@@ -36,7 +36,7 @@ rcell 은 yoomin53 이 만든 프로젝트입니다. 기여를 환영합니다.
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-RCELL_SAMPLES=로컬샘플폴더 cargo test --test real_samples -- --nocapture
+RCELL_CORPUS=말뭉치폴더 cargo test --test real_samples -- --nocapture   # 한셀 정답 대조 (tools/probe 로 만든 말뭉치)
 ```
 
 ## 4. 라이선스

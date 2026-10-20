@@ -136,6 +136,8 @@ enum Cmd {
         part: Option<String>,
     },
     /// 컨테이너 항목 하나를 16진수로 출력 — 리버스 엔지니어링용
+    /// 암호화된 문서(OLE2 EncryptionInfo + EncryptedPackage)를 풀어 ZIP 패키지로 저장 — 리버스 엔지니어링용
+    Decrypt { input: PathBuf, output: PathBuf },
     Hexdump {
         file: PathBuf,
         /// ZIP 파트 이름 또는 OLE2 스트림 경로 (예: /Workbook)
@@ -208,6 +210,9 @@ fn main() -> ExitCode {
             Ok(false) => return ExitCode::from(1),
             Err(e) => Err(e),
         },
+        Cmd::Decrypt { input, output } => {
+            read_plain(&input).and_then(|b| std::fs::write(&output, b).map_err(Into::into))
+        }
         Cmd::Hexdump {
             file,
             entry,

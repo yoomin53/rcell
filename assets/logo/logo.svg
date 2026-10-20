@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="rcell">
+  <!-- Copyright 2026 yoomin53 (https://github.com/yoomin53) · SPDX-License-Identifier: Apache-2.0 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3D6FC8"/>
+      <stop offset="1" stop-color="#1F3F7A"/>
+    </linearGradient>
+    <clipPath id="card">
+      <rect x="12" y="12" width="232" height="232" rx="52"/>
+    </clipPath>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#bg)"/>
+  <g clip-path="url(#card)">
+    <!-- 머리 행·열 -->
+    <rect x="12" y="12" width="232" height="44" fill="#FFFFFF" fill-opacity="0.12"/>
+    <rect x="12" y="12" width="44" height="232" fill="#FFFFFF" fill-opacity="0.12"/>
+    <!-- 눈금 -->
+    <g stroke="#FFFFFF" stroke-opacity="0.38" stroke-width="3">
+      <line x1="56" y1="12" x2="56" y2="244"/>
+      <line x1="118" y1="12" x2="118" y2="244"/>
+      <line x1="182" y1="12" x2="182" y2="244"/>
+      <line x1="12" y1="56" x2="244" y2="56"/>
+      <line x1="12" y1="118" x2="244" y2="118"/>
+      <line x1="12" y1="182" x2="244" y2="182"/>
+    </g>
+  </g>
+  <!-- 선택한 셀 -->
+  <rect x="104" y="104" width="92" height="92" rx="10" fill="#70AD47" stroke="#FFFFFF" stroke-width="6"/>
+  <text x="150" y="176" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="78" font-weight="700" fill="#FFFFFF">R</text>
+  <!-- 채우기 손잡이 -->
+  <rect x="186" y="186" width="18" height="18" rx="3" fill="#FFFFFF"/>
+</svg>
