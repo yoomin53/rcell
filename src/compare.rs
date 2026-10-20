@@ -1053,6 +1053,12 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
         )
     };
     diff("통합 문서 보기".into(), wv(a), wv(b));
+    // 편집 시간 (app.xml TotalTime, 분). 한셀은 원본 값을 그대로 쓴다 (없으면 0)
+    diff(
+        "편집 시간".into(),
+        a.total_time.unwrap_or(0).to_string(),
+        b.total_time.unwrap_or(0).to_string(),
+    );
     // 코드 이름은 둘 다 있을 때만 (한셀은 없는 코드 이름을 ThisWorkbook 으로 채운다)
     if let (Some(x), Some(y)) = (&a.code_name, &b.code_name) {
         diff("통합 문서 코드 이름".into(), x.clone(), y.clone());

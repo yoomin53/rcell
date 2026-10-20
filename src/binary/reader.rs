@@ -987,6 +987,7 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
         };
         wb.application = field("Application");
         wb.app_version = field("AppVersion");
+        wb.total_time = field("TotalTime").and_then(|t| t.parse().ok());
     }
     wb.properties = crate::parser::read_core_properties(pkg, &root_rels)?;
 

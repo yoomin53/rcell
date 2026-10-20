@@ -1756,7 +1756,10 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
         }
     );
     let app = format!(
-        "{DECL}<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Application>rcell</Application><AppVersion>{}</AppVersion></Properties>",
+        "{DECL}<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Application>rcell</Application>{}<AppVersion>{}</AppVersion></Properties>",
+        wb.total_time
+            .map(|t| format!("<TotalTime>{t}</TotalTime>"))
+            .unwrap_or_default(),
         env!("CARGO_PKG_VERSION")
     );
 

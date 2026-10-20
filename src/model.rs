@@ -19,6 +19,9 @@ pub struct Workbook {
     pub application: Option<String>,
     /// docProps/app.xml `AppVersion`
     pub app_version: Option<String>,
+    /// docProps/app.xml `TotalTime` — 편집 시간 (분). 레거시는 SummaryInformation PID 0x0A
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_time: Option<u32>,
     /// 문서 속성 (docProps/core.xml, 레거시 SummaryInformation)
     pub properties: DocProperties,
     pub file_version: Option<FileVersion>,

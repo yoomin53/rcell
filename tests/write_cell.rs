@@ -552,11 +552,13 @@ fn document_properties_roundtrip() {
         last_printed: Some("1997-05-05T14:10:37Z".into()),
         ..Default::default()
     };
+    a.total_time = Some(979);
     let out = write(&a, Flavor::Cell).unwrap();
     let b = rcell::from_bytes(out).unwrap();
     let diffs = compare(&a, &b, Options::default());
     assert!(diffs.is_empty(), "{}", diffs.join("\n"));
     assert_eq!(b.properties, a.properties);
+    assert_eq!(b.total_time, Some(979));
 }
 
 #[test]

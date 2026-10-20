@@ -35,7 +35,7 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
     // 문서 속성: 목록은 이름의 제어 문자를  로 표기한다 (container::display_path)
     if has("/\\x05SummaryInformation") {
         let s = container::read_entry(bytes, "/\u{5}SummaryInformation")?;
-        wb.properties = props::parse_summary(&s);
+        (wb.properties, wb.total_time) = props::parse_summary(&s);
     }
     Ok(wb)
 }
