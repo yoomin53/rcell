@@ -184,6 +184,8 @@ flags & 0x01 이면: cRun u16, (ich u16, ifnt u16) × cRun
 
 | 레코드 | 내용 | 근거 |
 |---|---|---|
+| WINDOW1 (0x003D, 18) | BIFF8 그대로: `xWn i16, yWn i16, dxWn u16, dyWn u16 (1/20 pt), grbit u16, itabCur u16, itabFirst u16, ctabSel u16, wTabRatio u16`. grbit 0x20 시트 탭 표시. 한셀은 스크롤 막대 비트 0x08·0x10 을 늘 켜서 쓴다 — 스크롤 막대 숨김을 잃는다 (통합 문서 창 대조 실험) | BIFF8 + 관측 |
+| CODENAME (0x01BA) | 전역에 있으면 통합 문서의 코드 이름 (`workbookPr/@codeName`, 시트 것은 시트 BOF 뒤) | 관측 |
 | 0xA030 (4) | `01 00 00 00` | 관측, 의미 미상 |
 | 0x0900 (2) | `01 00` | 관측, 의미 미상 |
 | 0xA101 (4) | u32 = XML `calcPr/@hs:hclCalcId` (관측 904, 계산 엔진 번호로 추정). 1 은 값이 없는 것으로 본다 | 관측 |

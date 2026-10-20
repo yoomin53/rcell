@@ -23,6 +23,12 @@ pub struct Workbook {
     pub properties: DocProperties,
     pub file_version: Option<FileVersion>,
     pub date1904: bool,
+    /// 통합 문서 창 (`bookViews/workbookView`, 레거시 WINDOW1, XLSB BrtBookView). 없으면 기본값
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view: Option<WorkbookView>,
+    /// `workbookPr/@codeName` (레거시 전역 CODENAME, XLSB BrtWbProp 의 이름)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_name: Option<String>,
     pub sheets: Vec<Sheet>,
     pub shared_strings: Vec<RichText>,
     pub styles: Styles,
@@ -103,6 +109,41 @@ impl Workbook {
             .and_then(|f| f.app_name.as_deref())
             .is_some_and(|a| a.eq_ignore_ascii_case("HCell"))
             || self.application.as_deref() == Some("Cell")
+    }
+}
+
+/// 통합 문서 창 하나 (`workbookView`). 위치·크기는 1/20 pt
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkbookView {
+    pub x_window: i32,
+    pub y_window: i32,
+    pub window_width: u32,
+    pub window_height: u32,
+    /// 시트 탭 영역 대 가로 스크롤 막대 (1/1000, 기본 600)
+    pub tab_ratio: u32,
+    /// 탭 줄에 처음 보이는 시트 (0부터)
+    pub first_sheet: u32,
+    /// 활성 시트 (0부터). 저장할 때는 선택된 시트(`tabSelected`)를 쓴다
+    pub active_tab: u32,
+    pub show_horizontal_scroll: bool,
+    pub show_vertical_scroll: bool,
+    pub show_sheet_tabs: bool,
+}
+
+impl Default for WorkbookView {
+    fn default() -> Self {
+        WorkbookView {
+            x_window: 0,
+            y_window: 0,
+            window_width: 0,
+            window_height: 0,
+            tab_ratio: 600,
+            first_sheet: 0,
+            active_tab: 0,
+            show_horizontal_scroll: true,
+            show_vertical_scroll: true,
+            show_sheet_tabs: true,
+        }
     }
 }
 

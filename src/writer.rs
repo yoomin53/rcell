@@ -1605,6 +1605,35 @@ fn page_xml(p: &PageLayout) -> String {
 // 패키지
 // ---------------------------------------------------------------------------
 
+/// `workbookView`. 활성 탭은 선택된 시트를 따른다. 원본에 창 정보가 있으면 한셀처럼 위치·크기를 늘 쓴다
+fn workbook_view_xml(v: Option<&crate::model::WorkbookView>, active: usize, n: usize) -> String {
+    let mut s = String::from("<x:workbookView");
+    if let Some(v) = v {
+        for (name, on) in [
+            ("showHorizontalScroll", v.show_horizontal_scroll),
+            ("showVerticalScroll", v.show_vertical_scroll),
+            ("showSheetTabs", v.show_sheet_tabs),
+        ] {
+            if !on {
+                let _ = write!(s, " {name}=\"0\"");
+            }
+        }
+        let _ = write!(
+            s,
+            " xWindow=\"{}\" yWindow=\"{}\" windowWidth=\"{}\" windowHeight=\"{}\"",
+            v.x_window, v.y_window, v.window_width, v.window_height
+        );
+        if v.tab_ratio != 600 {
+            let _ = write!(s, " tabRatio=\"{}\"", v.tab_ratio);
+        }
+        if v.first_sheet != 0 && (v.first_sheet as usize) < n {
+            let _ = write!(s, " firstSheet=\"{}\"", v.first_sheet);
+        }
+    }
+    let _ = write!(s, " activeTab=\"{active}\"/>");
+    s
+}
+
 /// 통합 문서를 XML `.cell`(또는 `.xlsx`) 바이트로 쓴다.
 pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
     let worksheets: Vec<&Sheet> = wb
@@ -1746,9 +1775,15 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
         s.push_str("/>");
         s
     });
+    let code_name = wb
+        .code_name
+        .as_ref()
+        .map(|c| format!(" codeName=\"{}\"", esc(c)))
+        .unwrap_or_default();
     let mut wbx = format!(
-        "{DECL}<x:workbook xmlns:r=\"{REL}\" xmlns:x=\"{SML}\"><x:fileVersion appName=\"rcell\"/><x:workbookPr date1904=\"{}\"/>{protection}<x:bookViews><x:workbookView activeTab=\"{first_visible}\"/></x:bookViews><x:sheets>",
-        wb.date1904 as u8
+        "{DECL}<x:workbook xmlns:r=\"{REL}\" xmlns:x=\"{SML}\"><x:fileVersion appName=\"rcell\"/><x:workbookPr date1904=\"{}\"{code_name}/>{protection}<x:bookViews>{}</x:bookViews><x:sheets>",
+        wb.date1904 as u8,
+        workbook_view_xml(wb.view.as_ref(), first_visible, worksheets.len())
     );
     let mut wb_rels = format!(
         "{DECL}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"

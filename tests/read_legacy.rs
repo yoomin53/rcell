@@ -58,6 +58,17 @@ fn cell_head(row: u32, col: u16) -> Vec<u8> {
 fn workbook_stream() -> Vec<u8> {
     let mut b = Biff::default();
     b.rec(0x0809, &bof(0x0005));
+    // 통합 문서 코드 이름과 WINDOW1 (한셀이 쓴 그대로: 240,120 16000x9500, 탭 비율 723, 첫 탭 1, grbit 0x38)
+    let mut code = 6u16.to_le_bytes().to_vec();
+    code.push(0);
+    code.extend(utf16("MyBook"));
+    b.rec(0x01BA, &code);
+    b.rec(
+        0x003D,
+        &[
+            0xf0, 0, 0x78, 0, 0x80, 0x3e, 0x1c, 0x25, 0x38, 0, 0, 0, 1, 0, 1, 0, 0xd3, 0x02,
+        ],
+    );
     // BOUNDSHEET: 위치는 나중에 채운다
     let mut bs = vec![0, 0, 0, 0, 0, 0, 4, 0];
     bs.extend(utf16("Sheet"));
@@ -303,6 +314,21 @@ fn notes_join_obj_txo_and_note_records() {
     assert_eq!(c[0].author, "yoomin53");
     assert_eq!(c[0].text.text, "메모 내용");
     assert!(c[0].visible);
+}
+
+#[test]
+fn workbook_window_and_code_name() {
+    let wb = read_workbook_stream(&workbook_stream()).unwrap();
+    assert_eq!(wb.code_name.as_deref(), Some("MyBook"));
+    let v = wb.view.unwrap();
+    assert_eq!(
+        (v.x_window, v.y_window, v.window_width, v.window_height),
+        (240, 120, 16000, 9500)
+    );
+    assert_eq!((v.tab_ratio, v.first_sheet, v.active_tab), (723, 1, 0));
+    assert!(v.show_horizontal_scroll && v.show_vertical_scroll && v.show_sheet_tabs);
+    // 시트의 CODENAME 은 시트 것으로 남는다
+    assert_eq!(wb.sheets[0].code_name.as_deref(), Some("Sheet1"));
 }
 
 #[test]

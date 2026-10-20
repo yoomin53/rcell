@@ -560,6 +560,30 @@ fn document_properties_roundtrip() {
 }
 
 #[test]
+fn workbook_view_and_code_name_roundtrip() {
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    a.code_name = Some("MyBook".into());
+    a.view = Some(rcell::model::WorkbookView {
+        x_window: -15,
+        y_window: 30,
+        window_width: 12000,
+        window_height: 8000,
+        tab_ratio: 250,
+        first_sheet: 1,
+        active_tab: 0,
+        show_horizontal_scroll: false,
+        show_vertical_scroll: true,
+        show_sheet_tabs: false,
+    });
+    let out = write(&a, Flavor::Cell).unwrap();
+    let b = rcell::from_bytes(out).unwrap();
+    let diffs = compare(&a, &b, Options::default());
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    assert_eq!(b.view, a.view);
+    assert_eq!(b.code_name.as_deref(), Some("MyBook"));
+}
+
+#[test]
 fn margins_survive_truncation_to_hwpunit() {
     // 레거시에서 읽은 여백 = f32(3683 / 7200): ×7200 이 3682.99… 라 자르는 읽기(한셀)는 한 단위를 잃는다
     let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();

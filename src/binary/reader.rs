@@ -1014,7 +1014,40 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
                     rup_build: rup,
                 });
             }
-            153 => wb.date1904 = r.u32().is_some_and(|f| f & 0x01 != 0),
+            153 => {
+                // BrtWbProp: 플래그 u32 (0x01 1904 날짜 체계), dwThemeVersion u32, 코드 이름 XLWideString
+                wb.date1904 = r.u32().is_some_and(|f| f & 0x01 != 0);
+                let _theme = r.u32();
+                wb.code_name = r.wstr().filter(|s| !s.is_empty());
+            }
+            158 if wb.view.is_none() => {
+                // BrtBookView: xWn i32, yWn i32, dxWn u32, dyWn u32, iTabRatio u32, itabFirst u32,
+                // itabCur u32, 플래그 u8 (0x08 가로 스크롤, 0x10 세로 스크롤, 0x20 시트 탭)
+                let (Some(x), Some(y), Some(w), Some(h), Some(ratio), Some(first), Some(cur)) = (
+                    r.u32(),
+                    r.u32(),
+                    r.u32(),
+                    r.u32(),
+                    r.u32(),
+                    r.u32(),
+                    r.u32(),
+                ) else {
+                    continue;
+                };
+                let f = r.u8().unwrap_or(0x38);
+                wb.view = Some(crate::model::WorkbookView {
+                    x_window: x as i32,
+                    y_window: y as i32,
+                    window_width: w,
+                    window_height: h,
+                    tab_ratio: ratio,
+                    first_sheet: first,
+                    active_tab: cur,
+                    show_horizontal_scroll: f & 0x08 != 0,
+                    show_vertical_scroll: f & 0x10 != 0,
+                    show_sheet_tabs: f & 0x20 != 0,
+                });
+            }
             534 => {
                 // BrtBookProtection: protpwdBook u16, protpwdRev u16, 플래그 u16 (1 구조, 2 창, 4 변경 내용)
                 let (Some(pw), Some(_rev), Some(f)) = (r.u16(), r.u16(), r.u16()) else {

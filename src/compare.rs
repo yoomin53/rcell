@@ -1036,6 +1036,27 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
         )
     };
     diff("문서 속성".into(), props(a), props(b));
+    // 통합 문서 창: 위치·크기(1/20 pt), 탭 비율, 첫 탭, 스크롤 막대·시트 탭 표시. 활성 탭은 시트 보기의 선택으로 본다
+    let wv = |w: &Workbook| {
+        let v = w.view.clone().unwrap_or_default();
+        format!(
+            "{},{} {}x{} tabRatio={} first={} hscroll={} vscroll={} tabs={}",
+            v.x_window,
+            v.y_window,
+            v.window_width,
+            v.window_height,
+            v.tab_ratio,
+            v.first_sheet,
+            v.show_horizontal_scroll,
+            v.show_vertical_scroll,
+            v.show_sheet_tabs
+        )
+    };
+    diff("통합 문서 보기".into(), wv(a), wv(b));
+    // 코드 이름은 둘 다 있을 때만 (한셀은 없는 코드 이름을 ThisWorkbook 으로 채운다)
+    if let (Some(x), Some(y)) = (&a.code_name, &b.code_name) {
+        diff("통합 문서 코드 이름".into(), x.clone(), y.clone());
+    }
     // 테마: 색 12개와 글꼴. 레거시에는 테마가 없다 (한셀은 다시 열 때 자기 기본 테마를 붙인다) → 둘 다 있을 때만
     if let (Some(ta), Some(tb)) = (&a.theme, &b.theme) {
         let tk = |t: &crate::theme::Theme| {

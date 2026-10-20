@@ -107,7 +107,12 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
     }
     if let Some(pr) = root.sml_child("workbookPr") {
         wb.date1904 = pr.attr_bool("date1904").unwrap_or(false);
+        wb.code_name = pr.attr("codeName").map(str::to_string);
     }
+    wb.view = root
+        .sml_child("bookViews")
+        .and_then(|b| b.sml_child("workbookView"))
+        .map(parse_workbook_view);
     if let Some(p) = root.sml_child("workbookProtection") {
         wb.protection = Some(crate::model::WorkbookProtection {
             lock_structure: p.attr_bool("lockStructure").unwrap_or(false),
@@ -360,6 +365,24 @@ fn copy_part_tree(
         }
     }
     Ok(())
+}
+
+/// `workbookView`: 창 위치·크기(1/20 pt), 탭 비율, 첫 탭, 활성 탭, 스크롤 막대·탭 표시
+fn parse_workbook_view(v: &crate::xml::Element) -> crate::model::WorkbookView {
+    let d = crate::model::WorkbookView::default();
+    let int = |n: &str| v.attr(n).and_then(|x| x.trim().parse::<i32>().ok());
+    crate::model::WorkbookView {
+        x_window: int("xWindow").unwrap_or(d.x_window),
+        y_window: int("yWindow").unwrap_or(d.y_window),
+        window_width: v.attr_u32("windowWidth").unwrap_or(d.window_width),
+        window_height: v.attr_u32("windowHeight").unwrap_or(d.window_height),
+        tab_ratio: v.attr_u32("tabRatio").unwrap_or(d.tab_ratio),
+        first_sheet: v.attr_u32("firstSheet").unwrap_or(d.first_sheet),
+        active_tab: v.attr_u32("activeTab").unwrap_or(d.active_tab),
+        show_horizontal_scroll: v.attr_bool("showHorizontalScroll").unwrap_or(true),
+        show_vertical_scroll: v.attr_bool("showVerticalScroll").unwrap_or(true),
+        show_sheet_tabs: v.attr_bool("showSheetTabs").unwrap_or(true),
+    }
 }
 
 fn finish_selection(root: &crate::xml::Element, wb: &mut Workbook) {

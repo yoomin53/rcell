@@ -893,6 +893,40 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         match rec.rtype {
             0x000A => break,
             0x0022 => wb.date1904 = r.u16() == Some(1),
+            0x003D if wb.view.is_none() => {
+                // WINDOW1 (BIFF8 그대로): xWn i16, yWn i16, dxWn u16, dyWn u16, grbit u16 (0x08 가로 스크롤,
+                // 0x10 세로 스크롤, 0x20 시트 탭), itabCur u16, itabFirst u16, ctabSel u16, wTabRatio u16
+                let (Some(x), Some(y), Some(w), Some(h), Some(f), Some(cur), Some(first)) = (
+                    r.u16(),
+                    r.u16(),
+                    r.u16(),
+                    r.u16(),
+                    r.u16(),
+                    r.u16(),
+                    r.u16(),
+                ) else {
+                    continue;
+                };
+                let _sel = r.u16();
+                wb.view = Some(crate::model::WorkbookView {
+                    x_window: x as i16 as i32,
+                    y_window: y as i16 as i32,
+                    window_width: w as u32,
+                    window_height: h as u32,
+                    tab_ratio: r.u16().map_or(600, u32::from),
+                    first_sheet: first as u32,
+                    active_tab: cur as u32,
+                    show_horizontal_scroll: f & 0x08 != 0,
+                    show_vertical_scroll: f & 0x10 != 0,
+                    show_sheet_tabs: f & 0x20 != 0,
+                });
+            }
+            0x01BA => {
+                // 전역의 CODENAME 은 통합 문서의 코드 이름 (시트 것은 시트 BOF 뒤에 있다)
+                let cch = r.u16().unwrap_or(0) as usize;
+                let _flag = r.u8();
+                wb.code_name = r.utf16(cch).filter(|s| !s.is_empty());
+            }
             0x00EB => dgg.extend_from_slice(d),
             // 통합 문서 보호: PROTECT (구조), WINDOWPROTECT (창), PASSWORD
             0x0012 | 0x0019 | 0x0013 => {

@@ -210,6 +210,7 @@ fn writer_output_is_read_identically_by_hancell() {
     };
     let mut failures = Vec::new();
     let mut checked = 0;
+    let mut stale_total = 0;
     for base in [dir.clone(), dir.join("craft"), dir.join("templates")] {
         let out = base.join("rcell-out");
         if !out.is_dir() {
@@ -251,17 +252,48 @@ fn writer_output_is_read_identically_by_hancell() {
                         .retain(|x| x.kind != rcell::model::ShapeKind::Chart);
                 }
             }
-            let diffs: Vec<String> = rcell::compare::compare(&a, &b, opts)
+            // 한셀 재저장본은 그것을 만들 때의 rcell 출력(X.rcell.cell)을 판정한다. 지금의 rcell 이 같은 원본에서
+            // 다르게 쓰는 항목은 그 재저장본으로 판정할 수 없다 → 빼고 알린다 (rcell-out 을 다시 만들면 사라진다)
+            let stale = stale_labels(
+                &base.join(format!("{stem}.cell")),
+                &out.join(format!("{stem}.rcell.cell")),
+            );
+            let all = rcell::compare::compare(&a, &b, opts);
+            let before = all.len();
+            let diffs: Vec<String> = all
                 .into_iter()
                 .filter(|d| !(stem.ends_with(".bin") && d.starts_with("외부 연결 상태")))
+                .filter(|d| !stale.contains(d.lines().next().unwrap_or("")))
                 .collect();
             checked += 1;
+            if !stale.is_empty() {
+                stale_total += 1;
+                eprintln!(
+                    "     (재저장본이 지난 출력: {} 항목 제외, 차이 {before} 중)  {}",
+                    stale.len(),
+                    resaved.display()
+                );
+            }
             eprintln!("{:>4} 차이  {}", diffs.len(), resaved.display());
             if !diffs.is_empty() {
                 failures.push(format!("{}:\n{}", resaved.display(), diffs.join("\n")));
             }
         }
     }
-    eprintln!("비교한 쌍: {checked}");
+    eprintln!("비교한 쌍: {checked} (지난 출력으로 일부 항목을 뺀 쌍: {stale_total})");
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// 지금의 rcell 이 `source` 에서 쓰는 결과와 보관된 rcell 출력 `stored` 가 의미상 다른 비교 항목의 이름.
+/// 파일이 없으면 빈 집합 (판정에서 뺄 것이 없다).
+fn stale_labels(source: &Path, stored: &Path) -> std::collections::BTreeSet<String> {
+    let (Ok(src), Ok(old)) = (rcell::open(source), rcell::open(stored)) else {
+        return Default::default();
+    };
+    let bytes = rcell::writer::write(&src, rcell::writer::Flavor::Cell).expect("rcell 쓰기");
+    let fresh = rcell::from_bytes(bytes).expect("rcell 출력 읽기");
+    rcell::compare::compare(&old, &fresh, Default::default())
+        .iter()
+        .filter_map(|d| d.lines().next().map(str::to_string))
+        .collect()
 }
