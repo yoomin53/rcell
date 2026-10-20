@@ -357,14 +357,15 @@ CFEX 의 DXFN12 (`cbdxf u32` + DXFN + 한컴 확장 + dxfId + XFExtNoFRT): 차�
 | PROTECT / OBJPROTECT 0x0063 / SCENPROTECT 0x00DD / PASSWORD (시트) | 시트 보호, 개체, 시나리오, 암호 해시 |
 | FEATHDR 0x0867 (isf = 2) | FRT 머리 12, `isf u16, 예약 u8, cbHdrData u32 (0xFFFFFFFF)`, `EnhancedProtection u32` — 비트 0–14 가 `objects` … `selectUnlockedCells` 의 **허용** 여부 (OOXML 속성과 반대) |
 | FILTERMODE 0x009B / AUTOFILTERINFO 0x009D | 필터 적용 중 (빈 레코드) / 단추 수 `u16`. 범위는 그 시트의 숨은 내장 이름 `_xlnm._FilterDatabase`(0x0D) |
-| AUTOFILTER 0x009E | `iEntry u16, grbit u16 (wJoin 비트 0–1: 0 = and, fSimple1/2, 0x10 상위/하위, 0x20 위, 0x40 백분율, 비트 7–15 개수)`, DOPER 10바이트 × 2 (`vt u8`: 2 RK, 4 f64, 6 문자열, 8 논리/오류, 0x0C 빈 칸, 0x0E 빈 칸 아님; `grbitSign u8`: 1 `<`, 2 `=`, 3 `<=`, 4 `>`, 5 `<>`, 6 `>=`; 문자열은 6번째 바이트가 cch), 이어서 문자열 (`flag u8 + UTF-16`). 상위/하위면 DOPER 1 에 기준값 |
+| AUTOFILTER 0x009E | `iEntry u16, grbit u16 (wJoin 비트 0–1: 0 = and, fSimple1/2, 0x10 상위/하위, 0x20 위, 0x40 백분율, 비트 7–15 개수)`, DOPER 10바이트 × 2 (`vt u8`: 2 RK, 4 f64, 6 문자열, 8 논리/오류, 0x0C 빈 칸, 0x0E 빈 칸 아님; `grbitSign u8`: 1 `<`, 2 `=`, 3 `<=`, 4 `>`, 5 `<>`, 6 `>=`; 문자열은 6번째 바이트가 cch), 이어서 문자열 (`flag u8 + UTF-16`). 상위/하위면 DOPER 1 에 기준값 (`filterVal`, 한셀은 RK 로 쓴다) |
 | 0x009F (한컴) | 값 목록 필터의 값 하나: `iEntry u16, 종류 u8 (0 문자열, 0x0C 빈 칸)`, 문자열이면 `cch u16, flag u8, UTF-16`. 바로 앞 AUTOFILTER 를 대신한다 (값이 둘 이하면 AUTOFILTER 에도 `=` 조건 두 개를 `or` 로 남긴다) |
-| AUTOFILTER12 0x087E | FrtRefHeader (범위 Ref8U), `iEntry u16, fHideArrow u32, ft u32, cft u32, cCriteria u32, cDateGroupings u32, …` — 동적 필터의 종류(cft): 1 평균 위, 2 평균 아래, 8 내일, 9 오늘, 10 어제, 11–13 다음 주/이번 주/지난주, 14–16 달, 17–19 분기, 20–22 해, 23 올해 누계, 24–27 Q1–Q4, 28–39 M1–M12. 조건 자체(AF12Criteria)는 쓰지 않는다 |
+| AUTOFILTER12 0x087E | FrtRefHeader (범위 Ref8U), `iEntry u16, fHideArrow u32, ft u32, cft u32, cCriteria u32, cDateGroupings u32, …` — 동적 필터의 종류(cft): 1 평균 위, 2 평균 아래, 8 내일, 9 오늘, 10 어제, 11–13 다음 주/이번 주/지난주, 14–16 달, 17–19 분기, 20–22 해, 23 올해 누계, 24–27 Q1–Q4, 28–39 M1–M12. 조건(AF12Criteria)은 뒤따르는 ContinueFrt12 에 있다 |
+| ContinueFrt12 0x087F | FrtRefHeader 12 + DOPER 10 — 바로 앞 AUTOFILTER12 의 조건 하나. 값 목록은 문자열 DOPER, 동적 필터는 숫자 DOPER(`vt` 4): 평균 위/아래는 `>`/`<` 평균값 하나 (`val`), 기간은 `>=` 시작 · `<` 끝 두 개 (`val`·`maxVal`, 날짜 일련번호). 한셀은 이 값을 읽는다 (필터 값 대조 실험) |
 
 자동 필터의 단추는 콤보 상자 OBJ(`ot` 0x14)와 OfficeArt 도형으로 저장된다 — 그리기 개체가 아니므로 건너뛴다.
 
 **한셀은 레거시의 자동 필터를 일부 잃고 읽는다** (rcell 은 원본과 같게 읽는다): 값 목록의 빈 칸(0x009F 종류 0x0C)과
-상위/하위의 백분율(grbit 0x40)을 버리고, 값 두 개짜리 목록은 사용자 지정 `=` 조건으로 보여 준다(같은 필터).
+상위/하위의 백분율(grbit 0x40)과 기준값(DOPER 1)을 버리고, 값 두 개짜리 목록은 사용자 지정 `=` 조건으로 보여 준다(같은 필터).
 시트 보호에서 잠기지 않은 셀 선택을 막으면 잠긴 셀 선택도 막힌 것으로 저장한다 (Excel 과 같은 규칙).
 
 ## 7. 수식 토큰
@@ -421,7 +422,7 @@ XTI 가 외부 SUPBOOK 을 가리키면 XML 표기로 `[n]시트!A1` 이 된다.
 | 개요 요약 위치·창 잠금 | WSBOOL·WINDOWPROTECT 를 고정값으로 써서 잃는다 (6.4절) |
 | 테마 | 레거시에는 테마가 없다 (THEME 0x0896 을 쓰지 않는다). 한셀은 다시 열 때 자기 기본 테마를 붙인다 |
 | 외부 값 캐시 | XCT/CRN 을 쓰지 않는다. 다시 열면 시트마다 `refreshError="0"` 인 빈 캐시 |
-| 자동 필터의 빈 칸·백분율 | 파일에는 있지만 한셀이 다시 열 때 읽지 않는다 (6.4절) |
+| 자동 필터의 빈 칸·백분율·기준값 | 파일에는 있지만 한셀이 다시 열 때 읽지 않는다 (6.4절) |
 | 사용자 정의 표 스타일 | 파일(0x088E–0x0890)에는 있지만 한셀이 다시 열 때 읽지 않는다 — 기본 스타일 이름만 남는다 |
 | 조건부 서식의 차등 서식 | 세로 맞춤을 읽지 않고 사용자 표시 형식을 깨뜨린다 (6.3절) |
 

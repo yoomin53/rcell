@@ -1735,15 +1735,20 @@ fn read_sheet(
                 // BrtTop10Filter: 플래그 u8 (1 위, 2 백분율, 4 기준값 있음), 개수/백분율 f64, 기준값 f64
                 if let (Some(f), Some(v), Some(c)) = (r.u8(), r.f64(), cur_filter_column(sheet)) {
                     c.top10 = Some((f & 0x01 != 0, f & 0x02 != 0, v));
+                    c.filter_val = r.f64().filter(|_| f & 0x04 != 0);
                 }
             }
             171 => {
-                // BrtDynamicFilter: cft u32, 플래그 u8, 값 f64, 최댓값 f64
+                // BrtDynamicFilter: cft u32, 플래그 u8, 값 f64, 최댓값 f64. 한셀은 플래그 바이트를 채우지 않고 쓰므로
+                // (관측: 같은 종류에 0x03·0x63·0xCC) 값은 플래그와 상관없이 0 이 아니면 있는 것으로 본다
                 if let (Some(t), Some(c)) = (r.u32(), cur_filter_column(sheet)) {
                     c.dynamic = DYNAMIC_FILTER_TYPES
                         .get(t as usize)
                         .filter(|s| !s.is_empty())
                         .map(|s| s.to_string());
+                    let _flags = r.u8();
+                    c.dynamic_val = r.f64().filter(|&v| v != 0.0);
+                    c.dynamic_max_val = r.f64().filter(|&v| v != 0.0);
                 }
             }
             485 => {

@@ -490,6 +490,12 @@ fn filter_stream() -> Vec<u8> {
     af12.extend_from_slice(&[0, 0, 8, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
     af12.extend_from_slice(&[0; 16]);
     b.rec(0x087E, &af12);
+    // ContinueFrt12: 기간 시작(>=) 46314, 끝(<) 46315 — 숫자 DOPER 둘
+    for (sign, v) in [(6u8, 46314.0f64), (1, 46315.0)] {
+        let mut c = vec![0x7f, 0x08, 1, 0, 0, 0, 11, 0, 0, 0, 4, 0, 0x04, sign];
+        c.extend_from_slice(&v.to_le_bytes());
+        b.rec(0x087F, &c);
+    }
     // E열: > 20 그리고 < 100 (RK)
     b.rec(
         0x009E,
@@ -551,7 +557,12 @@ fn outline_auto_filter_and_protection() {
     );
     assert!(c[0].custom.is_empty());
     assert_eq!(c[1].top10, Some((false, true, 20.0)));
+    assert_eq!(c[1].filter_val, Some(-3.0));
     assert_eq!(c[2].dynamic.as_deref(), Some("today"));
+    assert_eq!(
+        (c[2].dynamic_val, c[2].dynamic_max_val),
+        (Some(46314.0), Some(46315.0))
+    );
     assert!(c[2].custom.is_empty());
     assert_eq!(
         c[3].custom,

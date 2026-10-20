@@ -761,6 +761,14 @@ fn filter_key(sh: &Sheet) -> String {
                 } else {
                     (c.values.iter().collect(), &c.custom)
                 };
+                // 동적 필터의 val·maxVal 은 없으면 0 (한셀은 종류에 따라 val="0" 을 쓰기도 안 쓰기도 한다)
+                let dynamic = c.dynamic.as_ref().map(|t| {
+                    format!(
+                        "{t}({},{})",
+                        c.dynamic_val.unwrap_or(0.0),
+                        c.dynamic_max_val.unwrap_or(0.0)
+                    )
+                });
                 format!(
                     "#{} values={:?}{} custom={:?}{} top10={:?} dyn={:?}",
                     c.col_id,
@@ -773,13 +781,33 @@ fn filter_key(sh: &Sheet) -> String {
                         ""
                     },
                     c.top10,
-                    c.dynamic
+                    dynamic
                 )
             })
             .collect();
         format!("{} [{}]", norm_ranges(Some(&f.range)), cols.join("; "))
     });
     format!("filterMode={} {af}", sh.filter_mode)
+}
+
+/// 두 시트에 모두 있는 상위/하위 기준값(filterVal)을 열 번호 순으로
+fn filter_vals(a: &Sheet, b: &Sheet) -> (String, String) {
+    let cols = |s: &Sheet| -> Vec<(u32, f64)> {
+        s.auto_filter
+            .iter()
+            .flat_map(|f| &f.columns)
+            .filter_map(|c| c.filter_val.map(|v| (c.col_id, v)))
+            .collect()
+    };
+    let (ca, cb) = (cols(a), cols(b));
+    let pick = |x: &[(u32, f64)], y: &[(u32, f64)]| {
+        x.iter()
+            .filter(|(c, _)| y.iter().any(|(d, _)| d == c))
+            .map(|(c, v)| format!("#{c}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    (pick(&ca, &cb), pick(&cb, &ca))
 }
 
 /// 개요 요약 행·열의 위치
@@ -1297,6 +1325,10 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
         diff(format!("{s} 개요"), summary_key(sa), summary_key(sb));
         if !opts.ignore_filter {
             diff(format!("{s} 자동 필터"), filter_key(sa), filter_key(sb));
+            // 상위/하위의 기준값(filterVal)은 한셀이 필터를 적용할 때 계산해 넣는 값이라 저장본에 있기도 없기도
+            // 하다 → 양쪽에 다 있는 열만 비교한다
+            let (fa, fb) = filter_vals(sa, sb);
+            diff(format!("{s} 자동 필터 기준값"), fa, fb);
         }
         diff(
             format!("{s} 시트 보호"),

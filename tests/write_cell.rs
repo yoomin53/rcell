@@ -449,8 +449,21 @@ fn outline_auto_filter_and_protection_roundtrip() {
     states[12] = true; // sort 는 막고 나머지는 기본값과 다르게
     s.protection = Some(SheetProtection::from_states(Some("CC1A".into()), states));
     s.auto_filter = Some(AutoFilter {
-        range: "A1:C3".into(),
+        range: "A1:E3".into(),
         columns: vec![
+            FilterColumn {
+                col_id: 3,
+                dynamic: Some("thisWeek".into()),
+                dynamic_val: Some(46311.0),
+                dynamic_max_val: Some(46318.0),
+                ..Default::default()
+            },
+            FilterColumn {
+                col_id: 4,
+                dynamic: Some("aboveAverage".into()),
+                dynamic_val: Some(72.5),
+                ..Default::default()
+            },
             FilterColumn {
                 col_id: 0,
                 values: vec!["1".into(), "x".into()],
@@ -469,6 +482,7 @@ fn outline_auto_filter_and_protection_roundtrip() {
             FilterColumn {
                 col_id: 2,
                 top10: Some((false, true, 25.0)),
+                filter_val: Some(-3.0),
                 ..Default::default()
             },
         ],

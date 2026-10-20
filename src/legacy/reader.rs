@@ -1566,6 +1566,8 @@ fn read_sheet(
     let mut prot_enh: Option<u32> = None;
     // 자동 필터: AUTOFILTER12 의 범위 (_FilterDatabase 이름이 없을 때 쓴다)
     let mut af_ref: Option<String> = None;
+    // 마지막 AUTOFILTER12 가 동적 필터면 (열, 읽은 숫자 조건 수) — 뒤따르는 ContinueFrt12 의 val·maxVal
+    let mut af12_dynamic: Option<(u32, usize)> = None;
 
     for rec in recs.iter().skip(1) {
         let d = &rec.data[..];
@@ -2479,6 +2481,12 @@ fn read_sheet(
                 };
                 if grbit & 0x10 != 0 {
                     fc.top10 = Some((grbit & 0x20 != 0, grbit & 0x40 != 0, (grbit >> 7) as f64));
+                    // 첫 DOPER = 기준값 (filterVal, 한셀은 RK 로 쓴다 — 필터 대조 실험)
+                    fc.filter_val = dopers[0].and_then(|d| match d[0] {
+                        0x02 => Some(rk_value(u32::from_le_bytes([d[2], d[3], d[4], d[5]]))),
+                        0x04 => d[2..10].try_into().ok().map(f64::from_le_bytes),
+                        _ => None,
+                    });
                 } else {
                     for d in dopers.into_iter().flatten() {
                         let op = FILTER_OPERATORS.get(d[1] as usize).copied().unwrap_or("");
@@ -2575,6 +2583,7 @@ fn read_sheet(
                 let dynamic = DYNAMIC_FILTER_TYPES
                     .get(cft as usize)
                     .filter(|s| cft != 0 && !s.is_empty());
+                af12_dynamic = None;
                 if let (Some(t), Some(fc)) = (
                     dynamic,
                     sheet
@@ -2585,7 +2594,31 @@ fn read_sheet(
                     fc.custom.clear();
                     fc.custom_and = false;
                     fc.dynamic = Some(t.to_string());
+                    af12_dynamic = Some((entry as u32, 0));
                 }
+            }
+            0x087F => {
+                // ContinueFrt12: 바로 앞 AUTOFILTER12 의 조건(AF12Criteria) — FrtRefHeader 12 + DOPER 10.
+                // 동적 필터면 숫자 DOPER 가 차례로 val, maxVal (평균은 하나, 기간은 >= 시작 · < 끝)
+                let Some((col, n)) = af12_dynamic else {
+                    continue;
+                };
+                let Some(dp) = d.get(12..22).filter(|dp| dp[0] == 0x04) else {
+                    continue;
+                };
+                let v = f64::from_le_bytes(dp[2..10].try_into().unwrap_or_default());
+                if let Some(fc) = sheet
+                    .auto_filter
+                    .as_mut()
+                    .and_then(|f| f.columns.iter_mut().find(|c| c.col_id == col))
+                {
+                    match n {
+                        0 => fc.dynamic_val = Some(v).filter(|&v| v != 0.0),
+                        1 => fc.dynamic_max_val = Some(v).filter(|&v| v != 0.0),
+                        _ => {}
+                    }
+                }
+                af12_dynamic = Some((col, n + 1));
             }
             0x002A | 0x002B | 0x0083 | 0x0084 => {
                 let on = r.u16().unwrap_or(0) != 0;

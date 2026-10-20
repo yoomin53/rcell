@@ -244,11 +244,13 @@ fn parse_filter_column(c: &Element) -> FilterColumn {
             t.attr_bool("percent").unwrap_or(false),
             t.attr_f64("val").unwrap_or(10.0),
         ));
+        fc.filter_val = t.attr_f64("filterVal");
     }
-    fc.dynamic = c
-        .sml_child("dynamicFilter")
-        .and_then(|d| d.attr("type"))
-        .map(str::to_string);
+    if let Some(d) = c.sml_child("dynamicFilter") {
+        fc.dynamic = d.attr("type").map(str::to_string);
+        fc.dynamic_val = d.attr_f64("val");
+        fc.dynamic_max_val = d.attr_f64("maxVal");
+    }
     fc
 }
 

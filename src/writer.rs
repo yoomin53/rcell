@@ -1322,9 +1322,20 @@ fn auto_filter_xml(sheet: &Sheet) -> String {
             if percent {
                 s.push_str(" percent=\"1\"");
             }
-            let _ = write!(s, " val=\"{}\"/>", num(val));
+            let _ = write!(s, " val=\"{}\"", num(val));
+            if let Some(v) = c.filter_val {
+                let _ = write!(s, " filterVal=\"{}\"", num(v));
+            }
+            s.push_str("/>");
         } else if let Some(t) = &c.dynamic {
-            let _ = write!(s, "<x:dynamicFilter type=\"{}\"/>", esc(t));
+            let _ = write!(s, "<x:dynamicFilter type=\"{}\"", esc(t));
+            if let Some(v) = c.dynamic_val {
+                let _ = write!(s, " val=\"{}\"", num(v));
+            }
+            if let Some(v) = c.dynamic_max_val {
+                let _ = write!(s, " maxVal=\"{}\"", num(v));
+            }
+            s.push_str("/>");
         }
         s.push_str("</x:filterColumn>");
     }

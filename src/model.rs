@@ -870,9 +870,17 @@ pub struct FilterColumn {
     /// 상위/하위: (위, 백분율, 값)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top10: Option<(bool, bool, f64)>,
+    /// 상위/하위의 기준값 (`top10/@filterVal` — 필터를 적용할 때 계산한 경계값)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_val: Option<f64>,
     /// 동적 필터 종류 (`aboveAverage`, `today` …)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dynamic: Option<String>,
+    /// 동적 필터의 `val`(평균 또는 기간 시작 일련번호)·`maxVal`(기간 끝)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic_val: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic_max_val: Option<f64>,
 }
 
 /// 시트 보호 (`sheetProtection`). 속성은 원문 그대로 (기본값 해석은 비교 쪽에서).
