@@ -1,0 +1,1718 @@
+// Copyright 2026 yoomin53 (https://github.com/yoomin53)
+// SPDX-License-Identifier: Apache-2.0
+//
+// rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
+
+//! 바이너리 OOXML (`workbook.bin` 등) → [`Workbook`].
+//!
+//! 레코드 구조는 공개 명세 [MS-XLSB] 를 따른다. 한셀의 `xlCellb` 형식은 이 명세 그대로이며
+//! 한컴 글꼴/문단 확장은 담지 않는다 (docs/format/cell-binary.md).
+
+use std::collections::HashMap;
+
+use super::biff12::{self, Record};
+use crate::error::{Error, Result};
+use crate::legacy::formula::{self, Context, Decoded};
+use crate::model::{
+    Alignment, AutoFilter, Border, BorderEdge, Cell, CellRange, CellRef, CellValue, CfRule, Cfvo,
+    ColInfo, Color, Comment, ConditionalFormat, DYNAMIC_FILTER_TYPES, DataBar, DataValidation,
+    DefinedName, ExternalLink, FILTER_OPERATORS, FileVersion, Fill, FilterColumn, Font, Formula,
+    HeaderFooter, Hyperlink, IconSet, NamedStyle, NumFmt, PageMargins, PageSetup, Pane,
+    PrintOptions, Protection, RichText, RowInfo, Sheet, SheetKind, SheetProtection, SheetState,
+    Styles, TextRun, Workbook, WorkbookProtection, Xf,
+};
+use crate::package::{Package, Relationship};
+
+struct Rd<'a> {
+    b: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Rd<'a> {
+    fn new(b: &'a [u8]) -> Self {
+        Rd { b, pos: 0 }
+    }
+    fn left(&self) -> usize {
+        self.b.len().saturating_sub(self.pos)
+    }
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let s = self.b.get(self.pos..self.pos.checked_add(n)?)?;
+        self.pos += n;
+        Some(s)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Option<u16> {
+        let s = self.take(2)?;
+        Some(u16::from_le_bytes([s[0], s[1]]))
+    }
+    fn i16(&mut self) -> Option<i16> {
+        self.u16().map(|v| v as i16)
+    }
+    fn u32(&mut self) -> Option<u32> {
+        let s = self.take(4)?;
+        Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    }
+    fn f64(&mut self) -> Option<f64> {
+        Some(f64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+    /// XLWideString: cch u32 + UTF-16
+    fn wstr(&mut self) -> Option<String> {
+        let n = self.u32()? as usize;
+        Some(crate::text::utf16le(self.take(n.checked_mul(2)?)?))
+    }
+    /// XLNullableWideString: cch 0xFFFFFFFF 이면 없음
+    fn nwstr(&mut self) -> Option<Option<String>> {
+        let n = self.u32()?;
+        if n == 0xFFFF_FFFF {
+            return Some(None);
+        }
+        Some(Some(crate::text::utf16le(
+            self.take((n as usize).checked_mul(2)?)?,
+        )))
+    }
+}
+
+fn bad(what: &str) -> Error {
+    Error::InvalidValue {
+        context: "바이너리 .cell".into(),
+        value: what.into(),
+    }
+}
+
+/// 메모: `commentsN.bin` (BrtCommentAuthor 632, BrtBeginComment 635, BrtCommentText 637)
+/// + 표시 여부는 XML 과 같은 VML 파트.
+fn read_comments(
+    pkg: &mut Package,
+    srels: &[Relationship],
+    fonts: &[Font],
+    sheet: &mut Sheet,
+) -> Result<()> {
+    let Some(rel) = srels.iter().find(|r| r.rel_type.ends_with("/comments")) else {
+        return Ok(());
+    };
+    let data = read_part(pkg, &rel.target)?;
+    let mut authors: Vec<String> = Vec::new();
+    for rec in biff12::records(&data) {
+        let mut r = Rd::new(rec.data);
+        match rec.rtype {
+            632 => authors.push(r.wstr().unwrap_or_default()),
+            635 => {
+                // iauthor u32, RfX (rwFirst, rwLast, colFirst, colLast), guid 16
+                let (Some(a), Some(row), Some(_), Some(col)) = (r.u32(), r.u32(), r.u32(), r.u32())
+                else {
+                    continue;
+                };
+                sheet.comments.push(Comment {
+                    cell: CellRef { row, col },
+                    author: authors.get(a as usize).cloned().unwrap_or_default(),
+                    ..Default::default()
+                });
+            }
+            637 => {
+                if let (Some(c), Some(t)) = (sheet.comments.last_mut(), rich_str(&mut r, fonts)) {
+                    c.text = t;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(v) = srels.iter().find(|r| r.rel_type.ends_with("/vmlDrawing"))
+        && let Some(e) = pkg.read_xml(&v.target)?
+    {
+        crate::parser::comments::apply_vml(&e, &mut sheet.comments);
+    }
+    Ok(())
+}
+
+/// UncheckedSqRfX: crfx u32 + (rwFirst, rwLast, colFirst, colLast u32) × crfx → "A1:B2 C3"
+fn sqrfx(r: &mut Rd) -> String {
+    let n = r.u32().unwrap_or(0);
+    let mut v = Vec::new();
+    for _ in 0..n {
+        let (Some(r1), Some(r2), Some(c1), Some(c2)) = (r.u32(), r.u32(), r.u32(), r.u32()) else {
+            break;
+        };
+        v.push(
+            CellRange {
+                start: CellRef { row: r1, col: c1 },
+                end: CellRef { row: r2, col: c2 },
+            }
+            .to_string(),
+        );
+    }
+    v.join(" ")
+}
+
+/// 아이콘 집합 번호 → 이름 ([MS-XLSB] 2.5.75 IconSet)
+const ICON_SETS: [&str; 20] = [
+    "3Arrows",
+    "3ArrowsGray",
+    "3Flags",
+    "3TrafficLights1",
+    "3TrafficLights2",
+    "3Signs",
+    "3Symbols",
+    "3Symbols2",
+    "4Arrows",
+    "4ArrowsGray",
+    "4RedToBlack",
+    "4Rating",
+    "4TrafficLights",
+    "5Arrows",
+    "5ArrowsGray",
+    "5Rating",
+    "5Quarters",
+    "3Stars",
+    "3Triangles",
+    "5Boxes",
+];
+
+/// BrtBeginCFRule 의 종류·틀·매개 변수 → 규칙 (색 눈금 등 세부는 뒤 레코드가 채운다)
+#[allow(clippy::too_many_arguments)]
+fn cf_rule(
+    ty: u32,
+    template: u32,
+    dxf: u32,
+    priority: u32,
+    param: u32,
+    flags: u16,
+    text: Option<String>,
+    formulas: Vec<String>,
+) -> CfRule {
+    const OPS: [&str; 9] = [
+        "",
+        "between",
+        "notBetween",
+        "equal",
+        "notEqual",
+        "greaterThan",
+        "lessThan",
+        "greaterThanOrEqual",
+        "lessThanOrEqual",
+    ];
+    let mut r = CfRule {
+        priority,
+        dxf_id: (dxf != u32::MAX).then_some(dxf),
+        stop_if_true: flags & 0x02 != 0,
+        formulas,
+        ..Default::default()
+    };
+    match ty {
+        1 => {
+            r.kind = "cellIs".into();
+            r.operator = OPS
+                .get(param as usize)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+        }
+        3 => r.kind = "colorScale".into(),
+        4 => r.kind = "dataBar".into(),
+        5 => {
+            r.kind = "top10".into();
+            r.rank = Some(param);
+            r.bottom = flags & 0x08 != 0;
+            r.percent = flags & 0x10 != 0;
+        }
+        6 => r.kind = "iconSet".into(),
+        _ => {
+            // 식 계열: 틀(CFTemp)로 종류를 정한다
+            let (kind, op) = match template {
+                0x08 => match param {
+                    1 => ("notContainsText", "notContains"),
+                    2 => ("beginsWith", "beginsWith"),
+                    3 => ("endsWith", "endsWith"),
+                    _ => ("containsText", "containsText"),
+                },
+                0x09 => ("containsBlanks", ""),
+                0x0A => ("notContainsBlanks", ""),
+                0x0B => ("containsErrors", ""),
+                0x0C => ("notContainsErrors", ""),
+                0x0F..=0x18 => ("timePeriod", ""),
+                0x19 | 0x1A | 0x1D | 0x1E => ("aboveAverage", ""),
+                0x1B => ("duplicateValues", ""),
+                0x07 | 0x1C => ("uniqueValues", ""),
+                _ => ("expression", ""),
+            };
+            r.kind = kind.into();
+            if !op.is_empty() {
+                r.operator = Some(op.into());
+                r.text = text;
+            }
+            if kind == "timePeriod" {
+                const PERIODS: [&str; 10] = [
+                    "today",
+                    "tomorrow",
+                    "yesterday",
+                    "last7Days",
+                    "lastMonth",
+                    "nextMonth",
+                    "thisWeek",
+                    "nextWeek",
+                    "lastWeek",
+                    "thisMonth",
+                ];
+                r.time_period = PERIODS
+                    .get((template - 0x0F) as usize)
+                    .map(|s| s.to_string());
+            }
+            if kind == "aboveAverage" {
+                r.above_average = matches!(template, 0x1A | 0x1E).then_some(false);
+                r.equal_average = matches!(template, 0x1D | 0x1E);
+                r.std_dev = (param > 0).then_some(param);
+            }
+            // 이 종류들은 수식이 규칙에 딸린 것이 아니다 (한셀 XML 에 없다)
+            if matches!(kind, "duplicateValues" | "uniqueValues" | "aboveAverage") {
+                r.formulas.clear();
+            }
+        }
+    }
+    r
+}
+
+/// BrtDVal / 레거시 DV 의 플래그 u32 → 데이터 유효성 (문자열 순서: 오류 제목, 오류, 입력 제목, 입력)
+pub(crate) fn dv_from_flags(
+    flags: u32,
+    sqref: String,
+    s: &mut [Option<String>],
+    f1: Option<String>,
+    f2: Option<String>,
+) -> DataValidation {
+    const KINDS: [&str; 8] = [
+        "none",
+        "whole",
+        "decimal",
+        "list",
+        "date",
+        "time",
+        "textLength",
+        "custom",
+    ];
+    const OPS: [&str; 8] = [
+        "between",
+        "notBetween",
+        "equal",
+        "notEqual",
+        "greaterThan",
+        "lessThan",
+        "greaterThanOrEqual",
+        "lessThanOrEqual",
+    ];
+    let op = ((flags >> 20) & 0x0F) as usize;
+    let style = (flags >> 4) & 0x07;
+    DataValidation {
+        sqref,
+        kind: KINDS
+            .get((flags & 0x0F) as usize)
+            .unwrap_or(&"none")
+            .to_string(),
+        operator: (op != 0).then(|| OPS.get(op).unwrap_or(&"between").to_string()),
+        formula1: f1,
+        formula2: f2,
+        allow_blank: flags & 0x0100 != 0,
+        hide_drop_down: flags & 0x0200 != 0,
+        show_input: flags & 0x0004_0000 != 0,
+        show_error: flags & 0x0008_0000 != 0,
+        error_style: match style {
+            1 => Some("warning".into()),
+            2 => Some("information".into()),
+            _ => None,
+        },
+        error_title: s.first_mut().and_then(Option::take),
+        error: s.get_mut(1).and_then(Option::take),
+        prompt_title: s.get_mut(2).and_then(Option::take),
+        prompt: s.get_mut(3).and_then(Option::take),
+    }
+}
+
+/// 창 번호 (pnn) → `pane` 의 activePane 값
+fn pane_name(pnn: u32) -> Option<String> {
+    Some(
+        match pnn {
+            0 => "bottomRight",
+            1 => "topRight",
+            2 => "bottomLeft",
+            3 => "topLeft",
+            _ => return None,
+        }
+        .into(),
+    )
+}
+
+fn read_part(pkg: &mut Package, name: &str) -> Result<Vec<u8>> {
+    pkg.read_bytes(name)?
+        .ok_or_else(|| Error::MissingPart(name.to_string()))
+}
+
+/// BrtColor (8바이트).
+fn color(r: &mut Rd) -> Option<Option<Color>> {
+    let b0 = r.u8()?;
+    let index = r.u8()?;
+    let tint = r.i16()?;
+    let (red, green, blue, _a) = (r.u8()?, r.u8()?, r.u8()?, r.u8()?);
+    let kind = b0 >> 1;
+    let tint = (tint != 0).then(|| tint as f64 / 32767.0);
+    Some(match kind {
+        0 => Some(Color {
+            auto: true,
+            ..Default::default()
+        }),
+        1 => Some(Color {
+            indexed: Some(index as u32),
+            tint,
+            ..Default::default()
+        }),
+        2 => Some(Color {
+            rgb: Some(format!("ff{red:02x}{green:02x}{blue:02x}")),
+            tint,
+            ..Default::default()
+        }),
+        3 => Some(Color {
+            theme: Some(index as u32),
+            tint,
+            ..Default::default()
+        }),
+        _ => None,
+    })
+}
+
+/// 셀 공통 머리 (열 u32 + 스타일 24비트).
+fn cell_head(r: &mut Rd) -> Option<(u32, u32)> {
+    let col = r.u32()?;
+    let s = r.u32()? & 0x00FF_FFFF;
+    Some((col, s))
+}
+
+fn rk_value(rk: u32) -> f64 {
+    let v = if rk & 0x02 != 0 {
+        ((rk as i32) >> 2) as f64
+    } else {
+        f64::from_bits(((rk & 0xFFFF_FFFC) as u64) << 32)
+    };
+    if rk & 0x01 != 0 { v / 100.0 } else { v }
+}
+
+const BORDER_STYLES: [&str; 14] = [
+    "none",
+    "thin",
+    "medium",
+    "dashed",
+    "dotted",
+    "thick",
+    "double",
+    "hair",
+    "mediumDashed",
+    "dashDot",
+    "mediumDashDot",
+    "dashDotDot",
+    "mediumDashDotDot",
+    "slantDashDot",
+];
+const PATTERNS: [&str; 19] = [
+    "none",
+    "solid",
+    "mediumGray",
+    "darkGray",
+    "lightGray",
+    "darkHorizontal",
+    "darkVertical",
+    "darkDown",
+    "darkUp",
+    "darkGrid",
+    "darkTrellis",
+    "lightHorizontal",
+    "lightVertical",
+    "lightDown",
+    "lightUp",
+    "lightGrid",
+    "lightTrellis",
+    "gray125",
+    "gray0625",
+];
+const H_ALIGN: [&str; 8] = [
+    "general",
+    "left",
+    "center",
+    "right",
+    "fill",
+    "justify",
+    "centerContinuous",
+    "distributed",
+];
+const V_ALIGN: [&str; 5] = ["top", "center", "bottom", "justify", "distributed"];
+
+/// BrtColor 인데 RGB 가 유효(첫 바이트 0x01)하면 종류와 상관없이 RGB 로 (조건부 서식·차등 서식)
+fn valid_rgb_color(r: &mut Rd) -> Option<Color> {
+    let b = r.take(8)?;
+    if b[0] & 0x01 != 0 && b[0] >> 1 != 3 {
+        return Some(Color {
+            rgb: Some(format!("ff{:02x}{:02x}{:02x}", b[4], b[5], b[6])),
+            ..Default::default()
+        });
+    }
+    color(&mut Rd::new(b)).flatten()
+}
+
+/// BrtDXF (507): 예약 u16 ×2, cprops u16, XFProp(종류 u16, 크기 u16(머리 포함), 값) × cprops
+pub(crate) fn parse_dxf(d: &[u8]) -> crate::model::Dxf {
+    use crate::model::{Border, BorderEdge, Dxf, Fill, Font};
+    let mut r = Rd::new(d);
+    r.take(4);
+    let n = r.u16().unwrap_or(0);
+    let mut dxf = Dxf::default();
+    let mut font = Font::default();
+    let mut has_font = false;
+    let mut fill = Fill::default();
+    let mut has_fill = false;
+    let mut border = Border::default();
+    let mut has_border = false;
+    for _ in 0..n {
+        let (Some(ty), Some(cb)) = (r.u16(), r.u16()) else {
+            break;
+        };
+        let Some(v) = r.take((cb as usize).saturating_sub(4)) else {
+            break;
+        };
+        let mut x = Rd::new(v);
+        let edge = |x: &mut Rd| -> Option<BorderEdge> {
+            let c = valid_rgb_color(x);
+            let dg = x.u16()?;
+            Some(BorderEdge {
+                style: BORDER_STYLES.get(dg as usize).map(|s| s.to_string()),
+                color: c,
+            })
+        };
+        match ty {
+            0x00 => {
+                fill.pattern_type = x
+                    .u8()
+                    .and_then(|p| PATTERNS.get(p as usize))
+                    .map(|s| s.to_string());
+                has_fill = true;
+            }
+            0x01 => {
+                fill.fg_color = valid_rgb_color(&mut x);
+                has_fill = true;
+            }
+            0x02 => {
+                fill.bg_color = valid_rgb_color(&mut x);
+                has_fill = true;
+            }
+            0x05 => {
+                font.color = valid_rgb_color(&mut x);
+                has_font = true;
+            }
+            0x06 => {
+                border.top = edge(&mut x);
+                has_border = true;
+            }
+            0x07 => {
+                border.bottom = edge(&mut x);
+                has_border = true;
+            }
+            0x08 => {
+                border.left = edge(&mut x);
+                has_border = true;
+            }
+            0x09 => {
+                border.right = edge(&mut x);
+                has_border = true;
+            }
+            0x19 => {
+                font.bold = x.u16().unwrap_or(400) >= 700;
+                has_font = true;
+            }
+            0x1A => {
+                font.italic = x.u8().unwrap_or(0) != 0;
+                has_font = true;
+            }
+            0x1B => {
+                font.strike = x.u8().unwrap_or(0) != 0;
+                has_font = true;
+            }
+            // 한셀은 밑줄을 0x1C 로 쓴다 (관측). [MS-XLSB] 의 밑줄 0x24 도 받는다
+            0x1C | 0x24 => {
+                font.underline = match x.u8().unwrap_or(0) {
+                    0 => None,
+                    2 => Some("double".into()),
+                    0x21 => Some("singleAccounting".into()),
+                    0x22 => Some("doubleAccounting".into()),
+                    _ => Some("single".into()),
+                };
+                has_font = true;
+            }
+            _ => {}
+        }
+    }
+    dxf.font = has_font.then_some(font);
+    dxf.fill = has_fill.then_some(fill);
+    dxf.border = has_border.then_some(border);
+    dxf
+}
+
+fn parse_styles(data: &[u8]) -> Styles {
+    let mut st = Styles::default();
+    let mut in_cell_xfs = false;
+    let mut in_style_xfs = false;
+    for rec in biff12::records(data) {
+        let mut r = Rd::new(rec.data);
+        match rec.rtype {
+            507 => st.dxfs.push(parse_dxf(rec.data)),
+            617 => in_cell_xfs = true,
+            618 => in_cell_xfs = false,
+            626 => in_style_xfs = true,
+            627 => in_style_xfs = false,
+            43 => {
+                let f = (|| -> Option<Font> {
+                    let height = r.u16()?;
+                    let grbit = r.u16()?;
+                    let bls = r.u16()?;
+                    let sss = r.u16()?;
+                    let uls = r.u8()?;
+                    let family = r.u8()?;
+                    let charset = r.u8()?;
+                    let _unused = r.u8()?;
+                    let col = color(&mut r)?;
+                    let scheme = r.u8()?;
+                    let name = r.wstr()?;
+                    Some(Font {
+                        name: Some(name),
+                        size: Some(height as f64 / 20.0),
+                        bold: bls >= 700,
+                        italic: grbit & 0x02 != 0,
+                        strike: grbit & 0x08 != 0,
+                        underline: match uls {
+                            0 => None,
+                            1 => Some("single".into()),
+                            2 => Some("double".into()),
+                            0x21 => Some("singleAccounting".into()),
+                            0x22 => Some("doubleAccounting".into()),
+                            _ => Some("single".into()),
+                        },
+                        vert_align: match sss {
+                            1 => Some("superscript".into()),
+                            2 => Some("subscript".into()),
+                            _ => None,
+                        },
+                        family: (family != 0).then_some(family as u32),
+                        charset: Some(charset as u32),
+                        scheme: match scheme {
+                            1 => Some("major".into()),
+                            2 => Some("minor".into()),
+                            _ => None,
+                        },
+                        color: col,
+                        ..Default::default()
+                    })
+                })();
+                st.fonts.push(f.unwrap_or_default());
+            }
+            44 => {
+                if let (Some(id), Some(code)) = (r.u16(), r.wstr()) {
+                    st.num_fmts.push(NumFmt {
+                        id: id as u32,
+                        code,
+                    });
+                }
+            }
+            45 => {
+                let fill = (|| -> Option<Fill> {
+                    let fls = r.u32()? as usize;
+                    let fg = color(&mut r)?;
+                    let bg = color(&mut r)?;
+                    let gradient = r.u32()? != 0;
+                    Some(Fill {
+                        pattern_type: PATTERNS.get(fls).map(|s| s.to_string()),
+                        fg_color: (fls != 0).then_some(fg).flatten(),
+                        bg_color: (fls != 0).then_some(bg).flatten(),
+                        gradient,
+                    })
+                })();
+                st.fills.push(fill.unwrap_or_default());
+            }
+            46 => {
+                let border = (|| -> Option<Border> {
+                    let flags = r.u8()?;
+                    let edge = |r: &mut Rd| -> Option<Option<BorderEdge>> {
+                        let dg = r.u8()? as usize;
+                        let _res = r.u8()?;
+                        let c = color(r)?;
+                        Some((dg != 0).then(|| BorderEdge {
+                            style: BORDER_STYLES.get(dg).map(|s| s.to_string()),
+                            color: c,
+                        }))
+                    };
+                    let top = edge(&mut r)?;
+                    let bottom = edge(&mut r)?;
+                    let left = edge(&mut r)?;
+                    let right = edge(&mut r)?;
+                    let diagonal = edge(&mut r)?;
+                    Some(Border {
+                        left,
+                        right,
+                        top,
+                        bottom,
+                        diagonal,
+                        diagonal_down: flags & 0x01 != 0,
+                        diagonal_up: flags & 0x02 != 0,
+                    })
+                })();
+                st.borders.push(border.unwrap_or_default());
+            }
+            47 => {
+                let xf = (|| -> Option<Xf> {
+                    let parent = r.u16()?;
+                    let fmt = r.u16()?;
+                    let font = r.u16()?;
+                    let fill = r.u16()?;
+                    let border = r.u16()?;
+                    let trot = r.u8()?;
+                    let indent = r.u8()?;
+                    let flags = r.u16()?;
+                    let atr = r.u8()?;
+                    let alc = (flags & 0x07) as usize;
+                    let alcv = ((flags >> 3) & 0x07) as usize;
+                    Some(Xf {
+                        num_fmt_id: fmt as u32,
+                        font_id: font as u32,
+                        fill_id: fill as u32,
+                        border_id: border as u32,
+                        xf_id: (parent != 0xFFFF).then_some(parent as u32),
+                        apply_number_format: Some(atr & 0x01 != 0),
+                        apply_font: Some(atr & 0x02 != 0),
+                        apply_alignment: Some(atr & 0x04 != 0),
+                        apply_border: Some(atr & 0x08 != 0),
+                        apply_fill: Some(atr & 0x10 != 0),
+                        apply_protection: Some(atr & 0x20 != 0),
+                        alignment: Some(Alignment {
+                            horizontal: H_ALIGN.get(alc).map(|s| s.to_string()),
+                            vertical: V_ALIGN.get(alcv).map(|s| s.to_string()),
+                            wrap_text: flags & 0x40 != 0,
+                            shrink_to_fit: flags & 0x100 != 0,
+                            text_rotation: (trot != 0).then_some(trot as i32),
+                            indent: (indent != 0).then_some(indent as u32),
+                            reading_order: (((flags >> 10) & 0x03) != 0)
+                                .then_some(((flags >> 10) & 0x03) as u32),
+                        }),
+                        protection: Some(Protection {
+                            locked: Some(flags & 0x1000 != 0),
+                            hidden: Some(flags & 0x2000 != 0),
+                        }),
+                        hancom: None,
+                    })
+                })()
+                .unwrap_or_default();
+                if in_cell_xfs {
+                    st.cell_xfs.push(xf);
+                } else if in_style_xfs {
+                    st.cell_style_xfs.push(xf);
+                }
+            }
+            48 => {
+                if let (Some(ixf), Some(flags), Some(builtin), Some(_lvl), Some(name)) =
+                    (r.u32(), r.u16(), r.u8(), r.u8(), r.wstr())
+                {
+                    st.cell_styles.push(NamedStyle {
+                        name,
+                        xf_id: ixf,
+                        builtin_id: (flags & 1 != 0).then_some(builtin as u32),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    st
+}
+
+/// RichStr ([MS-XLSB] 2.5.125).
+fn rich_str(r: &mut Rd, fonts: &[Font]) -> Option<RichText> {
+    let flags = r.u8()?;
+    let text = r.wstr()?;
+    let mut rt = RichText {
+        text: text.clone(),
+        runs: Vec::new(),
+    };
+    if flags & 0x01 != 0 {
+        let n = r.u32()? as usize;
+        let mut marks = Vec::with_capacity(n);
+        for _ in 0..n {
+            marks.push((r.u16()? as usize, r.u16()? as usize));
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let mut start = 0;
+        let mut cur: Option<usize> = None;
+        for (ich, ifnt) in marks.into_iter().chain(std::iter::once((chars.len(), 0))) {
+            let end = ich.min(chars.len());
+            if end > start {
+                rt.runs.push(TextRun {
+                    text: chars[start..end].iter().collect(),
+                    font: cur.and_then(|i| fonts.get(i).cloned()),
+                });
+            }
+            start = end;
+            cur = Some(ifnt);
+        }
+    }
+    Some(rt)
+}
+
+/// CellParsedFormula / NameParsedFormula: cce u32 + rgce + cb u32 + rgcb
+fn parsed_formula<'a>(r: &mut Rd<'a>) -> Option<&'a [u8]> {
+    let cce = r.u32()? as usize;
+    let rgce = r.take(cce)?;
+    if r.left() >= 4 {
+        let cb = r.u32()? as usize;
+        r.take(cb);
+    }
+    Some(rgce)
+}
+
+struct BundleSheet {
+    state: SheetState,
+    rel_id: String,
+    name: String,
+}
+
+/// 바이너리 통합 문서를 읽는다. `wb_part` 는 `xl/workbook.bin`.
+pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
+    let mut wb = Workbook::default();
+    let root_rels = pkg.relationships("")?;
+    if let Some(app) = root_rels
+        .iter()
+        .find(|r| r.rel_type.ends_with("/extended-properties"))
+        && let Some(props) = pkg.read_xml(&app.target)?
+    {
+        let field = |name: &str| {
+            props
+                .child_ns(crate::ns::EXTENDED_PROPS, name)
+                .map(|e| e.text().trim().to_string())
+        };
+        wb.application = field("Application");
+        wb.app_version = field("AppVersion");
+    }
+    wb.properties = crate::parser::read_core_properties(pkg, &root_rels)?;
+
+    let data = read_part(pkg, wb_part)?;
+    let rels = pkg.relationships(wb_part)?;
+    let mut bundles: Vec<BundleSheet> = Vec::new();
+    let mut names: Vec<(String, Option<u32>, bool, Vec<u8>)> = Vec::new();
+    // None = 이 통합 문서, Some(관계 ID) = 외부 통합 문서
+    let mut supbooks: Vec<Option<String>> = Vec::new();
+    let mut xti: Vec<(u32, i32, i32)> = Vec::new();
+
+    for rec in biff12::records(&data) {
+        let mut r = Rd::new(rec.data);
+        match rec.rtype {
+            128 => {
+                r.take(16);
+                let app = r.wstr();
+                let last = r.wstr();
+                let lowest = r.wstr();
+                let rup = r.wstr();
+                wb.file_version = Some(FileVersion {
+                    app_name: app,
+                    last_edited: last,
+                    lowest_edited: lowest,
+                    rup_build: rup,
+                });
+            }
+            153 => wb.date1904 = r.u32().is_some_and(|f| f & 0x01 != 0),
+            534 => {
+                // BrtBookProtection: protpwdBook u16, protpwdRev u16, 플래그 u16 (1 구조, 2 창, 4 변경 내용)
+                let (Some(pw), Some(_rev), Some(f)) = (r.u16(), r.u16(), r.u16()) else {
+                    continue;
+                };
+                wb.protection = Some(WorkbookProtection {
+                    lock_structure: f & 0x01 != 0,
+                    lock_windows: f & 0x02 != 0,
+                    password: (pw != 0).then(|| format!("{pw:04X}")),
+                });
+            }
+            156 => {
+                let (Some(hs), Some(_tab), Some(rel), Some(name)) =
+                    (r.u32(), r.u32(), r.nwstr(), r.wstr())
+                else {
+                    continue;
+                };
+                bundles.push(BundleSheet {
+                    state: match hs {
+                        1 => SheetState::Hidden,
+                        2 => SheetState::VeryHidden,
+                        _ => SheetState::Visible,
+                    },
+                    rel_id: rel.unwrap_or_default(),
+                    name,
+                });
+            }
+            // BrtSupSelf / BrtSupSame: 이 통합 문서, BrtSupBookSrc: 외부 통합 문서
+            357 | 358 => supbooks.push(None),
+            355 => supbooks.push(Some(r.wstr().unwrap_or_default())),
+            362 => {
+                let n = r.u32().unwrap_or(0);
+                for _ in 0..n {
+                    let (Some(b), Some(f), Some(l)) = (r.u32(), r.u32(), r.u32()) else {
+                        break;
+                    };
+                    xti.push((b, f as i32, l as i32));
+                }
+            }
+            39 => {
+                let flags = r.u32().unwrap_or(0);
+                let _key = r.u8();
+                let itab = r.u32().unwrap_or(0xFFFF_FFFF);
+                let mut name = r.wstr().unwrap_or_default();
+                // fBuiltin: Print_Area 등 내장 이름은 XML 처럼 _xlnm. 을 붙인다
+                if flags & 0x20 != 0 && !name.starts_with("_xlnm.") {
+                    name = format!("_xlnm.{name}");
+                }
+                let rgce = parsed_formula(&mut r).unwrap_or_default().to_vec();
+                names.push((
+                    name,
+                    (itab != 0xFFFF_FFFF).then_some(itab),
+                    flags & 0x01 != 0,
+                    rgce,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    // 테마 / 스타일 / 공유 문자열
+    if let Some(th) = rels.iter().find(|r| r.rel_type.ends_with("/theme"))
+        && let Some(e) = pkg.read_xml(&th.target)?
+    {
+        let mut theme = crate::theme::parse_theme(&e);
+        theme.source = pkg.read_bytes(&th.target)?;
+        wb.theme = Some(theme);
+    }
+    if let Some(st) = rels.iter().find(|r| r.rel_type.ends_with("/styles")) {
+        wb.styles = parse_styles(&read_part(pkg, &st.target)?);
+    }
+    if let Some(sst) = rels.iter().find(|r| r.rel_type.ends_with("/sharedStrings")) {
+        let data = read_part(pkg, &sst.target)?;
+        for rec in biff12::records(&data) {
+            if rec.rtype == 19 {
+                let mut r = Rd::new(rec.data);
+                wb.shared_strings
+                    .push(rich_str(&mut r, &wb.styles.fonts).unwrap_or_default());
+            }
+        }
+    }
+
+    // 외부 연결 (externalLinkN.bin: BrtBeginSupBook 의 관계 ID → 경로, BrtSupTabs → 시트 이름)
+    let mut book_index: Vec<Option<usize>> = Vec::new(); // SupBook 번호 → 외부 연결 번호 (1부터)
+    for sb in &supbooks {
+        let Some(rid) = sb else {
+            book_index.push(None);
+            continue;
+        };
+        let mut link = ExternalLink::default();
+        if let Some(rel) = rels.iter().find(|r| &r.id == rid) {
+            let data = read_part(pkg, &rel.target)?;
+            let link_rels = pkg.relationships(&rel.target)?;
+            for rec in biff12::records(&data) {
+                let mut r = Rd::new(rec.data);
+                match rec.rtype {
+                    360 => {
+                        if r.u16() == Some(0)
+                            && let Some(Some(id)) = r.nwstr()
+                            && let Some(t) = link_rels.iter().find(|x| x.id == id)
+                        {
+                            link.target = t.target.clone();
+                        }
+                    }
+                    359 => {
+                        let n = r.u32().unwrap_or(0);
+                        for _ in 0..n {
+                            match r.wstr() {
+                                Some(s) => link.sheet_names.push(s),
+                                None => break,
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        wb.external_links.push(link);
+        book_index.push(Some(wb.external_links.len()));
+    }
+
+    let sheet_names: Vec<String> = bundles.iter().map(|b| b.name.clone()).collect();
+    let xti_sheets: Vec<Option<String>> = xti
+        .iter()
+        .map(|&(book, first, last)| {
+            if first < 0 {
+                return None;
+            }
+            let (book, names) = match *book_index.get(book as usize)? {
+                None => (None, &sheet_names),
+                Some(n) => {
+                    let link = &wb.external_links[n - 1];
+                    (Some((n, link.file_name())), &link.sheet_names)
+                }
+            };
+            let a = names.get(first as usize)?;
+            let b = if first == last {
+                None
+            } else {
+                Some(names.get(last as usize)?.as_str())
+            };
+            Some(formula::sheet_ref_prefix(
+                book.as_ref().map(|(n, f)| (*n, f.as_str())),
+                a,
+                b,
+            ))
+        })
+        .collect();
+    let name_list: Vec<String> = names.iter().map(|n| n.0.clone()).collect();
+    wb.defined_names = names
+        .iter()
+        .filter(|n| !n.3.is_empty() && !n.0.starts_with("_xlfn."))
+        .map(|(name, local, hidden, rgce)| {
+            let ctx = Context {
+                xti_sheets: &xti_sheets,
+                names: &name_list,
+                base: CellRef::default(),
+                xlsb: true,
+                row_shift: 0,
+            };
+            let formula = match formula::decode(rgce, &ctx) {
+                Ok(Decoded::Text(t)) => t,
+                Ok(Decoded::SharedRef(_)) => String::new(),
+                Err(e) => format!("#ERR({})", e.0),
+            };
+            DefinedName {
+                name: name.clone(),
+                local_sheet_id: *local,
+                hidden: *hidden,
+                formula,
+            }
+        })
+        .collect();
+
+    for b in bundles {
+        let Some(rel) = rels.iter().find(|r| r.id == b.rel_id).cloned() else {
+            continue;
+        };
+        let mut sheet = Sheet {
+            name: b.name,
+            sheet_id: wb.sheets.len() as u32 + 1,
+            state: b.state,
+            kind: if rel.rel_type.ends_with("/worksheet") {
+                SheetKind::Worksheet
+            } else if rel.rel_type.ends_with("/chartsheet") {
+                SheetKind::Chartsheet
+            } else {
+                SheetKind::Other(rel.rel_type.clone())
+            },
+            part: rel.target.clone(),
+            show_grid_lines: true,
+            ..Default::default()
+        };
+        if sheet.kind == SheetKind::Worksheet {
+            let data = read_part(pkg, &rel.target)?;
+            let srels = pkg.relationships(&rel.target)?;
+            read_sheet(&data, &mut sheet, &wb, &srels, (&xti_sheets, &name_list))?;
+            read_comments(pkg, &srels, &wb.styles.fonts, &mut sheet)?;
+            crate::parser::read_sheet_drawings(pkg, &srels, &mut wb.raw_parts, &mut sheet)?;
+        }
+        wb.sheets.push(sheet);
+    }
+    Ok(wb)
+}
+
+/// 자동 필터에서 지금 읽고 있는 열
+fn cur_filter_column(sheet: &mut Sheet) -> Option<&mut FilterColumn> {
+    sheet.auto_filter.as_mut()?.columns.last_mut()
+}
+
+fn read_sheet(
+    data: &[u8],
+    sheet: &mut Sheet,
+    wb: &Workbook,
+    rels: &[Relationship],
+    (xti_sheets, names): (&Vec<Option<String>>, &Vec<String>),
+) -> Result<()> {
+    let rel_by_id: HashMap<&str, &Relationship> = rels.iter().map(|r| (r.id.as_str(), r)).collect();
+    let mut row: u32 = 0;
+    // 페이지 나누기 목록 안: 1 = 행, 2 = 열
+    let mut brk_kind = 0u8;
+    // BrtSel 이 활성 창 것과 맞았는지
+    let mut sel_matched = false;
+    // 공유 수식: (범위, 토큰열). XLSB 의 PtgExp 는 기준 행만 가리키므로 범위로 찾는다.
+    let mut shared: Vec<(CellRange, Vec<u8>)> = Vec::new();
+    let find_shared = |shared: &[(CellRange, Vec<u8>)], master_row: u32, at: CellRef| {
+        shared
+            .iter()
+            .rev()
+            .find(|(rg, _)| {
+                rg.start.row == master_row
+                    && (rg.start.row..=rg.end.row).contains(&at.row)
+                    && (rg.start.col..=rg.end.col).contains(&at.col)
+            })
+            .map(|(_, t)| t.clone())
+    };
+    let recs: Vec<Record> = biff12::records(data);
+    for rec in &recs {
+        let mut r = Rd::new(rec.data);
+        match rec.rtype {
+            148 => {
+                if let (Some(r1), Some(r2), Some(c1), Some(c2)) =
+                    (r.u32(), r.u32(), r.u32(), r.u32())
+                {
+                    sheet.dimension = Some(
+                        CellRange {
+                            start: CellRef { row: r1, col: c1 },
+                            end: CellRef { row: r2, col: c2 },
+                        }
+                        .to_string(),
+                    );
+                }
+            }
+            147 => {
+                // BrtWsProp: 플래그 3바이트 (0x000001 자동 페이지 나누기, 0x000040 요약 행 아래,
+                // 0x000080 요약 열 오른쪽, 0x000100 페이지에 맞추기, 0x010000 필터 적용 중),
+                // brtcolorTab, rwSync, colSync, strName(코드 이름)
+                let (Some(a), Some(b), Some(c)) = (r.u8(), r.u8(), r.u8()) else {
+                    continue;
+                };
+                sheet.page.auto_page_breaks = Some(a & 0x01 != 0);
+                sheet.summary_above = a & 0x40 == 0;
+                sheet.summary_left = a & 0x80 == 0;
+                sheet.page.fit_to_page = Some(b & 0x01 != 0);
+                sheet.filter_mode = c & 0x01 != 0;
+                sheet.tab_color = color(&mut r).flatten().filter(|c| !c.auto); // 자동 = 탭 색 없음
+                r.take(8);
+                sheet.code_name = r.wstr().filter(|s| !s.is_empty());
+            }
+            137 => {
+                // BrtBeginWsView (한셀 30바이트): flags u16, xlView u32, rwTop u32, colLeft u32,
+                // icvHdr u8, 예약 u8, ? u16, 현재 확대율 u16 (18), 기본 u16 (20), 페이지 나누기 미리 보기 u16 (22),
+                // 페이지 레이아웃 u16 (24), iWbkView u32 — [MS-XLSB] 순서. 한셀의 XML 과는 일관되지 않다 (문서 참고)
+                let Some(flags) = r.u16() else { continue };
+                sheet.show_grid_lines = flags & 0x0004 != 0;
+                let v = &mut sheet.view;
+                v.show_formulas = flags & 0x0002 != 0;
+                v.show_row_col_headers = flags & 0x0008 != 0;
+                v.show_zeros = flags & 0x0010 != 0;
+                v.tab_selected = flags & 0x0040 != 0;
+                let xl_view = r.u32().unwrap_or(0);
+                v.view = match xl_view {
+                    1 => Some("pageBreakPreview".into()),
+                    2 => Some("pageLayout".into()),
+                    _ => None,
+                };
+                if let (Some(row), Some(col)) = (r.u32(), r.u32()) {
+                    v.top_left_cell = Some(CellRef { row, col }.to_string());
+                }
+                r.take(4);
+                let z = |x: Option<u16>| x.filter(|&z| z != 0).map(u32::from);
+                v.zoom_scale = z(r.u16());
+                v.zoom_scale_normal = z(r.u16());
+                v.zoom_scale_sheet_layout_view = z(r.u16());
+            }
+            151 => {
+                // BrtPane: xnumXSplit f64, xnumYSplit f64, rwTop u32, colLeft u32, pnnAct u32, flags u8
+                let (Some(x), Some(y), Some(row), Some(col), Some(pnn), Some(f)) =
+                    (r.f64(), r.f64(), r.u32(), r.u32(), r.u32(), r.u8())
+                else {
+                    continue;
+                };
+                sheet.view.pane = Some(Pane {
+                    x_split: x,
+                    y_split: y,
+                    top_left_cell: Some(CellRef { row, col }.to_string()),
+                    active_pane: pane_name(pnn),
+                    state: Some(
+                        match (f & 0x01 != 0, f & 0x02 != 0) {
+                            (true, true) => "frozen",
+                            (true, false) => "frozenSplit",
+                            _ => "split",
+                        }
+                        .into(),
+                    ),
+                });
+            }
+            152 => {
+                // BrtSel: pnn u32, rwAct u32, colAct u32, dwRfxAct u32, crfx u32 + RfX × crfx
+                let (Some(pnn), Some(row), Some(col), Some(_i), Some(n)) =
+                    (r.u32(), r.u32(), r.u32(), r.u32(), r.u32())
+                else {
+                    continue;
+                };
+                let active = sheet.view.pane.as_ref().and_then(|p| p.active_pane.clone());
+                // 활성 창 것을 쓰고, 맞는 것이 없으면 마지막 것 (한셀은 나눈 창의 번호를 잃기도 한다)
+                let hit = pane_name(pnn) == active || (active.is_none() && pnn == 3);
+                if !hit && sel_matched {
+                    continue;
+                }
+                sel_matched |= hit;
+                sheet.view.active_cell = Some(CellRef { row, col }.to_string());
+                let mut refs = Vec::new();
+                for _ in 0..n {
+                    let (Some(r1), Some(r2), Some(c1), Some(c2)) =
+                        (r.u32(), r.u32(), r.u32(), r.u32())
+                    else {
+                        break;
+                    };
+                    refs.push(
+                        CellRange {
+                            start: CellRef { row: r1, col: c1 },
+                            end: CellRef { row: r2, col: c2 },
+                        }
+                        .to_string(),
+                    );
+                }
+                sheet.view.sqref = Some(refs.join(" "));
+            }
+            461 => {
+                // BrtBeginConditionalFormatting: ccf u32, fPivot u32, UncheckedSqRfX
+                r.take(8);
+                sheet.conditional_formats.push(ConditionalFormat {
+                    sqref: sqrfx(&mut r),
+                    rules: Vec::new(),
+                });
+            }
+            463 => {
+                // BrtBeginCFRule: iType, iTemplate, dxfId, iPri, iParam, 예약 ×2 (u32), flags u16,
+                // cbFmla1..3 u32, strParam, 수식 1–3 (CFParsedFormula)
+                let Some(cf) = sheet.conditional_formats.last_mut() else {
+                    continue;
+                };
+                let base = CellRange::parse(cf.sqref.split(' ').next().unwrap_or(""))
+                    .map(|r| r.start)
+                    .unwrap_or_default();
+                let v: Vec<u32> = (0..7).map(|_| r.u32().unwrap_or(0)).collect();
+                let flags = r.u16().unwrap_or(0);
+                let cb: Vec<u32> = (0..3).map(|_| r.u32().unwrap_or(0)).collect();
+                let text = r.nwstr().flatten();
+                let mut formulas = Vec::new();
+                for &n in &cb {
+                    if n == 0 {
+                        continue;
+                    }
+                    let Some(f) = r.take(n as usize) else { break };
+                    let mut fr = Rd::new(f);
+                    if let Some(rgce) = parsed_formula(&mut fr) {
+                        let ctx = Context {
+                            xti_sheets,
+                            names,
+                            base,
+                            xlsb: true,
+                            row_shift: 0,
+                        };
+                        formulas.push(match formula::decode(rgce, &ctx) {
+                            Ok(Decoded::Text(t)) => t,
+                            _ => String::new(),
+                        });
+                    }
+                }
+                cf.rules
+                    .push(cf_rule(v[0], v[1], v[2], v[3], v[4], flags, text, formulas));
+            }
+            469 | 467 | 465 => {
+                // 색 눈금 / 데이터 막대 (bLenMin u8, bLenMax u8, fShowValue u8) / 아이콘 (iSet u32, flags u16)
+                let Some(rule) = sheet
+                    .conditional_formats
+                    .last_mut()
+                    .and_then(|c| c.rules.last_mut())
+                else {
+                    continue;
+                };
+                match rec.rtype {
+                    469 => rule.color_scale = Some(Default::default()),
+                    467 => {
+                        let (min, max, show) = (r.u8(), r.u8(), r.u8());
+                        rule.data_bar = Some(DataBar {
+                            min_length: min.map(u32::from).filter(|&v| v != 10),
+                            max_length: max.map(u32::from).filter(|&v| v != 90),
+                            show_value: show != Some(0),
+                            ..Default::default()
+                        });
+                    }
+                    _ => {
+                        let set = r.u32().unwrap_or(0);
+                        let f = r.u16().unwrap_or(0);
+                        rule.icon_set = Some(IconSet {
+                            set: ICON_SETS
+                                .get(set as usize)
+                                .unwrap_or(&"3TrafficLights1")
+                                .to_string(),
+                            cfvos: Vec::new(),
+                            show_value: f & 0x02 == 0,
+                            reverse: f & 0x04 != 0,
+                            percent: true,
+                        });
+                    }
+                }
+            }
+            471 | 564 => {
+                // BrtCFVO (iType u32, numParam f64, fSaveGTE u32, fGTE u32, cbFmla u32 + 수식) / BrtColor
+                let Some(rule) = sheet
+                    .conditional_formats
+                    .last_mut()
+                    .and_then(|c| c.rules.last_mut())
+                else {
+                    continue;
+                };
+                if rec.rtype == 471 {
+                    let ty = r.u32().unwrap_or(0);
+                    let num = r.f64().unwrap_or(0.0);
+                    let (save_gte, gte) = (r.u32().unwrap_or(0), r.u32().unwrap_or(1));
+                    let kind = match ty {
+                        1 => "num",
+                        2 => "min",
+                        3 => "max",
+                        4 => "percent",
+                        5 => "percentile",
+                        6 => "formula",
+                        7 => "autoMin",
+                        8 => "autoMax",
+                        _ => "num",
+                    };
+                    let cfvo = Cfvo {
+                        kind: kind.into(),
+                        val: matches!(ty, 1 | 4 | 5).then(|| formula::number_text(num)),
+                        gte: save_gte == 0 || gte != 0,
+                    };
+                    if let Some(c) = rule.color_scale.as_mut() {
+                        c.cfvos.push(cfvo);
+                    } else if let Some(d) = rule.data_bar.as_mut() {
+                        d.cfvos.push(cfvo);
+                    } else if let Some(i) = rule.icon_set.as_mut() {
+                        i.cfvos.push(cfvo);
+                    }
+                } else {
+                    let c = valid_rgb_color(&mut r);
+                    if let Some(s) = rule.color_scale.as_mut() {
+                        s.colors.extend(c);
+                    } else if let Some(d) = rule.data_bar.as_mut() {
+                        d.color = c;
+                    }
+                }
+            }
+            64 => {
+                // BrtDVal: 플래그 u32, UncheckedSqRfX, 제목·내용 문자열 4개, 수식 2개 (DValFormula)
+                let Some(flags) = r.u32() else { continue };
+                let sqref = sqrfx(&mut r);
+                let base = CellRange::parse(sqref.split(' ').next().unwrap_or(""))
+                    .map(|r| r.start)
+                    .unwrap_or_default();
+                let mut s: Vec<Option<String>> = (0..4).map(|_| r.nwstr().flatten()).collect();
+                let mut fml = || {
+                    let rgce = parsed_formula(&mut r)?;
+                    if rgce.is_empty() {
+                        return None;
+                    }
+                    let ctx = Context {
+                        xti_sheets,
+                        names,
+                        base,
+                        xlsb: true,
+                        row_shift: 0,
+                    };
+                    match formula::decode(rgce, &ctx) {
+                        Ok(Decoded::Text(t)) => Some(t),
+                        _ => None,
+                    }
+                };
+                let (f1, f2) = (fml(), fml());
+                sheet
+                    .data_validations
+                    .push(dv_from_flags(flags, sqref, &mut s, f1, f2));
+            }
+            // 페이지 나누기: BrtBeginRwBrks(392)/BrtBeginColBrks(394) 안의 BrtBrk(396)
+            392 => brk_kind = 1,
+            394 => brk_kind = 2,
+            393 | 395 => brk_kind = 0,
+            396 => {
+                // BrtBrk: id u32, min u32, max u32, fMan u32, fPivot u32
+                if let Some(id) = r.u32() {
+                    match brk_kind {
+                        1 => sheet.page.row_breaks.push(id),
+                        2 => sheet.page.col_breaks.push(id),
+                        _ => {}
+                    }
+                }
+            }
+            476 => {
+                // BrtMargins: f64 × 6
+                let mut v = [0f64; 6];
+                for x in v.iter_mut() {
+                    *x = r.f64().unwrap_or(0.0);
+                }
+                sheet.page.margins = Some(PageMargins {
+                    left: v[0],
+                    right: v[1],
+                    top: v[2],
+                    bottom: v[3],
+                    header: v[4],
+                    footer: v[5],
+                });
+            }
+            477 => {
+                // BrtPrintOptions: 0x01 가로 가운데, 0x02 세로 가운데, 0x04 행·열 머리글, 0x08 눈금선
+                let f = r.u16().unwrap_or(0);
+                sheet.page.print_options = Some(PrintOptions {
+                    horizontal_centered: f & 0x01 != 0,
+                    vertical_centered: f & 0x02 != 0,
+                    headings: f & 0x04 != 0,
+                    grid_lines: f & 0x08 != 0,
+                });
+            }
+            478 => {
+                // BrtPageSetup: paper, scale, res, vres, copies, pageStart, fitW, fitH (u32), flags u16
+                let mut v = [0u32; 8];
+                for x in v.iter_mut() {
+                    *x = r.u32().unwrap_or(0);
+                }
+                let g = r.u16().unwrap_or(0);
+                sheet.page.setup = Some(PageSetup {
+                    paper_size: Some(v[0]),
+                    scale: Some(v[1]),
+                    horizontal_dpi: Some(v[2]),
+                    vertical_dpi: Some(v[3]),
+                    copies: Some(v[4]),
+                    first_page_number: Some(v[5]),
+                    fit_to_width: Some(v[6]),
+                    fit_to_height: Some(v[7]),
+                    orientation: Some(
+                        if g & 0x0040 != 0 {
+                            "default"
+                        } else if g & 0x0002 != 0 {
+                            "landscape"
+                        } else {
+                            "portrait"
+                        }
+                        .into(),
+                    ),
+                    page_order: (g & 0x0001 != 0).then(|| "overThenDown".into()),
+                    use_printer_defaults: g & 0x0004 == 0,
+                    black_and_white: g & 0x0008 != 0,
+                    draft: g & 0x0010 != 0,
+                    use_first_page_number: g & 0x0080 != 0,
+                });
+            }
+            479 => {
+                // BrtBeginHeaderFooter: flags u16 + 머리글/바닥글 6개 (XLNullableWideString)
+                let f = r.u16().unwrap_or(0);
+                let mut t: Vec<Option<String>> = (0..6)
+                    .map(|_| r.nwstr().flatten().filter(|s| !s.is_empty()))
+                    .collect();
+                sheet.page.header_footer = Some(HeaderFooter {
+                    different_odd_even: f & 0x01 != 0,
+                    different_first: f & 0x02 != 0,
+                    scale_with_doc: f & 0x04 != 0,
+                    align_with_margins: f & 0x08 != 0,
+                    odd_header: t[0].take(),
+                    odd_footer: t[1].take(),
+                    even_header: t[2].take(),
+                    even_footer: t[3].take(),
+                    first_header: t[4].take(),
+                    first_footer: t[5].take(),
+                });
+            }
+            535 => {
+                // BrtSheetProtection: protpwd u16, 이어서 u32 16개 — fLocked(시트 보호) 다음 15개는
+                // "허용" 여부라 OOXML 속성(참 = 막힘)과 반대다
+                let pw = r.u16().unwrap_or(0);
+                let mut states = [false; 16];
+                for (i, s) in states.iter_mut().enumerate() {
+                    let v = r.u32().unwrap_or(0) != 0;
+                    *s = if i == 0 { v } else { !v };
+                }
+                sheet.protection = Some(SheetProtection::from_states(
+                    (pw != 0).then(|| format!("{pw:04X}")),
+                    states,
+                ));
+            }
+            161 => {
+                // BrtBeginAFilter: RfX (rwFirst, rwLast, colFirst, colLast)
+                if let (Some(r1), Some(r2), Some(c1), Some(c2)) =
+                    (r.u32(), r.u32(), r.u32(), r.u32())
+                {
+                    sheet.auto_filter = Some(AutoFilter {
+                        range: CellRange {
+                            start: CellRef { row: r1, col: c1 },
+                            end: CellRef { row: r2, col: c2 },
+                        }
+                        .to_string(),
+                        columns: Vec::new(),
+                    });
+                }
+            }
+            163 => {
+                // BrtBeginFilterColumn: dwCol u32, 플래그 u16 (단추 숨김 등)
+                if let (Some(af), Some(col)) = (sheet.auto_filter.as_mut(), r.u32()) {
+                    af.columns.push(FilterColumn {
+                        col_id: col,
+                        ..Default::default()
+                    });
+                }
+            }
+            165 => {
+                // BrtBeginFilters: fBlank u32, 달력 종류 u32
+                if let Some(c) = cur_filter_column(sheet) {
+                    c.blank = r.u32().is_some_and(|v| v != 0);
+                }
+            }
+            167 => {
+                if let (Some(v), Some(c)) = (r.wstr(), cur_filter_column(sheet)) {
+                    c.values.push(v);
+                }
+            }
+            172 => {
+                if let Some(c) = cur_filter_column(sheet) {
+                    c.custom_and = r.u32().is_some_and(|v| v != 0);
+                }
+            }
+            174 => {
+                // BrtCustomFilter: vts u8 (4 수, 6 문자열, 8 논리/오류, 0x0C 빈 칸, 0x0E 빈 칸 아님),
+                // grbitSign u8, 값 8바이트 (문자열이면 이어서 XLWideString)
+                let (Some(vts), Some(sign)) = (r.u8(), r.u8()) else {
+                    continue;
+                };
+                let op = FILTER_OPERATORS.get(sign as usize).copied().unwrap_or("");
+                let op = if op.is_empty() { "equal" } else { op };
+                let val = match vts {
+                    4 => r.f64().map(formula::number_text),
+                    6 => {
+                        r.take(8);
+                        r.wstr()
+                    }
+                    8 => r.u8().map(|b| {
+                        if b != 0 {
+                            "TRUE".into()
+                        } else {
+                            "FALSE".into()
+                        }
+                    }),
+                    0x0C => Some(String::new()),
+                    0x0E => Some(String::new()),
+                    _ => None,
+                };
+                if let (Some(v), Some(c)) = (val, cur_filter_column(sheet)) {
+                    c.custom.push((op.to_string(), v));
+                }
+            }
+            170 => {
+                // BrtTop10Filter: 플래그 u8 (1 위, 2 백분율, 4 기준값 있음), 개수/백분율 f64, 기준값 f64
+                if let (Some(f), Some(v), Some(c)) = (r.u8(), r.f64(), cur_filter_column(sheet)) {
+                    c.top10 = Some((f & 0x01 != 0, f & 0x02 != 0, v));
+                }
+            }
+            171 => {
+                // BrtDynamicFilter: cft u32, 플래그 u8, 값 f64, 최댓값 f64
+                if let (Some(t), Some(c)) = (r.u32(), cur_filter_column(sheet)) {
+                    c.dynamic = DYNAMIC_FILTER_TYPES
+                        .get(t as usize)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                }
+            }
+            485 => {
+                if let (Some(dx_gcol), Some(_dx_col), Some(dy)) = (r.u32(), r.u16(), r.u16()) {
+                    sheet.default_col_width = Some(dx_gcol as f64 / 256.0);
+                    sheet.default_row_height = Some(dy as f64 / 20.0);
+                }
+            }
+            60 => {
+                let (Some(c1), Some(c2), Some(w), Some(ixfe), Some(flags)) =
+                    (r.u32(), r.u32(), r.u32(), r.u32(), r.u16())
+                else {
+                    continue;
+                };
+                sheet.cols.push(ColInfo {
+                    min: c1 + 1,
+                    max: c2 + 1,
+                    width: Some(w as f64 / 256.0),
+                    style: Some(ixfe),
+                    hidden: flags & 0x0001 != 0,
+                    custom_width: flags & 0x0002 != 0,
+                    // BrtColInfo 플래그: 비트 8–10 개요 수준, 0x1000 접힘 ([MS-XLSB]).
+                    // 한셀은 접힘을 0x2000 에 쓴다 — 둘 다 받는다.
+                    outline_level: ((flags >> 8) & 0x07) as u8,
+                    collapsed: flags & 0x3000 != 0,
+                });
+            }
+            0 => {
+                let (Some(rw), Some(ixfe), Some(h), Some(flags)) =
+                    (r.u32(), r.u32(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                row = rw;
+                let custom = flags & 0x2000 != 0;
+                let hidden = flags & 0x1000 != 0;
+                let has_style = flags & 0x4000 != 0;
+                // BrtRowHdr 플래그: 비트 8–10 개요 수준, 0x0800 접힘
+                let level = ((flags >> 8) & 0x07) as u8;
+                let collapsed = flags & 0x0800 != 0;
+                // 높이는 지정(fUnsynced)이 아니어도 그 행의 실제 높이다 — 기본과 다르면 남긴다
+                // (한셀 XML 의 ht. 버리면 한셀이 다시 계산해 그리기 앵커가 어긋난다)
+                let default_twips = sheet.default_row_height.map(|d| (d * 20.0).round() as u16);
+                let differs = h != 0 && Some(h) != default_twips;
+                if custom || hidden || has_style || level > 0 || collapsed || differs {
+                    sheet.rows.push(RowInfo {
+                        index: rw + 1,
+                        height: (custom || differs).then_some(h as f64 / 20.0),
+                        custom_height: custom,
+                        hidden,
+                        style: has_style.then_some(ixfe),
+                        outline_level: level,
+                        collapsed,
+                    });
+                }
+            }
+            1..=7 | 62 => {
+                let Some((col, style)) = cell_head(&mut r) else {
+                    continue;
+                };
+                let value = match rec.rtype {
+                    1 => CellValue::Empty,
+                    2 => r
+                        .u32()
+                        .map(|v| CellValue::Number(rk_value(v)))
+                        .unwrap_or_default(),
+                    3 => r
+                        .u8()
+                        .map(|e| CellValue::Error(formula::error_text(e).into()))
+                        .unwrap_or_default(),
+                    4 => r.u8().map(|b| CellValue::Bool(b != 0)).unwrap_or_default(),
+                    5 => r.f64().map(CellValue::Number).unwrap_or_default(),
+                    6 => r.wstr().map(CellValue::Text).unwrap_or_default(),
+                    7 => r
+                        .u32()
+                        .and_then(|i| wb.shared_strings.get(i as usize))
+                        .map(|s| CellValue::Text(s.text.clone()))
+                        .unwrap_or_default(),
+                    _ => rich_str(&mut r, &wb.styles.fonts)
+                        .map(|s| CellValue::Text(s.text))
+                        .unwrap_or_default(),
+                };
+                sheet.cells.push(Cell {
+                    r: CellRef { row, col },
+                    style,
+                    value,
+                    formula: None,
+                });
+            }
+            8..=11 => {
+                let Some((col, style)) = cell_head(&mut r) else {
+                    continue;
+                };
+                let value = match rec.rtype {
+                    8 => r.wstr().map(CellValue::Text).unwrap_or_default(),
+                    9 => r.f64().map(CellValue::Number).unwrap_or_default(),
+                    10 => r.u8().map(|b| CellValue::Bool(b != 0)).unwrap_or_default(),
+                    _ => r
+                        .u8()
+                        .map(|e| CellValue::Error(formula::error_text(e).into()))
+                        .unwrap_or_default(),
+                };
+                let _grbit = r.u16();
+                let at = CellRef { row, col };
+                let rgce = parsed_formula(&mut r).unwrap_or_default();
+                let ctx = Context {
+                    xti_sheets,
+                    names,
+                    base: at,
+                    xlsb: true,
+                    row_shift: 0,
+                };
+                let text = match formula::decode(rgce, &ctx) {
+                    Ok(Decoded::Text(t)) => t,
+                    Ok(Decoded::SharedRef(m)) => find_shared(&shared, m.row, at)
+                        .and_then(|tok| match formula::decode(&tok, &ctx) {
+                            Ok(Decoded::Text(t)) => Some(t),
+                            _ => None,
+                        })
+                        .unwrap_or_default(),
+                    Err(e) => format!("#ERR({})", e.0),
+                };
+                sheet.cells.push(Cell {
+                    r: at,
+                    style,
+                    value,
+                    formula: Some(Formula {
+                        text,
+                        ..Default::default()
+                    }),
+                });
+            }
+            427 => {
+                // BrtShrFmla: RfX + formula
+                if let (Some(r1), Some(r2), Some(c1), Some(c2)) =
+                    (r.u32(), r.u32(), r.u32(), r.u32())
+                    && let Some(tokens) = parsed_formula(&mut r)
+                {
+                    // 기준 셀(직전 수식 셀)은 이 레코드보다 먼저 나오므로 다시 해석한다
+                    if let Some(cell) = sheet.cells.last_mut()
+                        && cell.r == (CellRef { row: r1, col: c1 })
+                        && let Some(f) = cell.formula.as_mut()
+                        && f.text.is_empty()
+                    {
+                        let ctx = Context {
+                            xti_sheets,
+                            names,
+                            base: cell.r,
+                            xlsb: true,
+                            row_shift: 0,
+                        };
+                        if let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx) {
+                            f.text = t;
+                        }
+                    }
+                    shared.push((
+                        CellRange {
+                            start: CellRef { row: r1, col: c1 },
+                            end: CellRef { row: r2, col: c2 },
+                        },
+                        tokens.to_vec(),
+                    ));
+                }
+            }
+            176 => {
+                if let (Some(r1), Some(r2), Some(c1), Some(c2)) =
+                    (r.u32(), r.u32(), r.u32(), r.u32())
+                {
+                    sheet.merges.push(CellRange {
+                        start: CellRef { row: r1, col: c1 },
+                        end: CellRef { row: r2, col: c2 },
+                    });
+                }
+            }
+            494 => {
+                let h = (|| -> Option<Hyperlink> {
+                    let (r1, r2, c1, c2) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+                    let rel = r.nwstr()?;
+                    let location = r.wstr()?;
+                    let tooltip = r.wstr()?;
+                    let display = r.wstr()?;
+                    Some(Hyperlink {
+                        range: CellRange {
+                            start: CellRef { row: r1, col: c1 },
+                            end: CellRef { row: r2, col: c2 },
+                        }
+                        .to_string(),
+                        location: (!location.is_empty()).then_some(location),
+                        target: rel
+                            .and_then(|id| rel_by_id.get(id.as_str()).map(|r| r.target.clone())),
+                        tooltip: (!tooltip.is_empty()).then_some(tooltip),
+                        display: (!display.is_empty()).then_some(display),
+                    })
+                })();
+                if let Some(h) = h {
+                    sheet.hyperlinks.push(h);
+                }
+            }
+            _ => {}
+        }
+    }
+    let _ = bad;
+    sheet.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    Ok(())
+}

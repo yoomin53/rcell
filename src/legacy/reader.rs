@@ -1,0 +1,2975 @@
+// Copyright 2026 yoomin53 (https://github.com/yoomin53)
+// SPDX-License-Identifier: Apache-2.0
+//
+// rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
+
+//! 레거시 `.cell` → [`Workbook`] 변환.
+//!
+//! 레코드 의미는 BIFF8 공개 명세 [MS-XLS] 를 따르되, 한셀 레거시(BOF 버전 0x1001)의
+//! 차이는 한셀이 같은 문서를 XML 형식으로 저장한 결과와 대조해 확정했다.
+//! 차이 목록: `docs/format/cell-legacy.md`.
+
+use std::collections::HashMap;
+
+use super::biff::{self, Record};
+use super::escher;
+use super::formula::{self, Context, Decoded};
+use crate::error::{Error, Result};
+use crate::model::{
+    Alignment, Anchor, AnchorKind, Border, BorderEdge, Cell, CellRange, CellRef, CellValue, CfRule,
+    Cfvo, ColInfo, Color, ColorScale, Comment, ConditionalFormat, DYNAMIC_FILTER_TYPES, DataBar,
+    DefinedName, DrawColor, DrawingPara, DrawingRun, ExternalLink, FILTER_OPERATORS, Fill,
+    FilterColumn, Font, Formula, FormulaKind, HancomFontExt, HancomXfExt, HeaderFooter, Hyperlink,
+    IconSet, Marker, NamedStyle, NumFmt, Outline, PageMargins, PageSetup, Paint, Pane, ParaShape,
+    Protection, RichText, RowInfo, SHEET_PROTECTION_FLAGS, Shape, ShapeKind, Sheet, SheetKind,
+    SheetProtection, SheetState, Styles, TextBody, TextRun, Workbook, WorkbookProtection, Xf,
+};
+use crate::vocab;
+
+/// 한셀 레거시 BOF 버전.
+pub const HANCELL_BIFF_VERSION: u16 = 0x1001;
+/// 시트 크기 (한셀 2024: 1,048,576행 × 16,384열)
+const MAX_ROWS: u32 = 1_048_576;
+const MAX_COLS: u32 = 16_384;
+
+/// SUPBOOK 종류
+#[derive(Clone, Copy)]
+enum Book {
+    Internal,
+    AddIn,
+    /// 외부 문서: `Workbook::external_links` 번호 (1부터)
+    External(usize),
+}
+
+/// SUPBOOK 가상 경로 ([MS-XLS] 2.5.277 VirtualPath) → 관계 Target (URI) 꼴.
+/// U+0001 로 시작하면 부호화된 경로다: U+0001 드라이브 문자(`@` 는 UNC),
+/// U+0002 같은 드라이브의 루트, U+0003 하위 폴더, U+0004 상위 폴더.
+fn virtual_path(p: &str) -> String {
+    fn push(c: char, out: &mut String) {
+        if c.is_ascii_alphanumeric() || "-._~/:()!$&'*+,;=@".contains(c) {
+            out.push(c);
+        } else {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    let mut out = String::new();
+    let Some(rest) = p.strip_prefix('\u{1}') else {
+        for c in p.chars() {
+            push(if c == '\\' { '/' } else { c }, &mut out);
+        }
+        return out;
+    };
+    let mut it = rest.chars();
+    while let Some(c) = it.next() {
+        match c {
+            '\u{1}' => match it.next() {
+                Some('@') => out.push_str("file://"),
+                Some(d) => {
+                    out.push_str("file:///");
+                    out.push(d);
+                    out.push_str(":/");
+                }
+                None => {}
+            },
+            '\u{2}' | '\u{3}' => out.push('/'),
+            '\u{4}' => out.push_str("../"),
+            '\u{5}' => {
+                // 긴 볼륨 이름: 길이 문자 + 이름
+                let n = it.next().map_or(0, |c| c as usize);
+                out.push_str("file:///");
+                for c in it.by_ref().take(n) {
+                    push(c, &mut out);
+                }
+                out.push('/');
+            }
+            '\u{6}'..='\u{8}' => {}
+            c => push(c, &mut out),
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// 바이트 읽기
+// ---------------------------------------------------------------------------
+
+struct Rd<'a> {
+    b: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Rd<'a> {
+    fn new(b: &'a [u8]) -> Self {
+        Rd { b, pos: 0 }
+    }
+    fn left(&self) -> usize {
+        self.b.len().saturating_sub(self.pos)
+    }
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let s = self.b.get(self.pos..self.pos + n)?;
+        self.pos += n;
+        Some(s)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Option<u16> {
+        let s = self.take(2)?;
+        Some(u16::from_le_bytes([s[0], s[1]]))
+    }
+    fn u32(&mut self) -> Option<u32> {
+        let s = self.take(4)?;
+        Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    }
+    fn i32(&mut self) -> Option<i32> {
+        self.u32().map(|v| v as i32)
+    }
+    fn f64(&mut self) -> Option<f64> {
+        Some(f64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+    /// 한셀 레거시 문자열: 플래그 값과 상관없이 UTF-16LE.
+    fn utf16(&mut self, cch: usize) -> Option<String> {
+        Some(crate::text::utf16le(self.take(cch * 2)?))
+    }
+}
+
+fn bad(what: &str) -> Error {
+    Error::InvalidValue {
+        context: "레거시 .cell".into(),
+        value: what.into(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 논리 레코드 (CONTINUE 병합)
+// ---------------------------------------------------------------------------
+
+struct Logical {
+    rtype: u16,
+    offset: usize,
+    data: Vec<u8>,
+}
+
+fn logical_records(stream: &[u8]) -> Vec<Logical> {
+    let mut out: Vec<Logical> = Vec::new();
+    for Record {
+        offset,
+        rtype,
+        data,
+    } in biff::records(stream)
+    {
+        if rtype == 0x003C
+            && let Some(last) = out.last_mut()
+        {
+            last.data.extend_from_slice(data);
+            continue;
+        }
+        out.push(Logical {
+            rtype,
+            offset,
+            data: data.to_vec(),
+        });
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// 색
+// ---------------------------------------------------------------------------
+
+/// BIFF8 기본 팔레트 (색 번호 8–63), [MS-XLS] 2.5.161.
+const DEFAULT_PALETTE: [u32; 56] = [
+    0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0xFF00FF, 0x00FFFF, 0x800000,
+    0x008000, 0x000080, 0x808000, 0x800080, 0x008080, 0xC0C0C0, 0x808080, 0x9999FF, 0x993366,
+    0xFFFFCC, 0xCCFFFF, 0x660066, 0xFF8080, 0x0066CC, 0xCCCCFF, 0x000080, 0xFF00FF, 0xFFFF00,
+    0x00FFFF, 0x800080, 0x800000, 0x008080, 0x0000FF, 0x00CCFF, 0xCCFFFF, 0xCCFFCC, 0xFFFF99,
+    0x99CCFF, 0xFF99CC, 0xCC99FF, 0xFFCC99, 0x3366FF, 0x33CCCC, 0x99CC00, 0xFFCC00, 0xFF9900,
+    0xFF6600, 0x666699, 0x969696, 0x003366, 0x339966, 0x003300, 0x333300, 0x993300, 0x993366,
+    0x333399, 0x333333,
+];
+
+/// 한셀 확장 영역의 COLORREF(0x00BBGGRR). `0xFFFFFFFF` = 지정 안 함, `0xDFFFFFFF` = 자동.
+fn colorref(v: u32) -> Option<Color> {
+    match v {
+        0xFFFF_FFFF => None,
+        0xDFFF_FFFF => Some(Color {
+            indexed: Some(64),
+            ..Default::default()
+        }),
+        _ => {
+            let r = v & 0xFF;
+            let g = (v >> 8) & 0xFF;
+            let b = (v >> 16) & 0xFF;
+            Some(Color {
+                rgb: Some(format!("ff{r:02x}{g:02x}{b:02x}")),
+                ..Default::default()
+            })
+        }
+    }
+}
+
+fn palette_color(icv: u16, palette: &[u32]) -> Option<Color> {
+    match icv {
+        8..=63 => palette.get(icv as usize - 8).map(|rgb| Color {
+            rgb: Some(format!("ff{rgb:06x}")),
+            ..Default::default()
+        }),
+        64 | 0x7FFF => Some(Color {
+            auto: true,
+            ..Default::default()
+        }),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FONT
+// ---------------------------------------------------------------------------
+
+fn parse_font(data: &[u8], palette: &[u32]) -> Option<Font> {
+    let mut r = Rd::new(data);
+    let height = r.u16()?;
+    let grbit = r.u16()?;
+    let icv = r.u16()?;
+    let bls = r.u16()?;
+    let sss = r.u16()?;
+    let uls = r.u8()?;
+    let family = r.u8()?;
+    let charset = r.u8()?;
+    let _reserved = r.u8()?;
+    let cch = r.u8()? as usize;
+    let _flag = r.u8()?;
+    let name = r.utf16(cch)?;
+
+    let mut font = Font {
+        name: Some(name),
+        size: Some(height as f64 / 20.0),
+        bold: bls >= 700,
+        italic: grbit & 0x02 != 0,
+        strike: grbit & 0x08 != 0,
+        underline: match uls {
+            0 => None,
+            1 => Some("single".into()),
+            2 => Some("double".into()),
+            0x21 => Some("singleAccounting".into()),
+            0x22 => Some("doubleAccounting".into()),
+            _ => Some("single".into()),
+        },
+        vert_align: match sss {
+            1 => Some("superscript".into()),
+            2 => Some("subscript".into()),
+            _ => None,
+        },
+        family: (family != 0).then_some(family as u32),
+        charset: Some(charset as u32),
+        color: palette_color(icv, palette),
+        ..Default::default()
+    };
+
+    // 한셀 확장: 플래그 1 + 78바이트
+    if r.u8() == Some(1) && r.left() >= 78 {
+        let ext = Rd::new(r.take(78)?);
+        font.hancom = parse_font_ext(ext, &mut font);
+    }
+    Some(font)
+}
+
+/// FONT 확장 78바이트. 오프셋은 docs/format/cell-legacy.md 의 표를 따른다.
+fn parse_font_ext(mut e: Rd, font: &mut Font) -> Option<HancomFontExt> {
+    let size100 = e.u32()?;
+    let flags = e.u16()?;
+    let ul_type = e.u16()?;
+    let _w8 = e.u16()?;
+    let ul_shape = e.u32()?;
+    let outline = e.u32()?;
+    let shadow = e.u32()?;
+    let sh_x = e.i32()?;
+    let sh_y = e.i32()?;
+    let so_type = e.u32()?;
+    let diacsym = e.u32()?;
+    let so_shape = e.u32()?;
+    let text_color = e.u32()?;
+    let ul_color = e.u32()?;
+    let shade = e.u32()?;
+    let sh_color = e.u32()?;
+    let rel_size = e.i32()?;
+    let ratio = e.i32()?;
+    let spacing = e.i32()?;
+    let offset = e.i32()?;
+    let so_color = e.u32()?;
+
+    // 1/100 pt 크기가 더 정밀하다 (7.5pt 같은 값)
+    font.size = Some(size100 as f64 / 100.0);
+    if text_color != 0xFFFF_FFFF
+        && let Some(c) = colorref(text_color)
+    {
+        font.color = Some(c);
+    }
+
+    let pick = |v: &'static [&'static str], i: u32| v.get(i as usize).map(|s| s.to_string());
+    let mut h = HancomFontExt {
+        size: Some(rel_size),
+        ratio: Some(ratio),
+        spacing: Some(spacing),
+        offset: Some(offset),
+        emboss: (flags & 0x01 != 0).then_some(true),
+        engrave: (flags & 0x02 != 0).then_some(true),
+        use_kerning: (flags & 0x10 != 0).then_some(true),
+        superscript: (font.vert_align.as_deref() == Some("superscript")).then_some(true),
+        subscript: (font.vert_align.as_deref() == Some("subscript")).then_some(true),
+        ..Default::default()
+    };
+    if ul_type != 0 {
+        // 밑줄 위치: 1 = 아래, 3 = 위(윗줄). 윗줄은 표준 밑줄(x:u)이 아니다 (한셀 XML 과 같게).
+        if ul_type != 1 {
+            font.underline = None;
+        }
+        h.underline_type = Some(ul_type.to_string());
+        h.underline_shape = pick(vocab::LINE_SHAPE, ul_shape);
+        h.underline_color = colorref(ul_color);
+    }
+    if so_type != 0 {
+        h.strikeout_type = Some(so_type.to_string());
+        h.strikeout_shape = pick(vocab::LINE_SHAPE, so_shape);
+        h.strikeout_color = colorref(so_color);
+    }
+    if outline != 0 {
+        h.outline_type = pick(vocab::OUTLINE_TYPE, outline);
+    }
+    if shadow != 0 {
+        h.shadow_type = pick(vocab::SHADOW_TYPE, shadow);
+        h.shadow_color = colorref(sh_color);
+        h.shadow_offset_x = Some(sh_x);
+        h.shadow_offset_y = Some(sh_y);
+    }
+    if diacsym != 0 {
+        h.diacsym_mark = pick(vocab::DIACSYM_MARK, diacsym);
+    }
+    h.shade_color = colorref(shade);
+    Some(h)
+}
+
+// ---------------------------------------------------------------------------
+// XF
+// ---------------------------------------------------------------------------
+
+struct RawXf {
+    style: bool,
+    parent: u16,
+    xf: Xf,
+}
+
+const BORDER_STYLES: [&str; 14] = [
+    "none",
+    "thin",
+    "medium",
+    "dashed",
+    "dotted",
+    "thick",
+    "double",
+    "hair",
+    "mediumDashed",
+    "dashDot",
+    "mediumDashDot",
+    "dashDotDot",
+    "mediumDashDotDot",
+    "slantDashDot",
+];
+
+const PATTERNS: [&str; 19] = [
+    "none",
+    "solid",
+    "mediumGray",
+    "darkGray",
+    "lightGray",
+    "darkHorizontal",
+    "darkVertical",
+    "darkDown",
+    "darkUp",
+    "darkGrid",
+    "darkTrellis",
+    "lightHorizontal",
+    "lightVertical",
+    "lightDown",
+    "lightUp",
+    "lightGrid",
+    "lightTrellis",
+    "gray125",
+    "gray0625",
+];
+
+const H_ALIGN: [&str; 8] = [
+    "general",
+    "left",
+    "center",
+    "right",
+    "fill",
+    "justify",
+    "centerContinuous",
+    "distributed",
+];
+const V_ALIGN: [&str; 5] = ["top", "center", "bottom", "justify", "distributed"];
+
+struct XfParts {
+    raw: RawXf,
+    fill: Fill,
+    border: Border,
+    /// 확장 개수가 3이면 붙는 문단 모양 참조 (0xA011 표의 번호)
+    para_ref: Option<u32>,
+}
+
+fn parse_xf(data: &[u8], palette: &[u32]) -> Option<XfParts> {
+    let mut r = Rd::new(data);
+    let ifnt = r.u16()?;
+    let ifmt = r.u16()?;
+    let prot = r.u16()?;
+    let align = r.u8()?;
+    let trot = r.u8()?;
+    let indent_b = r.u8()?;
+    let used = r.u8()?;
+    let border1 = r.u32()?;
+    let border2 = r.u32()?;
+    let colors = r.u16()?;
+
+    // 한셀 확장: u16 개수 + COLORREF 8개 (+ 개수 3이면 u32 하나 더)
+    let mut ext = [0xFFFF_FFFFu32; 8];
+    let mut para_ref = None;
+    if let Some(n) = r.u16() {
+        // 개수 3: 문단 모양 번호(u32)가 색 8개 앞에 온다 (관측)
+        if n >= 3 {
+            para_ref = r.u32();
+        }
+        for slot in ext.iter_mut() {
+            match r.u32() {
+                Some(v) => *slot = v,
+                None => break,
+            }
+        }
+    }
+
+    let style = prot & 0x0004 != 0;
+    let alc = (align & 0x07) as usize;
+    let alcv = ((align >> 4) & 0x07) as usize;
+    let alignment = Alignment {
+        horizontal: H_ALIGN.get(alc).map(|s| s.to_string()),
+        vertical: V_ALIGN.get(alcv).map(|s| s.to_string()),
+        wrap_text: align & 0x08 != 0,
+        shrink_to_fit: indent_b & 0x10 != 0,
+        text_rotation: (trot != 0).then_some(trot as i32),
+        indent: ((indent_b & 0x0F) != 0).then_some((indent_b & 0x0F) as u32),
+        reading_order: ((indent_b >> 6) != 0).then_some((indent_b >> 6) as u32),
+    };
+
+    let edge = |dg: u32, icv: u32, rgb: u32| -> Option<BorderEdge> {
+        if dg == 0 {
+            return None;
+        }
+        Some(BorderEdge {
+            style: BORDER_STYLES.get(dg as usize).map(|s| s.to_string()),
+            color: colorref(rgb)
+                .filter(|c| c.rgb.is_some())
+                .or_else(|| palette_color(icv as u16, palette)),
+        })
+    };
+    let grbit_diag = border1 >> 30;
+    let border = Border {
+        left: edge(border1 & 0xF, (border1 >> 16) & 0x7F, ext[3]),
+        right: edge((border1 >> 4) & 0xF, (border1 >> 23) & 0x7F, ext[5]),
+        top: edge((border1 >> 8) & 0xF, border2 & 0x7F, ext[2]),
+        bottom: edge((border1 >> 12) & 0xF, (border2 >> 7) & 0x7F, ext[4]),
+        diagonal: edge((border2 >> 21) & 0xF, (border2 >> 14) & 0x7F, ext[6]),
+        diagonal_up: grbit_diag & 0x2 != 0,
+        diagonal_down: grbit_diag & 0x1 != 0,
+    };
+
+    let fls = (border2 >> 26) as usize;
+    let icv_fore = colors & 0x7F;
+    let icv_back = (colors >> 7) & 0x7F;
+    let fill = if fls == 0 {
+        Fill {
+            pattern_type: Some("none".into()),
+            ..Default::default()
+        }
+    } else {
+        Fill {
+            pattern_type: PATTERNS.get(fls).map(|s| s.to_string()),
+            fg_color: colorref(ext[1])
+                .filter(|c| c.rgb.is_some())
+                .or_else(|| palette_color(icv_fore, palette)),
+            bg_color: colorref(ext[0]).or_else(|| palette_color(icv_back, palette)),
+            gradient: false,
+        }
+    };
+
+    let xf = Xf {
+        num_fmt_id: ifmt as u32,
+        font_id: ifnt as u32,
+        fill_id: 0,
+        border_id: 0,
+        xf_id: None,
+        apply_number_format: Some(used & 0x04 != 0),
+        apply_font: Some(used & 0x08 != 0),
+        apply_alignment: Some(used & 0x10 != 0),
+        apply_border: Some(used & 0x20 != 0),
+        apply_fill: Some(used & 0x40 != 0),
+        apply_protection: Some(used & 0x80 != 0),
+        alignment: Some(alignment),
+        protection: Some(Protection {
+            locked: Some(prot & 0x0001 != 0),
+            hidden: Some(prot & 0x0002 != 0),
+        }),
+        hancom: None,
+    };
+    Some(XfParts {
+        raw: RawXf {
+            style,
+            parent: prot >> 4,
+            xf,
+        },
+        fill,
+        border,
+        para_ref,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 문자열
+// ---------------------------------------------------------------------------
+
+/// SST 문자열. BIFF8 의 XLUnicodeRichExtendedString 과 다르다 (관측):
+/// `cch u16, flags u8, UTF-16 문자[cch]`, flags 비트 0 이 서 있으면 문자 **뒤에**
+/// `cRun u16` 과 `(ich u16, ifnt u16) × cRun` 이 온다.
+fn read_sst_string(r: &mut Rd, fonts: &[Font]) -> Option<RichText> {
+    let cch = r.u16()? as usize;
+    let flags = r.u8()?;
+    let text = r.utf16(cch)?;
+    let runs = if flags & 0x01 != 0 {
+        r.u16()? as usize
+    } else {
+        0
+    };
+    let mut rt = RichText {
+        text: text.clone(),
+        runs: Vec::new(),
+    };
+    if runs > 0 {
+        // FormatRun: ich u16, ifnt u16
+        let mut marks = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let ich = r.u16()? as usize;
+            let ifnt = r.u16()? as usize;
+            marks.push((ich, ifnt));
+        }
+        let chars: Vec<char> = text.chars().collect();
+        // 첫 런 앞부분은 셀 글꼴
+        let mut segments: Vec<(usize, usize, Option<usize>)> = Vec::new();
+        let mut start = 0;
+        let mut cur: Option<usize> = None;
+        for &(ich, ifnt) in &marks {
+            if ich > start {
+                segments.push((start, ich.min(chars.len()), cur));
+            }
+            start = ich.min(chars.len());
+            cur = Some(ifnt);
+        }
+        if start < chars.len() {
+            segments.push((start, chars.len(), cur));
+        }
+        rt.runs = segments
+            .into_iter()
+            .map(|(a, b, f)| TextRun {
+                text: chars[a..b].iter().collect(),
+                font: f.and_then(|i| fonts.get(i).cloned()),
+            })
+            .collect();
+    }
+    Some(rt)
+}
+
+// ---------------------------------------------------------------------------
+// 통합 문서
+// ---------------------------------------------------------------------------
+
+struct BoundSheet {
+    offset: u32,
+    state: SheetState,
+    kind: SheetKind,
+    name: String,
+}
+
+struct PendingName {
+    name: String,
+    local: Option<u32>,
+    hidden: bool,
+    rgce: Vec<u8>,
+}
+
+/// 레거시 `/Workbook` 스트림을 통합 문서 모델로 읽는다.
+pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
+    let recs = logical_records(stream);
+    let first = recs.first().ok_or_else(|| bad("빈 Workbook 스트림"))?;
+    if first.rtype != 0x0809 || first.data.len() < 4 {
+        return Err(bad("BOF 레코드가 없습니다"));
+    }
+    let version = u16::from_le_bytes([first.data[0], first.data[1]]);
+    if version != HANCELL_BIFF_VERSION {
+        return Err(bad(&format!(
+            "BIFF 버전 0x{version:04x} — 한셀 레거시(0x1001)가 아닙니다 (.xls 는 아직 미지원)"
+        )));
+    }
+
+    let mut wb = Workbook {
+        application: Some("Cell".into()),
+        ..Default::default()
+    };
+    let mut palette: Vec<u32> = DEFAULT_PALETTE.to_vec();
+    let mut fonts: Vec<Font> = Vec::new();
+    let mut formats: Vec<NumFmt> = Vec::new();
+    let mut xfs: Vec<XfParts> = Vec::new();
+    let mut styles_named: Vec<(u16, String, Option<u32>)> = Vec::new();
+    let mut sheets: Vec<BoundSheet> = Vec::new();
+    let mut sst: Vec<RichText> = Vec::new();
+    let mut supbooks: Vec<Book> = Vec::new();
+    let mut xti: Vec<(u16, u16, u16)> = Vec::new();
+    let mut pending_names: Vec<PendingName> = Vec::new();
+    let mut parashapes: Vec<ParaShape> = Vec::new();
+    let mut dxf_num_fmts: Vec<(u32, String)> = Vec::new();
+    let mut dxfs: Vec<crate::model::Dxf> = Vec::new();
+    let mut para_refs: Vec<u32> = Vec::new();
+    // MSODRAWINGGROUP: OfficeArtDggContainer (그림 저장소)
+    let mut dgg: Vec<u8> = Vec::new();
+
+    // 전역 부분: 첫 EOF 까지
+    for rec in recs.iter().skip(1) {
+        let d = &rec.data[..];
+        let mut r = Rd::new(d);
+        match rec.rtype {
+            0x000A => break,
+            0x0022 => wb.date1904 = r.u16() == Some(1),
+            0x00EB => dgg.extend_from_slice(d),
+            // 통합 문서 보호: PROTECT (구조), WINDOWPROTECT (창), PASSWORD
+            0x0012 | 0x0019 | 0x0013 => {
+                let v = r.u16().unwrap_or(0);
+                if v != 0 {
+                    let p = wb
+                        .protection
+                        .get_or_insert_with(WorkbookProtection::default);
+                    match rec.rtype {
+                        0x0012 => p.lock_structure = true,
+                        0x0019 => p.lock_windows = true,
+                        _ => p.password = Some(format!("{v:04X}")),
+                    }
+                }
+            }
+            0xA001 => parashapes.push(parse_parashape(d)),
+            0xA011 => {
+                let _kind = r.u32();
+                para_refs.push(r.u32().unwrap_or(0));
+            }
+            0x0092 => {
+                if let Some(n) = r.u16() {
+                    palette.clear();
+                    for _ in 0..n {
+                        let Some(v) = r.u32() else { break };
+                        palette.push(((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF));
+                    }
+                }
+            }
+            0x088D => {
+                // 차등 서식 표 (한컴 DXF FRT): FRT 머리 12바이트 뒤 XLSB BrtDXF 와 같은 XFProp 목록
+                if let Some(x) = d.get(12..) {
+                    dxfs.push(crate::binary::reader::parse_dxf(x));
+                }
+            }
+            0x0031 => {
+                if fonts.len() == 4 {
+                    // BIFF 규칙: 글꼴 번호 4 는 비워 둔다
+                    let phantom = fonts[0].clone();
+                    fonts.push(phantom);
+                }
+                fonts.push(parse_font(d, &palette).ok_or_else(|| bad("FONT"))?);
+            }
+            0x041E => {
+                let id = r.u16().ok_or_else(|| bad("FORMAT"))?;
+                let cch = r.u16().unwrap_or(0) as usize;
+                let _flag = r.u8();
+                let code = r.utf16(cch).unwrap_or_default();
+                formats.push(NumFmt {
+                    id: id as u32,
+                    code,
+                });
+            }
+            0x00E0 => xfs.push(parse_xf(d, &palette).ok_or_else(|| bad("XF"))?),
+            0x0293 => {
+                let ixfe = r.u16().unwrap_or(0);
+                if ixfe & 0x8000 != 0 {
+                    let builtin = r.u8().unwrap_or(0);
+                    styles_named.push((
+                        ixfe & 0x0FFF,
+                        builtin_style_name(builtin),
+                        Some(builtin as u32),
+                    ));
+                } else {
+                    let cch = r.u16().unwrap_or(0) as usize;
+                    let _flag = r.u8();
+                    let name = r.utf16(cch).unwrap_or_default();
+                    styles_named.push((ixfe & 0x0FFF, name, None));
+                }
+            }
+            0x0085 => {
+                let offset = r.u32().ok_or_else(|| bad("BOUNDSHEET"))?;
+                let hs = r.u8().unwrap_or(0);
+                let dt = r.u8().unwrap_or(0);
+                let cch = r.u8().unwrap_or(0) as usize;
+                let _flag = r.u8();
+                let name = r.utf16(cch).unwrap_or_default();
+                sheets.push(BoundSheet {
+                    offset,
+                    state: match hs & 0x03 {
+                        1 => SheetState::Hidden,
+                        2 => SheetState::VeryHidden,
+                        _ => SheetState::Visible,
+                    },
+                    kind: match dt {
+                        0 => SheetKind::Worksheet,
+                        2 => SheetKind::Chartsheet,
+                        other => SheetKind::Other(format!("biff-dt-{other}")),
+                    },
+                    name,
+                });
+            }
+            0x00FC => {
+                let _total = r.u32();
+                let unique = r.u32().unwrap_or(0) as usize;
+                for _ in 0..unique {
+                    match read_sst_string(&mut r, &fonts) {
+                        Some(s) => sst.push(s),
+                        None => break,
+                    }
+                }
+            }
+            0x01AE => {
+                // SUPBOOK: 0x0401 = 이 문서, 0x3A01 = 추가 기능, 그 밖 = 외부 문서 (경로 + 시트 이름)
+                let ctab = r.u16().unwrap_or(0);
+                let marker = r.u16().unwrap_or(0);
+                supbooks.push(match marker {
+                    0x0401 => Book::Internal,
+                    0x3A01 => Book::AddIn,
+                    cch => {
+                        let _flag = r.u8();
+                        let path = r.utf16(cch as usize).unwrap_or_default();
+                        let mut sheet_names = Vec::new();
+                        for _ in 0..ctab {
+                            let Some(n) = r.u16() else { break };
+                            let _flag = r.u8();
+                            match r.utf16(n as usize) {
+                                Some(s) => sheet_names.push(s),
+                                None => break,
+                            }
+                        }
+                        wb.external_links.push(ExternalLink {
+                            target: virtual_path(&path),
+                            sheet_names,
+                            sheet_data: Vec::new(),
+                            // 부호화된 가상 경로(U+0001 …)가 아니면 경로가 없는 연결 (한셀 해석)
+                            path_missing: !path.starts_with(''),
+                        });
+                        Book::External(wb.external_links.len())
+                    }
+                });
+            }
+            0x0017 => {
+                let n = r.u16().unwrap_or(0);
+                for _ in 0..n {
+                    let (Some(a), Some(b), Some(c)) = (r.u16(), r.u16(), r.u16()) else {
+                        break;
+                    };
+                    xti.push((a, b, c));
+                }
+            }
+            0x0018 => {
+                let grbit = r.u16().unwrap_or(0);
+                let _key = r.u8();
+                let cch = r.u8().unwrap_or(0) as usize;
+                let cce = r.u16().unwrap_or(0) as usize;
+                let _res = r.u16();
+                let itab = r.u16().unwrap_or(0);
+                r.take(4);
+                let _flag = r.u8();
+                let mut name = r.utf16(cch).unwrap_or_default();
+                if grbit & 0x0020 != 0 {
+                    // 내장 이름 (Print_Area 등): 첫 문자가 번호
+                    name = builtin_name(name.chars().next().map(|c| c as u32).unwrap_or(0));
+                }
+                let rgce = r.take(cce).map(<[u8]>::to_vec).unwrap_or_default();
+                pending_names.push(PendingName {
+                    name,
+                    local: (itab != 0).then(|| itab as u32 - 1),
+                    hidden: grbit & 0x0001 != 0,
+                    rgce,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // 스타일 모델 구성: 셀 XF 와 스타일 XF 를 나눈다.
+    let mut cell_map: HashMap<u16, u32> = HashMap::new();
+    let mut style_map: HashMap<u16, u32> = HashMap::new();
+    let mut styles = Styles {
+        fonts,
+        num_fmts: formats,
+        dxfs,
+        ..Default::default()
+    };
+    let mut fill_index: Vec<(String, u32)> = Vec::new();
+    let mut border_index: Vec<(String, u32)> = Vec::new();
+    for (i, parts) in xfs.iter().enumerate() {
+        if parts.raw.style {
+            style_map.insert(i as u16, styles.cell_style_xfs.len() as u32);
+            styles.cell_style_xfs.push(parts.raw.xf.clone());
+        }
+    }
+    for (i, parts) in xfs.into_iter().enumerate() {
+        let fill_key = format!("{:?}", parts.fill);
+        let fill_id = match fill_index.iter().find(|(k, _)| *k == fill_key) {
+            Some((_, id)) => *id,
+            None => {
+                let id = styles.fills.len() as u32;
+                styles.fills.push(parts.fill);
+                fill_index.push((fill_key, id));
+                id
+            }
+        };
+        let border_key = format!("{:?}", parts.border);
+        let border_id = match border_index.iter().find(|(k, _)| *k == border_key) {
+            Some((_, id)) => *id,
+            None => {
+                let id = styles.borders.len() as u32;
+                styles.borders.push(parts.border);
+                border_index.push((border_key, id));
+                id
+            }
+        };
+        let mut xf = parts.raw.xf;
+        xf.fill_id = fill_id;
+        xf.border_id = border_id;
+        if let Some(k) = parts.para_ref.filter(|&k| k != u32::MAX) {
+            let idx = para_refs
+                .get(k as usize)
+                .copied()
+                .unwrap_or(k.saturating_add(1)) as usize;
+            if let Some(ps) = parashapes.get(idx) {
+                attach_parashape(&mut xf, ps.clone());
+            }
+        }
+        if parts.raw.style {
+            let idx = style_map[&(i as u16)] as usize;
+            styles.cell_style_xfs[idx].fill_id = fill_id;
+            styles.cell_style_xfs[idx].border_id = border_id;
+        } else {
+            xf.xf_id = style_map.get(&parts.raw.parent).copied();
+            cell_map.insert(i as u16, styles.cell_xfs.len() as u32);
+            styles.cell_xfs.push(xf);
+        }
+    }
+    styles.cell_styles = styles_named
+        .into_iter()
+        .map(|(ixfe, name, builtin)| NamedStyle {
+            name,
+            xf_id: style_map.get(&ixfe).copied().unwrap_or(0),
+            builtin_id: builtin,
+        })
+        .collect();
+    wb.styles = styles;
+    wb.shared_strings = sst;
+
+    // 3차원 참조용 XTI → 시트 이름
+    let sheet_names: Vec<String> = sheets.iter().map(|s| s.name.clone()).collect();
+    let xti_sheets: Vec<Option<String>> = xti
+        .iter()
+        .map(|&(book, first, last)| {
+            // 외부 문서는 `[n]시트` (n = 외부 연결 번호, 1부터)
+            let (book, names) = match supbooks.get(book as usize)? {
+                Book::Internal => (None, &sheet_names),
+                &Book::External(n) => {
+                    let link = &wb.external_links[n - 1];
+                    (Some((n, link.file_name())), &link.sheet_names)
+                }
+                Book::AddIn => return None,
+            };
+            let a = names.get(first as usize)?;
+            let b = if first == last {
+                None
+            } else {
+                Some(names.get(last as usize)?.as_str())
+            };
+            Some(formula::sheet_ref_prefix(
+                book.as_ref().map(|(n, f)| (*n, f.as_str())),
+                a,
+                b,
+            ))
+        })
+        .collect();
+    let name_list: Vec<String> = pending_names.iter().map(|n| n.name.clone()).collect();
+
+    // 수식이 없는 NAME 은 정의되지 않은 이름(=XYZ)이나 _xlfn. 함수 이름 자리다.
+    wb.defined_names = pending_names
+        .iter()
+        .filter(|n| !n.rgce.is_empty() && !n.name.starts_with("_xlfn."))
+        .map(|n| {
+            let ctx = Context {
+                xti_sheets: &xti_sheets,
+                names: &name_list,
+                base: CellRef::default(),
+                xlsb: false,
+                row_shift: 0,
+            };
+            let formula = match formula::decode(&n.rgce, &ctx) {
+                Ok(Decoded::Text(t)) => t,
+                Ok(Decoded::SharedRef(_)) => String::new(),
+                Err(e) => format!("#ERR({})", e.0),
+            };
+            DefinedName {
+                name: n.name.clone(),
+                local_sheet_id: n.local,
+                hidden: n.hidden,
+                formula,
+            }
+        })
+        .collect();
+
+    // 그림 저장소 → xl/media 파트 (도형이 쓰지 않는 것은 시트를 읽은 뒤 버린다)
+    for (i, b) in escher::blip_store(&dgg).into_iter().enumerate() {
+        if let Some(b) = b {
+            let (ext, ct) = crate::image::ext_and_type(b.format);
+            wb.raw_parts.push(crate::model::RawPart {
+                name: format!("{MEDIA_PREFIX}{}.{ext}", i + 1),
+                content_type: Some(ct.into()),
+                data: b.data,
+            });
+        }
+    }
+
+    // 시트
+    for bs in sheets {
+        let mut sheet = Sheet {
+            name: bs.name.clone(),
+            state: bs.state,
+            kind: bs.kind.clone(),
+            part: format!("/Workbook@{:#x}", bs.offset),
+            show_grid_lines: true,
+            ..Default::default()
+        };
+        sheet.sheet_id = wb.sheets.len() as u32 + 1;
+        if bs.kind == SheetKind::Worksheet {
+            let start = recs
+                .iter()
+                .position(|r| r.offset == bs.offset as usize)
+                .ok_or_else(|| bad("BOUNDSHEET 위치에 BOF 가 없습니다"))?;
+            let ctx_sheets = (&xti_sheets, &name_list);
+            read_sheet(
+                &recs[start..],
+                &mut sheet,
+                &wb,
+                &cell_map,
+                ctx_sheets,
+                &mut dxf_num_fmts,
+            )?;
+        }
+        wb.sheets.push(sheet);
+    }
+    // CF 의 DXFN 에만 남은 차등 서식 표시 형식 (한셀은 0x088D 표에 쓰지 않는다)
+    let mut next_id = wb
+        .styles
+        .num_fmts
+        .iter()
+        .map(|n| n.id)
+        .max()
+        .unwrap_or(163)
+        .max(163)
+        + 1;
+    for (i, code) in dxf_num_fmts {
+        if let Some(d) = wb.styles.dxfs.get_mut(i as usize)
+            && d.num_fmt.is_none()
+        {
+            d.num_fmt = Some(NumFmt { id: next_id, code });
+            next_id += 1;
+        }
+    }
+    prune_external_links(&mut wb);
+    let mut used: Vec<String> = Vec::new();
+    fn targets(shapes: &[Shape], used: &mut Vec<String>) {
+        for s in shapes {
+            used.extend(s.target.clone());
+            targets(&s.children, used);
+        }
+    }
+    for s in &wb.sheets {
+        targets(&s.shapes, &mut used);
+    }
+    wb.raw_parts
+        .retain(|p| !p.name.starts_with(MEDIA_PREFIX) || used.contains(&p.name));
+    Ok(wb)
+}
+
+/// 한셀은 레거시 문서를 열 때 어떤 수식·이름도 쓰지 않는 외부 연결(SUPBOOK)을 버리고
+/// 남은 연결 번호를 앞으로 당긴다 (관측). 수식의 `[n]` 도 같이 고친다.
+fn prune_external_links(wb: &mut Workbook) {
+    use crate::formula_text::map_external_books;
+    if wb.external_links.is_empty() {
+        return;
+    }
+    let mut used = vec![false; wb.external_links.len() + 1];
+    let mut mark = |text: &str| {
+        map_external_books(text, |n| {
+            if let Some(u) = used.get_mut(n) {
+                *u = true;
+            }
+            None
+        });
+    };
+    for d in &wb.defined_names {
+        mark(&d.formula);
+    }
+    for c in wb.sheets.iter().flat_map(|s| &s.cells) {
+        if let Some(f) = &c.formula {
+            mark(&f.text);
+        }
+    }
+    if used[1..].iter().all(|&u| u) {
+        return;
+    }
+    // 옛 번호 → 새 번호
+    let mut renum = vec![0usize; used.len()];
+    let mut next = 0;
+    for (n, &u) in used.iter().enumerate().skip(1) {
+        if u {
+            next += 1;
+            renum[n] = next;
+        }
+    }
+    let map = |n: usize| renum.get(n).copied().filter(|&m| m != 0);
+    for d in &mut wb.defined_names {
+        d.formula = map_external_books(&d.formula, map);
+    }
+    for c in wb.sheets.iter_mut().flat_map(|s| &mut s.cells) {
+        if let Some(f) = &mut c.formula {
+            f.text = map_external_books(&f.text, map);
+        }
+    }
+    let mut n = 0;
+    wb.external_links.retain(|_| {
+        n += 1;
+        used[n]
+    });
+}
+
+fn builtin_style_name(id: u8) -> String {
+    match id {
+        0 => "Normal",
+        1 => "RowLevel",
+        2 => "ColLevel",
+        3 => "Comma",
+        4 => "Currency",
+        5 => "Percent",
+        6 => "Comma [0]",
+        7 => "Currency [0]",
+        8 => "Hyperlink",
+        9 => "Followed Hyperlink",
+        _ => "Style",
+    }
+    .to_string()
+}
+
+fn builtin_name(code: u32) -> String {
+    match code {
+        0x00 => "_xlnm.Consolidate_Area",
+        0x01 => "_xlnm.Auto_Open",
+        0x02 => "_xlnm.Auto_Close",
+        0x03 => "_xlnm.Extract",
+        0x04 => "_xlnm.Database",
+        0x05 => "_xlnm.Criteria",
+        0x06 => "_xlnm.Print_Area",
+        0x07 => "_xlnm.Print_Titles",
+        0x08 => "_xlnm.Recorder",
+        0x09 => "_xlnm.Data_Form",
+        0x0A => "_xlnm.Auto_Activate",
+        0x0B => "_xlnm.Auto_Deactivate",
+        0x0C => "_xlnm.Sheet_Title",
+        0x0D => "_xlnm._FilterDatabase",
+        _ => "_xlnm.Unknown",
+    }
+    .to_string()
+}
+
+/// RK 값 ([MS-XLS] 2.5.217).
+fn rk_value(rk: u32) -> f64 {
+    let v = if rk & 0x02 != 0 {
+        ((rk as i32) >> 2) as f64
+    } else {
+        f64::from_bits(((rk & 0xFFFF_FFFC) as u64) << 32)
+    };
+    if rk & 0x01 != 0 { v / 100.0 } else { v }
+}
+
+fn read_sheet(
+    recs: &[Logical],
+    sheet: &mut Sheet,
+    wb: &Workbook,
+    cell_map: &HashMap<u16, u32>,
+    (xti_sheets, names): (&Vec<Option<String>>, &Vec<String>),
+    dxf_num_fmts: &mut Vec<(u32, String)>,
+) -> Result<()> {
+    let style = |ixfe: u16| cell_map.get(&ixfe).copied().unwrap_or(0);
+    let mut pending_string_cell: Option<usize> = None;
+    let mut shared: HashMap<(u32, u32), (Vec<u8>, CellRef)> = HashMap::new();
+    // 활성 창 번호 (PANE 이 없으면 왼쪽 위 = 3)
+    let mut active_pane: u8 = 3;
+    // SELECTION 이 활성 창 것과 맞았는지 (안 맞으면 마지막 것을 쓴다)
+    let mut sel_matched = false;
+    let mut window_flags: u16 = 0;
+    // 메모: OBJ(ftCmo, 종류 0x19) 번호 → 바로 뒤 TXO 의 내용. NOTE 가 번호로 가리킨다
+    let mut last_note_obj: Option<u16> = None;
+    let mut note_texts: HashMap<u16, RichText> = HashMap::new();
+    // 그리기: MSODRAWING 을 이어 붙인 OfficeArt 스트림, OBJ 목록(종류, 번호, TXO 내용)
+    let mut art: Vec<u8> = Vec::new();
+    let mut objs: Vec<ObjRec> = Vec::new();
+    // 한컴 차트(0x7EF0)의 앵커 — 차트 내용(VtChart)은 아직 해석하지 않는다
+    let mut chart_anchors: Vec<(u16, [u32; 8])> = Vec::new();
+    // 조건부 서식: CONDFMT 번호(nID) → 목록 위치, (nID, icf) → (서식, 규칙) 위치, 다음 CF12 가 붙을 서식
+    let mut cf_by_id: HashMap<u16, usize> = HashMap::new();
+    let mut cf_rules: HashMap<(u16, u16), (usize, usize)> = HashMap::new();
+    let mut cf_current: Option<(u16, u16)> = None;
+    let mut cf12_target: Option<usize> = None;
+    // 수식 셀의 토큰열 (공유 수식은 기준 셀의 토큰) — 행 반복(0xB002) 때 다시 해석한다
+    let mut tokens_at: HashMap<(u32, u32), Vec<u8>> = HashMap::new();
+    // 시트 보호: PROTECT, OBJPROTECT, SCENPROTECT, PASSWORD, FEATHDR 의 EnhancedProtection
+    let (mut prot, mut prot_obj, mut prot_scen, mut prot_pw) = (false, false, false, 0u16);
+    let mut prot_enh: Option<u32> = None;
+    // 자동 필터: AUTOFILTER12 의 범위 (_FilterDatabase 이름이 없을 때 쓴다)
+    let mut af_ref: Option<String> = None;
+
+    for rec in recs.iter().skip(1) {
+        let d = &rec.data[..];
+        let mut r = Rd::new(d);
+        match rec.rtype {
+            0x000A => break,
+            0x0225 => {
+                let _flags = r.u16();
+                if let Some(h) = r.u16() {
+                    sheet.default_row_height = Some(h as f64 / 20.0);
+                }
+            }
+            0x0055 => {
+                if let Some(w) = r.u16() {
+                    sheet.default_col_width = Some(w as f64);
+                }
+            }
+            0x0200 => {
+                let (Some(r1), Some(r2), Some(c1), Some(c2)) = (r.u32(), r.u32(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                if r2 > r1 && c2 > c1 {
+                    sheet.dimension = Some(
+                        CellRange {
+                            start: CellRef {
+                                row: r1,
+                                col: c1 as u32,
+                            },
+                            end: CellRef {
+                                row: r2 - 1,
+                                col: c2 as u32 - 1,
+                            },
+                        }
+                        .to_string(),
+                    );
+                }
+            }
+            // COLINFO, 0xB00E = 257번째 열부터의 COLINFO (한컴, 같은 배치)
+            0x007D | 0xB00E => {
+                let (Some(c1), Some(c2), Some(w), Some(ixfe), Some(flags)) =
+                    (r.u16(), r.u16(), r.u16(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                sheet.cols.push(ColInfo {
+                    min: c1 as u32 + 1,
+                    max: (c2 as u32 + 1).min(MAX_COLS),
+                    width: Some(w as f64 / 256.0),
+                    style: Some(style(ixfe)),
+                    hidden: flags & 0x0001 != 0,
+                    custom_width: flags & 0x0002 != 0,
+                    // BIFF8 COLINFO: 비트 8–10 개요 수준, 0x1000 접힘
+                    outline_level: ((flags >> 8) & 0x07) as u8,
+                    collapsed: flags & 0x1000 != 0,
+                });
+            }
+            0x0208 => {
+                let Some(row) = r.u32() else { continue };
+                r.take(4);
+                let height = r.u16().unwrap_or(0);
+                r.take(4);
+                let flags = r.u32().unwrap_or(0);
+                let custom = flags & 0x40 != 0;
+                let hidden = flags & 0x20 != 0;
+                let has_style = flags & 0x80 != 0;
+                // BIFF8 ROW: 비트 0–2 개요 수준, 0x10 접힘
+                let level = (flags & 0x07) as u8;
+                let collapsed = flags & 0x10 != 0;
+                // 높이는 지정(0x40)이 아니어도 그 행의 실제 높이다 (한셀 XML 의 ht, 그리기 앵커 계산에 쓰인다)
+                let default_twips = sheet.default_row_height.map(|h| (h * 20.0).round() as u16);
+                if custom
+                    || hidden
+                    || has_style
+                    || level > 0
+                    || collapsed
+                    || (height != 0 && Some(height) != default_twips)
+                {
+                    sheet.rows.push(RowInfo {
+                        index: row + 1,
+                        height: (height != 0).then_some(height as f64 / 20.0),
+                        custom_height: custom,
+                        hidden,
+                        style: has_style.then(|| style(((flags >> 16) & 0x0FFF) as u16)),
+                        outline_level: level,
+                        collapsed,
+                    });
+                }
+            }
+            0xB002 => {
+                // 한컴 행 반복: first 행(속성·셀)을 first+1..=last 행에 그대로 되풀이한다.
+                // 행 상대 참조는 옮긴 행 수만큼 따라 움직인다.
+                let (Some(first), Some(last)) = (r.u32(), r.u32()) else {
+                    continue;
+                };
+                if last <= first || last >= MAX_ROWS {
+                    continue;
+                }
+                let info = sheet
+                    .rows
+                    .iter()
+                    .rev()
+                    .find(|ri| ri.index == first + 1)
+                    .cloned();
+                let src: Vec<Cell> = sheet
+                    .cells
+                    .iter()
+                    .filter(|c| c.r.row == first)
+                    .cloned()
+                    .collect();
+                for row in first + 1..=last {
+                    if let Some(ri) = &info {
+                        sheet.rows.push(RowInfo {
+                            index: row + 1,
+                            ..ri.clone()
+                        });
+                    }
+                    for c in &src {
+                        let mut copy = c.clone();
+                        copy.r.row = row;
+                        if let Some(tokens) = tokens_at.get(&(first, c.r.col)) {
+                            let ctx = Context {
+                                xti_sheets,
+                                names,
+                                base: copy.r,
+                                xlsb: false,
+                                row_shift: (row - first) as i64,
+                            };
+                            if let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx) {
+                                copy.formula = Some(Formula {
+                                    text: t,
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                        sheet.cells.push(copy);
+                    }
+                }
+            }
+            0x00FD | 0x0203 | 0x027E | 0x0201 | 0x0205 | 0x0204 => {
+                let (Some(row), Some(col), Some(ixfe)) = (r.u32(), r.u16(), r.u16()) else {
+                    continue;
+                };
+                let value = match rec.rtype {
+                    0x00FD => r
+                        .u32()
+                        .and_then(|i| wb.shared_strings.get(i as usize))
+                        .map(|s| CellValue::Text(s.text.clone()))
+                        .unwrap_or_default(),
+                    0x0203 => r.f64().map(CellValue::Number).unwrap_or_default(),
+                    0x027E => r
+                        .u32()
+                        .map(|v| CellValue::Number(rk_value(v)))
+                        .unwrap_or_default(),
+                    0x0205 => {
+                        let v = r.u8().unwrap_or(0);
+                        if r.u8() == Some(1) {
+                            CellValue::Error(formula::error_text(v).into())
+                        } else {
+                            CellValue::Bool(v != 0)
+                        }
+                    }
+                    0x0204 => {
+                        let cch = r.u16().unwrap_or(0) as usize;
+                        let _flag = r.u8();
+                        CellValue::Text(r.utf16(cch).unwrap_or_default())
+                    }
+                    _ => CellValue::Empty,
+                };
+                sheet.cells.push(Cell {
+                    r: CellRef {
+                        row,
+                        col: col as u32,
+                    },
+                    style: style(ixfe),
+                    value,
+                    formula: None,
+                });
+            }
+            0x00BD => {
+                let (Some(row), Some(first)) = (r.u32(), r.u16()) else {
+                    continue;
+                };
+                let n = (r.left().saturating_sub(2)) / 6;
+                for k in 0..n {
+                    let (Some(ixfe), Some(rk)) = (r.u16(), r.u32()) else {
+                        break;
+                    };
+                    sheet.cells.push(Cell {
+                        r: CellRef {
+                            row,
+                            col: first as u32 + k as u32,
+                        },
+                        style: style(ixfe),
+                        value: CellValue::Number(rk_value(rk)),
+                        formula: None,
+                    });
+                }
+            }
+            0x00BE => {
+                let (Some(row), Some(first)) = (r.u32(), r.u16()) else {
+                    continue;
+                };
+                let n = (r.left().saturating_sub(2)) / 2;
+                for k in 0..n {
+                    let Some(ixfe) = r.u16() else { break };
+                    sheet.cells.push(Cell {
+                        r: CellRef {
+                            row,
+                            col: first as u32 + k as u32,
+                        },
+                        style: style(ixfe),
+                        value: CellValue::Empty,
+                        formula: None,
+                    });
+                }
+            }
+            0x0006 => {
+                let (Some(row), Some(col), Some(ixfe)) = (r.u32(), r.u16(), r.u16()) else {
+                    continue;
+                };
+                let Some(val) = r.take(8) else { continue };
+                let _grbit = r.u16();
+                let _chn = r.u32();
+                let cce = r.u16().unwrap_or(0) as usize;
+                let rgce = r.take(cce).unwrap_or_default();
+                let at = CellRef {
+                    row,
+                    col: col as u32,
+                };
+                let value = if val[6] == 0xFF && val[7] == 0xFF {
+                    match val[0] {
+                        0 => CellValue::Text(String::new()), // STRING 레코드가 뒤따른다
+                        1 => CellValue::Bool(val[2] != 0),
+                        2 => CellValue::Error(formula::error_text(val[2]).into()),
+                        _ => CellValue::Text(String::new()),
+                    }
+                } else {
+                    CellValue::Number(f64::from_le_bytes(val.try_into().unwrap()))
+                };
+                let ctx = Context {
+                    xti_sheets,
+                    names,
+                    base: at,
+                    xlsb: false,
+                    row_shift: 0,
+                };
+                let formula = match formula::decode(rgce, &ctx) {
+                    Ok(Decoded::Text(t)) => {
+                        tokens_at.insert((row, col as u32), rgce.to_vec());
+                        Formula {
+                            text: t,
+                            ..Default::default()
+                        }
+                    }
+                    Ok(Decoded::SharedRef(master)) => {
+                        let text = shared
+                            .get(&(master.row, master.col))
+                            .and_then(|(tokens, _)| {
+                                tokens_at.insert((row, col as u32), tokens.clone());
+                                let c = Context {
+                                    xti_sheets,
+                                    names,
+                                    base: at,
+                                    xlsb: false,
+                                    row_shift: 0,
+                                };
+                                match formula::decode(tokens, &c) {
+                                    Ok(Decoded::Text(t)) => Some(t),
+                                    _ => None,
+                                }
+                            })
+                            .unwrap_or_default();
+                        Formula {
+                            text,
+                            ..Default::default()
+                        }
+                    }
+                    Err(e) => Formula {
+                        text: format!("#ERR({})", e.0),
+                        ..Default::default()
+                    },
+                };
+                let is_string = val[6] == 0xFF && val[7] == 0xFF && val[0] == 0;
+                sheet.cells.push(Cell {
+                    r: at,
+                    style: style(ixfe),
+                    value,
+                    formula: Some(formula),
+                });
+                pending_string_cell = is_string.then(|| sheet.cells.len() - 1);
+            }
+            0x04BC => {
+                // SHRFMLA: 범위 + 공유 토큰열. 직전 FORMULA 가 기준 셀이다.
+                let (Some(r1), Some(_r2), Some(c1), Some(_c2)) =
+                    (r.u32(), r.u32(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                let _res = r.u16();
+                let cce = r.u16().unwrap_or(0) as usize;
+                if let Some(tokens) = r.take(cce) {
+                    shared.insert(
+                        (r1, c1 as u32),
+                        (
+                            tokens.to_vec(),
+                            CellRef {
+                                row: r1,
+                                col: c1 as u32,
+                            },
+                        ),
+                    );
+                    // 직전 수식 셀을 다시 해석
+                    if let Some(cell) = sheet.cells.last_mut()
+                        && cell.formula.as_ref().is_some_and(|f| f.text.is_empty())
+                    {
+                        let ctx = Context {
+                            xti_sheets,
+                            names,
+                            base: cell.r,
+                            xlsb: false,
+                            row_shift: 0,
+                        };
+                        if let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx) {
+                            tokens_at.insert((cell.r.row, cell.r.col), tokens.to_vec());
+                            cell.formula = Some(Formula {
+                                text: t,
+                                kind: FormulaKind::Normal,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+            }
+            0x0207 => {
+                let cch = r.u16().unwrap_or(0) as usize;
+                let _flag = r.u8();
+                let s = r.utf16(cch).unwrap_or_default();
+                if let Some(i) = pending_string_cell.take() {
+                    sheet.cells[i].value = CellValue::Text(s);
+                }
+            }
+            0x00E5 => {
+                let n = r.u16().unwrap_or(0);
+                for _ in 0..n {
+                    let (Some(r1), Some(r2), Some(c1), Some(c2)) =
+                        (r.u32(), r.u32(), r.u16(), r.u16())
+                    else {
+                        break;
+                    };
+                    sheet.merges.push(CellRange {
+                        start: CellRef {
+                            row: r1,
+                            col: c1 as u32,
+                        },
+                        end: CellRef {
+                            row: r2,
+                            col: c2 as u32,
+                        },
+                    });
+                }
+            }
+            0x023E => {
+                // WINDOW2: grbit u16, rwTop u32, colLeft u16, icvHdr u32, 예약 u16,
+                // wScaleNormal u16 (14), wScaleSLV u16 (16) — BIFF8 과 두 확대율 순서가 다르다 (관측)
+                let Some(grbit) = r.u16() else { continue };
+                window_flags = grbit;
+                sheet.show_grid_lines = grbit & 0x0002 != 0;
+                let v = &mut sheet.view;
+                v.show_formulas = grbit & 0x0001 != 0;
+                v.show_row_col_headers = grbit & 0x0004 != 0;
+                v.show_zeros = grbit & 0x0010 != 0;
+                v.tab_selected = grbit & 0x0200 != 0;
+                if grbit & 0x0800 != 0 {
+                    v.view = Some("pageBreakPreview".into());
+                }
+                if let (Some(row), Some(col)) = (r.u32(), r.u16()) {
+                    v.top_left_cell = Some(
+                        CellRef {
+                            row,
+                            col: col as u32,
+                        }
+                        .to_string(),
+                    );
+                }
+                r.take(6);
+                let normal = r.u16().filter(|&z| z != 0);
+                let slv = r.u16().filter(|&z| z != 0);
+                v.zoom_scale_normal = normal.map(u32::from);
+                v.zoom_scale_sheet_layout_view = slv.map(u32::from);
+            }
+            0x01BE => {
+                // DV: 플래그 u32 (XLSB BrtDVal 과 같은 비트), 입력 제목·오류 제목·입력·오류 (cch u16, flag u8, UTF-16),
+                // 수식 1·2 (cce u16, 예약 u16, 토큰), 범위 (n u16, (rw u32 ×2, col u16 ×2) × n)
+                let Some(flags) = r.u32() else { continue };
+                let mut strs: Vec<Option<String>> = (0..4)
+                    .map(|_| {
+                        let n = r.u16().unwrap_or(0) as usize;
+                        let _flag = r.u8();
+                        r.utf16(n).filter(|s| !s.is_empty() && s != "\0")
+                    })
+                    .collect();
+                let mut tokens = Vec::new();
+                for _ in 0..2 {
+                    let cce = r.u16().unwrap_or(0) as usize;
+                    r.take(2);
+                    tokens.push(r.take(cce).unwrap_or_default().to_vec());
+                }
+                let n = r.u16().unwrap_or(0);
+                let mut refs = Vec::new();
+                for _ in 0..n {
+                    let (Some(r1), Some(r2), Some(c1), Some(c2)) =
+                        (r.u32(), r.u32(), r.u16(), r.u16())
+                    else {
+                        break;
+                    };
+                    refs.push(CellRange {
+                        start: CellRef {
+                            row: r1,
+                            col: c1 as u32,
+                        },
+                        end: CellRef {
+                            row: r2,
+                            col: c2 as u32,
+                        },
+                    });
+                }
+                let base = refs.first().map(|x| x.start).unwrap_or_default();
+                let dec = |t: &[u8]| {
+                    if t.is_empty() {
+                        return None;
+                    }
+                    let ctx = Context {
+                        xti_sheets,
+                        names,
+                        base,
+                        xlsb: false,
+                        row_shift: 0,
+                    };
+                    match formula::decode(t, &ctx) {
+                        Ok(Decoded::Text(x)) => Some(x),
+                        _ => None,
+                    }
+                };
+                // 레거시 문자열 순서: 입력 제목, 오류 제목, 입력, 오류 → (오류 제목, 오류, 입력 제목, 입력)
+                let mut ordered = vec![
+                    strs[1].take(),
+                    strs[3].take(),
+                    strs[0].take(),
+                    strs[2].take(),
+                ];
+                let sqref = refs
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                sheet
+                    .data_validations
+                    .push(crate::binary::reader::dv_from_flags(
+                        flags,
+                        sqref,
+                        &mut ordered,
+                        dec(&tokens[0]),
+                        dec(&tokens[1]),
+                    ));
+            }
+            0x01B0 | 0x0879 => {
+                // CONDFMT / CONDFMT12(FRT 머리 12바이트 뒤): ccf u16, (nID << 1) u16, 경계 Ref8 (행 u32),
+                // 범위 (n u16, Ref8 × n)
+                if rec.rtype == 0x0879 {
+                    r.take(12);
+                }
+                let (Some(_ccf), Some(id)) = (r.u16(), r.u16()) else {
+                    continue;
+                };
+                r.take(12);
+                let n = r.u16().unwrap_or(0);
+                let mut refs = Vec::new();
+                for _ in 0..n {
+                    let (Some(r1), Some(r2), Some(c1), Some(c2)) =
+                        (r.u32(), r.u32(), r.u16(), r.u16())
+                    else {
+                        break;
+                    };
+                    refs.push(
+                        CellRange {
+                            start: CellRef {
+                                row: r1,
+                                col: c1 as u32,
+                            },
+                            end: CellRef {
+                                row: r2,
+                                col: c2 as u32,
+                            },
+                        }
+                        .to_string(),
+                    );
+                }
+                let nid = id >> 1;
+                cf_by_id.insert(nid, sheet.conditional_formats.len());
+                sheet.conditional_formats.push(ConditionalFormat {
+                    sqref: refs.join(" "),
+                    rules: Vec::new(),
+                });
+                cf_current = Some((nid, 0));
+                cf12_target = (rec.rtype == 0x0879).then(|| sheet.conditional_formats.len() - 1);
+            }
+            0x01B1 => {
+                // CF: ct u8 (1 값, 2 수식), cp u8 (연산자), cce1 u16, cce2 u16, DXFN(가변, 한컴 확장),
+                // 끝에서 차등 서식 번호 u32 + 수식 1·2
+                let Some((nid, icf)) = cf_current else {
+                    continue;
+                };
+                let Some(&fi) = cf_by_id.get(&nid) else {
+                    continue;
+                };
+                let (Some(ct), Some(cp), Some(c1), Some(c2)) = (r.u8(), r.u8(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                let (c1, c2) = (c1 as usize, c2 as usize);
+                let Some(fstart) = d.len().checked_sub(c1 + c2) else {
+                    continue;
+                };
+                // 차등 서식 번호 u32 는 수식 바로 앞. DXFN 에 테두리 블록(플래그 0x10000000)이 있으면
+                // 한컴 확장이 2바이트 더 붙어 6바이트 앞이다 (관측)
+                let has_border = d.get(6..10).is_some_and(|x| {
+                    u32::from_le_bytes([x[0], x[1], x[2], x[3]]) & 0x1000_0000 != 0
+                });
+                let dxf = fstart
+                    .checked_sub(if has_border { 6 } else { 4 })
+                    .and_then(|i| d.get(i..i + 4))
+                    .map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]));
+                let base = CellRange::parse(
+                    sheet.conditional_formats[fi]
+                        .sqref
+                        .split(' ')
+                        .next()
+                        .unwrap_or(""),
+                )
+                .map(|x| x.start)
+                .unwrap_or_default();
+                let dec = |t: &[u8]| {
+                    let ctx = Context {
+                        xti_sheets,
+                        names,
+                        base,
+                        xlsb: false,
+                        row_shift: 0,
+                    };
+                    match formula::decode(t, &ctx) {
+                        Ok(Decoded::Text(x)) => x,
+                        _ => String::new(),
+                    }
+                };
+                // DXFN 의 사용자 표시 형식: 플래그 0x02000000(ibitAtrNum) + 다음 u16 의 0x0001(fIfmtUser)
+                // → DXFNumUsr (cb u16, cch u16, flag u8, 문자 — flag 0 이면 1바이트)
+                let dxfn = u32::from_le_bytes([d[6], d[7], d[8], d[9]]);
+                let user = d.get(10).is_some_and(|b| b & 0x01 != 0);
+                if dxfn & 0x0200_0000 != 0
+                    && user
+                    && let (Some(id), Some(x)) = (dxf.filter(|&x| x != u32::MAX), d.get(12..))
+                {
+                    let mut nr = Rd::new(x);
+                    let _cb = nr.u16();
+                    let cch = nr.u16().unwrap_or(0) as usize;
+                    let wide = nr.u8().unwrap_or(0) & 0x01 != 0;
+                    let code = if wide {
+                        nr.utf16(cch)
+                    } else {
+                        nr.take(cch).map(|b| b.iter().map(|&c| c as char).collect())
+                    };
+                    if let Some(code) = code.filter(|c| !c.is_empty()) {
+                        dxf_num_fmts.push((id, code));
+                    }
+                }
+                let mut formulas = vec![dec(&d[fstart..fstart + c1])];
+                if c2 > 0 {
+                    formulas.push(dec(&d[fstart + c1..]));
+                }
+                const OPS: [&str; 9] = [
+                    "",
+                    "between",
+                    "notBetween",
+                    "equal",
+                    "notEqual",
+                    "greaterThan",
+                    "lessThan",
+                    "greaterThanOrEqual",
+                    "lessThanOrEqual",
+                ];
+                let cf = &mut sheet.conditional_formats[fi];
+                cf.rules.push(CfRule {
+                    kind: if ct == 1 { "cellIs" } else { "expression" }.into(),
+                    priority: cf.rules.len() as u32 + 1,
+                    dxf_id: dxf.filter(|&x| x != u32::MAX),
+                    operator: (ct == 1)
+                        .then(|| OPS.get(cp as usize).map(|s| s.to_string()))
+                        .flatten()
+                        .filter(|s| !s.is_empty()),
+                    formulas: formulas.into_iter().filter(|f| !f.is_empty()).collect(),
+                    ..Default::default()
+                });
+                cf_rules.insert((nid, icf), (fi, cf.rules.len() - 1));
+                cf_current = Some((nid, icf + 1));
+            }
+            0x087B => {
+                // CFEX: FRT 머리(ref8 은 16비트 행), fIsCF12 u32, nID u16,
+                // CF12 가 아니면 icf u16, cp u8, 틀 u8, 우선순위 u16, 플래그 u8 (0x02 멈춤) … 끝 16바이트 = 틀 매개 변수
+                r.take(12);
+                let (Some(is12), Some(nid)) = (r.u32(), r.u16()) else {
+                    continue;
+                };
+                if is12 != 0 {
+                    cf12_target = cf_by_id.get(&nid).copied();
+                    continue;
+                }
+                let (Some(icf), Some(_cp), Some(tmpl), Some(pri), Some(flags)) =
+                    (r.u16(), r.u8(), r.u8(), r.u16(), r.u8())
+                else {
+                    continue;
+                };
+                let params = d.get(d.len().saturating_sub(16)..).unwrap_or_default();
+                if let Some(&(fi, ri)) = cf_rules.get(&(nid, icf)) {
+                    let rule = &mut sheet.conditional_formats[fi].rules[ri];
+                    rule.priority = pri as u32;
+                    rule.stop_if_true = flags & 0x02 != 0;
+                    apply_cf_template(rule, tmpl as u32, params);
+                }
+            }
+            0x087A => {
+                // CF12: FRT 머리 12, ct u8, cp u8, cce1 u16, cce2 u16, cbdxf u32 + DXFN12, 수식 1·2,
+                // 활성 수식(cce u16 + 2), 플래그 u8, 우선순위 u16, 틀 u16, 매개 변수(cb u8 + 16), 종류별 내용
+                let Some(fi) = cf12_target else { continue };
+                r.take(12);
+                let (Some(ct), Some(_cp), Some(c1), Some(c2), Some(cbdxf)) =
+                    (r.u8(), r.u8(), r.u16(), r.u16(), r.u32())
+                else {
+                    continue;
+                };
+                r.take(cbdxf as usize + c1 as usize + c2 as usize + 4);
+                let (Some(_flags), Some(pri), Some(tmpl), Some(cbp)) =
+                    (r.u8(), r.u16(), r.u16(), r.u8())
+                else {
+                    continue;
+                };
+                let params = r.take(cbp as usize).unwrap_or_default().to_vec();
+                r.take(2); // 내용 길이
+                let mut rule = CfRule {
+                    priority: pri as u32,
+                    ..Default::default()
+                };
+                match ct {
+                    3 => {
+                        rule.kind = "colorScale".into();
+                        rule.color_scale = legacy_color_scale(&mut r);
+                    }
+                    4 => {
+                        rule.kind = "dataBar".into();
+                        rule.data_bar = legacy_data_bar(&mut r);
+                    }
+                    6 => {
+                        rule.kind = "iconSet".into();
+                        rule.icon_set = legacy_icon_set(&mut r);
+                    }
+                    _ => {
+                        rule.kind = "expression".into();
+                        apply_cf_template(&mut rule, tmpl as u32, &params);
+                    }
+                }
+                sheet.conditional_formats[fi].rules.push(rule);
+            }
+            0x00EC => art.extend_from_slice(d),
+            0x7EF0 => {
+                // 한컴 차트: u32, u16, 차트 번호 u16, 그다음 OfficeArtClientAnchor 와 같은 22바이트 앵커
+                r.take(8);
+                let (Some(flag), Some(c1), Some(dx1), Some(r1), Some(dy1)) =
+                    (r.u16(), r.u16(), r.u16(), r.u32(), r.u16())
+                else {
+                    continue;
+                };
+                let (Some(c2), Some(dx2), Some(r2), Some(dy2)) =
+                    (r.u16(), r.u16(), r.u32(), r.u16())
+                else {
+                    continue;
+                };
+                chart_anchors.push((
+                    flag,
+                    [
+                        c1 as u32, dx1 as u32, r1, dy1 as u32, c2 as u32, dx2 as u32, r2,
+                        dy2 as u32,
+                    ],
+                ));
+            }
+            0x005D => {
+                // OBJ: 첫 하위 레코드 ftCmo = ft u16 (0x15), cb u16, ot u16, id u16, …
+                let (Some(ft), Some(_cb), Some(ot), Some(id)) =
+                    (r.u16(), r.u16(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                last_note_obj = (ft == 0x15 && ot == 0x19).then_some(id);
+                objs.push(ObjRec { ot, text: None });
+            }
+            0x01B6 => {
+                // TXO (한컴): 머리 10바이트, cch u16, flag u8, UTF-16 (CONTINUE 없이 바로),
+                // 뒤에 (ich u16, ifnt u16, 예약 u32) 런
+                r.take(10);
+                let cch = r.u16().unwrap_or(0) as usize;
+                let _flag = r.u8();
+                let text = r.utf16(cch).unwrap_or_default();
+                let mut runs = Vec::new();
+                while let (Some(ich), Some(ifnt)) = (r.u16(), r.u16()) {
+                    runs.push((ich, ifnt));
+                    r.take(4);
+                }
+                if let Some(o) = objs.last_mut() {
+                    o.text = Some((text.clone(), runs));
+                }
+                let Some(id) = last_note_obj.take() else {
+                    continue;
+                };
+                let mut r = Rd::new(d);
+                r.take(13 + cch * 2);
+                let font = match (r.u16(), r.u16()) {
+                    (Some(0), Some(ifnt)) => wb.styles.fonts.get(ifnt as usize).cloned(),
+                    _ => None,
+                };
+                let runs = match font {
+                    Some(f) if !text.is_empty() => vec![TextRun {
+                        text: text.clone(),
+                        font: Some(f),
+                    }],
+                    _ => Vec::new(),
+                };
+                note_texts.insert(id, RichText { text, runs });
+            }
+            0x001C => {
+                // NOTE: rw u32, col u16, grbit u16 (0x0002 표시), idObj u16, 작성자 (cch u16, flag u8, UTF-16)
+                let (Some(row), Some(col), Some(grbit), Some(id)) =
+                    (r.u32(), r.u16(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                let cch = r.u16().unwrap_or(0) as usize;
+                let _flag = r.u8();
+                sheet.comments.push(Comment {
+                    cell: CellRef {
+                        row,
+                        col: col as u32,
+                    },
+                    author: r.utf16(cch).unwrap_or_default(),
+                    text: note_texts.remove(&id).unwrap_or_default(),
+                    visible: grbit & 0x0002 != 0,
+                });
+            }
+            0x0041 => {
+                // PANE: x u16, y u32, rwTop u32, colLeft u16, pnnAct u16.
+                // 고정(WINDOW2 0x0008)이면 x·y 는 열·행 수, 아니면 1/20 pt
+                let (Some(x), Some(y), Some(row), Some(col), Some(pnn)) =
+                    (r.u16(), r.u32(), r.u32(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                active_pane = pnn as u8;
+                let frozen = window_flags & 0x0008 != 0;
+                let no_split = window_flags & 0x0100 != 0;
+                sheet.view.pane = Some(Pane {
+                    x_split: x as f64,
+                    y_split: y as f64,
+                    top_left_cell: Some(
+                        CellRef {
+                            row,
+                            col: col as u32,
+                        }
+                        .to_string(),
+                    ),
+                    active_pane: pane_name(pnn as u32),
+                    state: Some(
+                        match (frozen, no_split) {
+                            (true, true) => "frozen",
+                            (true, false) => "frozenSplit",
+                            _ => "split",
+                        }
+                        .into(),
+                    ),
+                });
+            }
+            0x001B => {
+                // HORIZONTALPAGEBREAKS: n u16, (rw u32, colStart u16, colEnd u16) × n
+                let n = r.u16().unwrap_or(0);
+                for _ in 0..n {
+                    let (Some(row), Some(_), Some(_)) = (r.u32(), r.u16(), r.u16()) else {
+                        break;
+                    };
+                    sheet.page.row_breaks.push(row);
+                }
+            }
+            0x001A => {
+                // VERTICALPAGEBREAKS: n u16, (col u16, rwStart u16, rwEnd u32) × n (관측: 8바이트)
+                let n = r.u16().unwrap_or(0);
+                for _ in 0..n {
+                    let (Some(col), Some(_), Some(_)) = (r.u16(), r.u16(), r.u32()) else {
+                        break;
+                    };
+                    sheet.page.col_breaks.push(col as u32);
+                }
+            }
+            0x00A0 => {
+                // SCL: 현재 확대율 = num / den
+                if let (Some(n), Some(d)) = (r.u16(), r.u16())
+                    && d != 0
+                {
+                    sheet.view.zoom_scale = Some((n as u32 * 100 + d as u32 / 2) / d as u32);
+                }
+            }
+            0x001D => {
+                // SELECTION: pnn u8, rwAct u32, colAct u16, irefAct u16, cref u16, (rw u32 ×2, col u16 ×2) × cref
+                let (Some(pnn), Some(row), Some(col), Some(_iref), Some(n)) =
+                    (r.u8(), r.u32(), r.u16(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                // 틀이 나뉘면 창마다 하나씩 있다: 활성 창(PANE)의 것, 없으면 왼쪽 위(3)
+                if pnn != active_pane && sel_matched {
+                    continue;
+                }
+                sel_matched |= pnn == active_pane;
+                sheet.view.active_cell = Some(
+                    CellRef {
+                        row,
+                        col: col as u32,
+                    }
+                    .to_string(),
+                );
+                let mut refs = Vec::new();
+                for _ in 0..n {
+                    let (Some(r1), Some(r2), Some(c1), Some(c2)) =
+                        (r.u32(), r.u32(), r.u16(), r.u16())
+                    else {
+                        break;
+                    };
+                    refs.push(
+                        CellRange {
+                            start: CellRef {
+                                row: r1,
+                                col: c1 as u32,
+                            },
+                            end: CellRef {
+                                row: r2,
+                                col: c2 as u32,
+                            },
+                        }
+                        .to_string(),
+                    );
+                }
+                sheet.view.sqref = Some(refs.join(" "));
+            }
+            0x0862 => {
+                // SHEETEXT: frt 머리 12 + cb u32 + icvPlain u32 (팔레트), 한컴은 뒤에 COLORREF 를 붙인다
+                r.take(16);
+                let icv = r.u32().unwrap_or(0x7F) & 0x7F;
+                sheet.tab_color = match r.u32() {
+                    Some(v) => colorref(v),
+                    None if icv != 0x7F => palette_color(icv as u16, &DEFAULT_PALETTE),
+                    None => None,
+                };
+            }
+            0x01BA => {
+                // CODENAME: cch u16, flag u8, UTF-16
+                let cch = r.u16().unwrap_or(0) as usize;
+                let _flag = r.u8();
+                sheet.code_name = r.utf16(cch);
+            }
+            0x0081 => {
+                // WSBOOL: 0x0001 자동 페이지 나누기 표시, 0x0040 요약 행 아래, 0x0080 요약 열 오른쪽,
+                // 0x0100 페이지에 맞추기
+                if let Some(g) = r.u16() {
+                    sheet.page.auto_page_breaks = Some(g & 0x0001 != 0);
+                    sheet.summary_above = g & 0x0040 == 0;
+                    sheet.summary_left = g & 0x0080 == 0;
+                    sheet.page.fit_to_page = Some(g & 0x0100 != 0);
+                }
+            }
+            0x0012 => prot = r.u16().is_some_and(|v| v != 0),
+            0x0063 => prot_obj = r.u16().is_some_and(|v| v != 0),
+            0x00DD => prot_scen = r.u16().is_some_and(|v| v != 0),
+            0x0013 => prot_pw = r.u16().unwrap_or(0),
+            0x0867 => {
+                // FEATHDR: FrtHeader 12바이트, isf u16 (2 = 보호), 예약 u8, cbHdrData u32,
+                // EnhancedProtection u32 (비트 = "허용", objects 부터 selectUnlockedCells 까지)
+                r.take(12);
+                if r.u16() == Some(2) {
+                    r.take(5);
+                    prot_enh = r.u32();
+                }
+            }
+            0x009B => sheet.filter_mode = true,
+            0x009D => {
+                sheet.auto_filter.get_or_insert_with(Default::default);
+            }
+            0x009E => {
+                // AUTOFILTER: iEntry u16, grbit u16 (wJoin 0–1 (0 = and), fSimple1/2, fTopN 0x10,
+                // fTop 0x20, fPercent 0x40, wTopN 비트 7–15), DOPER 10바이트 ×2, 이어서 문자열들
+                let (Some(entry), Some(grbit)) = (r.u16(), r.u16()) else {
+                    continue;
+                };
+                let dopers = [r.take(10), r.take(10)];
+                let mut fc = FilterColumn {
+                    col_id: entry as u32,
+                    ..Default::default()
+                };
+                if grbit & 0x10 != 0 {
+                    fc.top10 = Some((grbit & 0x20 != 0, grbit & 0x40 != 0, (grbit >> 7) as f64));
+                } else {
+                    for d in dopers.into_iter().flatten() {
+                        let op = FILTER_OPERATORS.get(d[1] as usize).copied().unwrap_or("");
+                        let op = if op.is_empty() { "equal" } else { op };
+                        let val = match d[0] {
+                            0x02 => Some(formula::number_text(rk_value(u32::from_le_bytes([
+                                d[2], d[3], d[4], d[5],
+                            ])))),
+                            0x04 => Some(formula::number_text(f64::from_le_bytes(
+                                d[2..10].try_into().unwrap_or_default(),
+                            ))),
+                            // 문자열: cch 는 DOPER 의 6번째 바이트, 내용은 레코드 끝에 (한컴: 플래그 u8 + UTF-16)
+                            0x06 => {
+                                let cch = d[6] as usize;
+                                let _flag = r.u8();
+                                r.utf16(cch)
+                            }
+                            0x08 => Some(if d[3] != 0 {
+                                "#ERR".into()
+                            } else if d[2] != 0 {
+                                "TRUE".into()
+                            } else {
+                                "FALSE".into()
+                            }),
+                            0x0C => Some(String::new()),
+                            0x0E => Some(" ".into()),
+                            _ => None,
+                        };
+                        if let Some(v) = val {
+                            fc.custom.push((op.to_string(), v));
+                        }
+                    }
+                    fc.custom_and = fc.custom.len() == 2 && grbit & 0x03 == 0;
+                }
+                sheet
+                    .auto_filter
+                    .get_or_insert_with(Default::default)
+                    .columns
+                    .push(fc);
+            }
+            0x009F => {
+                // 한컴 확장: 값 목록 필터의 값 하나. iEntry u16, 종류 u8 (0 문자열, 0x0C 빈 칸),
+                // 문자열이면 cch u16, 플래그 u8, UTF-16. 바로 앞 AUTOFILTER 의 조건을 대신한다.
+                let Some(fc) = sheet
+                    .auto_filter
+                    .as_mut()
+                    .and_then(|f| f.columns.last_mut())
+                else {
+                    continue;
+                };
+                if fc.values.is_empty() && !fc.blank {
+                    fc.custom.clear();
+                    fc.custom_and = false;
+                }
+                r.take(2);
+                match r.u8() {
+                    Some(0x0C) => fc.blank = true,
+                    Some(_) => {
+                        let cch = r.u16().unwrap_or(0) as usize;
+                        let _flag = r.u8();
+                        if let Some(v) = r.utf16(cch) {
+                            fc.values.push(v);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            0x087E => {
+                // AUTOFILTER12: FrtRefHeader (rt, grbitFrt, Ref8U: rwFirst, rwLast, colFirst, colLast),
+                // iEntry u16, fHideArrow u32, ft u32, cft u32 (동적 필터 종류), cCriteria u32, …
+                r.take(4);
+                let (Some(r1), Some(r2), Some(c1), Some(c2)) = (r.u16(), r.u16(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                af_ref = Some(
+                    CellRange {
+                        start: CellRef {
+                            row: r1 as u32,
+                            col: c1 as u32,
+                        },
+                        end: CellRef {
+                            row: r2 as u32,
+                            col: c2 as u32,
+                        },
+                    }
+                    .to_string(),
+                );
+                let (Some(entry), Some(_hide), Some(_ft), Some(cft)) =
+                    (r.u16(), r.u32(), r.u32(), r.u32())
+                else {
+                    continue;
+                };
+                let dynamic = DYNAMIC_FILTER_TYPES
+                    .get(cft as usize)
+                    .filter(|s| cft != 0 && !s.is_empty());
+                if let (Some(t), Some(fc)) = (
+                    dynamic,
+                    sheet
+                        .auto_filter
+                        .as_mut()
+                        .and_then(|f| f.columns.iter_mut().find(|c| c.col_id == entry as u32)),
+                ) {
+                    fc.custom.clear();
+                    fc.custom_and = false;
+                    fc.dynamic = Some(t.to_string());
+                }
+            }
+            0x002A | 0x002B | 0x0083 | 0x0084 => {
+                let on = r.u16().unwrap_or(0) != 0;
+                let o = sheet
+                    .page
+                    .print_options
+                    .get_or_insert_with(Default::default);
+                match rec.rtype {
+                    0x002A => o.headings = on,
+                    0x002B => o.grid_lines = on,
+                    0x0083 => o.horizontal_centered = on,
+                    _ => o.vertical_centered = on,
+                }
+            }
+            0x0026..=0x0029 => {
+                let Some(v) = r.f64().map(hwp_inch) else {
+                    continue;
+                };
+                let m = sheet.page.margins.get_or_insert(PageMargins {
+                    left: 0.75,
+                    right: 0.75,
+                    top: 1.0,
+                    bottom: 1.0,
+                    header: 0.5,
+                    footer: 0.5,
+                });
+                match rec.rtype {
+                    0x0026 => m.left = v,
+                    0x0027 => m.right = v,
+                    0x0028 => m.top = v,
+                    _ => m.bottom = v,
+                }
+            }
+            0x0014 | 0x0015 => {
+                // HEADER / FOOTER: 비어 있으면 길이 0, 아니면 cch u16, flag u8, UTF-16
+                let Some(cch) = r.u16() else { continue };
+                let _flag = r.u8();
+                let text = canonical_hf_fonts(&r.utf16(cch as usize).unwrap_or_default());
+                let h = sheet
+                    .page
+                    .header_footer
+                    .get_or_insert_with(default_header_footer);
+                if rec.rtype == 0x0014 {
+                    h.odd_header = Some(text);
+                } else {
+                    h.odd_footer = Some(text);
+                }
+            }
+            0x089C => {
+                // HeaderFooter FRT: frt 머리 12 + guid 16 + flags u16 + cch u16 ×4 + 문자열 4개
+                r.take(28);
+                let Some(flags) = r.u16() else { continue };
+                let h = sheet
+                    .page
+                    .header_footer
+                    .get_or_insert_with(default_header_footer);
+                h.different_odd_even = flags & 0x0001 != 0;
+                h.different_first = flags & 0x0002 != 0;
+                h.scale_with_doc = flags & 0x0004 != 0;
+                h.align_with_margins = flags & 0x0008 != 0;
+                r.take(8);
+                let mut texts = Vec::new();
+                for _ in 0..4 {
+                    let Some(cch) = r.u16() else { break };
+                    let _flag = r.u8();
+                    texts.push(
+                        r.utf16(cch as usize)
+                            .filter(|t| !t.is_empty())
+                            .map(|t| canonical_hf_fonts(&t)),
+                    );
+                }
+                texts.resize(4, None);
+                h.even_header = texts[0].take();
+                h.even_footer = texts[1].take();
+                h.first_header = texts[2].take();
+                h.first_footer = texts[3].take();
+            }
+            0x00A1 => {
+                // SETUP
+                let (Some(paper), Some(scale), Some(start), Some(fit_w), Some(fit_h), Some(g)) =
+                    (r.u16(), r.u16(), r.u16(), r.u16(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                let (res, vres) = (r.u16(), r.u16());
+                let (hdr, ftr) = (r.f64().map(hwp_inch), r.f64().map(hwp_inch));
+                let copies = r.u16();
+                let no_pls = g & 0x0004 != 0;
+                sheet.page.setup = Some(PageSetup {
+                    paper_size: Some(paper as u32),
+                    scale: Some(scale as u32),
+                    first_page_number: Some(start as u32),
+                    fit_to_width: Some(fit_w as u32),
+                    fit_to_height: Some(fit_h as u32),
+                    orientation: Some(
+                        if g & 0x0040 != 0 {
+                            "default"
+                        } else if g & 0x0002 != 0 {
+                            "portrait"
+                        } else {
+                            "landscape"
+                        }
+                        .into(),
+                    ),
+                    page_order: (g & 0x0001 != 0).then(|| "overThenDown".into()),
+                    use_printer_defaults: !no_pls,
+                    black_and_white: g & 0x0008 != 0,
+                    draft: g & 0x0010 != 0,
+                    use_first_page_number: g & 0x0080 != 0,
+                    horizontal_dpi: res.map(u32::from),
+                    vertical_dpi: vres.map(u32::from),
+                    copies: copies.map(u32::from),
+                });
+                let m = sheet.page.margins.get_or_insert(PageMargins {
+                    left: 0.75,
+                    right: 0.75,
+                    top: 1.0,
+                    bottom: 1.0,
+                    header: 0.5,
+                    footer: 0.5,
+                });
+                if let Some(v) = hdr {
+                    m.header = v;
+                }
+                if let Some(v) = ftr {
+                    m.footer = v;
+                }
+            }
+            0x01B8 => {
+                if let Some(h) = parse_hlink(d) {
+                    sheet.hyperlinks.push(h);
+                }
+            }
+            0x0800 => {
+                // HLINKTOOLTIP: frtRefHeaderNoGrbit(rt u16 + ref) + wzTooltip
+                if let Some(last) = sheet.hyperlinks.last_mut() {
+                    let body = d.get(4 + 12..).unwrap_or_default();
+                    last.tooltip = Some(crate::text::utf16le_nul(body));
+                }
+            }
+            _ => {}
+        }
+    }
+    sheet.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    let mdw = crate::units::max_digit_width(wb);
+    // 한셀은 차트를 다른 그리기 개체보다 먼저 둔다 (관측)
+    let mut shapes: Vec<Shape> = chart_anchors
+        .iter()
+        .map(|&(_, a)| Shape {
+            anchor: legacy_anchor(a, 0, sheet, mdw),
+            kind: ShapeKind::Chart,
+            ..Default::default()
+        })
+        .collect();
+    if !art.is_empty() {
+        let mut k = 0;
+        shapes.extend(
+            escher::parse(&art)
+                .iter()
+                .filter_map(|e| legacy_shape(e, &objs, &mut k, sheet, wb, mdw)),
+        );
+    }
+    sheet.shapes = shapes;
+    if prot {
+        let mut states = [false; 16];
+        states[0] = true;
+        states[1] = prot_obj;
+        states[2] = prot_scen;
+        if let Some(e) = prot_enh {
+            for (i, s) in states.iter_mut().enumerate().skip(1) {
+                *s = e & (1 << (i - 1)) == 0;
+            }
+        } else {
+            for (s, (_, d)) in states.iter_mut().zip(SHEET_PROTECTION_FLAGS).skip(3) {
+                *s = d;
+            }
+        }
+        sheet.protection = Some(SheetProtection::from_states(
+            (prot_pw != 0).then(|| format!("{prot_pw:04X}")),
+            states,
+        ));
+    }
+    if let Some(af) = sheet.auto_filter.as_mut() {
+        // 범위는 그 시트의 숨은 이름 _xlnm._FilterDatabase 에서 (없으면 AUTOFILTER12 의 범위)
+        let idx = wb.sheets.len() as u32;
+        af.range = wb
+            .defined_names
+            .iter()
+            .find(|d| d.name == "_xlnm._FilterDatabase" && d.local_sheet_id == Some(idx))
+            .map(|d| d.formula.rsplit('!').next().unwrap_or("").replace('$', ""))
+            .or(af_ref)
+            .unwrap_or_default();
+    }
+    Ok(())
+}
+
+/// 레거시 앵커 → 모델. dx 는 (열 픽셀 − 1)의 1/32768, dy 는 (행 픽셀 − 1)의 1/8192 이고
+/// 픽셀 단위로 반올림한다 (한셀 대조, docs/format/cell-legacy.md).
+fn legacy_anchor(a: [u32; 8], flag: u16, sheet: &Sheet, mdw: u32) -> Anchor {
+    let [c1, dx1, r1, dy1, c2, dx2, r2, dy2] = a;
+    let col_off = |c: u32, dx: u32| {
+        let eff = crate::units::sheet_col_px(sheet, c, mdw).saturating_sub(1) as f64;
+        (dx as f64 * eff / 32768.0).round() as i64 * crate::units::EMU_PER_PX
+    };
+    let row_off = |r: u32, dy: u32| {
+        let eff = crate::units::sheet_row_px(sheet, r).saturating_sub(1) as f64;
+        (dy as f64 * eff / 8192.0).round() as i64 * crate::units::EMU_PER_PX
+    };
+    Anchor {
+        kind: AnchorKind::TwoCell,
+        edit_as: match flag {
+            2 => Some("oneCell".into()),
+            3 => Some("absolute".into()),
+            _ => None,
+        },
+        from: Marker {
+            col: c1,
+            col_off: col_off(c1, dx1),
+            row: r1,
+            row_off: row_off(r1, dy1),
+        },
+        to: Some(Marker {
+            col: c2,
+            col_off: col_off(c2, dx2),
+            row: r2,
+            row_off: row_off(r2, dy2),
+        }),
+        ext: None,
+        pos: None,
+    }
+}
+
+/// CFEX/CF12 의 틀(CFTemp)과 매개 변수(16바이트)로 규칙 종류를 정한다
+fn apply_cf_template(rule: &mut CfRule, tmpl: u32, params: &[u8]) {
+    let p0 = params.first().copied().unwrap_or(0);
+    let p16 = |i: usize| {
+        params
+            .get(i..i + 2)
+            .map(|x| u16::from_le_bytes([x[0], x[1]]))
+            .unwrap_or(0)
+    };
+    // 글 규칙의 글자는 수식의 첫 문자열 상수
+    let literal = |f: &[String]| {
+        f.first().and_then(|s| {
+            let a = s.find('"')?;
+            let b = s[a + 1..].find('"')?;
+            Some(s[a + 1..a + 1 + b].to_string())
+        })
+    };
+    match tmpl {
+        0x00 => {}
+        0x01 => rule.kind = "expression".into(),
+        0x05 => {
+            rule.kind = "top10".into();
+            rule.bottom = p0 & 0x01 == 0;
+            rule.percent = p0 & 0x02 != 0;
+            rule.rank = Some(p16(1) as u32);
+            rule.formulas.clear();
+        }
+        0x08 => {
+            let (kind, op) = match p16(0) {
+                1 => ("notContainsText", "notContains"),
+                2 => ("beginsWith", "beginsWith"),
+                3 => ("endsWith", "endsWith"),
+                _ => ("containsText", "containsText"),
+            };
+            rule.kind = kind.into();
+            rule.operator = Some(op.into());
+            rule.text = literal(&rule.formulas);
+        }
+        0x09 => rule.kind = "containsBlanks".into(),
+        0x0A => rule.kind = "notContainsBlanks".into(),
+        0x0B => rule.kind = "containsErrors".into(),
+        0x0C => rule.kind = "notContainsErrors".into(),
+        0x0F..=0x18 => {
+            const PERIODS: [&str; 10] = [
+                "today",
+                "tomorrow",
+                "yesterday",
+                "last7Days",
+                "lastMonth",
+                "nextMonth",
+                "thisWeek",
+                "nextWeek",
+                "lastWeek",
+                "thisMonth",
+            ];
+            rule.kind = "timePeriod".into();
+            rule.time_period = PERIODS.get((tmpl - 0x0F) as usize).map(|s| s.to_string());
+        }
+        0x19 | 0x1A | 0x1D | 0x1E => {
+            rule.kind = "aboveAverage".into();
+            rule.above_average = matches!(tmpl, 0x1A | 0x1E).then_some(false);
+            rule.equal_average = matches!(tmpl, 0x1D | 0x1E);
+            rule.std_dev = (p16(0) > 0).then(|| p16(0) as u32);
+            rule.formulas.clear();
+        }
+        0x1B => {
+            rule.kind = "duplicateValues".into();
+            rule.formulas.clear();
+        }
+        0x07 | 0x1C => {
+            rule.kind = "uniqueValues".into();
+            rule.formulas.clear();
+        }
+        _ => {}
+    }
+}
+
+/// CFVO (레거시): 종류 u8, 수식 cce u16 + 토큰, 숫자 f64 (최소·최대 말고)
+fn legacy_cfvo(r: &mut Rd) -> Option<Cfvo> {
+    let ty = r.u8()?;
+    let cce = r.u16()? as usize;
+    r.take(cce);
+    let num = if matches!(ty, 2 | 3) { None } else { r.f64() };
+    let kind = match ty {
+        1 => "num",
+        2 => "min",
+        3 => "max",
+        4 => "percent",
+        5 => "percentile",
+        6 => "formula",
+        _ => "num",
+    };
+    Some(Cfvo {
+        kind: kind.into(),
+        val: num
+            .filter(|_| matches!(ty, 1 | 4 | 5))
+            .map(formula::number_text),
+        gte: true,
+    })
+}
+
+/// CFColor: 종류 u32 (2 = RGB), 값 4바이트, 밝기 f64
+fn legacy_cf_color(r: &mut Rd) -> Option<Color> {
+    let ty = r.u32()?;
+    let v = r.take(4)?;
+    r.take(8);
+    match ty {
+        2 => Some(Color {
+            rgb: Some(format!("ff{:02x}{:02x}{:02x}", v[0], v[1], v[2])),
+            ..Default::default()
+        }),
+        3 => Some(Color {
+            theme: Some(v[0] as u32),
+            ..Default::default()
+        }),
+        _ => Some(Color {
+            auto: true,
+            ..Default::default()
+        }),
+    }
+}
+
+/// CFGradient: 예약 u8, 보간 수 u8, 색 수 u8, 플래그 u8, (CFVO + 영역 f64) × n, (위치 f64 + CFColor) × m
+fn legacy_color_scale(r: &mut Rd) -> Option<ColorScale> {
+    r.take(1);
+    let (ni, nc, _f) = (r.u8()?, r.u8()?, r.u8()?);
+    let mut cs = ColorScale::default();
+    for _ in 0..ni {
+        cs.cfvos.push(legacy_cfvo(r)?);
+        r.take(8);
+    }
+    for _ in 0..nc {
+        r.take(8);
+        cs.colors.extend(legacy_cf_color(r));
+    }
+    Some(cs)
+}
+
+/// CFDatabar: 예약 u8, 플래그 u8 (0x02 값 숨김 — 한컴), 최소·최대 길이 u8, CFColor, CFVO × 2
+fn legacy_data_bar(r: &mut Rd) -> Option<DataBar> {
+    r.take(1);
+    let (flags, min, max) = (r.u8()?, r.u8()?, r.u8()?);
+    let color = legacy_cf_color(r);
+    let mut cfvos = Vec::new();
+    for _ in 0..2 {
+        cfvos.extend(legacy_cfvo(r));
+    }
+    Some(DataBar {
+        cfvos,
+        color,
+        show_value: flags & 0x02 == 0,
+        min_length: Some(min as u32).filter(|&v| v != 10),
+        max_length: Some(max as u32).filter(|&v| v != 90),
+    })
+}
+
+/// CFMultistate: 예약 u8, 아이콘 수 u8, 집합 번호 u8, 플래그 u8 (0x01 아이콘만, 0x04 거꾸로),
+/// (CFVO + fEqual u8 + 예약 u32) × n
+fn legacy_icon_set(r: &mut Rd) -> Option<IconSet> {
+    r.take(1);
+    let (n, set, flags) = (r.u8()?, r.u8()?, r.u8()?);
+    let mut cfvos = Vec::new();
+    for _ in 0..n {
+        let mut c = legacy_cfvo(r)?;
+        c.gte = r.u8()? != 0;
+        r.take(4);
+        cfvos.push(c);
+    }
+    const SETS: [&str; 20] = [
+        "3Arrows",
+        "3ArrowsGray",
+        "3Flags",
+        "3TrafficLights1",
+        "3TrafficLights2",
+        "3Signs",
+        "3Symbols",
+        "3Symbols2",
+        "4Arrows",
+        "4ArrowsGray",
+        "4RedToBlack",
+        "4Rating",
+        "4TrafficLights",
+        "5Arrows",
+        "5ArrowsGray",
+        "5Rating",
+        "5Quarters",
+        "3Stars",
+        "3Triangles",
+        "5Boxes",
+    ];
+    Some(IconSet {
+        set: SETS
+            .get(set as usize)
+            .unwrap_or(&"3TrafficLights1")
+            .to_string(),
+        cfvos,
+        show_value: flags & 0x01 == 0,
+        reverse: flags & 0x04 != 0,
+        percent: true,
+    })
+}
+
+/// OBJ 레코드 요약: 종류(ot)와 뒤따른 TXO 의 내용·런
+struct ObjRec {
+    ot: u16,
+    text: Option<(String, Vec<(u16, u16)>)>,
+}
+
+/// OfficeArt 도형 하나 → 모델 (OBJ 는 문서 순서로 하나씩 짝짓는다). 메모(ot 0x19)는 건너뛴다.
+fn legacy_shape(
+    e: &escher::EscherShape,
+    objs: &[ObjRec],
+    k: &mut usize,
+    sheet: &Sheet,
+    wb: &Workbook,
+    mdw: u32,
+) -> Option<Shape> {
+    let obj = objs.get(*k);
+    *k += 1;
+    let ot = obj.map_or(0x1E, |o| o.ot);
+    let children: Vec<Shape> = e
+        .children
+        .iter()
+        .filter_map(|c| legacy_shape(c, objs, k, sheet, wb, mdw))
+        .collect();
+    // 0x19 메모 (NOTE 가 따로 읽는다), 0x14 콤보 상자 (자동 필터의 단추)
+    if ot == 0x19 || ot == 0x14 {
+        return None;
+    }
+    let kind = if e.is_group() {
+        ShapeKind::Group
+    } else {
+        match ot {
+            0x05 => ShapeKind::Chart,
+            0x08 => ShapeKind::Picture,
+            0x01 => ShapeKind::Connector,
+            _ => ShapeKind::Shape,
+        }
+    };
+    let anchor = e
+        .anchor
+        .map(|a| legacy_anchor(a, e.anchor_flag, sheet, mdw));
+    let prop = |pid: u16| e.prop(pid);
+    // 채우기: 0x01BF 의 fUseFilled(0x100000)/fFilled(0x10), 색 0x0181 (COLORREF, 기본 흰색)
+    let filled = match prop(0x01BF) {
+        Some(b) if b & 0x0010_0000 != 0 => b & 0x10 != 0,
+        _ => true,
+    };
+    let fill = if kind == ShapeKind::Group || kind == ShapeKind::Chart {
+        None
+    } else if filled {
+        Some(Paint::Solid(art_color(prop(0x0181).unwrap_or(0x00FF_FFFF))))
+    } else {
+        Some(Paint::None)
+    };
+    // 선: 0x01FF 의 fUseLine(0x80000)/fLine(0x8), 색 0x01C0 (기본 검정), 두께 0x01CB (EMU, 기본 9525)
+    let lined = match prop(0x01FF) {
+        Some(b) if b & 0x0008_0000 != 0 => b & 0x08 != 0,
+        _ => true,
+    };
+    let line = (kind != ShapeKind::Group && kind != ShapeKind::Chart).then(|| Outline {
+        width: Some(prop(0x01CB).unwrap_or(9525) as i64),
+        fill: Some(if lined {
+            Paint::Solid(art_color(prop(0x01C0).unwrap_or(0)))
+        } else {
+            Paint::None
+        }),
+        dash: Some(
+            match prop(0x01CE).unwrap_or(0) {
+                1 => "dash",
+                2 => "sysDot",
+                3 => "dashDot",
+                4 => "lgDashDotDot",
+                6 => "lgDash",
+                _ => "solid",
+            }
+            .into(),
+        ),
+    });
+    let text = obj.and_then(|o| o.text.as_ref()).map(|(t, runs)| {
+        let font = runs
+            .first()
+            .and_then(|&(_, ifnt)| wb.styles.fonts.get(ifnt as usize));
+        TextBody {
+            anchor: prop(0x0087).map(|a| {
+                match a {
+                    1 | 4 => "ctr",
+                    2 | 5 => "b",
+                    _ => "t",
+                }
+                .into()
+            }),
+            wrap: prop(0x0085).map(|w| if w == 2 { "none" } else { "square" }.into()),
+            vert: None,
+            insets: [
+                prop(0x0081).map(i64::from),
+                prop(0x0082).map(i64::from),
+                prop(0x0083).map(i64::from),
+                prop(0x0084).map(i64::from),
+            ],
+            paragraphs: t
+                .split('\n')
+                .map(|line| DrawingPara {
+                    align: None,
+                    runs: (!line.is_empty())
+                        .then(|| DrawingRun {
+                            text: line.to_string(),
+                            size: font
+                                .and_then(|f| f.size)
+                                .map(|s| (s * 100.0).round() as u32),
+                            bold: font.map(|f| f.bold),
+                            italic: font.map(|f| f.italic),
+                            color: font
+                                .and_then(|f| f.color.as_ref())
+                                .and_then(|c| c.rgb.as_deref())
+                                .filter(|h| h.len() >= 6)
+                                .map(|h| DrawColor {
+                                    value: format!(
+                                        "srgb:{}",
+                                        h[h.len() - 6..].to_ascii_uppercase()
+                                    ),
+                                    mods: Vec::new(),
+                                }),
+                            latin: font.and_then(|f| f.name.clone()),
+                            ..Default::default()
+                        })
+                        .into_iter()
+                        .collect(),
+                })
+                .collect(),
+        }
+    });
+    let hidden = matches!(prop(0x03BF), Some(b) if b & 0x0002_0000 != 0 && b & 0x02 != 0);
+    Some(Shape {
+        anchor: anchor.unwrap_or_default(),
+        kind,
+        id: e.spid & 0x3FF,
+        name: e.string(0x0380).unwrap_or_default(),
+        descr: e.string(0x0381),
+        hidden,
+        xfrm: None,
+        // 사용자 정의 모양(0)은 꼭짓점(0x0145)이 있을 때만. 없으면 한셀처럼 모양 없음
+        geometry: (kind != ShapeKind::Group
+            && kind != ShapeKind::Chart
+            && !(e.shape_type == 0 && e.complex(0x0145).is_none()))
+        .then(|| {
+            match e.shape_type {
+                0 => "custom",
+                1 | 202 => "rect",
+                2 => "roundRect",
+                3 => "ellipse",
+                4 => "diamond",
+                5 => "triangle",
+                6 => "rtTriangle",
+                7 => "parallelogram",
+                8 => "trapezoid",
+                9 => "hexagon",
+                10 => "octagon",
+                11 => "plus",
+                12 => "star5",
+                13 => "rightArrow",
+                20 => "line",
+                _ => "rect",
+            }
+            .into()
+        }),
+        fill,
+        line,
+        text,
+        children,
+        // 그림: pib(0x0104) = 그림 저장소 번호 (1부터) → 전역에서 꺼내 둔 xl/media 파트
+        target: (kind == ShapeKind::Picture)
+            .then(|| prop(0x0104))
+            .flatten()
+            .and_then(|pib| {
+                let prefix = format!("{}{pib}.", MEDIA_PREFIX);
+                wb.raw_parts
+                    .iter()
+                    .find(|p| p.name.starts_with(&prefix))
+                    .map(|p| p.name.clone())
+            }),
+        raw: None,
+        raw_rels: Vec::new(),
+        chart: None,
+    })
+}
+
+/// 레거시 그림 저장소에서 꺼낸 그림의 파트 이름 앞부분 (뒤에 pib 와 확장자)
+const MEDIA_PREFIX: &str = "xl/media/image";
+
+/// OfficeArt COLORREF (R, G, B, 플래그) → DrawingML 색
+fn art_color(v: u32) -> DrawColor {
+    let (r, g, b) = (v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF);
+    DrawColor {
+        value: format!("srgb:{r:02X}{g:02X}{b:02X}"),
+        mods: Vec::new(),
+    }
+}
+
+/// 머리글·바닥글의 글꼴 코드를 한셀이 XML 에 쓰는 꼴로: `&"이름, REGULAR "` → `&"이름,Regular"`.
+/// 레거시에는 글꼴 모양이 대문자 + 공백으로 기록된다 (관측).
+fn canonical_hf_fonts(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("&\"") {
+        out.push_str(&rest[..i + 2]);
+        rest = &rest[i + 2..];
+        let Some(end) = rest.find('"') else { break };
+        let spec = &rest[..end];
+        match spec.split_once(',') {
+            Some((name, style)) => {
+                let style = style.trim();
+                let canon = ["Regular", "Bold", "Italic", "Bold Italic"]
+                    .into_iter()
+                    .find(|c| c.eq_ignore_ascii_case(style))
+                    .unwrap_or(style);
+                out.push_str(name.trim());
+                out.push(',');
+                out.push_str(canon);
+            }
+            None => out.push_str(spec),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 한셀은 레거시의 여백(인치)을 HWPUNIT(1/7200 인치) 정수로 **잘라** 들이고 f32 로 다시 쓴다 (관측:
+/// 머리글 여백 0.51180553 → 3684 → 0.51166666).
+fn hwp_inch(v: f64) -> f64 {
+    ((v * 7200.0).trunc() / 7200.0) as f32 as f64
+}
+
+/// 창 번호 (pnn) → `pane` 의 activePane 값
+fn pane_name(pnn: u32) -> Option<String> {
+    Some(
+        match pnn {
+            0 => "bottomRight",
+            1 => "topRight",
+            2 => "bottomLeft",
+            3 => "topLeft",
+            _ => return None,
+        }
+        .into(),
+    )
+}
+
+fn default_header_footer() -> HeaderFooter {
+    HeaderFooter {
+        scale_with_doc: true,
+        align_with_margins: true,
+        ..Default::default()
+    }
+}
+
+/// HLINK: Ref(행 u32) + CLSID + 하이퍼링크 객체 ([MS-OSHARED] 2.3.7.1).
+fn parse_hlink(d: &[u8]) -> Option<Hyperlink> {
+    let mut r = Rd::new(d);
+    let r1 = r.u32()?;
+    let r2 = r.u32()?;
+    let c1 = r.u16()?;
+    let c2 = r.u16()?;
+    r.take(16)?; // CLSID_StdHlink
+    let _ver = r.u32()?;
+    let flags = r.u32()?;
+    let read_hstr = |r: &mut Rd| -> Option<String> {
+        let n = r.u32()? as usize;
+        let s = r.utf16(n)?;
+        Some(s.trim_end_matches('\0').to_string())
+    };
+    let mut h = Hyperlink {
+        range: CellRange {
+            start: CellRef {
+                row: r1,
+                col: c1 as u32,
+            },
+            end: CellRef {
+                row: r2,
+                col: c2 as u32,
+            },
+        }
+        .to_string(),
+        ..Default::default()
+    };
+    if flags & 0x10 != 0 {
+        h.display = read_hstr(&mut r);
+    }
+    if flags & 0x80 != 0 {
+        let _frame = read_hstr(&mut r);
+    }
+    if flags & 0x01 != 0 {
+        if flags & 0x100 != 0 {
+            h.target = read_hstr(&mut r);
+        } else {
+            let clsid = r.take(16)?;
+            // URL 모니커 {79EAC9E0-BAF9-11CE-8C82-00AA004BA90B}
+            if clsid[0] == 0xE0 && clsid[1] == 0xC9 {
+                let len = r.u32()? as usize;
+                h.target = Some(crate::text::utf16le_nul(r.take(len)?));
+            }
+        }
+    }
+    if flags & 0x08 != 0
+        && let Some(loc) = read_hstr(&mut r)
+    {
+        h.location = Some(loc);
+    }
+    Some(h)
+}
+
+/// 0xA001 문단 모양 레코드 (37바이트, 문단 번호가 있으면 41바이트).
+/// 열거값은 한글 문단 모양 번호를 따른다 (docs/format/cell-legacy.md).
+fn parse_parashape(d: &[u8]) -> ParaShape {
+    let mut r = Rd::new(d);
+    let mut p = ParaShape::default();
+    let nz = |v: i32| (v != 0).then_some(v);
+    p.left_margin = r.i32().and_then(nz);
+    p.right_margin = r.i32().and_then(nz);
+    p.indentation = r.i32().and_then(nz);
+    p.prev_spacing = r.i32().and_then(nz);
+    p.next_spacing = r.i32().and_then(nz);
+    p.line_spacing = r.i32();
+    p.line_spacing_type = r.u8().and_then(|v| {
+        vocab::LINE_SPACING_TYPE
+            .get(v as usize)
+            .map(|s| s.to_string())
+    });
+    let _align = r.u8();
+    p.break_latin_word = r
+        .u8()
+        .map(|v| if v == 0 { "keepWord" } else { "breakWord" }.to_string());
+    p.break_non_latin_word = r
+        .u8()
+        .map(|v| if v == 0 { "keepWord" } else { "breakWord" }.to_string());
+    p.condense = r.i32();
+    p.text_alignment = r
+        .u16()
+        .and_then(|v| vocab::TEXT_ALIGNMENT.get(v as usize).map(|s| s.to_string()));
+    let _b34 = r.u8();
+    let num_type = r.u8().unwrap_or(0);
+    p.font_line_height = r.u8().and_then(|v| (v != 0).then_some(true));
+    if num_type != 0 {
+        p.abstract_num_type = Some(num_type as i32);
+        p.abstract_num_id = r.i32();
+    }
+    p
+}
+
+/// 문단 모양을 셀 서식에 붙이고, 한셀처럼 여백에서 들여쓰기 단계를 계산한다
+/// (들여쓰기 1단계 = 1134).
+fn attach_parashape(xf: &mut Xf, ps: ParaShape) {
+    if let Some(a) = xf.alignment.as_mut() {
+        let margin = match a.horizontal.as_deref() {
+            Some("left") => ps.left_margin,
+            Some("right") => ps.right_margin,
+            _ => None,
+        };
+        if let Some(m) = margin.filter(|&m| m > 0) {
+            a.indent = Some(((m as f64) / 1134.0).round() as u32);
+        }
+    }
+    xf.hancom = Some(HancomXfExt {
+        apply_extension: true,
+        parashape: Some(ps),
+        ..Default::default()
+    });
+}

@@ -1,0 +1,19 @@
+# Copyright 2026 yoomin53 (https://github.com/yoomin53)
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "rcell-wasm"
+version = "0.2.0"
+edition = "2024"
+authors = ["yoomin53 (https://github.com/yoomin53)"]
+description = "rcell WebAssembly bindings (C ABI, no wasm-bindgen) for the browser viewer"
+license = "Apache-2.0"
+repository = "https://github.com/yoomin53/rcell"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rcell = { path = "../.." }
+serde_json = "1.0.154"

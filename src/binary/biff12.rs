@@ -1,0 +1,162 @@
+// Copyright 2026 yoomin53 (https://github.com/yoomin53)
+// SPDX-License-Identifier: Apache-2.0
+//
+// rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
+
+//! 바이너리 OOXML 파트(`*.bin`)의 레코드 계층 (BIFF12).
+//!
+//! 레코드 틀은 공개 명세 [MS-XLSB] 2.1.4 를 따른다: 타입과 길이를 7비트 가변 길이
+//! 정수로 쓴다 (타입 최대 2바이트, 길이 최대 4바이트).
+
+#[derive(Debug, Clone, Copy)]
+pub struct Record<'a> {
+    pub offset: usize,
+    pub rtype: u32,
+    pub data: &'a [u8],
+}
+
+impl Record<'_> {
+    pub fn name(&self) -> &'static str {
+        record_name(self.rtype)
+    }
+}
+
+fn varint(b: &[u8], pos: &mut usize, max_bytes: usize) -> Option<u32> {
+    let mut v: u32 = 0;
+    for i in 0..max_bytes {
+        let byte = *b.get(*pos)?;
+        *pos += 1;
+        v |= ((byte & 0x7F) as u32) << (7 * i);
+        if byte & 0x80 == 0 {
+            return Some(v);
+        }
+    }
+    Some(v)
+}
+
+/// 파트 전체를 레코드로 나눈다.
+pub fn records(part: &[u8]) -> Vec<Record<'_>> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos < part.len() {
+        let offset = pos;
+        // 타입은 바이트 그대로의 가변 길이 표기 (MS-XLSB 2.1.4: 최상위 비트가 연속 표시)
+        let Some(t) = varint(part, &mut pos, 2) else {
+            break;
+        };
+        let Some(len) = varint(part, &mut pos, 4) else {
+            break;
+        };
+        let end = (pos + len as usize).min(part.len());
+        out.push(Record {
+            offset,
+            rtype: t,
+            data: &part[pos..end],
+        });
+        pos = end;
+    }
+    out
+}
+
+/// [MS-XLSB] 2.3 레코드 이름 (자주 쓰이는 것).
+pub fn record_name(t: u32) -> &'static str {
+    match t {
+        0 => "BrtRowHdr",
+        1 => "BrtCellBlank",
+        2 => "BrtCellRk",
+        3 => "BrtCellError",
+        4 => "BrtCellBool",
+        5 => "BrtCellReal",
+        6 => "BrtCellSt",
+        7 => "BrtCellIsst",
+        8 => "BrtFmlaString",
+        9 => "BrtFmlaNum",
+        10 => "BrtFmlaBool",
+        11 => "BrtFmlaError",
+        19 => "BrtSSTItem",
+        35 => "BrtFRTBegin",
+        36 => "BrtFRTEnd",
+        37 => "BrtACBegin",
+        38 => "BrtACEnd",
+        39 => "BrtName",
+        40 => "BrtIndexRowBlock",
+        42 => "BrtIndexBlock",
+        43 => "BrtFont",
+        44 => "BrtFmt",
+        45 => "BrtFill",
+        46 => "BrtBorder",
+        47 => "BrtXF",
+        48 => "BrtStyle",
+        60 => "BrtColInfo",
+        62 => "BrtCellRString",
+        64 => "BrtDVal",
+        128 => "BrtFileVersion",
+        129 => "BrtBeginSheet",
+        130 => "BrtEndSheet",
+        131 => "BrtBeginBook",
+        132 => "BrtEndBook",
+        133 => "BrtBeginWsViews",
+        134 => "BrtEndWsViews",
+        135 => "BrtBeginBookViews",
+        136 => "BrtEndBookViews",
+        137 => "BrtBeginWsView",
+        138 => "BrtEndWsView",
+        143 => "BrtBeginBundleShs",
+        144 => "BrtEndBundleShs",
+        145 => "BrtBeginSheetData",
+        146 => "BrtEndSheetData",
+        147 => "BrtWsProp",
+        148 => "BrtWsDim",
+        151 => "BrtPane",
+        152 => "BrtSel",
+        153 => "BrtWbProp",
+        154 => "BrtWbFactoid",
+        155 => "BrtFileRecover",
+        156 => "BrtBundleSh",
+        157 => "BrtCalcProp",
+        158 => "BrtBookView",
+        159 => "BrtBeginSst",
+        160 => "BrtEndSst",
+        176 => "BrtMergeCell",
+        177 => "BrtBeginMergeCells",
+        178 => "BrtEndMergeCells",
+        278 => "BrtBeginStyleSheet",
+        279 => "BrtEndStyleSheet",
+        353 => "BrtBeginExternals",
+        354 => "BrtEndExternals",
+        355 => "BrtSupBookSrc",
+        357 => "BrtSupSelf",
+        358 => "BrtSupSame",
+        359 => "BrtSupTabs",
+        360 => "BrtBeginSupBook",
+        362 => "BrtExternSheet",
+        588 => "BrtEndSupBook",
+        390 => "BrtBeginColInfos",
+        391 => "BrtEndColInfos",
+        426 => "BrtArrFmla",
+        427 => "BrtShrFmla",
+        485 => "BrtWsFmtInfo",
+        476 => "BrtMargins",
+        477 => "BrtPrintOptions",
+        478 => "BrtPageSetup",
+        479 => "BrtBeginHeaderFooter",
+        480 => "BrtEndHeaderFooter",
+        494 => "BrtHLink",
+        603 => "BrtBeginFills",
+        604 => "BrtEndFills",
+        611 => "BrtBeginFonts",
+        612 => "BrtEndFonts",
+        613 => "BrtBeginBorders",
+        614 => "BrtEndBorders",
+        615 => "BrtBeginFmts",
+        616 => "BrtEndFmts",
+        617 => "BrtBeginCellXFs",
+        618 => "BrtEndCellXFs",
+        619 => "BrtBeginStyles",
+        620 => "BrtEndStyles",
+        626 => "BrtBeginCellStyleXFs",
+        627 => "BrtEndCellStyleXFs",
+        2071 => "BrtAbsPath15",
+        _ => "?",
+    }
+}

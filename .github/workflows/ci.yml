@@ -1,0 +1,27 @@
+# Copyright 2026 yoomin53 (https://github.com/yoomin53)
+# SPDX-License-Identifier: Apache-2.0
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # tests/attribution.rs 가 모든 소스 파일의 저작자(yoomin53) 머리말을 검사한다.
+      - run: cargo test
+      - run: cargo build -p rcell-wasm --target wasm32-unknown-unknown --release

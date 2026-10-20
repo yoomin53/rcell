@@ -1,0 +1,36 @@
+# Copyright 2026 yoomin53 (https://github.com/yoomin53)
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "rcell"
+version = "0.2.0"
+edition = "2024"
+authors = ["yoomin53 (https://github.com/yoomin53)"]
+description = "Clean-room open-source implementation of the Hancom Cell (.cell) spreadsheet format"
+license = "Apache-2.0"
+repository = "https://github.com/yoomin53/rcell"
+readme = "README.md"
+keywords = ["hancom", "hancell", "cell", "spreadsheet", "ooxml"]
+categories = ["parser-implementations", "encoding"]
+
+[lib]
+name = "rcell"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rcell"
+path = "src/main.rs"
+
+[dependencies]
+# color 기능은 windows-sys(raw-dylib)를 끌어와 windows-gnu 툴체인에서 dlltool 을 요구하므로 끈다.
+clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
+quick-xml = "0.42.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
+# 레거시 메타파일 그림(EMF·WMF)의 압축 해제. zip 이 이미 쓰는 것과 같은 판·백엔드 (새 크레이트 없음)
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+
+[workspace]
+members = [".", "crates/rcell-wasm"]

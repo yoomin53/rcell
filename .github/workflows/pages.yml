@@ -1,0 +1,43 @@
+# Copyright 2026 yoomin53 (https://github.com/yoomin53)
+# SPDX-License-Identifier: Apache-2.0
+#
+# 웹 뷰어(web/)를 GitHub Pages 로 배포한다.
+# 저장소 Settings → Pages → Source 를 "GitHub Actions" 로 설정해야 한다.
+
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: sh tools/build-web.sh
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
