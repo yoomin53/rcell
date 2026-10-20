@@ -17,9 +17,10 @@ use crate::model::{
     Alignment, AutoFilter, Border, BorderEdge, Cell, CellRange, CellRef, CellValue, CfRule, Cfvo,
     ColInfo, Color, Comment, ConditionalFormat, DYNAMIC_FILTER_TYPES, DataBar, DataValidation,
     DefinedName, ExternalLink, FILTER_OPERATORS, FileVersion, Fill, FilterColumn, Font, Formula,
-    HeaderFooter, Hyperlink, IconSet, NamedStyle, NumFmt, PageMargins, PageSetup, Pane,
-    PrintOptions, Protection, RichText, RowInfo, Sheet, SheetKind, SheetProtection, SheetState,
-    Styles, TextRun, Workbook, WorkbookProtection, Xf,
+    GradientFill, GradientStop, HeaderFooter, Hyperlink, IconSet, NamedStyle, NumFmt, PageMargins,
+    PageSetup, Pane, PrintOptions, Protection, RichText, RowInfo, Sheet, SheetKind,
+    SheetProtection, SheetState, Styles, TABLE_STYLE_TYPES, TableStyle, TableStyleElement,
+    TableStyles, TextRun, Workbook, WorkbookProtection, Xf,
 };
 use crate::package::{Package, Relationship};
 
@@ -454,19 +455,49 @@ fn valid_rgb_color(r: &mut Rd) -> Option<Color> {
     color(&mut Rd::new(b)).flatten()
 }
 
-/// BrtDXF (507): 예약 u16 ×2, cprops u16, XFProp(종류 u16, 크기 u16(머리 포함), 값) × cprops
-pub(crate) fn parse_dxf(d: &[u8]) -> crate::model::Dxf {
-    use crate::model::{Border, BorderEdge, Dxf, Fill, Font};
+/// 차등 서식의 XFPropColor: 종류 0 은 자동이다. RGB 가 유효(0x01)해도 그렇다 (한셀 확인: 차등 서식 대조 실험 —
+/// 글꼴 색·테두리 색 모두 `<x:color auto="1"/>`)
+fn dxf_color(r: &mut Rd) -> Option<Color> {
+    let b = r.take(8)?;
+    // 레거시는 자동 색을 RGB 종류로 쓰고 값 FF FF FF DF 로 표시한다 (한셀의 자동 색 표지)
+    if b[0] >> 1 == 0 || b[4..8] == [0xFF, 0xFF, 0xFF, 0xDF] {
+        return Some(Color {
+            auto: true,
+            ..Default::default()
+        });
+    }
+    valid_rgb_color(&mut Rd::new(b))
+}
+
+/// 차등 서식의 테두리 선 (XFPropBorder: XFPropColor + dg u16). dg 0 은 '선 없음' 으로 지정된 선이다
+fn dxf_edge(r: &mut Rd) -> Option<crate::model::BorderEdge> {
+    let color = dxf_color(r);
+    let dg = r.u16()? as usize;
+    Some(crate::model::BorderEdge {
+        style: (dg != 0)
+            .then(|| BORDER_STYLES.get(dg).map(|s| s.to_string()))
+            .flatten(),
+        color,
+    })
+}
+
+/// BrtDXF (507): 플래그 u16 (0x8000 fNewBorder), 예약 u16, cprops u16, XFProp(종류 u16, 크기 u16(머리 포함), 값) × cprops.
+/// 레거시 DXF(0x088D) 도 FRT 머리 뒤가 같다. 종류 번호는 [MS-XLSB] XFProp 그대로다 (한셀 확인: 차등 서식 대조
+/// 실험 — 0x1A 밑줄 u16, 0x1C 기울임, 0x1D 취소선, 0x24 크기(1/20 pt), 0x0B·0x0C 안쪽 세로·가로 선).
+/// 한셀은 차등 서식의 글꼴 이름(0x18)을 XML 에 쓰지 않고 바이너리에는 깨진 문자열을 쓴다 — 글꼴이 있다는 것만 본다.
+/// 글꼴 크기(0x24)는 바이너리가 1/20 pt, 레거시가 1/100 pt 다 (`legacy`). 한셀은 차등 서식의 크기를 정수 pt 로 다룬다.
+pub(crate) fn parse_dxf(d: &[u8], legacy: bool) -> crate::model::Dxf {
+    use crate::model::{Alignment, Border, Dxf, Fill, Font, Protection};
     let mut r = Rd::new(d);
     r.take(4);
     let n = r.u16().unwrap_or(0);
-    let mut dxf = Dxf::default();
-    let mut font = Font::default();
-    let mut has_font = false;
-    let mut fill = Fill::default();
-    let mut has_fill = false;
-    let mut border = Border::default();
-    let mut has_border = false;
+    let mut font: Option<Font> = None;
+    let mut fill: Option<Fill> = None;
+    let mut border: Option<Border> = None;
+    let mut align: Option<Alignment> = None;
+    let mut prot: Option<Protection> = None;
+    let mut fmt_id: Option<u16> = None;
+    let mut fmt_code: Option<String> = None;
     for _ in 0..n {
         let (Some(ty), Some(cb)) = (r.u16(), r.u16()) else {
             break;
@@ -475,80 +506,165 @@ pub(crate) fn parse_dxf(d: &[u8]) -> crate::model::Dxf {
             break;
         };
         let mut x = Rd::new(v);
-        let edge = |x: &mut Rd| -> Option<BorderEdge> {
-            let c = valid_rgb_color(x);
-            let dg = x.u16()?;
-            Some(BorderEdge {
-                style: BORDER_STYLES.get(dg as usize).map(|s| s.to_string()),
-                color: c,
-            })
-        };
+        let on = |x: &mut Rd| x.u8().unwrap_or(0) != 0;
         match ty {
+            // 채우기: 무늬 u8 (0x28 = 그라데이션), 무늬 색, 배경색, 그라데이션(0x03)·정지점(0x04)
             0x00 => {
-                fill.pattern_type = x
+                let p = x.u8().unwrap_or(0);
+                let f = fill.get_or_insert_with(Default::default);
+                f.pattern_type = PATTERNS.get(p as usize).map(|s| s.to_string());
+                if p == 0x28 {
+                    f.gradient.get_or_insert_with(Default::default);
+                }
+            }
+            0x01 => fill.get_or_insert_with(Default::default).fg_color = dxf_color(&mut x),
+            0x02 => fill.get_or_insert_with(Default::default).bg_color = dxf_color(&mut x),
+            0x03 => {
+                // XFPropGradient: 종류 u32 (0 직선, 1 경로), 각도·왼쪽·오른쪽·위·아래 f64
+                let g = fill
+                    .get_or_insert_with(Default::default)
+                    .gradient
+                    .get_or_insert_with(Default::default);
+                g.path = x.u32() == Some(1);
+                g.degree = x.f64().unwrap_or(0.0);
+                g.left = x.f64().unwrap_or(0.0);
+                g.right = x.f64().unwrap_or(0.0);
+                g.top = x.f64().unwrap_or(0.0);
+                g.bottom = x.f64().unwrap_or(0.0);
+            }
+            0x04 => {
+                // XFPropGradientStop: 예약 u16, 위치 f64, XFPropColor
+                x.take(2);
+                let position = x.f64().unwrap_or(0.0);
+                let color = dxf_color(&mut x).unwrap_or_default();
+                fill.get_or_insert_with(Default::default)
+                    .gradient
+                    .get_or_insert_with(Default::default)
+                    .stops
+                    .push(GradientStop { position, color });
+            }
+            0x05 => font.get_or_insert_with(Default::default).color = dxf_color(&mut x),
+            // 테두리: 위, 아래, 왼쪽, 오른쪽, 대각선, 안쪽 세로, 안쪽 가로, 대각선 방향 두 가지
+            0x06..=0x0C => {
+                let e = dxf_edge(&mut x);
+                let b = border.get_or_insert_with(Default::default);
+                match ty {
+                    0x06 => b.top = e,
+                    0x07 => b.bottom = e,
+                    0x08 => b.left = e,
+                    0x09 => b.right = e,
+                    0x0A => b.diagonal = e,
+                    0x0B => b.vertical = e,
+                    _ => b.horizontal = e,
+                }
+            }
+            0x0D => border.get_or_insert_with(Default::default).diagonal_up = on(&mut x),
+            0x0E => border.get_or_insert_with(Default::default).diagonal_down = on(&mut x),
+            // 맞춤: 가로 u8, 세로 u8, 회전 u8, 들여쓰기 u16, 읽기 순서 u8, 줄 바꿈 u8, (0x15 양쪽 끝), 축소 u8
+            0x0F => {
+                align.get_or_insert_with(Default::default).horizontal = x
                     .u8()
-                    .and_then(|p| PATTERNS.get(p as usize))
-                    .map(|s| s.to_string());
-                has_fill = true;
+                    .and_then(|v| H_ALIGN.get(v as usize))
+                    .map(|s| s.to_string())
             }
-            0x01 => {
-                fill.fg_color = valid_rgb_color(&mut x);
-                has_fill = true;
+            0x10 => {
+                align.get_or_insert_with(Default::default).vertical = x
+                    .u8()
+                    .and_then(|v| V_ALIGN.get(v as usize))
+                    .map(|s| s.to_string())
             }
-            0x02 => {
-                fill.bg_color = valid_rgb_color(&mut x);
-                has_fill = true;
+            0x11 => {
+                align.get_or_insert_with(Default::default).text_rotation = x.u8().map(i32::from)
             }
-            0x05 => {
-                font.color = valid_rgb_color(&mut x);
-                has_font = true;
+            0x12 => align.get_or_insert_with(Default::default).indent = x.u16().map(u32::from),
+            0x13 => {
+                align.get_or_insert_with(Default::default).reading_order = x.u8().map(u32::from)
             }
-            0x06 => {
-                border.top = edge(&mut x);
-                has_border = true;
+            0x14 => align.get_or_insert_with(Default::default).wrap_text = on(&mut x),
+            0x16 => align.get_or_insert_with(Default::default).shrink_to_fit = on(&mut x),
+            // 글꼴
+            0x18 => {
+                font.get_or_insert_with(Default::default);
             }
-            0x07 => {
-                border.bottom = edge(&mut x);
-                has_border = true;
-            }
-            0x08 => {
-                border.left = edge(&mut x);
-                has_border = true;
-            }
-            0x09 => {
-                border.right = edge(&mut x);
-                has_border = true;
-            }
-            0x19 => {
-                font.bold = x.u16().unwrap_or(400) >= 700;
-                has_font = true;
-            }
+            0x19 => font.get_or_insert_with(Default::default).bold = x.u16().unwrap_or(400) >= 700,
             0x1A => {
-                font.italic = x.u8().unwrap_or(0) != 0;
-                has_font = true;
-            }
-            0x1B => {
-                font.strike = x.u8().unwrap_or(0) != 0;
-                has_font = true;
-            }
-            // 한셀은 밑줄을 0x1C 로 쓴다 (관측). [MS-XLSB] 의 밑줄 0x24 도 받는다
-            0x1C | 0x24 => {
-                font.underline = match x.u8().unwrap_or(0) {
+                font.get_or_insert_with(Default::default).underline = match x.u16().unwrap_or(0) {
                     0 => None,
                     2 => Some("double".into()),
                     0x21 => Some("singleAccounting".into()),
                     0x22 => Some("doubleAccounting".into()),
                     _ => Some("single".into()),
-                };
-                has_font = true;
+                }
             }
+            0x1B => {
+                font.get_or_insert_with(Default::default).vert_align = match x.u16().unwrap_or(0) {
+                    1 => Some("superscript".into()),
+                    2 => Some("subscript".into()),
+                    _ => None,
+                }
+            }
+            0x1C => font.get_or_insert_with(Default::default).italic = on(&mut x),
+            0x1D => font.get_or_insert_with(Default::default).strike = on(&mut x),
+            0x1E => font.get_or_insert_with(Default::default).outline = on(&mut x),
+            0x1F => font.get_or_insert_with(Default::default).shadow = on(&mut x),
+            0x20 => font.get_or_insert_with(Default::default).condense = on(&mut x),
+            0x21 => font.get_or_insert_with(Default::default).extend = on(&mut x),
+            0x22 => font.get_or_insert_with(Default::default).charset = x.u8().map(u32::from),
+            0x23 => font.get_or_insert_with(Default::default).family = x.u8().map(u32::from),
+            0x24 => {
+                font.get_or_insert_with(Default::default).size = x
+                    .u32()
+                    .map(|v| v as f64 / if legacy { 100.0 } else { 20.0 })
+            }
+            0x25 => {
+                font.get_or_insert_with(Default::default).scheme = match x.u8() {
+                    Some(1) => Some("major".into()),
+                    Some(2) => Some("minor".into()),
+                    _ => None,
+                }
+            }
+            // 표시 형식: 0x26 형식 문자열 (u16 cch + UTF-16), 0x29 IFmt u16 (한셀은 쓰지 않는다 — Excel 의 .xlsb)
+            0x26 => {
+                fmt_code = x
+                    .u16()
+                    .and_then(|c| x.take(c as usize * 2))
+                    .map(crate::text::utf16le)
+            }
+            0x29 => fmt_id = x.u16(),
+            // 보호: 잠금, 숨김
+            0x2B => prot.get_or_insert_with(Default::default).locked = Some(on(&mut x)),
+            0x2C => prot.get_or_insert_with(Default::default).hidden = Some(on(&mut x)),
             _ => {}
         }
     }
-    dxf.font = has_font.then_some(font);
-    dxf.fill = has_fill.then_some(fill);
-    dxf.border = has_border.then_some(border);
-    dxf
+    let num_fmt = (fmt_id.is_some() || fmt_code.is_some()).then(|| {
+        let id = fmt_id.map_or(164, u32::from);
+        NumFmt {
+            id,
+            code: fmt_code
+                .or_else(|| crate::numfmt::builtin(id).map(str::to_string))
+                .unwrap_or_default(),
+        }
+    });
+    Dxf {
+        font,
+        fill,
+        border,
+        num_fmt,
+        alignment: align,
+        protection: prot,
+        ..Default::default()
+    }
+}
+
+/// 표 스타일 요소 하나 (바이너리 BrtTableStyleElement, 레거시 TableStyleElement 공통).
+/// 종류 번호가 ST_TableStyleType 밖이면 버린다 (XML 에 쓸 수 있는 값이 없다)
+pub(crate) fn table_style_element(t: u32, size: u32, dxf: u32) -> Option<TableStyleElement> {
+    Some(TableStyleElement {
+        kind: TABLE_STYLE_TYPES.get(t as usize)?.to_string(),
+        size,
+        dxf_id: Some(dxf),
+    })
 }
 
 fn parse_styles(data: &[u8]) -> Styles {
@@ -558,7 +674,40 @@ fn parse_styles(data: &[u8]) -> Styles {
     for rec in biff12::records(data) {
         let mut r = Rd::new(rec.data);
         match rec.rtype {
-            507 => st.dxfs.push(parse_dxf(rec.data)),
+            507 => st.dxfs.push(parse_dxf(rec.data, false)),
+            508 => {
+                // BrtBeginTableStyles: cts u32, 기본 표 스타일 이름, 기본 피벗 스타일 이름 (XLWideString)
+                let _cts = r.u32();
+                st.table_styles = Some(TableStyles {
+                    default_table_style: r.wstr(),
+                    default_pivot_style: r.wstr(),
+                    styles: Vec::new(),
+                });
+            }
+            510 => {
+                // BrtBeginTableStyle: 플래그 u16 (0x02 피벗, 0x04 표), ctse u32, 이름
+                let (Some(flags), Some(_ctse), Some(name)) = (r.u16(), r.u32(), r.wstr()) else {
+                    continue;
+                };
+                st.table_styles
+                    .get_or_insert_with(Default::default)
+                    .styles
+                    .push(TableStyle {
+                        name,
+                        pivot: flags & 0x02 != 0,
+                        table: flags & 0x04 != 0,
+                        elements: Vec::new(),
+                    });
+            }
+            512 => {
+                // BrtTableStyleElement: 종류 u32, 줄무늬 폭 u32, 차등 서식 번호 u32
+                if let (Some(t), Some(size), Some(dxf)) = (r.u32(), r.u32(), r.u32())
+                    && let Some(e) = table_style_element(t, size, dxf)
+                    && let Some(ts) = st.table_styles.as_mut().and_then(|x| x.styles.last_mut())
+                {
+                    ts.elements.push(e);
+                }
+            }
             617 => in_cell_xfs = true,
             618 => in_cell_xfs = false,
             626 => in_style_xfs = true,
@@ -582,6 +731,10 @@ fn parse_styles(data: &[u8]) -> Styles {
                         bold: bls >= 700,
                         italic: grbit & 0x02 != 0,
                         strike: grbit & 0x08 != 0,
+                        outline: grbit & 0x10 != 0,
+                        shadow: grbit & 0x20 != 0,
+                        condense: grbit & 0x40 != 0,
+                        extend: grbit & 0x80 != 0,
                         underline: match uls {
                             0 => None,
                             1 => Some("single".into()),
@@ -617,16 +770,46 @@ fn parse_styles(data: &[u8]) -> Styles {
                 }
             }
             45 => {
+                // BrtFill: fls u32, 무늬 색, 배경색, 그라데이션 종류 u32 (0 직선, 1 경로), 각도·왼쪽·오른쪽·위·아래
+                // f64, 정지점 수 u32 + 정지점마다 BrtColor + 위치 f64. fls 0x28 이면 그라데이션 (한셀 확인:
+                // 그라데이션 대조 실험)
                 let fill = (|| -> Option<Fill> {
                     let fls = r.u32()? as usize;
                     let fg = color(&mut r)?;
                     let bg = color(&mut r)?;
-                    let gradient = r.u32()? != 0;
+                    // [MS-XLSB] fls 가 0x28 이 아니면 그라데이션 칸들은 0 이고 무시한다 — 무늬 채우기는 여기서 끝
+                    if fls != 0x28 {
+                        return Some(Fill {
+                            pattern_type: PATTERNS.get(fls).map(|s| s.to_string()),
+                            fg_color: (fls != 0).then_some(fg).flatten(),
+                            bg_color: (fls != 0).then_some(bg).flatten(),
+                            gradient: None,
+                        });
+                    }
+                    let ty = r.u32()?;
+                    let mut g = GradientFill {
+                        path: ty == 1,
+                        degree: r.f64()?,
+                        left: r.f64()?,
+                        right: r.f64()?,
+                        top: r.f64()?,
+                        bottom: r.f64()?,
+                        stops: Vec::new(),
+                    };
+                    let n = r.u32()?;
+                    for _ in 0..n.min(256) {
+                        // 잘린 정지점은 버리고 읽은 데까지 남긴다
+                        let (Some(c), Some(position)) = (color(&mut r), r.f64()) else {
+                            break;
+                        };
+                        g.stops.push(GradientStop {
+                            position,
+                            color: c.unwrap_or_default(),
+                        });
+                    }
                     Some(Fill {
-                        pattern_type: PATTERNS.get(fls).map(|s| s.to_string()),
-                        fg_color: (fls != 0).then_some(fg).flatten(),
-                        bg_color: (fls != 0).then_some(bg).flatten(),
-                        gradient,
+                        gradient: Some(g),
+                        ..Default::default()
                     })
                 })();
                 st.fills.push(fill.unwrap_or_default());
@@ -654,6 +837,8 @@ fn parse_styles(data: &[u8]) -> Styles {
                         top,
                         bottom,
                         diagonal,
+                        vertical: None,
+                        horizontal: None,
                         diagonal_down: flags & 0x01 != 0,
                         diagonal_up: flags & 0x02 != 0,
                     })
@@ -699,6 +884,8 @@ fn parse_styles(data: &[u8]) -> Styles {
                             locked: Some(flags & 0x1000 != 0),
                             hidden: Some(flags & 0x2000 != 0),
                         }),
+                        // BrtXF flags 0x8000 f123Prefix (= quotePrefix)
+                        quote_prefix: flags & 0x8000 != 0,
                         hancom: None,
                     })
                 })()
@@ -710,13 +897,22 @@ fn parse_styles(data: &[u8]) -> Styles {
                 }
             }
             48 => {
-                if let (Some(ixf), Some(flags), Some(builtin), Some(_lvl), Some(name)) =
+                // BrtStyle: ixf u32, grbitObj1 u16 (0x01 fBuiltIn), iStyBuiltIn u8, iLevel u8 (0xFF 없음), 이름.
+                // 한셀은 모든 스타일에 fBuiltIn 을 켜고, 사용자 스타일에는 앞 스타일의 내장 번호를 그대로 남긴다 (관측).
+                // 그래서 같은 (번호, 수준)이 이미 나왔으면 사용자 스타일로 본다 (Excel 도 내장 번호 중복을 허용하지 않는다).
+                if let (Some(ixf), Some(flags), Some(builtin), Some(lvl), Some(name)) =
                     (r.u32(), r.u16(), r.u8(), r.u8(), r.wstr())
                 {
+                    let i_level = (lvl != 0xFF).then_some(lvl as u32);
+                    let dup = st
+                        .cell_styles
+                        .iter()
+                        .any(|c| c.builtin_id == Some(builtin as u32) && c.i_level == i_level);
                     st.cell_styles.push(NamedStyle {
                         name,
                         xf_id: ixf,
-                        builtin_id: (flags & 1 != 0).then_some(builtin as u32),
+                        builtin_id: (flags & 1 != 0 && !dup).then_some(builtin as u32),
+                        i_level,
                     });
                 }
             }
@@ -975,6 +1171,7 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
             let ctx = Context {
                 xti_sheets: &xti_sheets,
                 names: &name_list,
+                xti_names: &[],
                 base: CellRef::default(),
                 xlsb: true,
                 row_shift: 0,
@@ -1200,6 +1397,7 @@ fn read_sheet(
                         let ctx = Context {
                             xti_sheets,
                             names,
+                            xti_names: &[],
                             base,
                             xlsb: true,
                             row_shift: 0,
@@ -1310,6 +1508,7 @@ fn read_sheet(
                     let ctx = Context {
                         xti_sheets,
                         names,
+                        xti_names: &[],
                         base,
                         xlsb: true,
                         row_shift: 0,
@@ -1619,6 +1818,7 @@ fn read_sheet(
                 let ctx = Context {
                     xti_sheets,
                     names,
+                    xti_names: &[],
                     base: at,
                     xlsb: true,
                     row_shift: 0,
@@ -1658,6 +1858,7 @@ fn read_sheet(
                         let ctx = Context {
                             xti_sheets,
                             names,
+                            xti_names: &[],
                             base: cell.r,
                             xlsb: true,
                             row_shift: 0,
@@ -1715,4 +1916,95 @@ fn read_sheet(
     let _ = bad;
     sheet.cells.sort_by_key(|c| (c.r.row, c.r.col));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// XFProp 하나: 종류 u16, 크기 u16 (머리 4바이트 포함), 값
+    fn prop(ty: u16, v: &[u8]) -> Vec<u8> {
+        let mut b = ty.to_le_bytes().to_vec();
+        b.extend_from_slice(&((v.len() + 4) as u16).to_le_bytes());
+        b.extend_from_slice(v);
+        b
+    }
+
+    /// BrtDXF: 플래그 u16, 예약 u16, cprops u16, XFProp 들
+    fn dxf(props: &[Vec<u8>]) -> Vec<u8> {
+        let mut b = vec![0, 0, 0, 0];
+        b.extend_from_slice(&(props.len() as u16).to_le_bytes());
+        for p in props {
+            b.extend_from_slice(p);
+        }
+        b
+    }
+
+    #[test]
+    fn dxf_props_follow_xlsb_numbers() {
+        let d = parse_dxf(
+            &dxf(&[
+                // 밑줄 이중, 기울임, 취소선, 위 첨자, 14 pt (1/20 pt)
+                prop(0x1A, &[2, 0]),
+                prop(0x1C, &[1]),
+                prop(0x1D, &[1]),
+                prop(0x1B, &[1, 0]),
+                prop(0x24, &280u32.to_le_bytes()),
+                // 안쪽 세로 선: 점선, 파랑 / 왼쪽: 선 없음, 자동 색(한셀 표지 FF FF FF DF)
+                prop(0x0B, &[5, 0, 0, 0, 0, 0, 0xFF, 0xFF, 4, 0]),
+                prop(0x08, &[1, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xDF, 0, 0]),
+            ]),
+            false,
+        );
+        let f = d.font.unwrap();
+        assert_eq!(f.underline.as_deref(), Some("double"));
+        assert!(f.italic && f.strike);
+        assert_eq!(f.vert_align.as_deref(), Some("superscript"));
+        assert_eq!(f.size, Some(14.0));
+        let b = d.border.unwrap();
+        let v = b.vertical.unwrap();
+        assert_eq!(v.style.as_deref(), Some("dotted"));
+        assert_eq!(v.color.unwrap().rgb.as_deref(), Some("ff0000ff"));
+        let l = b.left.unwrap();
+        assert_eq!(l.style, None);
+        assert!(l.color.unwrap().auto);
+        assert!(b.top.is_none());
+        // 레거시 DXF 는 크기가 1/100 pt
+        let d = parse_dxf(&dxf(&[prop(0x24, &1400u32.to_le_bytes())]), true);
+        assert_eq!(d.font.unwrap().size, Some(14.0));
+    }
+
+    #[test]
+    fn dxf_gradient_props() {
+        let mut g = 1u32.to_le_bytes().to_vec(); // 경로
+        for v in [0.0f64, 0.2, 0.8, 0.1, 0.9] {
+            g.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut stop = vec![0, 0];
+        stop.extend_from_slice(&1.0f64.to_le_bytes());
+        stop.extend_from_slice(&[5, 0, 0, 0, 0x44, 0x72, 0xC4, 0xFF]);
+        let d = parse_dxf(
+            &dxf(&[prop(0x00, &[0x28]), prop(0x03, &g), prop(0x04, &stop)]),
+            false,
+        );
+        let g = d.fill.unwrap().gradient.unwrap();
+        assert!(g.path);
+        assert_eq!((g.left, g.right, g.top, g.bottom), (0.2, 0.8, 0.1, 0.9));
+        assert_eq!(g.stops.len(), 1);
+        assert_eq!(g.stops[0].position, 1.0);
+        assert_eq!(g.stops[0].color.rgb.as_deref(), Some("ff4472c4"));
+    }
+
+    #[test]
+    fn table_style_element_names() {
+        assert_eq!(
+            table_style_element(5, 2, 20).unwrap().kind,
+            "firstRowStripe"
+        );
+        assert_eq!(
+            table_style_element(26, 1, 18).unwrap().kind,
+            "pageFieldLabels"
+        );
+        assert!(table_style_element(99, 1, 0).is_none());
+    }
 }

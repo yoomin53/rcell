@@ -5,9 +5,10 @@
 
 //! 수식 함수 번호 표.
 //!
-//! 0–367 번은 공개 명세 [MS-XLS] 2.5.198.17 (Ftab) 의 BIFF8 번호와 같다.
-//! 그 이후 번호는 한셀이 확장한 것으로, 한셀이 저장한 파일과 XML 형식 결과를
-//! 대조해 확인했다 (`docs/format/cell-legacy.md`).
+//! 0–367 번은 공개 명세 [MS-XLS] 2.5.198.17 (Ftab) 의 BIFF8 번호와 같다. 368–484 는 [MS-XLSB] Ftab 의
+//! Excel 2007 확장 번호로, 바이너리 .cell 이 그대로 쓴다. 레거시 .cell 은 이 함수들을 BIFF8 처럼 사용자
+//! 함수(255)와 이름(`_xlfn.…` NAME 또는 추가 기능 EXTERNNAME)으로 쓰고, 480(IFERROR)만 번호로 쓴다.
+//! 1904 SUBTOTALA, 1907 CONVERTK 는 한셀 전용 번호다 (함수 대조 실험, `docs/format/cell-legacy.md`).
 
 /// 함수 이름과 고정 인자 수 (`None` 이면 가변 인자 — PtgFuncVar 로만 쓰인다).
 pub fn lookup(index: u16) -> Option<(&'static str, Option<u8>)> {
@@ -259,8 +260,128 @@ pub fn lookup(index: u16) -> Option<(&'static str, Option<u8>)> {
         365 => ("VARPA", -1),
         366 => ("STDEVA", -1),
         367 => ("VARA", -1),
-        // ---- 한셀 확장 번호 (관측) ----
+        // ---- Excel 2007 확장 번호 ([MS-XLSB] Ftab, 바이너리 .cell 이 그대로 쓴다; 한셀 확인: 바이너리 대조 실험) ----
+        150 => ("CALL", -1),
+        368 => ("BAHTTEXT", 1),
+        369 => ("THAIDAYOFWEEK", 1),
+        370 => ("THAIDIGIT", 1),
+        371 => ("THAIMONTHOFYEAR", 1),
+        372 => ("THAINUMSOUND", 1),
+        373 => ("THAINUMSTRING", 1),
+        374 => ("THAISTRINGLENGTH", 1),
+        375 => ("ISTHAIDIGIT", 1),
+        376 => ("ROUNDBAHTDOWN", 1),
+        377 => ("ROUNDBAHTUP", 1),
+        378 => ("THAIYEAR", 1),
+        379 => ("RTD", -1),
+        380 => ("CUBEVALUE", -1),
+        381 => ("CUBEMEMBER", -1),
+        382 => ("CUBEMEMBERPROPERTY", 3),
+        383 => ("CUBERANKEDMEMBER", -1),
+        384 => ("HEX2BIN", -1),
+        385 => ("HEX2DEC", 1),
+        386 => ("HEX2OCT", -1),
+        387 => ("DEC2BIN", -1),
+        388 => ("DEC2HEX", -1),
+        389 => ("DEC2OCT", -1),
+        390 => ("OCT2BIN", -1),
+        391 => ("OCT2HEX", -1),
+        392 => ("OCT2DEC", 1),
+        393 => ("BIN2DEC", 1),
+        394 => ("BIN2OCT", -1),
+        395 => ("BIN2HEX", -1),
+        396 => ("IMSUB", 2),
+        397 => ("IMDIV", 2),
+        398 => ("IMPOWER", 2),
+        399 => ("IMABS", 1),
+        400 => ("IMSQRT", 1),
+        401 => ("IMLN", 1),
+        402 => ("IMLOG2", 1),
+        403 => ("IMLOG10", 1),
+        404 => ("IMSIN", 1),
+        405 => ("IMCOS", 1),
+        406 => ("IMEXP", 1),
+        407 => ("IMARGUMENT", 1),
+        408 => ("IMCONJUGATE", 1),
+        409 => ("IMAGINARY", 1),
+        410 => ("IMREAL", 1),
+        411 => ("COMPLEX", -1),
+        412 => ("IMSUM", -1),
+        413 => ("IMPRODUCT", -1),
+        414 => ("SERIESSUM", 4),
+        415 => ("FACTDOUBLE", 1),
+        416 => ("SQRTPI", 1),
+        417 => ("QUOTIENT", 2),
+        418 => ("DELTA", -1),
+        419 => ("GESTEP", -1),
+        420 => ("ISEVEN", 1),
+        421 => ("ISODD", 1),
+        422 => ("MROUND", 2),
+        423 => ("ERF", -1),
+        424 => ("ERFC", 1),
+        425 => ("BESSELJ", 2),
+        426 => ("BESSELK", 2),
+        427 => ("BESSELY", 2),
+        428 => ("BESSELI", 2),
+        429 => ("XIRR", -1),
+        430 => ("XNPV", 3),
+        431 => ("PRICEMAT", -1),
+        432 => ("YIELDMAT", -1),
+        433 => ("INTRATE", -1),
+        434 => ("RECEIVED", -1),
+        435 => ("DISC", -1),
+        436 => ("PRICEDISC", -1),
+        437 => ("YIELDDISC", -1),
+        438 => ("TBILLEQ", 3),
+        439 => ("TBILLPRICE", 3),
+        440 => ("TBILLYIELD", 3),
+        441 => ("PRICE", -1),
+        442 => ("YIELD", -1),
+        443 => ("DOLLARDE", 2),
+        444 => ("DOLLARFR", 2),
+        445 => ("NOMINAL", 2),
+        446 => ("EFFECT", 2),
+        447 => ("CUMPRINC", 6),
+        448 => ("CUMIPMT", 6),
+        449 => ("EDATE", 2),
+        450 => ("EOMONTH", 2),
+        451 => ("YEARFRAC", -1),
+        452 => ("COUPDAYBS", -1),
+        453 => ("COUPDAYS", -1),
+        454 => ("COUPDAYSNC", -1),
+        455 => ("COUPNCD", -1),
+        456 => ("COUPNUM", -1),
+        457 => ("COUPPCD", -1),
+        458 => ("DURATION", -1),
+        459 => ("MDURATION", -1),
+        460 => ("ODDLPRICE", -1),
+        461 => ("ODDLYIELD", -1),
+        462 => ("ODDFPRICE", -1),
+        463 => ("ODDFYIELD", -1),
+        464 => ("RANDBETWEEN", 2),
+        465 => ("WEEKNUM", -1),
+        466 => ("AMORDEGRC", -1),
+        467 => ("AMORLINC", -1),
+        468 => ("CONVERT", 3),
+        469 => ("ACCRINT", -1),
+        470 => ("ACCRINTM", -1),
+        471 => ("WORKDAY", -1),
+        472 => ("NETWORKDAYS", -1),
+        473 => ("GCD", -1),
+        474 => ("MULTINOMIAL", -1),
+        475 => ("LCM", -1),
+        476 => ("FVSCHEDULE", 2),
+        477 => ("CUBEKPIMEMBER", -1),
+        478 => ("CUBESET", -1),
+        479 => ("CUBESETCOUNT", 1),
         480 => ("IFERROR", 2),
+        481 => ("COUNTIFS", -1),
+        482 => ("SUMIFS", -1),
+        483 => ("AVERAGEIF", -1),
+        484 => ("AVERAGEIFS", -1),
+        // ---- 한셀 전용 번호 (관측: 바이너리 .cell) ----
+        1904 => ("SUBTOTALA", -1),
+        1907 => ("CONVERTK", 4),
         _ => return None,
     };
     Some((name, (argc >= 0).then_some(argc as u8)))
@@ -275,6 +396,9 @@ mod tests {
         assert_eq!(lookup(4), Some(("SUM", None)));
         assert_eq!(lookup(27), Some(("ROUND", Some(2))));
         assert_eq!(lookup(480), Some(("IFERROR", Some(2))));
+        assert_eq!(lookup(449), Some(("EDATE", Some(2))));
+        assert_eq!(lookup(482), Some(("SUMIFS", None)));
+        assert_eq!(lookup(1907), Some(("CONVERTK", Some(4))));
         assert_eq!(lookup(9999), None);
     }
 }

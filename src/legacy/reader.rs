@@ -16,13 +16,14 @@ use super::escher;
 use super::formula::{self, Context, Decoded};
 use crate::error::{Error, Result};
 use crate::model::{
-    Alignment, Anchor, AnchorKind, Border, BorderEdge, Cell, CellRange, CellRef, CellValue, CfRule,
-    Cfvo, ColInfo, Color, ColorScale, Comment, ConditionalFormat, DYNAMIC_FILTER_TYPES, DataBar,
-    DefinedName, DrawColor, DrawingPara, DrawingRun, ExternalLink, FILTER_OPERATORS, Fill,
-    FilterColumn, Font, Formula, FormulaKind, HancomFontExt, HancomXfExt, HeaderFooter, Hyperlink,
-    IconSet, Marker, NamedStyle, NumFmt, Outline, PageMargins, PageSetup, Paint, Pane, ParaShape,
-    Protection, RichText, RowInfo, SHEET_PROTECTION_FLAGS, Shape, ShapeKind, Sheet, SheetKind,
-    SheetProtection, SheetState, Styles, TextBody, TextRun, Workbook, WorkbookProtection, Xf,
+    AbstractNum, Alignment, Anchor, AnchorKind, Border, BorderEdge, Cell, CellRange, CellRef,
+    CellValue, CfRule, Cfvo, ColInfo, Color, ColorScale, Comment, ConditionalFormat,
+    DYNAMIC_FILTER_TYPES, DataBar, DefinedName, DrawColor, DrawingPara, DrawingRun, ExternalLink,
+    FILTER_OPERATORS, Fill, FilterColumn, Font, Formula, FormulaKind, GradientFill, GradientStop,
+    HancomFontExt, HancomXfExt, HeaderFooter, Hyperlink, IconSet, Marker, NamedStyle, NumFmt,
+    Outline, PageMargins, PageSetup, Paint, Pane, ParaShape, Protection, RichText, RowInfo,
+    SHEET_PROTECTION_FLAGS, Shape, ShapeKind, Sheet, SheetKind, SheetProtection, SheetState,
+    Styles, TableStyle, TableStyles, TextBody, TextRun, Workbook, WorkbookProtection, Xf,
 };
 use crate::vocab;
 
@@ -134,6 +135,232 @@ impl<'a> Rd<'a> {
     fn utf16(&mut self, cch: usize) -> Option<String> {
         Some(crate::text::utf16le(self.take(cch * 2)?))
     }
+}
+
+/// CF 레코드 DXFN 의 표준 부분 ([MS-XLS] DXFN) 에서 0x088D 표에 없을 수 있는 것들
+#[derive(Default)]
+struct Dxfn {
+    num_fmt: Option<String>,
+    alignment: Option<Alignment>,
+    protection: Option<Protection>,
+    /// CFEX 의 XFExtNoFRT 에만 있는 그라데이션
+    gradient: Option<GradientFill>,
+}
+
+/// DXFN: 플래그 u32 + u16, 그다음 플래그가 켠 블록만 순서대로 — 표시 형식(가변), 글꼴 118, 맞춤 8, 테두리 8,
+/// 무늬 4, 보호 2. 한컴 확장(글꼴 이름·RGB 색 등)은 표준 블록 뒤에 붙는다 (관측).
+fn parse_dxfn(d: &[u8]) -> Option<Dxfn> {
+    let mut r = Rd::new(d);
+    let flags = r.u32()?;
+    let flags2 = r.u16()?;
+    let mut out = Dxfn::default();
+    if flags & 0x0200_0000 != 0 {
+        if flags2 & 0x0001 != 0 {
+            // DXFNumUsr: cb u16 (자신 포함), cch u16, 플래그 u8, 문자 (플래그 0 이면 1바이트씩)
+            let cb = r.u16()? as usize;
+            let mut nr = Rd::new(r.take(cb.checked_sub(2)?)?);
+            let cch = nr.u16()? as usize;
+            let wide = nr.u8()? & 0x01 != 0;
+            let code = if wide {
+                nr.utf16(cch)
+            } else {
+                nr.take(cch).map(|b| b.iter().map(|&c| c as char).collect())
+            };
+            out.num_fmt = code.filter(|c| !c.is_empty());
+        } else {
+            r.take(2)?;
+        }
+    }
+    if flags & 0x0400_0000 != 0 {
+        r.take(118)?;
+    }
+    if flags & 0x0800_0000 != 0 {
+        // DXFALC: 가로 3비트·줄 바꿈·세로 3비트, 회전 u8, 들여쓰기 4비트·축소·병합·읽기 순서 2비트, 예약 u8,
+        // iIndent i32. 플래그의 낮은 비트들이 '지정 안 함'(Ninch) 이다.
+        // 한셀은 가로·세로 맞춤 번호를 표준보다 1 크게 쓴다 — 가로 일반 1 … 가운데 맞춤 7, 분산은 8 이 3비트에서
+        // 넘쳐 0, 세로 위쪽 1 … 분산 5 (맞춤 대조 실험). 셀 서식(XF) 의 맞춤은 표준 그대로다
+        let b = r.take(8)?;
+        let mut a = Alignment::default();
+        if flags & 0x01 == 0 {
+            a.horizontal = H_ALIGN
+                .get(((b[0] & 7) as usize + 7) % 8)
+                .map(|s| s.to_string());
+        }
+        if flags & 0x02 == 0 {
+            a.vertical = (((b[0] >> 4) & 7) as usize)
+                .checked_sub(1)
+                .and_then(|v| V_ALIGN.get(v))
+                .map(|s| s.to_string());
+        }
+        if flags & 0x04 == 0 {
+            a.wrap_text = b[0] & 0x08 != 0;
+        }
+        if flags & 0x08 == 0 {
+            a.text_rotation = Some(b[1] as i32);
+        }
+        if flags & 0x20 == 0 {
+            a.indent = Some((b[2] & 0x0F) as u32).filter(|&i| i != 0);
+        }
+        if flags & 0x40 == 0 {
+            a.shrink_to_fit = b[2] & 0x10 != 0;
+        }
+        if flags & 0x8000_0000 == 0 {
+            a.reading_order = Some(((b[2] >> 6) & 3) as u32).filter(|&o| o != 0);
+        }
+        out.alignment = Some(a);
+    }
+    if flags & 0x1000_0000 != 0 {
+        r.take(8)?;
+    }
+    if flags & 0x2000_0000 != 0 {
+        r.take(4)?;
+    }
+    if flags & 0x4000_0000 != 0 {
+        let p = r.u16()?;
+        out.protection = Some(Protection {
+            locked: (flags & 0x0100 == 0).then_some(p & 0x01 != 0),
+            hidden: (flags & 0x0200 == 0).then_some(p & 0x02 != 0),
+        });
+    }
+    Some(out)
+}
+
+/// ExtPropGradientFill ([MS-XLS] XFExtGradient): 종류 u32 (0 직선, 1 경로), 각도·왼쪽·오른쪽·위·아래 f64,
+/// 정지점 수 u32, 정지점마다 색 종류 u16 + 값 u32 + 위치 f64 + 밝기 f64 (한셀 확인: 그라데이션 대조 실험)
+fn ext_gradient(r: &mut Rd) -> Option<GradientFill> {
+    let ty = r.u32()?;
+    let mut g = GradientFill {
+        path: ty == 1,
+        degree: r.f64()?,
+        left: r.f64()?,
+        right: r.f64()?,
+        top: r.f64()?,
+        bottom: r.f64()?,
+        stops: Vec::new(),
+    };
+    let n = r.u32()?;
+    for _ in 0..n.min(256) {
+        let kind = r.u16()?;
+        let v = r.u32()?;
+        let position = r.f64()?;
+        let tint = r.f64()?;
+        let tint = (tint != 0.0).then_some(tint);
+        let color = match kind {
+            0 => Color {
+                auto: true,
+                ..Default::default()
+            },
+            1 => Color {
+                indexed: Some(v),
+                tint,
+                ..Default::default()
+            },
+            3 => Color {
+                theme: Some(v),
+                tint,
+                ..Default::default()
+            },
+            _ => Color {
+                rgb: Some(format!(
+                    "ff{:02x}{:02x}{:02x}",
+                    v & 0xFF,
+                    (v >> 8) & 0xFF,
+                    (v >> 16) & 0xFF
+                )),
+                tint,
+                ..Default::default()
+            },
+        };
+        g.stops.push(GradientStop { position, color });
+    }
+    Some(g)
+}
+
+/// CFEX 의 DXFN12 안 XFExtNoFRT (예약 u16 0, 0xFFFF, 0, cexts u16, ExtProp 들) 에서 그라데이션(종류 6) 을 찾는다.
+/// 앞의 DXFN 은 한컴 확장 길이를 알 수 없어 머리 모양으로 찾는다
+fn cfex_gradient(d: &[u8]) -> Option<GradientFill> {
+    (0..d.len().saturating_sub(12)).find_map(|i| {
+        let w = &d[i..];
+        if w[..6] != [0, 0, 0xFF, 0xFF, 0, 0] {
+            return None;
+        }
+        let n = u16::from_le_bytes([w[6], w[7]]);
+        if n == 0 || n > 32 {
+            return None;
+        }
+        let mut r = Rd::new(&w[8..]);
+        for _ in 0..n {
+            let ty = r.u16()?;
+            let cb = r.u16()? as usize;
+            let v = r.take(cb.checked_sub(4)?)?;
+            if ty == 6 {
+                return ext_gradient(&mut Rd::new(v));
+            }
+        }
+        None
+    })
+}
+
+/// CF 레코드의 차등 서식 번호: 수식 바로 앞 u32. DXFN 에 테두리 블록이 있으면 번호와 수식 사이에 한컴 안쪽 선
+/// 확장이 온다 — 가로·세로 선마다 있음 u8, 있으면 선 종류 u8 (1–13) + RGBA 4바이트, 곧 2·7·12 바이트 (관측:
+/// 안쪽 선 대조 실험). 검은 선은 색 바이트가 모두 0 이라 더 짧은 (틀린) 나눔도 구조가 맞는다 — 틀린 후보는 언제나
+/// 참 후보보다 짧으므로, 번호가 가리키는 차등 서식(0x088D)의 안쪽 선과 맞는 후보 중 가장 긴 것, 없으면 가장 긴
+/// 후보를 고른다.
+fn cf_dxf_id(d: &[u8], fstart: usize, has_border: bool, dxfs: &[crate::model::Dxf]) -> Option<u32> {
+    let id_at = |end: usize| -> Option<u32> {
+        let x = d.get(end.checked_sub(4)?..end)?;
+        Some(u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+    };
+    if !has_border {
+        return id_at(fstart);
+    }
+    let ndxf = dxfs.len();
+    let plausible =
+        |id: u32| id == u32::MAX || (id as usize) < ndxf || (ndxf == 0 && id < 0x1_0000);
+    // 구조가 맞는 후보: (번호, [가로, 세로] 선 종류)
+    let cands: Vec<(u32, [Option<u8>; 2])> = [2usize, 7, 12]
+        .into_iter()
+        .filter_map(|l| {
+            let ext = d.get(fstart.checked_sub(l)?..fstart)?;
+            let mut i = 0;
+            let mut lines = [None; 2];
+            for line in &mut lines {
+                match *ext.get(i)? {
+                    0 => i += 1,
+                    1 => {
+                        let ty = *ext.get(i + 1)?;
+                        if !(1..=13).contains(&ty) {
+                            return None;
+                        }
+                        *line = Some(ty);
+                        i += 6;
+                    }
+                    _ => return None,
+                }
+            }
+            if i != l {
+                return None;
+            }
+            Some((id_at(fstart - l).filter(|&id| plausible(id))?, lines))
+        })
+        .collect();
+    let style = |e: &Option<BorderEdge>| {
+        e.as_ref()
+            .and_then(|e| e.style.as_deref())
+            .and_then(|s| BORDER_STYLES.iter().position(|x| *x == s))
+            .map(|p| p as u8)
+    };
+    let agrees = |c: &&(u32, [Option<u8>; 2])| {
+        dxfs.get(c.0 as usize)
+            .and_then(|x| x.border.as_ref())
+            .is_some_and(|b| style(&b.horizontal) == c.1[0] && style(&b.vertical) == c.1[1])
+    };
+    cands
+        .iter()
+        .rev()
+        .find(agrees)
+        .or(cands.last())
+        .map(|c| c.0)
 }
 
 fn bad(what: &str) -> Error {
@@ -250,6 +477,10 @@ fn parse_font(data: &[u8], palette: &[u32]) -> Option<Font> {
         bold: bls >= 700,
         italic: grbit & 0x02 != 0,
         strike: grbit & 0x08 != 0,
+        outline: grbit & 0x10 != 0,
+        shadow: grbit & 0x20 != 0,
+        condense: grbit & 0x40 != 0,
+        extend: grbit & 0x80 != 0,
         underline: match uls {
             0 => None,
             1 => Some("single".into()),
@@ -338,6 +569,9 @@ fn parse_font_ext(mut e: Rd, font: &mut Font) -> Option<HancomFontExt> {
     }
     if outline != 0 {
         h.outline_type = pick(vocab::OUTLINE_TYPE, outline);
+        // 한셀은 외곽선 종류가 있으면 (실선이 아니어도) ECMA 외곽선(x:outline)도 켠다.
+        // FONT 의 grbit 0x10 은 실선일 때만 켜져 있다 (글꼴 대조 실험)
+        font.outline = true;
     }
     if shadow != 0 {
         h.shadow_type = pick(vocab::SHADOW_TYPE, shadow);
@@ -481,6 +715,8 @@ fn parse_xf(data: &[u8], palette: &[u32]) -> Option<XfParts> {
         top: edge((border1 >> 8) & 0xF, border2 & 0x7F, ext[2]),
         bottom: edge((border1 >> 12) & 0xF, (border2 >> 7) & 0x7F, ext[4]),
         diagonal: edge((border2 >> 21) & 0xF, (border2 >> 14) & 0x7F, ext[6]),
+        vertical: None,
+        horizontal: None,
         diagonal_up: grbit_diag & 0x2 != 0,
         diagonal_down: grbit_diag & 0x1 != 0,
     };
@@ -500,7 +736,7 @@ fn parse_xf(data: &[u8], palette: &[u32]) -> Option<XfParts> {
                 .filter(|c| c.rgb.is_some())
                 .or_else(|| palette_color(icv_fore, palette)),
             bg_color: colorref(ext[0]).or_else(|| palette_color(icv_back, palette)),
-            gradient: false,
+            gradient: None,
         }
     };
 
@@ -521,6 +757,8 @@ fn parse_xf(data: &[u8], palette: &[u32]) -> Option<XfParts> {
             locked: Some(prot & 0x0001 != 0),
             hidden: Some(prot & 0x0002 != 0),
         }),
+        // BIFF8 XF: 0x0004 fStyle, 0x0008 f123Prefix (= quotePrefix)
+        quote_prefix: prot & 0x0008 != 0,
         hancom: None,
     };
     Some(XfParts {
@@ -629,15 +867,21 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
     let mut fonts: Vec<Font> = Vec::new();
     let mut formats: Vec<NumFmt> = Vec::new();
     let mut xfs: Vec<XfParts> = Vec::new();
-    let mut styles_named: Vec<(u16, String, Option<u32>)> = Vec::new();
+    let mut styles_named: Vec<(u16, String, Option<u32>, Option<u32>)> = Vec::new();
     let mut sheets: Vec<BoundSheet> = Vec::new();
     let mut sst: Vec<RichText> = Vec::new();
     let mut supbooks: Vec<Book> = Vec::new();
+    // SUPBOOK 별 EXTERNNAME (추가 기능 함수 이름, 외부 문서의 이름)
+    let mut supbook_names: Vec<Vec<String>> = Vec::new();
     let mut xti: Vec<(u16, u16, u16)> = Vec::new();
     let mut pending_names: Vec<PendingName> = Vec::new();
     let mut parashapes: Vec<ParaShape> = Vec::new();
-    let mut dxf_num_fmts: Vec<(u32, String)> = Vec::new();
+    let mut dxf_extra: Vec<(u32, Dxfn)> = Vec::new();
     let mut dxfs: Vec<crate::model::Dxf> = Vec::new();
+    let mut table_styles: Option<TableStyles> = None;
+    let mut abstract_nums: Vec<AbstractNum> = Vec::new();
+    // XFEXT 의 그라데이션 채우기 (XF 번호별)
+    let mut xf_gradients: HashMap<u16, GradientFill> = HashMap::new();
     let mut para_refs: Vec<u32> = Vec::new();
     // MSODRAWINGGROUP: OfficeArtDggContainer (그림 저장소)
     let mut dgg: Vec<u8> = Vec::new();
@@ -681,7 +925,92 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
             0x088D => {
                 // 차등 서식 표 (한컴 DXF FRT): FRT 머리 12바이트 뒤 XLSB BrtDXF 와 같은 XFProp 목록
                 if let Some(x) = d.get(12..) {
-                    dxfs.push(crate::binary::reader::parse_dxf(x));
+                    dxfs.push(crate::binary::reader::parse_dxf(x, true));
+                }
+            }
+            0x088E => {
+                // TABLESTYLES (FRT 머리 12): cts u32 (기본 제공 144 + 사용자 정의 수), 기본 표·피벗 스타일 이름
+                // 길이 u16 ×2, 이름 두 개 (UTF-16, 플래그 바이트 없음)
+                r.take(12);
+                let _cts = r.u32();
+                let (Some(n1), Some(n2)) = (r.u16(), r.u16()) else {
+                    continue;
+                };
+                table_styles = Some(TableStyles {
+                    default_table_style: r.utf16(n1 as usize),
+                    default_pivot_style: r.utf16(n2 as usize),
+                    styles: Vec::new(),
+                });
+            }
+            0x088F => {
+                // TABLESTYLE (FRT 머리 12): 플래그 u16 (0x02 피벗, 0x04 표), ctse u32, 이름 길이 u16, 이름
+                r.take(12);
+                let (Some(flags), Some(_ctse), Some(n)) = (r.u16(), r.u32(), r.u16()) else {
+                    continue;
+                };
+                let name = r.utf16(n as usize).unwrap_or_default();
+                table_styles
+                    .get_or_insert_with(Default::default)
+                    .styles
+                    .push(TableStyle {
+                        name,
+                        pivot: flags & 0x02 != 0,
+                        table: flags & 0x04 != 0,
+                        elements: Vec::new(),
+                    });
+            }
+            0x0890 => {
+                // TABLESTYLEELEMENT (FRT 머리 12): 종류 u32, 줄무늬 폭 u32, 차등 서식(0x088D 순서) 번호 u32
+                r.take(12);
+                if let (Some(t), Some(size), Some(dxf)) = (r.u32(), r.u32(), r.u32())
+                    && let Some(e) = crate::binary::reader::table_style_element(t, size, dxf)
+                    && let Some(ts) = table_styles.as_mut().and_then(|x| x.styles.last_mut())
+                {
+                    ts.elements.push(e);
+                }
+            }
+            0xA020 => {
+                // 한컴 문단 번호 정의: 종류 u8, 시작 번호 u16, 길이 u16, 플래그 u8, 번호 모양 UTF-16 (`^1.`).
+                // XML 의 abstractNumType 은 종류 + 1 (관측: 0 → 1), lvlText 는 `^` 를 `%5e` 로 쓴다
+                let (Some(kind), Some(start), Some(n), Some(_flag)) =
+                    (r.u8(), r.u16(), r.u16(), r.u8())
+                else {
+                    continue;
+                };
+                let text = r.utf16(n as usize).unwrap_or_default();
+                abstract_nums.push(AbstractNum {
+                    num_type: kind as u32 + 1,
+                    id: abstract_nums.len() as u32,
+                    start_num: start as u32,
+                    lvl_text: text.replace('%', "%25").replace('^', "%5e"),
+                });
+            }
+            0x087D => {
+                // XFEXT (FRT 머리 12): 예약 u16, ixfe u16, 예약 u16, cexts u16, ExtProp(종류 u16, 크기 u16(머리 포함),
+                // 값) × cexts. 한셀은 그라데이션 채우기(종류 6)만 여기에 쓴다 (색은 XF 의 한컴 확장에 있다)
+                r.take(12);
+                let (Some(_), Some(ixfe), Some(_), Some(n)) = (r.u16(), r.u16(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                for _ in 0..n {
+                    let (Some(ty), Some(cb)) = (r.u16(), r.u16()) else {
+                        break;
+                    };
+                    let Some(v) = r.take((cb as usize).saturating_sub(4)) else {
+                        break;
+                    };
+                    if ty == 6
+                        && let Some(g) = ext_gradient(&mut Rd::new(v))
+                    {
+                        xf_gradients.insert(ixfe, g);
+                    }
+                }
+            }
+            0xA101 => {
+                // 한셀 계산 엔진 번호 (XML 의 calcPr/@hs:hclCalcId). 1 은 값이 없는 것으로 본다
+                if let Some(v) = r.u32().filter(|&v| v != 1) {
+                    wb.hancom.calc_id = Some(v);
                 }
             }
             0x0031 => {
@@ -706,17 +1035,20 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
             0x0293 => {
                 let ixfe = r.u16().unwrap_or(0);
                 if ixfe & 0x8000 != 0 {
+                    // 내장: istyBuiltIn u8, iLevel u8 (0xFF 없음)
                     let builtin = r.u8().unwrap_or(0);
+                    let lvl = r.u8().unwrap_or(0xFF);
                     styles_named.push((
                         ixfe & 0x0FFF,
                         builtin_style_name(builtin),
                         Some(builtin as u32),
+                        (lvl != 0xFF && matches!(builtin, 1 | 2)).then_some(lvl as u32),
                     ));
                 } else {
                     let cch = r.u16().unwrap_or(0) as usize;
                     let _flag = r.u8();
                     let name = r.utf16(cch).unwrap_or_default();
-                    styles_named.push((ixfe & 0x0FFF, name, None));
+                    styles_named.push((ixfe & 0x0FFF, name, None, None));
                 }
             }
             0x0085 => {
@@ -755,6 +1087,7 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 // SUPBOOK: 0x0401 = 이 문서, 0x3A01 = 추가 기능, 그 밖 = 외부 문서 (경로 + 시트 이름)
                 let ctab = r.u16().unwrap_or(0);
                 let marker = r.u16().unwrap_or(0);
+                supbook_names.push(Vec::new());
                 supbooks.push(match marker {
                     0x0401 => Book::Internal,
                     0x3A01 => Book::AddIn,
@@ -780,6 +1113,16 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                         Book::External(wb.external_links.len())
                     }
                 });
+            }
+            0x0023 => {
+                // EXTERNNAME (한컴): 옵션 u16, 예약 u32, cch u16, UTF-16 이름 (BIFF8 과 달리 플래그 바이트 없음).
+                // 바로 앞 SUPBOOK 의 이름 목록에 붙는다 — PtgNameX 의 이름 번호(1부터)가 가리킨다
+                r.take(6);
+                let cch = r.u16().unwrap_or(0) as usize;
+                let name = r.utf16(cch).unwrap_or_default();
+                if let Some(v) = supbook_names.last_mut() {
+                    v.push(name);
+                }
             }
             0x0017 => {
                 let n = r.u16().unwrap_or(0);
@@ -823,6 +1166,8 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         fonts,
         num_fmts: formats,
         dxfs,
+        table_styles,
+        abstract_nums,
         ..Default::default()
     };
     let mut fill_index: Vec<(String, u32)> = Vec::new();
@@ -833,7 +1178,13 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
             styles.cell_style_xfs.push(parts.raw.xf.clone());
         }
     }
-    for (i, parts) in xfs.into_iter().enumerate() {
+    for (i, mut parts) in xfs.into_iter().enumerate() {
+        if let Some(g) = xf_gradients.remove(&(i as u16)) {
+            parts.fill = Fill {
+                gradient: Some(g),
+                ..Default::default()
+            };
+        }
         let fill_key = format!("{:?}", parts.fill);
         let fill_id = match fill_index.iter().find(|(k, _)| *k == fill_key) {
             Some((_, id)) => *id,
@@ -878,10 +1229,11 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
     }
     styles.cell_styles = styles_named
         .into_iter()
-        .map(|(ixfe, name, builtin)| NamedStyle {
+        .map(|(ixfe, name, builtin, i_level)| NamedStyle {
             name,
             xf_id: style_map.get(&ixfe).copied().unwrap_or(0),
             builtin_id: builtin,
+            i_level,
         })
         .collect();
     wb.styles = styles;
@@ -914,6 +1266,20 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
             ))
         })
         .collect();
+    // XTI 별 외부 이름: 추가 기능 함수는 이름 그대로, 외부 문서 이름은 `[n]!이름`
+    let xti_names: Vec<Vec<String>> = xti
+        .iter()
+        .map(|&(book, _, _)| {
+            let names = supbook_names
+                .get(book as usize)
+                .cloned()
+                .unwrap_or_default();
+            match supbooks.get(book as usize) {
+                Some(&Book::External(n)) => names.iter().map(|x| format!("[{n}]!{x}")).collect(),
+                _ => names,
+            }
+        })
+        .collect();
     let name_list: Vec<String> = pending_names.iter().map(|n| n.name.clone()).collect();
 
     // 수식이 없는 NAME 은 정의되지 않은 이름(=XYZ)이나 _xlfn. 함수 이름 자리다.
@@ -924,6 +1290,7 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
             let ctx = Context {
                 xti_sheets: &xti_sheets,
                 names: &name_list,
+                xti_names: &xti_names,
                 base: CellRef::default(),
                 xlsb: false,
                 row_shift: 0,
@@ -970,19 +1337,20 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 .iter()
                 .position(|r| r.offset == bs.offset as usize)
                 .ok_or_else(|| bad("BOUNDSHEET 위치에 BOF 가 없습니다"))?;
-            let ctx_sheets = (&xti_sheets, &name_list);
+            let ctx_sheets = (&xti_sheets, &name_list, &xti_names);
             read_sheet(
                 &recs[start..],
                 &mut sheet,
                 &wb,
                 &cell_map,
                 ctx_sheets,
-                &mut dxf_num_fmts,
+                &mut dxf_extra,
             )?;
         }
         wb.sheets.push(sheet);
     }
-    // CF 의 DXFN 에만 남은 차등 서식 표시 형식 (한셀은 0x088D 표에 쓰지 않는다)
+    // CF 의 DXFN 에만 남은 차등 서식 표시 형식·맞춤, 그리고 보호 (한셀은 0x088D 표에 표시 형식·맞춤을 쓰지 않고
+    // 보호 값은 틀리게 쓴다 — 차등 서식 대조 실험)
     let mut next_id = wb
         .styles
         .num_fmts
@@ -992,12 +1360,24 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         .unwrap_or(163)
         .max(163)
         + 1;
-    for (i, code) in dxf_num_fmts {
-        if let Some(d) = wb.styles.dxfs.get_mut(i as usize)
+    for (i, x) in dxf_extra {
+        let Some(d) = wb.styles.dxfs.get_mut(i as usize) else {
+            continue;
+        };
+        if let Some(code) = x.num_fmt
             && d.num_fmt.is_none()
         {
             d.num_fmt = Some(NumFmt { id: next_id, code });
             next_id += 1;
+        }
+        if d.alignment.is_none() {
+            d.alignment = x.alignment;
+        }
+        if x.protection.is_some() {
+            d.protection = x.protection;
+        }
+        if x.gradient.is_some() {
+            d.fill.get_or_insert_with(Default::default).gradient = x.gradient;
         }
     }
     prune_external_links(&mut wb);
@@ -1121,8 +1501,8 @@ fn read_sheet(
     sheet: &mut Sheet,
     wb: &Workbook,
     cell_map: &HashMap<u16, u32>,
-    (xti_sheets, names): (&Vec<Option<String>>, &Vec<String>),
-    dxf_num_fmts: &mut Vec<(u32, String)>,
+    (xti_sheets, names, xti_names): (&Vec<Option<String>>, &Vec<String>, &Vec<Vec<String>>),
+    dxf_extra: &mut Vec<(u32, Dxfn)>,
 ) -> Result<()> {
     let style = |ixfe: u16| cell_map.get(&ixfe).copied().unwrap_or(0);
     let mut pending_string_cell: Option<usize> = None;
@@ -1276,6 +1656,7 @@ fn read_sheet(
                             let ctx = Context {
                                 xti_sheets,
                                 names,
+                                xti_names,
                                 base: copy.r,
                                 xlsb: false,
                                 row_shift: (row - first) as i64,
@@ -1395,6 +1776,7 @@ fn read_sheet(
                 let ctx = Context {
                     xti_sheets,
                     names,
+                    xti_names,
                     base: at,
                     xlsb: false,
                     row_shift: 0,
@@ -1415,6 +1797,7 @@ fn read_sheet(
                                 let c = Context {
                                     xti_sheets,
                                     names,
+                                    xti_names,
                                     base: at,
                                     xlsb: false,
                                     row_shift: 0,
@@ -1471,6 +1854,7 @@ fn read_sheet(
                         let ctx = Context {
                             xti_sheets,
                             names,
+                            xti_names,
                             base: cell.r,
                             xlsb: false,
                             row_shift: 0,
@@ -1587,6 +1971,7 @@ fn read_sheet(
                     let ctx = Context {
                         xti_sheets,
                         names,
+                        xti_names,
                         base,
                         xlsb: false,
                         row_shift: 0,
@@ -1677,14 +2062,11 @@ fn read_sheet(
                     continue;
                 };
                 // 차등 서식 번호 u32 는 수식 바로 앞. DXFN 에 테두리 블록(플래그 0x10000000)이 있으면
-                // 한컴 확장이 2바이트 더 붙어 6바이트 앞이다 (관측)
+                // 그 사이에 한컴 안쪽 선 확장이 온다 ([`cf_dxf_id`])
                 let has_border = d.get(6..10).is_some_and(|x| {
                     u32::from_le_bytes([x[0], x[1], x[2], x[3]]) & 0x1000_0000 != 0
                 });
-                let dxf = fstart
-                    .checked_sub(if has_border { 6 } else { 4 })
-                    .and_then(|i| d.get(i..i + 4))
-                    .map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]));
+                let dxf = cf_dxf_id(d, fstart, has_border, &wb.styles.dxfs);
                 let base = CellRange::parse(
                     sheet.conditional_formats[fi]
                         .sqref
@@ -1698,6 +2080,7 @@ fn read_sheet(
                     let ctx = Context {
                         xti_sheets,
                         names,
+                        xti_names,
                         base,
                         xlsb: false,
                         row_shift: 0,
@@ -1707,26 +2090,12 @@ fn read_sheet(
                         _ => String::new(),
                     }
                 };
-                // DXFN 의 사용자 표시 형식: 플래그 0x02000000(ibitAtrNum) + 다음 u16 의 0x0001(fIfmtUser)
-                // → DXFNumUsr (cb u16, cch u16, flag u8, 문자 — flag 0 이면 1바이트)
-                let dxfn = u32::from_le_bytes([d[6], d[7], d[8], d[9]]);
-                let user = d.get(10).is_some_and(|b| b & 0x01 != 0);
-                if dxfn & 0x0200_0000 != 0
-                    && user
-                    && let (Some(id), Some(x)) = (dxf.filter(|&x| x != u32::MAX), d.get(12..))
-                {
-                    let mut nr = Rd::new(x);
-                    let _cb = nr.u16();
-                    let cch = nr.u16().unwrap_or(0) as usize;
-                    let wide = nr.u8().unwrap_or(0) & 0x01 != 0;
-                    let code = if wide {
-                        nr.utf16(cch)
-                    } else {
-                        nr.take(cch).map(|b| b.iter().map(|&c| c as char).collect())
-                    };
-                    if let Some(code) = code.filter(|c| !c.is_empty()) {
-                        dxf_num_fmts.push((id, code));
-                    }
+                // DXFN 의 표준 부분에만 있는 표시 형식·맞춤·보호
+                if let (Some(id), Some(x)) = (
+                    dxf.filter(|&x| x != u32::MAX),
+                    d.get(6..).and_then(parse_dxfn),
+                ) {
+                    dxf_extra.push((id, x));
                 }
                 let mut formulas = vec![dec(&d[fstart..fstart + c1])];
                 if c2 > 0 {
@@ -1780,6 +2149,16 @@ fn read_sheet(
                     rule.priority = pri as u32;
                     rule.stop_if_true = flags & 0x02 != 0;
                     apply_cf_template(rule, tmpl as u32, params);
+                    // 차등 서식의 그라데이션은 여기 DXFN12 의 확장에만 있다
+                    if let (Some(id), Some(g)) = (rule.dxf_id, cfex_gradient(d)) {
+                        dxf_extra.push((
+                            id,
+                            Dxfn {
+                                gradient: Some(g),
+                                ..Default::default()
+                            },
+                        ));
+                    }
                 }
             }
             0x087A => {
@@ -2972,4 +3351,97 @@ fn attach_parashape(xf: &mut Xf, ps: ParaShape) {
         parashape: Some(ps),
         ..Default::default()
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dxfn_alignment_is_one_above_the_standard() {
+        // 가로·세로·줄 바꿈·회전 지정 (플래그 낮은 4비트 0), 맞춤 블록 (0x08000000)
+        let mut d = 0x0800_00F0u32.to_le_bytes().to_vec();
+        d.extend_from_slice(&[0, 0]);
+        // 가로 2 = 왼쪽, 줄 바꿈, 세로 3 = 아래, 90도
+        d.extend_from_slice(&[0x3A, 90, 0, 0, 0, 0, 0, 0]);
+        let a = parse_dxfn(&d).unwrap().alignment.unwrap();
+        assert_eq!(a.horizontal.as_deref(), Some("left"));
+        assert_eq!(a.vertical.as_deref(), Some("bottom"));
+        assert!(a.wrap_text);
+        assert_eq!(a.text_rotation, Some(90));
+        // 분산(7 + 1)은 3비트에서 넘쳐 0 이 된다
+        let mut d = 0x0800_00FEu32.to_le_bytes().to_vec();
+        d.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let a = parse_dxfn(&d).unwrap().alignment.unwrap();
+        assert_eq!(a.horizontal.as_deref(), Some("distributed"));
+        assert_eq!(a.vertical, None);
+    }
+
+    /// 차등 서식 22개, 번호 10 에만 안쪽 선 (가로 h, 세로 v)
+    fn dxf_table(h: Option<&str>, v: Option<&str>) -> Vec<crate::model::Dxf> {
+        let edge = |s: Option<&str>| {
+            s.map(|s| BorderEdge {
+                style: Some(s.into()),
+                color: None,
+            })
+        };
+        let mut t = vec![crate::model::Dxf::default(); 22];
+        t[10].border = Some(Border {
+            horizontal: edge(h),
+            vertical: edge(v),
+            ..Default::default()
+        });
+        t
+    }
+
+    fn cf_tail(id: u32, ext: &[u8]) -> (Vec<u8>, usize) {
+        let mut d = vec![0xAA; 8];
+        d.extend_from_slice(&id.to_le_bytes());
+        d.extend_from_slice(ext);
+        let fstart = d.len();
+        d.extend_from_slice(&[0x1D, 1]);
+        (d, fstart)
+    }
+
+    #[test]
+    fn cf_dxf_id_skips_inner_border_extension() {
+        // 안쪽 가로(이중)·세로(점선) 선 확장 12바이트
+        let t = dxf_table(Some("double"), Some("dotted"));
+        let (d, f) = cf_tail(10, &[1, 6, 0x61, 0x82, 0xD6, 0, 1, 4, 0, 0, 0xFF, 0]);
+        assert_eq!(cf_dxf_id(&d, f, true, &t), Some(10));
+        // 검은 이중 가로 + 점선 세로: 색 바이트 0 이라 7바이트 나눔도 구조가 맞는다
+        let (d, f) = cf_tail(10, &[1, 6, 0, 0, 0, 0, 1, 4, 0, 0, 0xFF, 0]);
+        assert_eq!(cf_dxf_id(&d, f, true, &t), Some(10));
+        // 검은 가는 가로선만: 2바이트 나눔이 선 종류 1 을 번호로 읽게 된다 — 표와 맞는 쪽, 없으면 긴 쪽
+        let t = dxf_table(Some("thin"), None);
+        let (d, f) = cf_tail(10, &[1, 1, 0, 0, 0, 0, 0]);
+        assert_eq!(cf_dxf_id(&d, f, true, &t), Some(10));
+        assert_eq!(cf_dxf_id(&d, f, true, &[]), Some(10));
+        // 안쪽 선이 없으면 확장은 2바이트
+        let (d, f) = cf_tail(3, &[0, 0]);
+        assert_eq!(cf_dxf_id(&d, f, true, &t), Some(3));
+        let mut d = vec![0xAA, 0, 0, 0, 0, 0, 0];
+        d.extend_from_slice(&1u32.to_le_bytes());
+        d.extend_from_slice(&[0, 0]);
+        let f = d.len();
+        d.extend_from_slice(&[0x1D, 1]);
+        assert_eq!(cf_dxf_id(&d, f, true, &t), Some(1));
+    }
+
+    #[test]
+    fn xfext_gradient() {
+        let mut v = 0u32.to_le_bytes().to_vec(); // 직선
+        for x in [45.0f64, 0.0, 0.0, 0.0, 0.0] {
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+        v.extend_from_slice(&1u32.to_le_bytes());
+        v.extend_from_slice(&[2, 0, 0xFF, 0, 0, 0]); // RGB 빨강
+        v.extend_from_slice(&0.5f64.to_le_bytes());
+        v.extend_from_slice(&0.0f64.to_le_bytes());
+        let g = ext_gradient(&mut Rd::new(&v)).unwrap();
+        assert!(!g.path);
+        assert_eq!(g.degree, 45.0);
+        assert_eq!(g.stops[0].position, 0.5);
+        assert_eq!(g.stops[0].color.rgb.as_deref(), Some("ffff0000"));
+    }
 }

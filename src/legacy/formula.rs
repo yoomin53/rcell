@@ -25,6 +25,9 @@ pub struct Context<'a> {
     pub xti_sheets: &'a [Option<String>],
     /// NAME 레코드 순서대로의 정의된 이름 (PtgName 은 1부터)
     pub names: &'a [String],
+    /// XTI 별 외부 이름(EXTERNNAME) 목록, PtgNameX 의 이름 번호는 1부터. 추가 기능이면 함수 이름 그대로,
+    /// 외부 문서면 `[n]!이름` 꼴로 미리 만들어 둔다
+    pub xti_names: &'a [Vec<String>],
     /// 수식이 있는 셀 (상대 토큰 PtgRefN/PtgAreaN 의 기준)
     pub base: CellRef,
     /// 바이너리 OOXML(XLSB) 토큰이면 true. PtgStr 이 플래그 없는 UTF-16 이다.
@@ -180,6 +183,16 @@ fn sheet_prefix(ctx: &Context, ixti: u16) -> String {
     match ctx.xti_sheets.get(ixti as usize).and_then(|s| s.as_deref()) {
         Some(prefix) => format!("{prefix}!"),
         None => "#REF!".to_string(),
+    }
+}
+
+/// 레거시는 Excel 2007 에서 새로 생긴 함수도 `_xlfn.` 이름으로 쓴다. 그중 OOXML 에서 접두 없이 쓰는
+/// 함수(한셀 XML 도 접두를 뗀다, 함수 대조 실험)는 접두를 뗀다.
+fn native_name(name: String) -> String {
+    const NATIVE: [&str; 5] = ["AVERAGEIF", "AVERAGEIFS", "COUNTIFS", "SUMIFS", "IFERROR"];
+    match name.strip_prefix("_xlfn.") {
+        Some(rest) if NATIVE.contains(&rest) => rest.to_string(),
+        _ => name,
     }
 }
 
@@ -359,7 +372,7 @@ pub fn decode(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
                     if args.is_empty() {
                         return Err(DecodeError("사용자 함수 이름 없음".into()));
                     }
-                    args.remove(0)
+                    native_name(args.remove(0))
                 } else {
                     ftab::lookup(idx)
                         .map(|(n, _)| n.to_string())
@@ -440,9 +453,15 @@ pub fn decode(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
                 ));
             }
             0x39 => {
-                let _ixti = r.u16()?;
+                let ixti = r.u16()?;
                 let idx = r.u32()?;
-                stack.push(format!("#NAMEX{idx}"));
+                let name = ctx
+                    .xti_names
+                    .get(ixti as usize)
+                    .and_then(|v| v.get((idx as usize).wrapping_sub(1)))
+                    .cloned()
+                    .unwrap_or_else(|| format!("#NAMEX{idx}"));
+                stack.push(name);
             }
             0x3A => {
                 let ixti = r.u16()?;
@@ -504,6 +523,7 @@ mod tests {
         Context {
             xti_sheets: &[],
             names: &[],
+            xti_names: &[],
             base: CellRef::default(),
             xlsb: false,
             row_shift: 0,
@@ -580,6 +600,7 @@ mod tests {
         let mut c = Context {
             xti_sheets: &[],
             names: &[],
+            xti_names: &[],
             base: CellRef { row: 28, col: 8 },
             xlsb: false,
             row_shift: 0,
@@ -598,6 +619,7 @@ mod tests {
         let c = Context {
             xti_sheets: &[],
             names: &[],
+            xti_names: &[],
             base: CellRef::default(),
             xlsb: false,
             row_shift: 2,
@@ -613,6 +635,7 @@ mod tests {
         let c = Context {
             xti_sheets: &sheets,
             names: &[],
+            xti_names: &[],
             base: CellRef::default(),
             xlsb: false,
             row_shift: 0,

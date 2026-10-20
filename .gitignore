@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 /target
+/target-dev
 /pkg
 
 # 한셀로 만든 실제 문서는 저작물/개인정보일 수 있으므로 커밋하지 않는다.

@@ -83,7 +83,8 @@ USESELFS → BOUNDSHEET* → `0xA101` → SUPBOOK/EXTERNSHEET/NAME → SST → E
 
 ### 5.3 FONT (0x0031)
 
-앞부분은 BIFF8 과 같다: `dyHeight u16(1/20pt), grbit u16(0x02 기울임, 0x08 취소선, 0x10 외곽선),
+앞부분은 BIFF8 과 같다: `dyHeight u16(1/20pt), grbit u16(0x02 기울임, 0x08 취소선, 0x10 외곽선, 0x20 그림자,
+0x40 condense, 0x80 extend),
 icv u16, bls u16(400/700), sss u16(1 위첨자, 2 아래첨자), uls u8(1 한 줄, 2 두 줄), bFamily u8,
 bCharSet u8, 예약 u8, cch u8, flag u8, 이름 UTF-16[cch]`.
 글꼴 번호 4 는 비워 둔다 (BIFF8 규칙과 같음).
@@ -116,6 +117,9 @@ bCharSet u8, 예약 u8, cch u8, flag u8, 이름 UTF-16[cch]`.
 
 COLORREF 는 `0x00BBGGRR` 이다. `0xFFFFFFFF` = 지정 안 함, `0xDFFFFFFF` = 자동 (관측).
 
+한셀은 외곽선 종류(오프셋 14)가 있으면 실선이 아니어도 ECMA 외곽선(`x:outline`)을 켠다. grbit 0x10 은 실선일 때만
+켜져 있으므로 둘 중 하나라도 있으면 외곽선이다 (글꼴 대조 실험). 그림자 종류(오프셋 18)는 `x:shadow` 를 켜지 않는다.
+
 ### 5.4 FORMAT (0x041E)
 
 `ifmt u16, cch u16, flag u8, UTF-16[cch]`. 한국어 로캘 내장 형식(5–8 ₩ 통화, 23–26 $ 통화,
@@ -125,7 +129,8 @@ COLORREF 는 `0x00BBGGRR` 이다. `0xFFFFFFFF` = 지정 안 함, `0xDFFFFFFF` = 
 
 처음 20바이트는 **BIFF8 XF 와 같다** (글꼴·표시 형식 번호, 잠금/숨김/스타일 비트와 부모,
 가로·세로 정렬과 줄 바꿈, 회전, 들여쓰기·축소·읽기 순서, 적용 비트, 테두리 스타일과 팔레트 색,
-채우기 무늬, 무늬 색). 한셀의 기본 세로 정렬은 가운데(`alcV = 1`)다.
+채우기 무늬, 무늬 색). 한셀의 기본 세로 정렬은 가운데(`alcV = 1`)다. 보호 칸의 0x0008(f123Prefix)이
+XML 의 `quotePrefix` 다. 그라데이션 채우기는 XFEXT(0x087D, 5.8절)에 있다.
 
 그 뒤에 **한컴 확장** (관측):
 
@@ -181,11 +186,17 @@ flags & 0x01 이면: cRun u16, (ich u16, ifnt u16) × cRun
 |---|---|---|
 | 0xA030 (4) | `01 00 00 00` | 관측, 의미 미상 |
 | 0x0900 (2) | `01 00` | 관측, 의미 미상 |
-| 0xA101 (4) | u32 = 904 — XML `calcPr/@hs:hclCalcId` 와 같은 값 | 관측 → 계산 엔진 ID 로 추정 |
+| 0xA101 (4) | u32 = XML `calcPr/@hs:hclCalcId` (관측 904, 계산 엔진 번호로 추정). 1 은 값이 없는 것으로 본다 | 관측 |
+| 0xA020 (가변) | 문단 번호 정의 하나: `종류 u8, 시작 번호 u16, cch u16, 플래그 u8, 번호 모양 UTF-16` (`^1.`) → XML `x:abstractNums/x:abstractNum`. `abstractNumType` = 종류 + 1 (관측 0 → 1), `lvlText` 는 `^` 를 `%5e` 로 쓴다. 한셀은 저장할 때마다 문단 모양에서 이 목록을 새로 만든다 (번호 하나) | 관측 |
+| EXTERNNAME (0x0023) | 바로 앞 SUPBOOK 의 이름 하나: `옵션 u16, 예약 u32, cch u16, UTF-16` (BIFF8 과 달리 플래그 바이트 없음). 추가 기능 SUPBOOK(`01 00 01 3a`) 아래면 함수 이름 — PtgNameX 가 1부터 가리킨다 (7절) | 관측 |
+| STYLE (0x0293) | BIFF8 과 같다. 한셀은 BIFF 상용구(내장 3–7 쉼표·통화·백분율 → XF 16–20)를 늘 쓴다. 셀 서식이 쓰지 않는 스타일은 다시 저장할 때 사라진다 (XML 에는 쓰이는 스타일과 표준 스타일만 쓴다) | 관측 |
+| TABLESTYLES (0x088E) | FRT 머리 12, `cts u32` (기본 제공 144 + 사용자 정의 수), 기본 표·피벗 스타일 이름 길이 `u16 × 2`, 이름 두 개 (UTF-16, 플래그 바이트 없음) | [MS-XLS] + 관측 |
+| TABLESTYLE (0x088F) | FRT 머리 12, `grbit u16` (0x02 피벗, 0x04 표), `ctse u32`, `cchName u16`, 이름 | [MS-XLS] + 관측 |
+| TABLESTYLEELEMENT (0x0890) | FRT 머리 12, `tseType u32` (ST_TableStyleType 순서: 0 wholeTable, 1 headerRow … 26 pageFieldLabels, 27 pageFieldValues), `size u32` (줄무늬 폭), `index u32` (DXF 0x088D 순서) | [MS-XLS] + 관측 |
 | SUPBOOK (0x01AE) | `ctab u16, cch u16` — `cch` 가 `0x0401` 이면 이 통합 문서, `0x3A01` 이면 추가 기능, 그 밖이면 외부 문서: `flag u8, 가상 경로 UTF-16[cch], (cch u16, flag u8, 시트 이름 UTF-16) × ctab` | BIFF8 + 관측 |
 | EXTERNSHEET (0x0017) | BIFF8 과 같다: `n u16, (iSupBook u16, itabFirst u16, itabLast u16) × n` | BIFF8 |
 | NAME (0x0018) | BIFF8 Lbl + 이름 UTF-16. 수식이 없는 NAME 은 정의되지 않은 이름(`=XYZ`)이나 `_xlfn.` 자리 | 관측 |
-| XFEXT (0x087D) | 테마 색 등 (Excel 2007 FRT 그대로) | BIFF8 |
+| XFEXT (0x087D) | FRT 머리 12, `예약 u16, ixfe u16, 예약 u16, cexts u16`, ExtProp(`종류 u16, cb u16 (머리 포함), 값`) × cexts. 한셀은 그라데이션 채우기(종류 6)만 쓴다: `종류 u32 (0 직선, 1 경로), 각도·왼쪽·오른쪽·위·아래 f64, 정지점 수 u32, (색 종류 u16 — 2 RGB, 값 u32, 위치 f64, 밝기 f64) × n`. 다른 색은 XF 의 한컴 확장에 있다 | [MS-XLS] + 관측 (그라데이션 대조 실험) |
 
 ## 6. 워크시트 레코드
 
@@ -287,9 +298,9 @@ DIB 는 BITMAPFILEHEADER 를 붙여 BMP 로 꺼낸다. 한셀은 그림을 저�
 
 | 레코드 | 배치 |
 |---|---|
-| DXF FRT 0x088D (전역) | 차등 서식 표: FRT 머리 12 + `u32` + `cprops u16` + XFProp 목록 — **XLSB BrtDXF 와 같은 꼴**. 레코드 순서가 dxfId |
+| DXF FRT 0x088D (전역) | 차등 서식 표: FRT 머리 12 + `u32` + `cprops u16` + XFProp 목록 — **XLSB BrtDXF 와 같은 꼴, 같은 번호** ([cell-binary.md](cell-binary.md) 2.2절). 다른 점: 글꼴 크기(0x24)는 1/100 pt, XFPropColor 는 `icv` 0xFF·알파 0, 자동 색은 RGB 종류에 값 `FF FF FF DF`, 글꼴 이름(0x18)은 바른 UTF-16. 표시 형식·맞춤은 이 표에 쓰지 않는다(CF 의 DXFN 에만 있다). 보호(0x2C) 값은 틀리게 쓴다. 레코드 순서가 dxfId |
 | CONDFMT 0x01B0 | `ccf u16, (nID << 1) u16, 경계 Ref8 (행 u32), n u16, Ref8 × n` |
-| CF 0x01B1 | `ct u8 (1 값 비교, 2 수식), cp u8, cce1 u16, cce2 u16, DXFN(+한컴 확장), dxfId u32, 수식 1·2` — dxfId 는 수식 바로 앞(DXFN 에 테두리 블록이 있으면 2바이트 더 앞). 사용자 표시 형식은 DXFN 의 DXFNumUsr 에만 있다 |
+| CF 0x01B1 | `ct u8 (1 값 비교, 2 수식), cp u8, cce1 u16, cce2 u16`, DXFN(+한컴 확장, 아래), `dxfId u32`, [안쪽 선 확장], 수식 1·2 |
 | CONDFMT12 0x0879 | FRT 머리 12 뒤에 CONDFMT 와 같은 배치 (뒤따르는 CF12 의 범위) |
 | CFEX 0x087B | FRT 머리 12, `fIsCF12 u32, nID u16` — CF12 면 다음 CF12 의 서식(nID), 아니면 `icf u16, cp u8, 틀 u8, 우선순위 u16, 플래그 u8 (0x02 멈춤)` … 끝 16바이트 = 틀 매개 변수 (글 규칙: 연산 u16, 상위/하위: 플래그 u8(0x01 위, 0x02 %) + 순위 u16) |
 | CF12 0x087A | FRT 머리 12, `ct u8 (3 색 눈금, 4 막대, 6 아이콘), cp, cce1, cce2, cbdxf u32 + DXFN12`, 수식, 활성 수식(4), 플래그 u8, 우선순위 u16, 틀 u16, 매개 변수(cb u8 + 16), 길이 u16, 종류별 내용 (CFGradient / CFDatabar / CFMultistate: CFVO = 종류 u8, cce u16 + 토큰, 숫자 f64 — 최소·최대는 숫자 없음) |
@@ -297,9 +308,39 @@ DIB 는 BITMAPFILEHEADER 를 붙여 BMP 로 꺼낸다. 한셀은 그림을 저�
 
 틀(CFTemp): 0x01 수식, 0x05 상위/하위, 0x07 고유, 0x08 글, 0x09 빈 칸, 0x0F–0x18 날짜, 0x19/0x1A 평균 위/아래, 0x1B 중복.
 
+CF 레코드의 DXFN (관측, 차등 서식 대조 실험):
+
+```
+flags u32, flags2 u16   [MS-XLS] DXFN 그대로 — 블록 비트 ibitAtrNum 0x02000000, Fnt 0x04000000, Alc 0x08000000,
+                        Bdr 0x10000000, Pat 0x20000000, Prot 0x40000000; 낮은 비트들은 '지정 안 함'(Ninch)
+[표시 형식]  flags2 & 1 이면 DXFNumUsr (cb u16 자신 포함, cch u16, flag u8, 문자 — flag 0 이면 1바이트씩), 아니면 u16
+[글꼴]       DXFFntD 118바이트 (BIFF8 그대로)
+[맞춤]       DXFALC 8바이트 — 가로·세로 맞춤 번호가 표준보다 1 크다 (아래)
+[테두리]     DXFBdr 8바이트
+[무늬]       DXFPat 4바이트
+[보호]       DXFProt 2바이트 (0x01 잠금, 0x02 숨김)
+한컴 확장    글꼴 블록이 있으면 비트마스크 u32 + 값들 (크기 1/100 pt, 색 RGBA, 밑줄·취소선 모양, 언어별 글꼴 이름 …),
+             테두리 블록이 있으면 RGBA × 4 (왼쪽·오른쪽·위·아래) + 2바이트, 무늬 블록이 있으면 RGBA × 2
+dxfId u32
+[안쪽 선]    테두리 블록이 있을 때만: 가로·세로 선마다 있음 u8 (+ 있으면 선 종류 u8, RGBA 4) → 2·7·12 바이트
+수식 1·2
+```
+
+표준 블록은 크기가 정해져 있어 앞에서부터 읽을 수 있지만, 한컴 확장의 길이는 알 수 없으므로 dxfId 는 수식 쪽에서
+거꾸로 찾는다. 안쪽 선 확장의 길이는 구조가 맞는 나눔 가운데 dxfId 가 가리키는 DXF(0x088D)의 안쪽 선과 맞는 가장 긴
+것으로 고른다 — 검은 선은 색 바이트가 모두 0 이라 더 짧은 (틀린) 나눔도 구조가 맞는다.
+
+DXFALC 의 맞춤 번호 (한셀): 가로 일반 1, 왼쪽 2, 가운데 3, 오른쪽 4, 채우기 5, 양쪽 6, 선택 영역 가운데 7, 분산 0
+(8 이 3비트에서 넘친다), 세로 위 1, 가운데 2, 아래 3, 양쪽 4, 분산 5. XF 의 맞춤은 표준 그대로다. 한셀은 이 블록의
+들여쓰기·읽기 순서를 쓰지 않는다 (맞춤 대조 실험).
+
+CFEX 의 DXFN12 (`cbdxf u32` + DXFN + 한컴 확장 + dxfId + XFExtNoFRT): 차등 서식의 그라데이션은 여기 XFExtNoFRT
+(`0, 0xFFFF, 0, cexts u16`, ExtProp 종류 6) 에만 있다.
+
 **한셀은 레거시의 조건부 서식을 잘못 읽는다** (rcell 은 원본과 같게 읽는다): 글 포함·빈 칸 규칙의 수식을 `#N/A`
-로, CONDFMT12 의 범위를 16비트 행으로 읽어 깨뜨리고, 차등 서식의 사용자 표시 형식을 쓰레기 값으로 만든다.
-평균 아래(`aboveAverage="0"`)도 잃는다. 데이터 유효성은 바르게 읽는다.
+로, CONDFMT12 의 범위를 16비트 행으로 읽어 깨뜨리고, 차등 서식의 사용자 표시 형식을 쓰레기 값으로 만든다 (1바이트
+문자를 UTF-16 으로 읽는다: `0.000` → `\⸰\〰\࠰`). DXFALC 의 세로 맞춤을 읽지 않고, 같은 내용이 된 차등 서식을 하나로
+합친다. 평균 아래(`aboveAverage="0"`)도 잃는다. 데이터 유효성은 바르게 읽는다.
 
 ## 6.4 개요·자동 필터·보호 — 조작한 XML 원본과 대조
 
@@ -332,8 +373,19 @@ BIFF8 Ptg 와 같고 다음만 다르다 (관측, `src/legacy/formula.rs`):
 | PtgRef3d | 8 | `ixti u16, rw u32, col u16` |
 | PtgArea3d | 14 | |
 | PtgStr | 3 + 문자 | `cch u16, flag u8` |
-| PtgFunc / PtgFuncVar | BIFF8 | 함수 번호 0–367 은 BIFF8 Ftab, **IFERROR = 480** (한셀 확장) |
+| PtgFunc / PtgFuncVar | BIFF8 | 함수 번호 0–367 은 BIFF8 Ftab, **IFERROR = 480** (한셀 확장). 그 밖의 Excel 2007 함수와 한컴 함수는 사용자 함수(PtgFuncVar 255)로 쓰고 첫 인자가 이름이다 (아래) |
+| PtgName | 4 | NAME 순서 번호 u32 (1부터) |
+| PtgNameX | 6 | `ixti u16, 이름 번호 u32` — XTI 의 SUPBOOK 아래 EXTERNNAME (1부터) |
 | PtgExp | 6 | `rw u32, col u16` — 공유 수식(SHRFMLA, 범위 행 u32)의 기준 셀 |
+
+Excel 2007 에서 생긴 함수(SUMIFS, AVERAGEIF …)는 `PtgName` 이 가리키는 NAME `_xlfn.이름` (grbit 0x000B 또는 0x038B) 이나
+추가 기능 SUPBOOK 의 EXTERNNAME(`PtgNameX`)을 첫 인자로 한 PtgFuncVar 255 다. 한컴 함수(WON, JUNJA, RANKAVG, RANKEQ,
+ERRORTYPE)도 같은 꼴이며 NAME 의 grbit 가 0 이다. XML 은 AVERAGEIF·AVERAGEIFS·COUNTIFS·SUMIFS·IFERROR 만 `_xlfn.` 없이
+쓴다 (함수 대조 실험).
+
+한셀의 레거시 저장은 grbit 0x038B 인 `_xlfn.` 이름을 PtgName 번호로 셀 때 grbit 0x000B 이름을 빼고 센다. 한셀 자신도
+같은 방식으로 읽으므로 대개 맞게 보이지만, 번호가 엇갈리는 문서에서는 수식이 `#N/A` 가 된다. rcell 은 NAME 순서 그대로
+읽는다.
 
 ### 7.1 외부 문서 참조
 
@@ -365,6 +417,8 @@ XTI 가 외부 SUPBOOK 을 가리키면 XML 표기로 `[n]시트!A1` 이 된다.
 | 테마 | 레거시에는 테마가 없다 (THEME 0x0896 을 쓰지 않는다). 한셀은 다시 열 때 자기 기본 테마를 붙인다 |
 | 외부 값 캐시 | XCT/CRN 을 쓰지 않는다. 다시 열면 시트마다 `refreshError="0"` 인 빈 캐시 |
 | 자동 필터의 빈 칸·백분율 | 파일에는 있지만 한셀이 다시 열 때 읽지 않는다 (6.4절) |
+| 사용자 정의 표 스타일 | 파일(0x088E–0x0890)에는 있지만 한셀이 다시 열 때 읽지 않는다 — 기본 스타일 이름만 남는다 |
+| 조건부 서식의 차등 서식 | 세로 맞춤을 읽지 않고 사용자 표시 형식을 깨뜨린다 (6.3절) |
 
 ## 9. 검증 방법
 

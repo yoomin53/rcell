@@ -8,8 +8,9 @@
 use std::collections::BTreeMap;
 
 use crate::model::{
-    Alignment, Border, BorderEdge, Color, Dxf, Fill, Font, HancomFontExt, HancomXfExt, NamedStyle,
-    NumFmt, ParaShape, Protection, Styles, Xf,
+    AbstractNum, Alignment, Border, BorderEdge, Color, Dxf, Fill, Font, GradientFill, GradientStop,
+    HancomFontExt, HancomXfExt, NamedStyle, NumFmt, ParaShape, Protection, Styles, TableStyle,
+    TableStyleElement, TableStyles, Xf,
 };
 use crate::ns;
 use crate::xml::{Element, parse_bool};
@@ -49,11 +50,45 @@ pub fn parse_styles(root: &Element) -> Styles {
                 name: c.attr("name").unwrap_or("").to_string(),
                 xf_id: c.attr_u32("xfId").unwrap_or(0),
                 builtin_id: c.attr_u32("builtinId"),
+                i_level: c.attr_u32("iLevel"),
             })
             .collect();
     }
     if let Some(e) = root.sml_child("dxfs") {
         st.dxfs = e.sml_children("dxf").map(parse_dxf).collect();
+    }
+    if let Some(e) = root.sml_child("tableStyles") {
+        st.table_styles = Some(TableStyles {
+            default_table_style: e.attr("defaultTableStyle").map(str::to_string),
+            default_pivot_style: e.attr("defaultPivotStyle").map(str::to_string),
+            styles: e
+                .sml_children("tableStyle")
+                .map(|t| TableStyle {
+                    name: t.attr("name").unwrap_or("").to_string(),
+                    pivot: t.attr_bool("pivot").unwrap_or(true),
+                    table: t.attr_bool("table").unwrap_or(true),
+                    elements: t
+                        .sml_children("tableStyleElement")
+                        .map(|x| TableStyleElement {
+                            kind: x.attr("type").unwrap_or("").to_string(),
+                            size: x.attr_u32("size").unwrap_or(1),
+                            dxf_id: x.attr_u32("dxfId"),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        });
+    }
+    if let Some(e) = root.sml_child("abstractNums") {
+        st.abstract_nums = e
+            .sml_children("abstractNum")
+            .map(|a| AbstractNum {
+                num_type: a.attr_u32("abstractNumType").unwrap_or(0),
+                id: a.attr_u32("abstractNumId").unwrap_or(0),
+                start_num: a.attr_u32("startNum").unwrap_or(0),
+                lvl_text: a.attr("lvlText").unwrap_or("").to_string(),
+            })
+            .collect();
     }
     st
 }
@@ -70,7 +105,15 @@ fn parse_dxf(e: &Element) -> Dxf {
             })
         }),
         alignment: e.sml_child("alignment").map(parse_alignment),
+        protection: e.sml_child("protection").map(parse_protection),
         hancom: parse_hancom_xf_ext(e),
+    }
+}
+
+fn parse_protection(p: &Element) -> Protection {
+    Protection {
+        locked: p.attr_bool("locked"),
+        hidden: p.attr_bool("hidden"),
     }
 }
 
@@ -103,6 +146,10 @@ pub fn parse_font(e: &Element) -> Font {
                 "i" => f.italic = flag(c),
                 "strike" => f.strike = flag(c),
                 "dstrike" => f.double_strike = flag(c),
+                "outline" => f.outline = flag(c),
+                "shadow" => f.shadow = flag(c),
+                "condense" => f.condense = flag(c),
+                "extend" => f.extend = flag(c),
                 "u" => {
                     let v = c.attr("val").unwrap_or("single");
                     f.underline = (v != "none").then(|| v.to_string());
@@ -184,18 +231,31 @@ fn parse_fill(e: &Element) -> Fill {
         f.fg_color = p.sml_child("fgColor").map(parse_color);
         f.bg_color = p.sml_child("bgColor").map(parse_color);
     }
-    f.gradient = e.sml_child("gradientFill").is_some();
+    f.gradient = e.sml_child("gradientFill").map(|g| GradientFill {
+        path: g.attr("type") == Some("path"),
+        degree: g.attr_f64("degree").unwrap_or(0.0),
+        left: g.attr_f64("left").unwrap_or(0.0),
+        right: g.attr_f64("right").unwrap_or(0.0),
+        top: g.attr_f64("top").unwrap_or(0.0),
+        bottom: g.attr_f64("bottom").unwrap_or(0.0),
+        stops: g
+            .sml_children("stop")
+            .map(|s| GradientStop {
+                position: s.attr_f64("position").unwrap_or(0.0),
+                color: s.sml_child("color").map(parse_color).unwrap_or_default(),
+            })
+            .collect(),
+    });
     f
 }
 
+/// 있는 선은 스타일이 없어도 남긴다: 차등 서식에서 없는 선은 '그대로 둠', 스타일 없는 선은 '선 없음'
 fn parse_edge(e: Option<&Element>) -> Option<BorderEdge> {
     let e = e?;
-    let style = e.attr("style").map(str::to_string);
-    let color = e.sml_child("color").map(parse_color);
-    if style.is_none() && color.is_none() {
-        return None;
-    }
-    Some(BorderEdge { style, color })
+    Some(BorderEdge {
+        style: e.attr("style").map(str::to_string),
+        color: e.sml_child("color").map(parse_color),
+    })
 }
 
 fn parse_border(e: &Element) -> Border {
@@ -205,6 +265,8 @@ fn parse_border(e: &Element) -> Border {
         top: parse_edge(e.sml_child("top")),
         bottom: parse_edge(e.sml_child("bottom")),
         diagonal: parse_edge(e.sml_child("diagonal")),
+        vertical: parse_edge(e.sml_child("vertical")),
+        horizontal: parse_edge(e.sml_child("horizontal")),
         diagonal_up: e.attr_bool("diagonalUp").unwrap_or(false),
         diagonal_down: e.attr_bool("diagonalDown").unwrap_or(false),
     }
@@ -223,15 +285,11 @@ fn parse_xf(e: &Element) -> Xf {
         apply_border: e.attr_bool("applyBorder"),
         apply_alignment: e.attr_bool("applyAlignment"),
         apply_protection: e.attr_bool("applyProtection"),
+        quote_prefix: e.attr_bool("quotePrefix").unwrap_or(false),
         ..Default::default()
     };
     xf.alignment = e.sml_child("alignment").map(parse_alignment);
-    if let Some(p) = e.sml_child("protection") {
-        xf.protection = Some(Protection {
-            locked: p.attr_bool("locked"),
-            hidden: p.attr_bool("hidden"),
-        });
-    }
+    xf.protection = e.sml_child("protection").map(parse_protection);
     xf.hancom = parse_hancom_xf_ext(e);
     xf
 }

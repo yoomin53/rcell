@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 const AUTHOR: &str = "Copyright 2026 yoomin53";
 const SPDX: &str = "SPDX-License-Identifier: Apache-2.0";
 const CHECKED_EXT: &[&str] = &["rs", "toml", "ts", "js", "py", "ps1", "sh"];
-const SKIP_DIRS: &[&str] = &["target", ".git", "node_modules", "pkg"];
+const SKIP_DIRS: &[&str] = &["target", "target-dev", ".git", "node_modules", "pkg"];
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else { return };

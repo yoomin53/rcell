@@ -111,6 +111,9 @@ enum Cmd {
         /// 자동 필터 비교 생략 (한셀은 레거시 자동 필터의 빈 칸·백분율을 읽지 못한다)
         #[arg(long)]
         ignore_filter: bool,
+        /// 사용자 정의 표 스타일 비교 생략 (한셀은 레거시의 표 스타일을 읽지 않는다)
+        #[arg(long)]
+        ignore_table_styles: bool,
     },
     /// ZIP 패키지의 파트를 다른 파일 내용으로 바꿔 새 파일로 저장 — 리버스 엔지니어링용
     Patch {
@@ -135,9 +138,9 @@ enum Cmd {
         #[arg(long)]
         part: Option<String>,
     },
-    /// 컨테이너 항목 하나를 16진수로 출력 — 리버스 엔지니어링용
     /// 암호화된 문서(OLE2 EncryptionInfo + EncryptedPackage)를 풀어 ZIP 패키지로 저장 — 리버스 엔지니어링용
     Decrypt { input: PathBuf, output: PathBuf },
+    /// 컨테이너 항목 하나를 16진수로 출력 — 리버스 엔지니어링용
     Hexdump {
         file: PathBuf,
         /// ZIP 파트 이름 또는 OLE2 스트림 경로 (예: /Workbook)
@@ -192,6 +195,7 @@ fn main() -> ExitCode {
             ignore_chart,
             ignore_cf,
             ignore_filter,
+            ignore_table_styles,
         } => match diff(
             &a,
             &b,
@@ -204,6 +208,7 @@ fn main() -> ExitCode {
                 ignore_chart,
                 ignore_cf,
                 ignore_filter,
+                ignore_table_styles,
             },
         ) {
             Ok(true) => Ok(()),

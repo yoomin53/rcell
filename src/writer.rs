@@ -108,6 +108,16 @@ fn font_std_children(f: &Font) -> String {
     if f.strike {
         s.push_str("<x:strike val=\"1\"/>");
     }
+    for (on, el) in [
+        (f.outline, "x:outline"),
+        (f.shadow, "x:shadow"),
+        (f.condense, "x:condense"),
+        (f.extend, "x:extend"),
+    ] {
+        if on {
+            let _ = write!(s, "<{el} val=\"1\"/>");
+        }
+    }
     if let Some(c) = &f.color {
         s.push_str(&color_el("x:color", c));
     }
@@ -210,7 +220,40 @@ fn font_xml(f: &Font) -> String {
     }
 }
 
+/// `x:gradientFill` (0 인 값은 기본값이라 쓰지 않는다)
+fn gradient_xml(g: &crate::model::GradientFill) -> String {
+    let mut s = String::from("<x:gradientFill");
+    if g.path {
+        s.push_str(" type=\"path\"");
+    }
+    for (k, v) in [
+        ("degree", g.degree),
+        ("left", g.left),
+        ("right", g.right),
+        ("top", g.top),
+        ("bottom", g.bottom),
+    ] {
+        if v != 0.0 {
+            let _ = write!(s, " {k}=\"{}\"", num(v));
+        }
+    }
+    s.push('>');
+    for st in &g.stops {
+        let _ = write!(
+            s,
+            "<x:stop position=\"{}\">{}</x:stop>",
+            num(st.position),
+            color_el("x:color", &st.color)
+        );
+    }
+    s.push_str("</x:gradientFill>");
+    s
+}
+
 fn fill_xml(f: &Fill) -> String {
+    if let Some(g) = &f.gradient {
+        return format!("<x:fill>{}</x:fill>", gradient_xml(g));
+    }
     let pt = f.pattern_type.as_deref().unwrap_or("none");
     let mut inner = String::new();
     if let Some(c) = &f.fg_color {
@@ -246,7 +289,7 @@ fn edge_xml(name: &str, e: Option<&BorderEdge>) -> String {
     }
 }
 
-fn border_xml(b: &Border) -> String {
+fn border_attrs(b: &Border) -> String {
     let mut attrs = String::new();
     if b.diagonal_up {
         attrs.push_str(" diagonalUp=\"1\"");
@@ -254,14 +297,60 @@ fn border_xml(b: &Border) -> String {
     if b.diagonal_down {
         attrs.push_str(" diagonalDown=\"1\"");
     }
+    attrs
+}
+
+fn border_xml(b: &Border) -> String {
+    let mut inner = String::new();
+    for (name, e) in [("x:vertical", &b.vertical), ("x:horizontal", &b.horizontal)] {
+        if let Some(e) = e {
+            inner.push_str(&dxf_edge_xml(name, e));
+        }
+    }
     format!(
-        "<x:border{attrs}>{}{}{}{}{}</x:border>",
+        "<x:border{}>{}{}{}{}{}{inner}</x:border>",
+        border_attrs(b),
         edge_xml("x:left", b.left.as_ref()),
         edge_xml("x:right", b.right.as_ref()),
         edge_xml("x:top", b.top.as_ref()),
         edge_xml("x:bottom", b.bottom.as_ref()),
         edge_xml("x:diagonal", b.diagonal.as_ref()),
     )
+}
+
+/// 차등 서식의 선 하나: 스타일이 없으면 '선 없음' (색만 쓴다)
+fn dxf_edge_xml(name: &str, e: &BorderEdge) -> String {
+    let mut s = format!("<{name}");
+    if let Some(st) = &e.style {
+        let _ = write!(s, " style=\"{}\"", esc(st));
+    }
+    match &e.color {
+        Some(c) => {
+            let _ = write!(s, ">{}</{name}>", color_el("x:color", c));
+        }
+        None => s.push_str("/>"),
+    }
+    s
+}
+
+/// 차등 서식의 테두리: 지정한 선만 쓴다 (없는 선은 '그대로 둠')
+fn dxf_border_xml(b: &Border) -> String {
+    let mut s = format!("<x:border{}>", border_attrs(b));
+    for (name, e) in [
+        ("x:left", &b.left),
+        ("x:right", &b.right),
+        ("x:top", &b.top),
+        ("x:bottom", &b.bottom),
+        ("x:diagonal", &b.diagonal),
+        ("x:vertical", &b.vertical),
+        ("x:horizontal", &b.horizontal),
+    ] {
+        if let Some(e) = e {
+            s.push_str(&dxf_edge_xml(name, e));
+        }
+    }
+    s.push_str("</x:border>");
+    s
 }
 
 fn parashape_xml(p: &ParaShape) -> String {
@@ -305,6 +394,9 @@ fn xf_xml(xf: &Xf, is_cell: bool) -> String {
     );
     if is_cell {
         let _ = write!(attrs, " xfId=\"{}\"", xf.xf_id.unwrap_or(0));
+        if xf.quote_prefix {
+            attrs.push_str(" quotePrefix=\"1\"");
+        }
     }
     for (k, v) in [
         ("applyNumberFormat", xf.apply_number_format),
@@ -377,7 +469,7 @@ fn xf_xml(xf: &Xf, is_cell: bool) -> String {
     }
 }
 
-fn styles_xml(st: &Styles) -> String {
+fn styles_xml(st: &Styles, flavor: Flavor) -> String {
     let mut s = format!("{DECL}<x:styleSheet xmlns:x=\"{SML}\">");
     if !st.num_fmts.is_empty() {
         let _ = write!(s, "<x:numFmts count=\"{}\">", st.num_fmts.len());
@@ -429,6 +521,22 @@ fn styles_xml(st: &Styles) -> String {
         s.push_str(&border_xml(b));
     }
     s.push_str("</x:borders>");
+    // 한셀은 문단 번호 정의를 테두리 다음, 스타일 XF 앞에 쓴다. CT_Stylesheet 에 없는 요소라 .xlsx(Excel)에는
+    // 쓰지 않는다 — 한셀은 읽을 때 문단 모양에서 같은 정의를 다시 만든다
+    if flavor == Flavor::Cell && !st.abstract_nums.is_empty() {
+        let _ = write!(s, "<x:abstractNums count=\"{}\">", st.abstract_nums.len());
+        for a in &st.abstract_nums {
+            let _ = write!(
+                s,
+                "<x:abstractNum abstractNumType=\"{}\" abstractNumId=\"{}\" startNum=\"{}\" lvlText=\"{}\"/>",
+                a.num_type,
+                a.id,
+                a.start_num,
+                esc(&a.lvl_text)
+            );
+        }
+        s.push_str("</x:abstractNums>");
+    }
 
     let style_xfs: Vec<Xf> = if st.cell_style_xfs.is_empty() {
         vec![Xf::default()]
@@ -452,8 +560,8 @@ fn styles_xml(st: &Styles) -> String {
     }
     s.push_str("</x:cellXfs>");
 
-    let names: Vec<(String, u32, Option<u32>)> = if st.cell_styles.is_empty() {
-        vec![("Normal".into(), 0, Some(0))]
+    let names: Vec<(String, u32, Option<u32>, Option<u32>)> = if st.cell_styles.is_empty() {
+        vec![("Normal".into(), 0, Some(0), None)]
     } else {
         st.cell_styles
             .iter()
@@ -462,15 +570,19 @@ fn styles_xml(st: &Styles) -> String {
                     c.name.clone(),
                     c.xf_id.min(style_xfs.len() as u32 - 1),
                     c.builtin_id,
+                    c.i_level,
                 )
             })
             .collect()
     };
     let _ = write!(s, "<x:cellStyles count=\"{}\">", names.len());
-    for (name, xf, builtin) in names {
+    for (name, xf, builtin, i_level) in names {
         let _ = write!(s, "<x:cellStyle name=\"{}\" xfId=\"{xf}\"", esc(&name));
         if let Some(b) = builtin {
             let _ = write!(s, " builtinId=\"{b}\"");
+        }
+        if let Some(l) = i_level {
+            let _ = write!(s, " iLevel=\"{l}\"");
         }
         s.push_str("/>");
     }
@@ -482,15 +594,114 @@ fn styles_xml(st: &Styles) -> String {
         }
         s.push_str("</x:dxfs>");
     }
+    if let Some(t) = &st.table_styles {
+        s.push_str(&table_styles_xml(t));
+    }
     s.push_str("</x:styleSheet>");
     s
 }
 
-/// 조건부 서식용 차등 서식 (`x:dxf`: font, numFmt, fill, alignment, border 순)
+/// `x:tableStyles`. 한셀처럼 요소를 종류 번호 순으로, size 와 pivot·table 을 늘 쓴다
+fn table_styles_xml(t: &crate::model::TableStyles) -> String {
+    use crate::model::TABLE_STYLE_TYPES;
+    let mut s = format!("<x:tableStyles count=\"{}\"", t.styles.len());
+    if let Some(d) = &t.default_table_style {
+        let _ = write!(s, " defaultTableStyle=\"{}\"", esc(d));
+    }
+    if let Some(d) = &t.default_pivot_style {
+        let _ = write!(s, " defaultPivotStyle=\"{}\"", esc(d));
+    }
+    if t.styles.is_empty() {
+        s.push_str("/>");
+        return s;
+    }
+    s.push('>');
+    for ts in &t.styles {
+        let _ = write!(
+            s,
+            "<x:tableStyle name=\"{}\" pivot=\"{}\" table=\"{}\" count=\"{}\">",
+            esc(&ts.name),
+            u8::from(ts.pivot),
+            u8::from(ts.table),
+            ts.elements.len()
+        );
+        let mut els: Vec<&crate::model::TableStyleElement> = ts.elements.iter().collect();
+        els.sort_by_key(|e| {
+            TABLE_STYLE_TYPES
+                .iter()
+                .position(|&k| k == e.kind)
+                .unwrap_or(usize::MAX)
+        });
+        for e in els {
+            let _ = write!(
+                s,
+                "<x:tableStyleElement type=\"{}\" size=\"{}\"",
+                esc(&e.kind),
+                e.size
+            );
+            if let Some(d) = e.dxf_id {
+                let _ = write!(s, " dxfId=\"{d}\"");
+            }
+            s.push_str("/>");
+        }
+        s.push_str("</x:tableStyle>");
+    }
+    s.push_str("</x:tableStyles>");
+    s
+}
+
+/// 조건부 서식용 차등 서식 (`x:dxf`: font, numFmt, fill, alignment, border, protection 순 — CT_Dxf, 한셀도 같다).
+/// 한컴 확장(글꼴의 `hs:` 자식)이 있으면 셀 서식처럼 Choice(확장) + Fallback(표준) 쌍으로 쓴다. 한셀은 표준
+/// 자식이 없는 글꼴도 확장이 붙어 있으면 남기고, 확장 없는 빈 글꼴은 다시 읽을 때 버린다
 fn dxf_xml(d: &crate::model::Dxf) -> String {
-    let mut s = String::from("<x:dxf>");
+    let has_hs = d.hancom.is_some() || d.font.as_ref().is_some_and(|f| dxf_font_ext(f).is_some());
+    let fallback = format!("<x:dxf>{}</x:dxf>", dxf_children(d, false));
+    if has_hs {
+        alternate(
+            &format!(
+                "<x:dxf hs:applyExtension=\"1\">{}</x:dxf>",
+                dxf_children(d, true)
+            ),
+            &fallback,
+        )
+    } else {
+        fallback
+    }
+}
+
+/// 차등 서식 글꼴의 한컴 확장. 확장도 표준 자식도 없는 글꼴(바이너리·레거시에서 이름(0x18)만 있던 글꼴)에는
+/// 한셀이 차등 서식 글꼴에 쓰는 기본 확장을 붙인다 — 한셀은 확장 없는 빈 글꼴을 다시 읽을 때 버린다
+fn dxf_font_ext(f: &Font) -> Option<HancomFontExt> {
+    match &f.hancom {
+        Some(h) => Some(h.clone()),
+        None if font_std_children(f).is_empty() => Some(HancomFontExt {
+            use_font_space: Some(false),
+            size: Some(0),
+            ratio: Some(0),
+            spacing: Some(0),
+            offset: Some(0),
+            ..Default::default()
+        }),
+        None => None,
+    }
+}
+
+fn dxf_children(d: &crate::model::Dxf, hs: bool) -> String {
+    let mut s = String::new();
     if let Some(f) = &d.font {
-        let _ = write!(s, "<x:font>{}</x:font>", font_std_children(f));
+        let std = font_std_children(f);
+        match (dxf_font_ext(f), hs) {
+            (Some(h), true) => {
+                let _ = write!(
+                    s,
+                    "<x:font hs:extension=\"1\">{std}{}</x:font>",
+                    font_hs_children(&h)
+                );
+            }
+            _ => {
+                let _ = write!(s, "<x:font>{std}</x:font>");
+            }
+        }
     }
     if let Some(n) = &d.num_fmt {
         let _ = write!(
@@ -500,7 +711,9 @@ fn dxf_xml(d: &crate::model::Dxf) -> String {
             esc(&n.code)
         );
     }
-    if let Some(f) = &d.fill {
+    if let Some(g) = d.fill.as_ref().and_then(|f| f.gradient.as_ref()) {
+        let _ = write!(s, "<x:fill>{}</x:fill>", gradient_xml(g));
+    } else if let Some(f) = &d.fill {
         // 차등 서식의 단색 채우기는 bgColor 로 쓴다 (patternType 은 지정한 때만)
         s.push_str("<x:fill><x:patternFill");
         if let Some(p) = &f.pattern_type {
@@ -523,15 +736,36 @@ fn dxf_xml(d: &crate::model::Dxf) -> String {
         if let Some(v) = &a.vertical {
             let _ = write!(s, " vertical=\"{}\"", esc(v));
         }
+        if let Some(r) = a.text_rotation {
+            let _ = write!(s, " textRotation=\"{r}\"");
+        }
         if a.wrap_text {
             s.push_str(" wrapText=\"1\"");
+        }
+        if let Some(i) = a.indent {
+            let _ = write!(s, " indent=\"{i}\"");
+        }
+        if a.shrink_to_fit {
+            s.push_str(" shrinkToFit=\"1\"");
+        }
+        if let Some(o) = a.reading_order {
+            let _ = write!(s, " readingOrder=\"{o}\"");
         }
         s.push_str("/>");
     }
     if let Some(b) = &d.border {
-        s.push_str(&border_xml(b));
+        s.push_str(&dxf_border_xml(b));
     }
-    s.push_str("</x:dxf>");
+    if let Some(p) = &d.protection {
+        s.push_str("<x:protection");
+        if let Some(l) = p.locked {
+            let _ = write!(s, " locked=\"{}\"", u8::from(l));
+        }
+        if let Some(h) = p.hidden {
+            let _ = write!(s, " hidden=\"{}\"", u8::from(h));
+        }
+        s.push_str("/>");
+    }
     s
 }
 
@@ -824,7 +1058,10 @@ fn t_el(text: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn num(v: f64) -> String {
-    // 왕복 가능한 최단 표기
+    // 왕복 가능한 최단 표기. 무한대는 xsd:double 표기 (Rust 의 inf 는 xsd:double 이 아니다)
+    if v.is_infinite() {
+        return if v > 0.0 { "INF" } else { "-INF" }.into();
+    }
     format!("{v}")
 }
 
@@ -1609,7 +1846,7 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
     }
     put("xl/workbook.xml", wbx.as_bytes())?;
     put("xl/_rels/workbook.xml.rels", wb_rels.as_bytes())?;
-    put("xl/styles.xml", styles_xml(&wb.styles).as_bytes())?;
+    put("xl/styles.xml", styles_xml(&wb.styles, flavor).as_bytes())?;
     if let Some(t) = theme {
         put("xl/theme/theme1.xml", t)?;
     }
@@ -2016,5 +2253,54 @@ mod tests {
     #[test]
     fn escapes_markup_and_drops_invalid_controls() {
         assert_eq!(esc("a<b>&\"c\u{1}"), "a&lt;b&gt;&amp;&quot;c");
+    }
+
+    #[test]
+    fn dxf_border_writes_only_given_edges() {
+        let b = Border {
+            left: Some(BorderEdge {
+                style: Some("thin".into()),
+                color: None,
+            }),
+            right: Some(BorderEdge {
+                style: None,
+                color: Some(Color {
+                    auto: true,
+                    ..Default::default()
+                }),
+            }),
+            horizontal: Some(BorderEdge {
+                style: Some("double".into()),
+                color: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            dxf_border_xml(&b),
+            "<x:border><x:left style=\"thin\"/><x:right><x:color auto=\"1\"/></x:right><x:horizontal style=\"double\"/></x:border>"
+        );
+    }
+
+    #[test]
+    fn table_style_elements_in_type_order() {
+        use crate::model::{TableStyle, TableStyleElement, TableStyles};
+        let el = |kind: &str, dxf| TableStyleElement {
+            kind: kind.into(),
+            size: 1,
+            dxf_id: Some(dxf),
+        };
+        let t = TableStyles {
+            default_table_style: Some("T".into()),
+            default_pivot_style: None,
+            styles: vec![TableStyle {
+                name: "T".into(),
+                pivot: false,
+                table: true,
+                elements: vec![el("pageFieldLabels", 1), el("wholeTable", 0)],
+            }],
+        };
+        let x = table_styles_xml(&t);
+        assert!(x.contains("<x:tableStyle name=\"T\" pivot=\"0\" table=\"1\" count=\"2\">"));
+        assert!(x.find("wholeTable").unwrap() < x.find("pageFieldLabels").unwrap());
     }
 }

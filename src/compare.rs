@@ -40,6 +40,9 @@ pub struct Options {
     pub ignore_cf: bool,
     /// 자동 필터 비교 생략. 한셀은 레거시 자동 필터의 값 목록 빈 칸과 상위/하위 백분율을 읽지 못한다.
     pub ignore_filter: bool,
+    /// 사용자 정의 표 스타일 비교 생략 (기본 스타일 이름만 비교). 한셀은 레거시의 표 스타일 레코드를
+    /// 읽지 않는다 (docs/format/cell-legacy.md).
+    pub ignore_table_styles: bool,
 }
 
 fn color_key(c: Option<&Color>) -> String {
@@ -78,6 +81,16 @@ fn font_key(f: Option<&Font>, opts: Options) -> String {
     }
     if f.strike {
         parts.push("strike".into());
+    }
+    for (on, k) in [
+        (f.outline, "outline"),
+        (f.shadow, "shadow"),
+        (f.condense, "condense"),
+        (f.extend, "extend"),
+    ] {
+        if on {
+            parts.push(k.into());
+        }
     }
     if let Some(u) = &f.underline {
         parts.push(format!("u={u}"));
@@ -156,6 +169,34 @@ fn edge_key(e: Option<&BorderEdge>) -> String {
     }
 }
 
+/// 차등 서식의 선: 없는 선('그대로 둠')은 "-", 스타일 없는 선('선 없음')은 "none" (선 없음의 색은 보지 않는다)
+fn dxf_edge_key(e: Option<&BorderEdge>) -> String {
+    match e {
+        None => "-".into(),
+        Some(e) => match e.style.as_deref() {
+            None | Some("none") => "none".into(),
+            Some(s) => format!("{s}/{}", color_key(e.color.as_ref())),
+        },
+    }
+}
+
+/// 차등 서식의 테두리: 선 일곱 개를 모두 쓴다 (셀 테두리와 달리 없는 선과 선 없음이 다르다)
+fn dxf_border_key(b: Option<&Border>) -> String {
+    let Some(b) = b else { return "-".into() };
+    format!(
+        "L={} R={} T={} B={} D{}{}={} V={} H={}",
+        dxf_edge_key(b.left.as_ref()),
+        dxf_edge_key(b.right.as_ref()),
+        dxf_edge_key(b.top.as_ref()),
+        dxf_edge_key(b.bottom.as_ref()),
+        if b.diagonal_up { "U" } else { "" },
+        if b.diagonal_down { "D" } else { "" },
+        dxf_edge_key(b.diagonal.as_ref()),
+        dxf_edge_key(b.vertical.as_ref()),
+        dxf_edge_key(b.horizontal.as_ref()),
+    )
+}
+
 fn border_key(b: Option<&Border>) -> String {
     let Some(b) = b else { return "-".into() };
     let diag = if b.diagonal_up || b.diagonal_down {
@@ -168,8 +209,15 @@ fn border_key(b: Option<&Border>) -> String {
     } else {
         String::new()
     };
+    let mut inner = String::new();
+    for (k, e) in [("V", &b.vertical), ("H", &b.horizontal)] {
+        let v = edge_key(e.as_ref());
+        if v != "-" {
+            let _ = write!(inner, " {k}={v}");
+        }
+    }
     format!(
-        "L={} R={} T={} B={}{diag}",
+        "L={} R={} T={} B={}{diag}{inner}",
         edge_key(b.left.as_ref()),
         edge_key(b.right.as_ref()),
         edge_key(b.top.as_ref()),
@@ -197,9 +245,10 @@ pub fn style_key(styles: &Styles, xf_index: u32, opts: Options) -> String {
     let fill = styles
         .fills
         .get(xf.fill_id as usize)
-        .map(|f| match f.pattern_type.as_deref() {
-            None | Some("none") => "-".to_string(),
-            Some(p) => format!("{p}/{}", color_key(f.fg_color.as_ref())),
+        .map(|f| match (&f.gradient, f.pattern_type.as_deref()) {
+            (Some(g), _) => gradient_key(g),
+            (None, None | Some("none")) => "-".to_string(),
+            (None, Some(p)) => format!("{p}/{}", color_key(f.fg_color.as_ref())),
         })
         .unwrap_or_else(|| "-".into());
     let border = border_key(styles.borders.get(xf.border_id as usize));
@@ -287,8 +336,9 @@ pub fn style_key(styles: &Styles, xf_index: u32, opts: Options) -> String {
         })
         .unwrap_or_default();
     format!(
-        "font[{font}] fill[{fill}] border[{border}] align[{align}] fmt[{}]{prot}{para}",
-        num_fmt_code(styles, xf.num_fmt_id)
+        "font[{font}] fill[{fill}] border[{border}] align[{align}] fmt[{}]{prot}{para}{}",
+        num_fmt_code(styles, xf.num_fmt_id),
+        if xf.quote_prefix { " '" } else { "" }
     )
 }
 
@@ -436,27 +486,140 @@ fn dxf_key(styles: &Styles, id: Option<u32>) -> String {
     };
     let font = d.font.as_ref().map_or("-".into(), |f| {
         format!(
-            "{}{}{}{}/{}",
+            "{}{}{}{}{}{}/{}",
             if f.bold { "b" } else { "" },
             if f.italic { "i" } else { "" },
-            f.underline.as_deref().map_or("", |_| "u"),
+            // 한셀의 XML 저장은 차등 서식의 이중 회계 밑줄을 단일 회계로 쓴다 (바이너리·레거시는 0x22 를 지킨다,
+            // 차등 서식 대조 실험) — 회계 밑줄 둘은 같게 본다
+            f.underline.as_deref().map_or(String::new(), |u| match u {
+                "singleAccounting" | "doubleAccounting" => "u:accounting".into(),
+                u => format!("u:{u}"),
+            }),
             if f.strike { "s" } else { "" },
+            f.vert_align
+                .as_deref()
+                .map_or(String::new(), |v| format!(" {v}")),
+            f.size.map_or(String::new(), |v| format!(" {v}pt")),
             color_key(f.color.as_ref())
         )
     });
-    let fill = d.fill.as_ref().map_or("-".into(), |f| {
+    // 맞춤: 들여쓰기는 한셀이 차등 서식에 남기지 않는다
+    let align = d.alignment.as_ref().map_or("-".into(), |a| {
         format!(
+            "{}/{}{}{}{}",
+            a.horizontal.as_deref().unwrap_or("-"),
+            a.vertical.as_deref().unwrap_or("-"),
+            if a.wrap_text { " wrap" } else { "" },
+            a.text_rotation
+                .filter(|&r| r != 0)
+                .map_or(String::new(), |r| format!(" rot{r}")),
+            if a.shrink_to_fit { " shrink" } else { "" }
+        )
+    });
+    let fill = d.fill.as_ref().map_or("-".into(), |f| match &f.gradient {
+        Some(g) => gradient_key(g),
+        None => format!(
             "{}/{}/{}",
             f.pattern_type.as_deref().unwrap_or("-"),
             color_key(f.fg_color.as_ref()),
             color_key(f.bg_color.as_ref())
-        )
+        ),
     });
     format!(
-        "dxf[font={font} fill={fill} border={} fmt={}]",
-        border_key(d.border.as_ref()),
-        d.num_fmt.as_ref().map_or("-", |n| n.code.as_str())
+        "dxf[font={font} fill={fill} border={} fmt={} align={align}{}]",
+        dxf_border_key(d.border.as_ref()),
+        d.num_fmt.as_ref().map_or("-", |n| n.code.as_str()),
+        if d.protection.is_some() { " prot" } else { "" }
     )
+}
+
+/// 그라데이션: 종류(각도 또는 경로 사각형)와 정지점(위치:색)
+fn gradient_key(g: &crate::model::GradientFill) -> String {
+    let stops: Vec<String> = g
+        .stops
+        .iter()
+        .map(|s| format!("{:.3}:{}", s.position, color_key(Some(&s.color))))
+        .collect();
+    if g.path {
+        format!(
+            "path({:.3},{:.3},{:.3},{:.3})[{}]",
+            g.left,
+            g.right,
+            g.top,
+            g.bottom,
+            stops.join(" ")
+        )
+    } else {
+        format!("linear{}[{}]", g.degree, stops.join(" "))
+    }
+}
+
+/// 셀 스타일 목록: 기본 제공은 번호(수준은 행·열 윤곽 스타일 1·2 만), 사용자 정의는 이름.
+/// 한셀은 셀 서식이 쓰는 스타일과 표준 스타일만 저장한다 — 레거시에 쓰는 BIFF 상용구(쉼표·통화·백분율)와
+/// 쓰이지 않는 사용자 정의 스타일은 다시 저장할 때 사라진다. 그래서 쓰이는 것만 비교한다
+fn cell_styles_key(st: &Styles) -> String {
+    let used: BTreeSet<u32> = st.cell_xfs.iter().filter_map(|x| x.xf_id).collect();
+    let set: BTreeSet<String> = st
+        .cell_styles
+        .iter()
+        .filter(|c| c.builtin_id == Some(0) || used.contains(&c.xf_id))
+        .map(|c| match c.builtin_id {
+            Some(b) => format!(
+                "builtin{b}{}",
+                c.i_level
+                    .filter(|_| matches!(b, 1 | 2))
+                    .map_or(String::new(), |l| format!("/{l}"))
+            ),
+            None => format!("{:?}", c.name),
+        })
+        .collect();
+    // 셀 스타일이 없으면 쓸 때 표준 스타일 하나를 넣는다 (writer)
+    if st.cell_styles.is_empty() {
+        return "builtin0".into();
+    }
+    set.into_iter().collect::<Vec<_>>().join(" ")
+}
+
+/// 표 스타일: 기본 이름, 그리고 스타일마다 쓰임새와 요소(종류·폭·차등 서식 내용)
+fn table_styles_key(st: &Styles, defaults_only: bool) -> String {
+    let Some(t) = &st.table_styles else {
+        return "-".into();
+    };
+    let mut s = format!(
+        "default={:?}/{:?}",
+        t.default_table_style, t.default_pivot_style
+    );
+    if defaults_only {
+        return s;
+    }
+    let mut styles: Vec<String> = t
+        .styles
+        .iter()
+        .map(|ts| {
+            let mut els: Vec<String> = ts
+                .elements
+                .iter()
+                .map(|e| format!("{}:{}={}", e.kind, e.size, dxf_key(st, e.dxf_id)))
+                .collect();
+            els.sort();
+            format!(
+                "{:?}{}{} [{}]",
+                ts.name,
+                if ts.pivot { " pivot" } else { "" },
+                if ts.table { " table" } else { "" },
+                els.join(", ")
+            )
+        })
+        .collect();
+    styles.sort();
+    for x in styles {
+        let _ = write!(
+            s,
+            "
+      {x}"
+        );
+    }
+    s
 }
 
 /// 조건부 서식 전체를 (범위, 우선순위) 순으로 한 줄씩
@@ -723,8 +886,16 @@ fn view_key(sh: &Sheet) -> String {
     )
 }
 
-/// 인쇄 설정을 기본값을 채운 한 줄로.
-fn page_key(sh: &Sheet) -> String {
+/// 머리글·바닥글 여백 (pageMargins 가 없으면 OOXML 기본값 0.3)
+fn hf_margins(sh: &Sheet) -> (f64, f64) {
+    sh.page
+        .margins
+        .as_ref()
+        .map_or((0.3, 0.3), |m| (m.header, m.footer))
+}
+
+/// 인쇄 설정을 기본값을 채운 한 줄로. `hf` 를 주면 머리글·바닥글 여백 대신 그 값을 쓴다
+fn page_key(sh: &Sheet, hf: Option<(f64, f64)>) -> String {
     let p = &sh.page;
     // printOptions 가 없으면 모두 꺼짐과 같다 (한셀은 켠 것이 있을 때만 쓴다)
     let o = p.print_options.clone().unwrap_or_default();
@@ -741,9 +912,10 @@ fn page_key(sh: &Sheet) -> String {
         header: 0.3,
         footer: 0.3,
     });
+    let (header, footer) = hf.unwrap_or((m.header, m.footer));
     let m = format!(
-        "margin={:.3}/{:.3}/{:.3}/{:.3} hf={:.3}/{:.3}",
-        m.left, m.right, m.top, m.bottom, m.header, m.footer
+        "margin={:.3}/{:.3}/{:.3}/{:.3} hf={header:.3}/{footer:.3}",
+        m.left, m.right, m.top, m.bottom
     );
     let su = p.setup.as_ref().map_or("-".into(), |s| {
         format!(
@@ -875,6 +1047,18 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             )
         };
         diff("테마".into(), tk(ta), tk(tb));
+    }
+    if !opts.skip_styles {
+        diff(
+            "셀 스타일".into(),
+            cell_styles_key(&a.styles),
+            cell_styles_key(&b.styles),
+        );
+        diff(
+            "표 스타일".into(),
+            table_styles_key(&a.styles, opts.ignore_table_styles),
+            table_styles_key(&b.styles, opts.ignore_table_styles),
+        );
     }
 
     // 외부 연결은 시트 이름, 그리고 상태(경로 없음 여부, 값 캐시)를 비교한다 (경로의 드라이브는 한셀이
@@ -1020,7 +1204,13 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             (Some(x), Some(y)) => (Some(x), Some(y)),
             _ => (None, None),
         };
-        diff(format!("{s} 인쇄"), page_key(sa), page_key(sb));
+        // 한셀은 저장할 때마다 머리글·바닥글 여백을 HWPUNIT(1/7200 인치) 하나씩 잃는다 (잘라 읽기, 관측:
+        // 0.511805 → 0.511666 → 0.511527 …). 판정 비교의 양쪽은 한셀을 거친 횟수가 다를 수 있어 한 단위
+        // 안의 차이는 같은 값으로 본다
+        let (ha, hb) = (hf_margins(sa), hf_margins(sb));
+        let near = |x: f64, y: f64| ((x - y) * 7200.0).abs() <= 1.5;
+        let hf_b = (near(ha.0, hb.0) && near(ha.1, hb.1)).then_some(ha);
+        diff(format!("{s} 인쇄"), page_key(sa, None), page_key(sb, hf_b));
         diff(
             format!("{s} 시트 속성"),
             format!("{:?} tab={}", code_a, color_key(sa.tab_color.as_ref())),

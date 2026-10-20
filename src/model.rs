@@ -1200,6 +1200,83 @@ pub struct Styles {
     pub cell_styles: Vec<NamedStyle>,
     /// 조건부 서식 등에 쓰이는 차등 서식
     pub dxfs: Vec<Dxf>,
+    /// 표·피벗 표 스타일 (`x:tableStyles`). 한셀은 사용자 정의 스타일이 없어도 기본 스타일 이름을 쓴다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_styles: Option<TableStyles>,
+    /// 문단 번호 정의 (`x:abstractNums`, 한컴 확장 — 문단 모양의 `abstractNumId` 가 가리킨다)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub abstract_nums: Vec<AbstractNum>,
+}
+
+/// `x:tableStyles`
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TableStyles {
+    pub default_table_style: Option<String>,
+    pub default_pivot_style: Option<String>,
+    pub styles: Vec<TableStyle>,
+}
+
+/// `x:tableStyle` — 표의 부분(머리글 행, 줄무늬 …)마다 차등 서식 하나
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TableStyle {
+    pub name: String,
+    /// 피벗 표에 쓸 수 있다 (기본 참)
+    pub pivot: bool,
+    /// 표에 쓸 수 있다 (기본 참)
+    pub table: bool,
+    pub elements: Vec<TableStyleElement>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TableStyleElement {
+    /// ST_TableStyleType (`wholeTable`, `headerRow`, `firstRowStripe` …)
+    pub kind: String,
+    /// 줄무늬 폭 (행·열 수, 기본 1)
+    pub size: u32,
+    pub dxf_id: Option<u32>,
+}
+
+/// 표 스타일 요소 종류 — 바이너리·레거시 레코드의 번호 순서 ([MS-XLSB] BrtTableStyleElement,
+/// [MS-XLS] TableStyleElement 의 tseType. 한셀 확인: 표 스타일 대조 실험)
+pub const TABLE_STYLE_TYPES: [&str; 28] = [
+    "wholeTable",
+    "headerRow",
+    "totalRow",
+    "firstColumn",
+    "lastColumn",
+    "firstRowStripe",
+    "secondRowStripe",
+    "firstColumnStripe",
+    "secondColumnStripe",
+    "firstHeaderCell",
+    "lastHeaderCell",
+    "firstTotalCell",
+    "lastTotalCell",
+    "firstSubtotalColumn",
+    "secondSubtotalColumn",
+    "thirdSubtotalColumn",
+    "firstSubtotalRow",
+    "secondSubtotalRow",
+    "thirdSubtotalRow",
+    "blankRow",
+    "firstColumnSubheading",
+    "secondColumnSubheading",
+    "thirdColumnSubheading",
+    "firstRowSubheading",
+    "secondRowSubheading",
+    "thirdRowSubheading",
+    "pageFieldLabels",
+    "pageFieldValues",
+];
+
+/// `x:abstractNum` (한컴 확장). 한셀은 문단 모양에 번호가 있으면 저장할 때 이 목록을 새로 만든다
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AbstractNum {
+    pub num_type: u32,
+    pub id: u32,
+    pub start_num: u32,
+    /// 번호 모양, XML 에 쓰는 그대로 (`^` 를 `%5e` 로 쓴다: `%5e1.` = 1수준 번호 뒤 마침표)
+    pub lvl_text: String,
 }
 
 /// `x:dxf` — 차등 서식. 지정된 항목만 덮어쓴다.
@@ -1210,6 +1287,9 @@ pub struct Dxf {
     pub border: Option<Border>,
     pub num_fmt: Option<NumFmt>,
     pub alignment: Option<Alignment>,
+    /// `x:protection` (한셀 XML 은 값 없이 요소만 쓴다)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protection: Option<Protection>,
     /// `x:dxf hs:applyExtension="1"` 등
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hancom: Option<HancomXfExt>,
@@ -1258,6 +1338,16 @@ pub struct Font {
     /// `x:dstrike` — 이중 취소선. ECMA SpreadsheetML 에는 없고 한셀이 SML 네임스페이스에 쓰는 요소
     /// (HncOOXML.dll `CFont::InitMap` 에서 확인)
     pub double_strike: bool,
+    /// `x:outline` · `x:shadow` · `x:condense` · `x:extend` (ECMA 글꼴 효과 — Excel 등 다른 프로그램이 읽는 쪽.
+    /// 한셀은 한컴 확장의 외곽선·그림자 종류와 함께 쓴다)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub outline: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub shadow: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub condense: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub extend: bool,
     pub color: Option<Color>,
     pub vert_align: Option<String>,
     pub family: Option<u32>,
@@ -1311,7 +1401,28 @@ pub struct Fill {
     pub pattern_type: Option<String>,
     pub fg_color: Option<Color>,
     pub bg_color: Option<Color>,
-    pub gradient: bool,
+    /// `x:gradientFill` (있으면 무늬 채우기 대신 쓴다)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<GradientFill>,
+}
+
+/// `x:gradientFill`: 직선(각도) 또는 경로(사각형 안쪽에서 바깥으로) 그라데이션
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct GradientFill {
+    /// `type="path"`
+    pub path: bool,
+    pub degree: f64,
+    pub left: f64,
+    pub right: f64,
+    pub top: f64,
+    pub bottom: f64,
+    pub stops: Vec<GradientStop>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct GradientStop {
+    pub position: f64,
+    pub color: Color,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1327,6 +1438,11 @@ pub struct Border {
     pub top: Option<BorderEdge>,
     pub bottom: Option<BorderEdge>,
     pub diagonal: Option<BorderEdge>,
+    /// 범위 안쪽 세로·가로 선 (`x:vertical`, `x:horizontal` — 차등 서식·표 스타일에서 쓴다)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<BorderEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub horizontal: Option<BorderEdge>,
     pub diagonal_up: bool,
     pub diagonal_down: bool,
 }
@@ -1363,6 +1479,9 @@ pub struct Xf {
     pub apply_protection: Option<bool>,
     pub alignment: Option<Alignment>,
     pub protection: Option<Protection>,
+    /// 글자 접두(작은따옴표) — `quotePrefix`. 숫자처럼 보이는 글을 글로 둔다
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub quote_prefix: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hancom: Option<HancomXfExt>,
 }
@@ -1416,6 +1535,8 @@ pub struct NamedStyle {
     pub name: String,
     pub xf_id: u32,
     pub builtin_id: Option<u32>,
+    /// 개요 수준 스타일(RowLevel_n / ColLevel_n, 내장 번호 1·2)의 수준. XML `iLevel`
+    pub i_level: Option<u32>,
 }
 
 #[cfg(test)]

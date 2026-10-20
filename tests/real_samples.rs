@@ -71,6 +71,8 @@ fn legacy_reading_matches_hancell() {
         // → 아래 legacy_cf_matches_xml_source 에서 원본과 비교
         ignore_cf: true,
         ignore_filter: true,
+        // 한셀은 레거시의 사용자 정의 표 스타일을 읽지 않는다
+        ignore_table_styles: true,
         ..Default::default()
     };
     let mut failures = Vec::new();
@@ -100,7 +102,7 @@ fn legacy_reading_matches_hancell() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// 레거시의 조건부 서식·데이터 유효성·자동 필터는 같은 문서의 XML 원본(X.cell)과 비교한다.
+/// 레거시의 조건부 서식·데이터 유효성·자동 필터·사용자 정의 표 스타일은 같은 문서의 XML 원본(X.cell)과 비교한다.
 #[test]
 fn legacy_cf_matches_xml_source() {
     let Some(dir) = std::env::var_os("RCELL_CORPUS").map(PathBuf::from) else {
@@ -123,7 +125,11 @@ fn legacy_cf_matches_xml_source() {
             let diffs: Vec<String> = rcell::compare::compare(&a, &b, Default::default())
                 .into_iter()
                 .filter(|d| {
-                    d.contains("조건부 서식") || d.contains("유효성") || d.contains("자동 필터")
+                    d.contains("조건부 서식")
+                        || d.contains("유효성")
+                        || d.contains("자동 필터")
+                        // 한셀은 레거시의 사용자 정의 표 스타일을 읽지 않는다 → XML 원본만 정답이 된다
+                        || d.starts_with("표 스타일")
                 })
                 .collect();
             if !diffs.is_empty() {
@@ -195,6 +201,7 @@ fn writer_output_is_read_identically_by_hancell() {
         ignore_shape_detail: true,
         ignore_cf: true,
         ignore_filter: true,
+        ignore_table_styles: true,
         ..Default::default()
     };
     let bin_opts = rcell::compare::Options {
