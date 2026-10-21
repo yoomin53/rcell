@@ -115,6 +115,19 @@ enum Cmd {
         #[arg(long)]
         ignore_table_styles: bool,
     },
+    /// 수식을 다시 계산해 파일의 값(한셀이 계산한 값)과 비교한다. 다르면 종료 코드 1
+    Calc {
+        file: PathBuf,
+        /// 값이 다른 셀을 출력
+        #[arg(long)]
+        diff: bool,
+        /// 출력할 최대 차이 수
+        #[arg(long, default_value_t = 50)]
+        max: usize,
+        /// 다시 계산한 문서를 저장 (XML .cell, 확장자가 .xlsx 면 Excel 형식)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
     /// ZIP 패키지의 파트를 다른 파일 내용으로 바꿔 새 파일로 저장 — 리버스 엔지니어링용
     Patch {
         input: PathBuf,
@@ -211,6 +224,16 @@ fn main() -> ExitCode {
                 ignore_table_styles,
             },
         ) {
+            Ok(true) => Ok(()),
+            Ok(false) => return ExitCode::from(1),
+            Err(e) => Err(e),
+        },
+        Cmd::Calc {
+            file,
+            diff,
+            max,
+            output,
+        } => match calc(&file, diff, max, output.as_deref()) {
             Ok(true) => Ok(()),
             Ok(false) => return ExitCode::from(1),
             Err(e) => Err(e),
@@ -644,6 +667,63 @@ fn diff(a: &Path, b: &Path, max: usize, opts: rcell::compare::Options) -> rcell:
     }
     println!("차이 {}개", diffs.len());
     Ok(diffs.is_empty())
+}
+
+/// 다시 계산해 파일의 값과 비교한다. 휘발성 셀(NOW·RAND …) 말고 다른 값이 없으면 true.
+fn calc(file: &Path, show: bool, max: usize, output: Option<&Path>) -> rcell::Result<bool> {
+    use rcell::calc::CellStatus;
+    let mut wb = open_doc(file)?;
+    let opts = rcell::calc::CalcOptions::default();
+    let (results, report) = rcell::calc::evaluate(&wb, &opts);
+    let (mut same, mut differ, mut volatile_differ, mut no_cache) = (0usize, 0usize, 0usize, 0usize);
+    let mut lines = Vec::new();
+    for r in &results {
+        match rcell::calc::matches_cached(&wb, r) {
+            None => no_cache += 1,
+            Some(true) => same += 1,
+            Some(false) => {
+                if r.status == CellStatus::Volatile {
+                    volatile_differ += 1;
+                } else {
+                    differ += 1;
+                }
+                let sheet = wb.sheets.get(r.sheet).map(|s| s.name.as_str()).unwrap_or("?");
+                lines.push(format!(
+                    "{sheet}!{}  ={}  계산 {:?}  파일 {:?}  [{:?}]",
+                    r.cell, r.formula, r.value, r.cached, r.status
+                ));
+            }
+        }
+    }
+    println!(
+        "수식 셀 {}: 같음 {same}, 다름 {differ} (휘발성 다름 {volatile_differ}), 파일 값 없음 {no_cache}",
+        report.formula_cells
+    );
+    println!(
+        "계산 {}, 휘발성 {}, 지원 안 함 {}, 해석 실패 {}, 순환 {}",
+        report.computed, report.volatile, report.unsupported, report.parse_errors, report.cycles
+    );
+    if !report.unsupported_functions.is_empty() {
+        let fns: Vec<String> = report
+            .unsupported_functions
+            .iter()
+            .map(|(k, v)| format!("{k}({v})"))
+            .collect();
+        println!("지원하지 않는 함수: {}", fns.join(", "));
+    }
+    if show {
+        for l in lines.iter().take(max) {
+            println!("{l}");
+        }
+        if lines.len() > max {
+            println!("… 외 {}개", lines.len() - max);
+        }
+    }
+    if let Some(out) = output {
+        rcell::calc::recalculate_with(&mut wb, &opts);
+        rcell::save(&wb, out)?;
+    }
+    Ok(differ == 0)
 }
 
 fn html(file: &Path, output: Option<&Path>, sheet: Option<&str>) -> rcell::Result<()> {

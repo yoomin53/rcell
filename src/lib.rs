@@ -22,6 +22,7 @@
 //! 작성자: yoomin53 (<https://github.com/yoomin53>)
 
 pub mod binary;
+pub mod calc;
 pub mod cf_eval;
 pub mod cfb;
 pub mod chart_svg;

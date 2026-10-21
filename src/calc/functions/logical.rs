@@ -1,0 +1,232 @@
+// Copyright 2026 yoomin53 (https://github.com/yoomin53)
+// SPDX-License-Identifier: Apache-2.0
+//
+// rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
+
+//! 논리 함수.
+
+use std::rc::Rc;
+
+use super::{Arg, FnSpec, MANY, R, V, f, lazy};
+use crate::calc::ast::Expr;
+use crate::calc::eval::{Ctx, broadcast_dim};
+use crate::calc::value::{self, Array, ErrorKind, Value};
+
+pub const FNS: &[FnSpec] = &[
+    f("TRUE", 0, 0, V, |_, _| Value::Bool(true)),
+    f("FALSE", 0, 0, V, |_, _| Value::Bool(false)),
+    f("NOT", 1, 1, V, not),
+    f("AND", 1, MANY, R, and),
+    f("OR", 1, MANY, R, or),
+    f("XOR", 1, MANY, R, xor),
+    lazy("IF", 2, 3, if_),
+    lazy("IFERROR", 2, 2, iferror),
+    lazy("IFNA", 2, 2, ifna),
+    lazy("IFS", 2, MANY, ifs),
+    lazy("SWITCH", 3, MANY, switch),
+];
+
+const _: &[Arg] = &[];
+
+fn not(ctx: &mut Ctx, a: &[Value]) -> Value {
+    Value::Bool(!try_v!(ctx.boolean(&a[0])))
+}
+
+/// AND·OR·XOR 의 인수에서 논리 값을 모은다. 범위·배열의 글과 빈 칸은 건너뛴다.
+fn logicals(ctx: &mut Ctx, args: &[Value]) -> Result<Vec<bool>, ErrorKind> {
+    let mut out = Vec::new();
+    for a in args {
+        match a {
+            Value::Ref(r) => {
+                for area in r.iter() {
+                    let mut err = None;
+                    ctx.for_each_in_area(area, |_, _, v| {
+                        if err.is_some() {
+                            return;
+                        }
+                        match v {
+                            Value::Bool(b) => out.push(*b),
+                            Value::Number(n) => out.push(*n != 0.0),
+                            Value::Error(e) => err = Some(*e),
+                            _ => {}
+                        }
+                    });
+                    if let Some(e) = err {
+                        return Err(e);
+                    }
+                }
+            }
+            Value::Array(arr) => {
+                for v in &arr.data {
+                    match v {
+                        Value::Bool(b) => out.push(*b),
+                        Value::Number(n) => out.push(*n != 0.0),
+                        Value::Error(e) => return Err(*e),
+                        _ => {}
+                    }
+                }
+            }
+            Value::Empty => out.push(false),
+            other => out.push(ctx.boolean(other)?),
+        }
+    }
+    if out.is_empty() {
+        return Err(ErrorKind::Value);
+    }
+    Ok(out)
+}
+
+fn and(ctx: &mut Ctx, a: &[Value]) -> Value {
+    Value::Bool(try_v!(logicals(ctx, a)).iter().all(|&b| b))
+}
+
+fn or(ctx: &mut Ctx, a: &[Value]) -> Value {
+    Value::Bool(try_v!(logicals(ctx, a)).iter().any(|&b| b))
+}
+
+fn xor(ctx: &mut Ctx, a: &[Value]) -> Value {
+    Value::Bool(try_v!(logicals(ctx, a)).iter().filter(|&&b| b).count() % 2 == 1)
+}
+
+/// 생략한 인수는 0
+fn branch(ctx: &mut Ctx, e: &Expr) -> Value {
+    match e {
+        Expr::Missing => Value::Number(0.0),
+        e => ctx.eval(e),
+    }
+}
+
+fn branch_value(ctx: &mut Ctx, e: &Expr) -> Value {
+    match e {
+        Expr::Missing => Value::Number(0.0),
+        e => ctx.eval_value(e),
+    }
+}
+
+fn if_(ctx: &mut Ctx, args: &[Expr]) -> Value {
+    let cond = ctx.eval_value(&args[0]);
+    if let Value::Array(c) = cond {
+        let t = match args.get(1) {
+            Some(e) => branch_value(ctx, e),
+            None => Value::Bool(true),
+        };
+        let fv = match args.get(2) {
+            Some(e) => branch_value(ctx, e),
+            None => Value::Bool(false),
+        };
+        return elementwise3(&c, &t, &fv, |c, t, f| match value::to_bool(c) {
+            Ok(true) => t.clone(),
+            Ok(false) => f.clone(),
+            Err(e) => Value::Error(e),
+        });
+    }
+    match ctx.boolean(&cond) {
+        Ok(true) => branch(ctx, &args[1]),
+        Ok(false) => match args.get(2) {
+            Some(e) => branch(ctx, e),
+            None => Value::Bool(false),
+        },
+        Err(e) => Value::Error(e),
+    }
+}
+
+/// 배열 조건과 두 값(배열이거나 스칼라)을 원소마다
+fn elementwise3(c: &Array, t: &Value, f: &Value, g: impl Fn(&Value, &Value, &Value) -> Value) -> Value {
+    let dims = |v: &Value| match v {
+        Value::Array(a) => (a.rows, a.cols),
+        _ => (1, 1),
+    };
+    let (tr, tc) = dims(t);
+    let (fr, fc) = dims(f);
+    let rows = broadcast_dim(broadcast_dim(c.rows, tr), fr);
+    let cols = broadcast_dim(broadcast_dim(c.cols, tc), fc);
+    let pick = |v: &Value, r: usize, k: usize| match v {
+        Value::Array(a) => a.get_broadcast(r, k),
+        o => o.clone(),
+    };
+    let mut data = Vec::with_capacity(rows * cols);
+    for r in 0..rows {
+        for k in 0..cols {
+            data.push(g(&c.get_broadcast(r, k), &pick(t, r, k), &pick(f, r, k)));
+        }
+    }
+    Value::Array(Rc::new(Array::new(rows, cols, data)))
+}
+
+fn iferror(ctx: &mut Ctx, args: &[Expr]) -> Value {
+    catch(ctx, args, |_| true)
+}
+
+fn ifna(ctx: &mut Ctx, args: &[Expr]) -> Value {
+    catch(ctx, args, |e| e == ErrorKind::NA)
+}
+
+fn catch(ctx: &mut Ctx, args: &[Expr], hit: fn(ErrorKind) -> bool) -> Value {
+    let v = ctx.eval_value(&args[0]);
+    match v {
+        Value::Array(a) => {
+            if !a.data.iter().any(|x| matches!(x, Value::Error(e) if hit(*e))) {
+                return Value::Array(a);
+            }
+            let alt = branch_value(ctx, &args[1]);
+            let cond = Array::new(a.rows, a.cols, a.data.clone());
+            elementwise3(&cond, &alt, &Value::Empty, |x, alt, _| match x {
+                Value::Error(e) if hit(*e) => alt.clone(),
+                o => o.clone(),
+            })
+        }
+        Value::Error(e) if hit(e) => branch(ctx, &args[1]),
+        Value::Empty => Value::Number(0.0),
+        o => o,
+    }
+}
+
+fn ifs(ctx: &mut Ctx, args: &[Expr]) -> Value {
+    if args.len() % 2 != 0 {
+        return Value::Error(ErrorKind::NA);
+    }
+    for pair in args.chunks(2) {
+        let c = ctx.eval_value(&pair[0]);
+        let c = ctx.scalar(c);
+        match ctx.boolean(&c) {
+            Ok(true) => return branch(ctx, &pair[1]),
+            Ok(false) => {}
+            Err(e) => return Value::Error(e),
+        }
+    }
+    Value::Error(ErrorKind::NA)
+}
+
+fn switch(ctx: &mut Ctx, args: &[Expr]) -> Value {
+    let x = ctx.eval_value(&args[0]);
+    let x = ctx.scalar(x);
+    if let Value::Error(e) = x {
+        return Value::Error(e);
+    }
+    let rest = &args[1..];
+    let mut i = 0;
+    while i + 1 < rest.len() {
+        let v = ctx.eval_value(&rest[i]);
+        let v = ctx.scalar(v);
+        if let Value::Error(e) = v {
+            return Value::Error(e);
+        }
+        if value::compare(&x, &v) == std::cmp::Ordering::Equal && same_kind(&x, &v) {
+            return branch(ctx, &rest[i + 1]);
+        }
+        i += 2;
+    }
+    if i < rest.len() {
+        return branch(ctx, &rest[i]);
+    }
+    Value::Error(ErrorKind::NA)
+}
+
+fn same_kind(a: &Value, b: &Value) -> bool {
+    matches!(
+        (a, b),
+        (Value::Number(_) | Value::Empty, Value::Number(_) | Value::Empty)
+            | (Value::Text(_), Value::Text(_))
+            | (Value::Bool(_), Value::Bool(_))
+    )
+}
