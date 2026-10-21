@@ -33,6 +33,7 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
 | 표 스타일 | `BrtBeginTableStyles`(508: `cts u32` (사용자 정의 수), 기본 표·피벗 스타일 이름 XLWideString), `BrtBeginTableStyle`(510: 플래그 u16 — 0x02 피벗, 0x04 표, `ctse u32`, 이름), `BrtTableStyleElement`(512: `tseType u32, size u32, dxfId u32`), 끝 511·509 |
 | 함수 번호 | `PtgFunc`/`PtgFuncVar` 는 [MS-XLSB] Ftab 그대로 (368–484 Excel 2007 함수, 150 CALL). 한컴 함수는 1904 SUBTOTALA (가변), 1907 CONVERTK (인자 4) — 함수 대조 실험 |
 | 공유 수식 | `BrtShrFmla`(**427**, `RfX` + 수식)가 기준 셀 수식 레코드 **뒤에** 온다. 셀의 `PtgExp` 는 **행 u32 만** 담고 열은 `rgcb` 의 `PtgExtraCol`(u32)에 있다 ([MS-XLSB]) |
+| 상대 3차원 참조 | 상대 위치 수식(공유 수식·조건부 서식·유효성)에서는 `PtgRef3d`/`PtgArea3d` 도 상대 플래그가 선 축을 기준 셀에서의 **오프셋**으로 쓴다 (RgceLocRel). 3차원 참조 대조 실험 (공유 수식을 넣어 만든 XML → 한셀 → 바이너리): D1:D6 `Sheet2!C1+1` → `5A 0000 00000000 FFFF`(열 −1), E2:E6 `SUM(Sheet2!B1:C2)` → 행 `FFFFF`(−1)·0, 열 −3·−2, 조건부 서식 B3:B8 `Sheet2!B3` → 0·0, 유효성 G4:G8 `Sheet2!B4` → 열 −5. 이름 정의는 A1 기준이라 오프셋과 좌표가 같다 |
 | 이름 | `BrtName` 의 `fBuiltin`(0x20) 이면 `Print_Area` 같은 내장 이름 → XML 의 `_xlnm.Print_Area` |
 | 외부 연결 | `workbook.bin` 의 `BrtSupBookSrc`(355) = 관계 ID → `xl/externalLinks/externalLinkN.bin`: `BrtBeginSupBook`(360, `sbt u16` 0 = 외부 + 관계 ID → `externalLinkPath`), `BrtSupTabs`(359, `cTab u32` + 시트 이름들) |
 | 시트 속성 | `BrtWsProp`(147): 플래그 3바이트(0x000001 자동 페이지 나누기, 0x000040 요약 행 아래, 0x000080 요약 열 오른쪽, 0x000100 페이지에 맞추기, 0x010000 필터 적용 중), `BrtColor` 탭 색(자동 = 없음), `rwSync`, `colSync`, 코드 이름 (없으면 한셀이 채운다) |
@@ -52,7 +53,12 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
 - 조건부 서식의 차등 서식에서 표시 형식과 맞춤이 사라진다. 글꼴 이름(XFProp 0x18)은 깨진 문자열로 쓴다. "시작 문자" 규칙의 글자(`strParam`)를 수식의 다른 부분으로 잘못 쓴다.
 - 요약 열 왼쪽(`summaryRight="0"`)을 잃는다 (`BrtWsProp` 0x80 을 언제나 켠다). 구조 잠금이 없는 통합 문서 보호
   (창 잠금·암호만)는 `BrtBookProtection` 째로 저장하지 않는다.
-- 보호가 걸린 문서는 표준 암호화(ECMA-376, AES-128, 기본 암호 `VelvetSweatshop`)로 저장한다 — rcell 은 투명하게 푼다.
+- 통합 문서 구조 잠금이 걸린 문서는 표준 암호화(ECMA-376, AES-128, 기본 암호 `VelvetSweatshop`)로 감싸 저장한다
+  (시트 보호·창 잠금·통합 문서 암호만이면 감싸지 않는다: filter2·filter3, 창 잠금만 건 COM 문서) — rcell 은 투명하게
+  풀고, 쓸 때도 똑같이 감싼다 (4.10절).
+- 그림을 다시 부호화한다 (pictures: PNG 149 → 178 바이트, JPEG 155,595 → 146,356 바이트; XML 저장은 원본 그대로).
+  조작한 XML 의 그림에는 `macro=""`·`fPublished="0"`·`rotWithShape="1"`·`fLocksWithSheet`·`fPrintsWithSheet` 를 채우고
+  `a:xfrm` 의 위치·크기를 앵커에서 다시 계산한다.
 - 외부 연결의 상태를 잃는다: 값 캐시(`BrtExternTableStart` … 를 쓰지 않아 `refreshError` 도 사라짐)와
   경로를 잃은 연결의 표시(관계 종류 `xlPathMissing` → 보통의 `externalLinkPath`). 한셀은 이 둘에 따라 이름 참조의
   따옴표를 정하므로, 바이너리를 거친 문서는 이름의 표기가 달라질 수 있다.
@@ -104,6 +110,14 @@ XFPropColor 는 `fValidRGB 1비트 + 종류 7비트 (0 자동, 1 색인, 2 RGB, 
 rcell diff X.bin.cell X.cell --ignore-hancom
 ```
 
+쓰기(4절)의 검증 (`tests/write_binary.rs`, 코퍼스 114쌍):
+
+| 검증 | 방법 | 결과 |
+|---|---|---|
+| 왕복 | XML·한셀 바이너리·레거시 원본 → rcell 바이너리 → rcell 읽기, `rcell diff` | 342/342 차이 0 |
+| 레코드 대조 | rcell 이 `X.cell` 에서 쓴 바이너리 대 한셀의 `X.bin.cell` (`rcell bindiff`) | 한셀 레코드 47,382 중 바이트까지 같음 46,898 (98.98%, `exact`) · 46,874 (98.93%, 기본) |
+| 한셀 읽기 | rcell 바이너리를 한셀이 .xlsb 로 열어 XML 저장 (`tools/probe/binw-oracle.ps1`) 대 `X.bin.as.cell`, `rcell diff --ignore-hancom` | `exact` 114/114 차이 0. 기본은 한셀의 바이너리 저장이 잃는 값(4.8절)이 있는 조작 문서 5개만 다르다 |
+
 ## 4. 쓰기 — 한셀이 쓰는 꼴 (`src/binary/writer.rs`)
 
 근거: 코퍼스 114개 문서의 `X.cell`(한셀 XML 저장)과 `X.bin.cell`(같은 문서를 한셀이 -2007 로 저장)을 레코드마다
@@ -117,11 +131,11 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 | ZIP | 파트를 이름 순으로, Deflate, 날짜 1980-01-01 |
 | `[Content_Types].xml` | Default: `rels`, `xml`, 메모가 있으면 `vml`, 그림 확장자(`png`·`jpeg` …), **외부 연결 대상의 확장자**(`xls` → `application/vnd.ms-excel`). Override: 나머지 파트를 이름 순으로 (`xl/workbook.bin` = `…sheet.binary.macroEnabled.main`, 시트 `…ms-excel.worksheet`, `…styles`, `…sharedStrings`, `…comments`, `…externalLink`) |
 | 루트 관계 | rId1 officeDocument, rId2 core-properties, rId3 extended-properties |
-| 통합 문서 관계 | rId1 테마, rId2 styles.bin, rId3 sharedStrings.bin, rId4… 시트, 그 뒤 외부 연결 (`externalLinks/externalLinkN.bin`) |
+| 통합 문서 관계 | rId1 테마, rId2 styles.bin, rId3 sharedStrings.bin, rId4… 시트, 그 뒤 외부 연결 (`externalLinks/externalLinkN.bin`). 문자열이 하나도 없으면 sharedStrings.bin 과 그 관계·콘텐츠 타입이 없고 시트가 rId3 부터다 (3차원 참조 대조 실험의 숫자·수식만 있는 문서) |
 | 시트 관계 | 하이퍼링크(외부), 그리기, VML, 메모 순. 대상은 상대 경로 (`../drawings/drawing1.xml`) |
 | 외부 연결 파트 | `BrtBeginSupBook`(360: `sbt 0`, 관계 ID `rId1`, 빈 문자열 0xFFFFFFFF), `BrtSupTabs`(359), `BrtEndSupBook`(588). 관계는 경로를 잃은 연결도 보통의 `externalLinkPath` |
-| 그리기·차트·그림·VML | XML 파트 그대로 (차트는 모델에서 `chart_xml` 로). 한셀은 그리기·차트·그림 파트에 **세션 전체의 번호**를 붙인다 (같은 문서의 `X.cell` 은 `drawing69.xml`, `X.bin.cell` 은 `drawing70.xml`) — 문서의 정보가 아니다 |
-| docProps | app.xml: `Application` Cell, 시트 이름 목록(`TitlesOfParts`), `TotalTime` 0, `AppVersion` 12.0300. core.xml 은 늘 쓴다 |
+| 그리기·차트·그림·VML | XML 파트 그대로 (차트는 모델에서 `chart_xml` 로). 한셀은 그리기·차트·그림 파트에 **세션 전체의 번호**를 붙인다 (같은 문서의 `X.cell` 은 `drawing69.xml`, `X.bin.cell` 은 `drawing70.xml`) — 문서의 정보가 아니다. 메모 VML 은 문서의 VML 도형(이름 `메모 N`, 앵커, z-index, `o:spid`, `x:ShapeUri`)을 그대로 옮긴다 — rcell 모델에는 도형 정보가 없어 XML 쓰기와 같은 기본 VML 을 쓴다 (코퍼스 6개 문서가 다르다) |
+| docProps | app.xml: `Application` Cell, 시트 이름 목록(`TitlesOfParts`), `TotalTime` 원본 값(서식 파일 51 → 51, 없으면 0), `AppVersion` 12.0300. core.xml 은 늘 쓰고 끝에 `cp:version` 1300.0100.01 (바이너리 113개 모두). 수정 번호(+1)·수정 날짜(저장 시각)는 저장할 때 바뀐다 — rcell 은 모델 값을 쓰고, 대조(`binary::parity`)와 `rcell diff` 는 이 둘과 수정한 사람을 뺀다 |
 
 ### 4.2 `workbook.bin`
 
@@ -138,7 +152,7 @@ rcell diff X.bin.cell X.cell --ignore-hancom
   (`Sheet1!$A$1:$A$5`). 차트만 있는 문서도 `BrtSupSelf` + `BrtExternSheet` 가 있는 까닭이다 (차트 문서 68개).
 - **이름**: 모델 순서 그대로, `_xlnm.` 은 떼고 `fBuiltin`(0x20). 수식에 쓰였지만 정의되지 않은 이름은 수식 없는
   이름(cce 0)으로 덧붙인다 (`=XYZ` → `BrtName XYZ`). 주석은 0xFFFFFFFF.
-- 보호가 걸린 통합 문서(구조 잠금)는 한셀이 ECMA-376 표준 암호화로 감싸 저장한다 (2절). rcell 은 감싸지 않는다.
+- 구조 잠금이 걸린 통합 문서는 ECMA-376 표준 암호화로 감싼다 (4.10절).
 
 ### 4.3 시트 (`sheetN.bin`)
 
@@ -184,7 +198,8 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 ### 4.5 공유 문자열
 
 XML 의 공유 문자열 순서를 지킨다 (서식 파일 28개 모두; 조작 문서 몇 개는 한셀이 순서를 바꾼다 — 숨은 상태).
-`cstTotal` 은 XML 의 `count` 를 그대로 옮긴다 (실제 참조 수와 다를 수 있다).
+`cstTotal` 은 XML 의 `count` 를 그대로 옮긴다 (실제 참조 수와 다를 수 있다). 문자열이 하나도 없으면 파트째 쓰지
+않는다 (4.1절).
 
 ### 4.6 수식 토큰 (`src/binary/formula.rs`)
 
@@ -197,6 +212,7 @@ XML 의 공유 문자열 순서를 지킨다 (서식 파일 28개 모두; 조작
 | 0–65535 정수 `PtgInt`, 나머지 `PtgNum`; 수 앞의 `-` 는 음수 `PtgNum` 하나 | `ABS(-5)` → `1F … 14 C0` |
 | 이름 정의는 참조 클래스, 합집합은 `PtgMemFunc`(0x29 + 길이)로 감싼다 | 인쇄 영역 `A,B` |
 | 상대 토큰(공유 수식·조건부 서식·유효성)의 행 오프셋은 **20비트** (`-7` → `F9 FF 0F 00`), 열은 14비트 | 서식 파일의 공유 수식 |
+| 상대 위치 수식의 3차원 참조는 `PtgRef3d`/`PtgArea3d` 그대로, 상대 축만 오프셋 (`PtgRefN` 같은 3차원 토큰은 없다) | 3차원 참조 대조 실험 (2절) — 읽기는 `legacy::formula::decode_relative` |
 
 ### 4.7 조건부 서식·유효성·자동 필터
 
@@ -230,4 +246,29 @@ XML 이 같은데 바이너리가 다른 칸 — rcell 은 가장 흔한 값을 
 (22)·(24), `BrtPrintOptions` 0x10, 테두리 자동 색의 `DF`/`FF`, 머리글·바닥글 여백의 HWPUNIT 하나, 병합과 공유 문자열의
 순서, 몇몇 서식 파일의 XTI 순서와 쓰이지 않는 XTI, XF 의 순서가 바뀐 문서 하나, 쓰이지 않는 글꼴 하나, 차등 서식의
 이중 회계 밑줄(XML 은 단일 회계로 쓴다), 데이터 막대의 GUID 와 XML x14 확장의 세부(rcell 모델에 없다), 상위/하위·동적
-필터가 데이터로 계산한 값, `BrtAbsPath15` 의 폴더.
+필터가 데이터로 계산한 값, `BrtAbsPath15` 의 폴더. rcell 모델에 없어 다른 것: 메모 VML 도형 (4.1절), 다시 부호화한
+그림과 조작한 XML 의 그림 앵커 정규화 (2.1절).
+
+### 4.10 구조 잠금 문서의 암호화 컨테이너 (`src/binary/encrypt.rs`)
+
+구조 잠금 문서를 한셀이 바이너리로 저장한 것 (코퍼스 outline, COM 으로 만든 패키지 5.6 KB·99 KB·706 KB 문서 셋):
+OLE2 복합 문서 판 3 (0x3E, 512바이트 섹터) 안에 스트림 `EncryptionInfo` 와 `EncryptedPackage` 둘뿐이다
+(`\x06DataSpaces` 없음).
+
+- `EncryptionInfo` 224 바이트: 버전 4.2, 플래그 0x24, 머리 길이 140 (플래그 0x24, 0, AES-128 0x660E, SHA-1 0x8004,
+  128, 공급자 0x18, 0, 0, `Microsoft Enhanced RSA and AES Cryptographic Provider`), 검증자 (salt 16, 암호화한 검증자 16,
+  해시 길이 20, 암호화한 해시 32 — 해시 뒤 12바이트는 0).
+- **salt 와 검증자가 같은 16바이트**이고, 한셀 한 번 실행하는 동안 같은 값이다 (같은 세션의 두 문서). rcell 은
+  패키지 SHA-1 의 앞 16바이트를 쓴다.
+- `EncryptedPackage`: 원래 길이 u64 + AES-128 ECB 암호문. 마지막 블록을 채운 바이트는 한셀은 쓰레기 값, rcell 은 0.
+- 섹터: 0 FAT, 1 디렉터리 (루트 → 자식 `EncryptionInfo`(검정) → 오른쪽 `EncryptedPackage`(빨강), 넷째 항목은 빈
+  항목), 2 미니 FAT, 3 미니 스트림 (`EncryptionInfo`), 4… 패키지. FAT 섹터는 0, 125, 254, 383, 512, 633, 762, 891,
+  1020, 1149, 1278, 1407 (706 KB) — 패키지를 8바이트 머리 다음 4096바이트씩 쓰면서, 쓰기 뒤의 섹터 수가 FAT 이 덮는
+  수를 넘으면 그 자리에 FAT 섹터를 잡는 꼴이다. rcell 은 이 규칙으로 같은 자리에 둔다.
+- 한셀은 루트에 저장 시각을 적고, 파일을 패키지 스트림 끝에서 자른다 (마지막 섹터가 덜 찬 채). rcell 은 시각 0,
+  마지막 섹터를 채운다. 패키지가 4096 바이트보다 작으면 [MS-CFB] 대로 미니 스트림에 넣는다 (한셀에서는 보지 못한
+  크기 — 관측한 한셀 패키지는 모두 5.5 KB 넘는다. rcell 은 레거시에서 읽은 문서처럼 테마가 없으면 더 작게 쓴다).
+- XML 저장: 같은 세션에서 COM 으로 구조를 잠근 문서는 XML 도 감싸지만 (`xmlfirst.cell`), 코퍼스의 outline.cell 은
+  감싸지 않았다 — 조건 미확인. 한셀이 감싼 바이너리를 다시 열어 XML 로 저장하면 그것도 감싼다 (X.bin.as.cell).
+- 한셀 대조: rcell 이 감싼 outline 바이너리를 한셀이 .xlsb 로 열어 XML 로 저장한 결과가 한셀 자기 바이너리를 같은
+  길로 연 것과 차이 0 (exact·기본 모두), 그 XML 도 한셀이 감싼다.
