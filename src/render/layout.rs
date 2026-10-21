@@ -21,8 +21,8 @@ use std::collections::{HashMap, HashSet};
 use super::metrics::{self, FontMetrics, col_px, default_col_chars, row_px};
 use crate::model::{Cell, CellValue, Font, RowInfo, Sheet, Workbook};
 
-/// 칸 안 왼쪽 여백 (px, 한셀 화면: 글자가 왼쪽 경계에서 3px 안쪽에서 시작)
-pub(super) const PAD: f64 = 3.0;
+/// 칸 안 왼쪽 여백 (px): 한셀 화면에서 왼쪽 맞춤 글자의 잉크가 경계 다음 픽셀부터 2px 안쪽 (보정 문서 갈무리)
+pub(super) const PAD: f64 = 2.0;
 /// 오른쪽 맞춤 글자의 오른쪽 여백 (px, 격자선 제외): 한셀 화면에서 글자 끝이 격자선 2px 앞
 pub(super) const PAD_R: f64 = 2.0;
 

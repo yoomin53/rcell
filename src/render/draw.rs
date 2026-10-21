@@ -14,6 +14,7 @@ use super::cell::font_family;
 use super::layout::Layout;
 use super::shape;
 use crate::model::{DrawColor, Marker, Paint, Shape, ShapeKind, TextBody, Workbook};
+use crate::xml::Element;
 use crate::theme::Theme;
 use crate::writer::esc;
 
@@ -64,8 +65,18 @@ pub(super) fn shapes_html(
             _ => (x1, y1),
         };
         let (w, h) = ((x2 - x1).max(0.0), (y2 - y1).max(0.0));
+        // 한셀 화면의 개체 자리 (앵커 대조 실험): 도형의 1px 선은 칸 경계보다 1px 왼쪽·위 픽셀
+        // (선 가운데를 −0.5px 에), 그림은 1px 왼쪽·위, 차트 틀은 왼쪽 2px·위 1px 바깥에서 오른쪽·아래
+        // 경계의 1px 안쪽까지 (틀 크기 +1)
+        let r = match sh.kind {
+            crate::model::ShapeKind::Chart => {
+                (x1.round() - 2.0, y1.round() - 1.0, w.round() + 1.0, h.round() + 1.0)
+            }
+            crate::model::ShapeKind::Picture => (x1 - 1.0, y1 - 1.0, w, h),
+            _ => (x1 - 0.5, y1 - 0.5, w, h),
+        };
         let obj = sh.raw.as_deref().and_then(shape::object_element);
-        s.push_str(&object_html(wb, sh, obj.as_ref(), (x1, y1, w, h), theme));
+        s.push_str(&object_html(wb, sh, obj.as_ref(), r, theme));
     }
     s
 }
@@ -74,7 +85,7 @@ pub(super) fn shapes_html(
 fn object_html(
     wb: &Workbook,
     sh: &Shape,
-    obj: Option<&crate::xml::Element>,
+    obj: Option<&Element>,
     (x, y, w, h): (f64, f64, f64, f64),
     theme: &Theme,
 ) -> String {
@@ -161,74 +172,297 @@ fn object_html(
     s
 }
 
-/// 채우기 색 (모델 → 없으면 스타일 참조)
-fn shape_fill(
-    sh: &Shape,
-    obj: Option<&crate::xml::Element>,
+/// DrawingML 색 요소 → (CSS 색, 불투명도)
+fn color_el(e: &Element, theme: &Theme) -> Option<(String, f64)> {
+    let c = crate::parser::drawing::color(e);
+    let alpha = c
+        .mods
+        .iter()
+        .find(|(m, _)| m == "alpha")
+        .map_or(1.0, |(_, v)| (*v as f64 / 100_000.0).clamp(0.0, 1.0));
+    Some((draw_color(&c, theme)?, alpha))
+}
+
+/// 채우기 요소(solidFill/gradFill/pattFill/blipFill/noFill)가 든 부모에서 SVG 채우기 값을 만든다.
+/// 그라데이션·무늬·그림은 defs 에 정의를 넣고 url(#id) 를 돌려준다. 채우기 요소가 없으면 None
+fn fill_from(
+    parent: &Element,
     theme: &Theme,
     defs: &mut String,
     id: &str,
-) -> Option<String> {
-    match &sh.fill {
-        Some(Paint::Solid(c)) => draw_color(c, theme),
-        Some(Paint::None) => None,
-        Some(Paint::Other(kind)) if kind == "gradFill" => {
-            let (ang, stops) = obj.and_then(shape::grad_fill)?;
-            let th = ang.to_radians();
-            let (c, s) = (th.cos(), th.sin());
-            let d = c.abs() + s.abs();
-            let _ = write!(
-                defs,
-                "<linearGradient id=\"{id}\" x1=\"{:.3}\" y1=\"{:.3}\" x2=\"{:.3}\" y2=\"{:.3}\">",
-                0.5 - c * d / 2.0,
-                0.5 - s * d / 2.0,
-                0.5 + c * d / 2.0,
-                0.5 + s * d / 2.0
-            );
-            for (p, e) in &stops {
-                let col = draw_color(&crate::parser::drawing::color(e), theme)
-                    .unwrap_or_else(|| "#FFFFFF".into());
-                let _ = write!(defs, "<stop offset=\"{p}\" stop-color=\"{col}\"/>");
-            }
-            defs.push_str("</linearGradient>");
-            Some(format!("url(#{id})"))
+    wb: &Workbook,
+    sh: &Shape,
+) -> Option<Option<(String, f64)>> {
+    for c in parent.elements().filter(|c| c.ns.as_deref() == Some(shape::A)) {
+        match c.name.as_str() {
+            "noFill" => return Some(None),
+            "solidFill" => return Some(c.elements().next().and_then(|e| color_el(e, theme))),
+            "gradFill" => return Some(gradient_def(c, theme, defs, id).map(|u| (u, 1.0))),
+            "pattFill" => return Some(pattern_def(c, theme, defs, id).map(|u| (u, 1.0))),
+            "blipFill" => return Some(image_def(c, wb, sh, defs, id).map(|u| (u, 1.0))),
+            "grpFill" => return Some(None),
+            _ => {}
         }
-        Some(Paint::Other(_)) => Some("#D9D9D9".into()),
+    }
+    None
+}
+
+/// a:gradFill → linearGradient/radialGradient
+fn gradient_def(g: &Element, theme: &Theme, defs: &mut String, id: &str) -> Option<String> {
+    let stops: Vec<(f64, String, f64)> = g
+        .child_ns(shape::A, "gsLst")?
+        .elements()
+        .filter(|e| e.is(shape::A, "gs"))
+        .filter_map(|gs| {
+            let pos = gs.attr_f64("pos").unwrap_or(0.0) / 100_000.0;
+            let (c, a) = color_el(gs.elements().next()?, theme)?;
+            Some((pos, c, a))
+        })
+        .collect();
+    if stops.is_empty() {
+        return None;
+    }
+    let stop_xml: String = stops
+        .iter()
+        .map(|(p, c, a)| {
+            if *a < 1.0 {
+                format!("<stop offset=\"{p:.4}\" stop-color=\"{c}\" stop-opacity=\"{a:.3}\"/>")
+            } else {
+                format!("<stop offset=\"{p:.4}\" stop-color=\"{c}\"/>")
+            }
+        })
+        .collect();
+    if let Some(path) = g.child_ns(shape::A, "path") {
+        // 원·사각·모양 경로 그라데이션: 채우는 사각형(fillToRect)의 가운데에서 바깥으로
+        let r = path.child_ns(shape::A, "fillToRect");
+        let v = |n: &str| r.and_then(|r| r.attr_f64(n)).unwrap_or(50_000.0) / 100_000.0;
+        let (cx, cy) = ((v("l") + 1.0 - v("r")) / 2.0, (v("t") + 1.0 - v("b")) / 2.0);
+        let _ = write!(
+            defs,
+            "<radialGradient id=\"{id}\" cx=\"{cx:.3}\" cy=\"{cy:.3}\" r=\"0.71\">{stop_xml}</radialGradient>"
+        );
+    } else {
+        let ang = g
+            .child_ns(shape::A, "lin")
+            .and_then(|l| l.attr_f64("ang"))
+            .unwrap_or(5_400_000.0)
+            / 60000.0;
+        let th = ang.to_radians();
+        let (c, s) = (th.cos(), th.sin());
+        let d = c.abs() + s.abs();
+        let _ = write!(
+            defs,
+            "<linearGradient id=\"{id}\" x1=\"{:.3}\" y1=\"{:.3}\" x2=\"{:.3}\" y2=\"{:.3}\">{stop_xml}</linearGradient>",
+            0.5 - c * d / 2.0,
+            0.5 - s * d / 2.0,
+            0.5 + c * d / 2.0,
+            0.5 + s * d / 2.0
+        );
+    }
+    Some(format!("url(#{id})"))
+}
+
+/// a:pattFill → 8×8 무늬 (전경 픽셀 판정은 무늬 이름의 모양을 따라 직접 그린 근사)
+fn pattern_def(p: &Element, theme: &Theme, defs: &mut String, id: &str) -> Option<String> {
+    let col = |n: &str, d: &str| {
+        p.child_ns(shape::A, n)
+            .and_then(|c| c.elements().next())
+            .and_then(|e| color_el(e, theme))
+            .map_or_else(|| d.to_string(), |c| c.0)
+    };
+    let (fg, bg) = (col("fgClr", "#000000"), col("bgClr", "#FFFFFF"));
+    let prst = p.attr("prst").unwrap_or("pct5");
+    let on = |x: u32, y: u32| -> bool {
+        let pct = |n: u32| (x * 5 + y * 3 + (x ^ y) * 7) % 100 < n;
+        match prst {
+            "pct5" => pct(5),
+            "pct10" => pct(10),
+            "pct20" => pct(20),
+            "pct25" => pct(25),
+            "pct30" => pct(30),
+            "pct40" => pct(40),
+            "pct50" => (x + y).is_multiple_of(2),
+            "pct60" => pct(60),
+            "pct70" => pct(70),
+            "pct75" => pct(75),
+            "pct80" => pct(80),
+            "pct90" => pct(90),
+            "horz" | "ltHorz" | "narHorz" => y.is_multiple_of(4),
+            "dkHorz" => y % 4 < 2,
+            "vert" | "ltVert" | "narVert" => x.is_multiple_of(4),
+            "dkVert" => x % 4 < 2,
+            "dnDiag" | "ltDnDiag" | "wdDnDiag" => (x + 8 - y).is_multiple_of(4),
+            "dkDnDiag" => (x + 8 - y) % 4 < 2,
+            "upDiag" | "ltUpDiag" | "wdUpDiag" => (x + y).is_multiple_of(4),
+            "dkUpDiag" => (x + y) % 4 < 2,
+            "smGrid" | "cross" => x.is_multiple_of(4) || y.is_multiple_of(4),
+            "lgGrid" => x == 0 || y == 0,
+            "dotGrid" => x.is_multiple_of(4) && y.is_multiple_of(2) || y.is_multiple_of(4) && x.is_multiple_of(2),
+            "smCheck" => (x / 2 + y / 2).is_multiple_of(2),
+            "lgCheck" => (x / 4 + y / 4).is_multiple_of(2),
+            "diagCross" | "trellis" => (x + y).is_multiple_of(4) || (x + 8 - y).is_multiple_of(4),
+            "dashHorz" => y.is_multiple_of(4) && x % 8 < 4,
+            "dashVert" => x.is_multiple_of(4) && y % 8 < 4,
+            "dashDnDiag" => (x + 8 - y).is_multiple_of(4) && y % 8 < 4,
+            "dashUpDiag" => (x + y).is_multiple_of(4) && y % 8 < 4,
+            "zigZag" | "wave" => y == [0, 1, 2, 3, 3, 2, 1, 0][x as usize % 8],
+            "solidDmnd" | "openDmnd" | "dotDmnd" => (x as i32 - 4).abs() + (y as i32 - 4).abs() == 3,
+            _ => pct(50),
+        }
+    };
+    let _ = write!(
+        defs,
+        "<pattern id=\"{id}\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\"><rect width=\"8\" height=\"8\" fill=\"{bg}\"/><path fill=\"{fg}\" d=\""
+    );
+    for y in 0..8 {
+        for x in 0..8 {
+            if on(x, y) {
+                let _ = write!(defs, "M{x} {y}h1v1h-1z");
+            }
+        }
+    }
+    defs.push_str("\"/></pattern>");
+    Some(format!("url(#{id})"))
+}
+
+/// a:blipFill → 도형을 채우는 그림 (늘이기)
+fn image_def(b: &Element, wb: &Workbook, sh: &Shape, defs: &mut String, id: &str) -> Option<String> {
+    let blip = b.child_ns(shape::A, "blip")?;
+    let rid = blip
+        .attrs
+        .iter()
+        .find(|a| a.name == "embed")
+        .map(|a| a.value.as_str())?;
+    let target = sh.raw_rels.iter().find(|r| r.0 == rid).map(|r| r.2.as_str())?;
+    let part = wb.raw_parts.iter().find(|p| p.name == target)?;
+    let ct = part.content_type.as_deref().unwrap_or("image/png");
+    let _ = write!(
+        defs,
+        "<pattern id=\"{id}\" width=\"1\" height=\"1\" patternContentUnits=\"objectBoundingBox\"><image width=\"1\" height=\"1\" preserveAspectRatio=\"none\" href=\"data:{ct};base64,{}\"/></pattern>",
+        base64(&part.data)
+    );
+    Some(format!("url(#{id})"))
+}
+
+/// 채우기 (원본 spPr → 모델 → 스타일 참조): (SVG 채우기 값, 불투명도)
+fn shape_fill(
+    wb: &Workbook,
+    sh: &Shape,
+    obj: Option<&Element>,
+    theme: &Theme,
+    defs: &mut String,
+    id: &str,
+) -> Option<(String, f64)> {
+    if let Some(p) = obj.and_then(shape::sp_pr)
+        && let Some(f) = fill_from(p, theme, defs, id, wb, sh)
+    {
+        return f;
+    }
+    match &sh.fill {
+        Some(Paint::Solid(c)) => draw_color(c, theme).map(|c| (c, 1.0)),
+        Some(Paint::None) => None,
+        Some(Paint::Other(_)) => Some(("#D9D9D9".into(), 1.0)),
         None => obj
             .and_then(|o| shape::style_ref(o, "fillRef"))
-            .map(crate::parser::drawing::color)
-            .and_then(|c| draw_color(&c, theme)),
+            .and_then(|e| color_el(e, theme)),
     }
 }
 
-/// 선 (색, 굵기 px, 점선)
-fn shape_line(
-    sh: &Shape,
-    obj: Option<&crate::xml::Element>,
-    theme: &Theme,
-) -> Option<(String, f64, Option<String>)> {
-    let style_color = || {
-        obj.and_then(|o| shape::style_ref(o, "lnRef"))
-            .map(crate::parser::drawing::color)
-            .and_then(|c| draw_color(&c, theme))
-    };
-    let (color, width, dash) = match &sh.line {
-        Some(l) => {
-            let c = match &l.fill {
-                Some(Paint::Solid(c)) => draw_color(c, theme),
-                Some(Paint::None) => return None,
-                Some(Paint::Other(_)) => Some("#000000".into()),
-                None => style_color(),
-            }?;
-            (c, l.width, l.dash.clone())
-        }
-        None => (style_color()?, None, None),
-    };
-    let px = (width.unwrap_or(9525) as f64 / EMU).max(1.0);
-    Some((color, px, dash.as_deref().and_then(|d| dash_array(d, px))))
+/// 선
+struct Line {
+    color: String,
+    alpha: f64,
+    px: f64,
+    dash: Option<String>,
+    cap: &'static str,
+    join: &'static str,
+    head: Option<(String, String, String)>,
+    tail: Option<(String, String, String)>,
 }
 
-/// DrawingML 미리 정의된 점선 (`a:prstDash`) → SVG stroke-dasharray (선 굵기 배수)
+/// 선 (원본 a:ln → 모델 → 스타일 참조). 선이 없으면 None
+fn shape_line(sh: &Shape, obj: Option<&Element>, theme: &Theme) -> Option<Line> {
+    let ln = obj.and_then(shape::sp_pr).and_then(|p| p.child_ns(shape::A, "ln"));
+    let style_color = || {
+        obj.and_then(|o| shape::style_ref(o, "lnRef"))
+            .and_then(|e| color_el(e, theme))
+    };
+    let (color, alpha) = match ln {
+        Some(ln) => {
+            let mut found = None;
+            for c in ln.elements().filter(|c| c.ns.as_deref() == Some(shape::A)) {
+                match c.name.as_str() {
+                    "noFill" => return None,
+                    "solidFill" => found = c.elements().next().and_then(|e| color_el(e, theme)),
+                    "gradFill" => {
+                        // 선 그라데이션은 첫 정지점 색으로
+                        found = c
+                            .child_ns(shape::A, "gsLst")
+                            .and_then(|l| l.elements().next())
+                            .and_then(|gs| gs.elements().next())
+                            .and_then(|e| color_el(e, theme))
+                    }
+                    _ => {}
+                }
+            }
+            found.or_else(style_color)?
+        }
+        None => match &sh.line {
+            Some(l) => match &l.fill {
+                Some(Paint::Solid(c)) => (draw_color(c, theme)?, 1.0),
+                Some(Paint::None) => return None,
+                Some(Paint::Other(_)) => ("#000000".into(), 1.0),
+                None => style_color()?,
+            },
+            None => style_color()?,
+        },
+    };
+    let width = ln
+        .and_then(|l| l.attr("w"))
+        .and_then(|v| v.parse::<i64>().ok())
+        .or(sh.line.as_ref().and_then(|l| l.width));
+    // 굵기 0 은 가장 가는 선 (1px)
+    let px = (width.unwrap_or(9525) as f64 / EMU).max(1.0);
+    let dash = ln
+        .and_then(|l| l.child_ns(shape::A, "prstDash"))
+        .and_then(|d| d.attr("val"))
+        .map(str::to_string)
+        .or(sh.line.as_ref().and_then(|l| l.dash.clone()))
+        .and_then(|d| dash_array(&d, px));
+    let cap = match ln.and_then(|l| l.attr("cap")) {
+        Some("rnd") => "round",
+        Some("sq") => "square",
+        _ => "butt",
+    };
+    let join = if ln.and_then(|l| l.child_ns(shape::A, "round")).is_some() {
+        "round"
+    } else if ln.and_then(|l| l.child_ns(shape::A, "bevel")).is_some() {
+        "bevel"
+    } else {
+        "miter"
+    };
+    let end = |which: &str| {
+        let e = ln?.child_ns(shape::A, which)?;
+        let t = e.attr("type").filter(|t| *t != "none")?;
+        Some((
+            t.to_string(),
+            e.attr("w").unwrap_or("med").to_string(),
+            e.attr("len").unwrap_or("med").to_string(),
+        ))
+    };
+    Some(Line {
+        color,
+        alpha,
+        px,
+        dash,
+        cap,
+        join,
+        head: end("headEnd"),
+        tail: end("tailEnd"),
+    })
+}
+
+/// DrawingML 미리 정의된 점선 (a:prstDash) → SVG stroke-dasharray (선 굵기 배수)
 pub(super) fn dash_array(d: &str, px: f64) -> Option<String> {
     let pat: &[f64] = match d {
         "sysDot" => &[1.0, 1.0],
@@ -249,26 +483,72 @@ pub(super) fn dash_array(d: &str, px: f64) -> Option<String> {
     )
 }
 
-/// 개체 하나의 style 나머지와 내용 (`style="…` 다음부터 `</div>` 앞까지)
+/// 선 끝 모양 → SVG marker (크기는 선 굵기 배수: sm 2, med 3, lg 5)
+fn marker_def(defs: &mut String, id: &str, end: &(String, String, String), color: &str, tail: bool) {
+    let k = |v: &str| match v {
+        "sm" => 2.0,
+        "lg" => 5.0,
+        _ => 3.0,
+    };
+    let (mw, ml) = (k(&end.1), k(&end.2));
+    let shape = match end.0.as_str() {
+        "oval" => "<ellipse cx=\"5\" cy=\"5\" rx=\"5\" ry=\"5\"/>".to_string(),
+        "diamond" => "<path d=\"M0,5L5,0L10,5L5,10Z\"/>".to_string(),
+        "stealth" => "<path d=\"M0,0L10,5L0,10L3,5Z\"/>".to_string(),
+        "arrow" => "<path d=\"M0,0L10,5L0,10\" fill=\"none\" stroke-width=\"1.5\" stroke=\"COL\"/>".to_string(),
+        _ => "<path d=\"M0,0L10,5L0,10Z\"/>".to_string(),
+    }
+    .replace("COL", color);
+    let _ = write!(
+        defs,
+        "<marker id=\"{id}\" viewBox=\"0 0 10 10\" refX=\"{}\" refY=\"5\" markerWidth=\"{ml}\" markerHeight=\"{mw}\" orient=\"auto-start-reverse\" fill=\"{color}\">{shape}</marker>",
+        if tail { 9 } else { 1 }
+    );
+}
+
+/// 선 SVG 속성 (stroke …, 선 끝 marker)
+fn stroke_attrs(line: &Line, defs: &mut String, id: &str) -> String {
+    let mut a = format!(
+        " stroke=\"{}\" stroke-width=\"{:.2}\" stroke-linecap=\"{}\" stroke-linejoin=\"{}\"",
+        line.color, line.px, line.cap, line.join
+    );
+    if line.alpha < 1.0 {
+        let _ = write!(a, " stroke-opacity=\"{:.3}\"", line.alpha);
+    }
+    if let Some(d) = &line.dash {
+        let _ = write!(a, " stroke-dasharray=\"{d}\"");
+    }
+    if let Some(e) = &line.head {
+        marker_def(defs, &format!("{id}h"), e, &line.color, false);
+        let _ = write!(a, " marker-start=\"url(#{id}h)\"");
+    }
+    if let Some(e) = &line.tail {
+        marker_def(defs, &format!("{id}t"), e, &line.color, true);
+        let _ = write!(a, " marker-end=\"url(#{id}t)\"");
+    }
+    a
+}
+
+/// 개체 하나의 style 나머지와 내용 (style="… 다음부터 </div> 앞까지)
 fn shape_body(
     wb: &Workbook,
     sh: &Shape,
-    obj: Option<&crate::xml::Element>,
+    obj: Option<&Element>,
     w: f64,
     h: f64,
     theme: &Theme,
 ) -> String {
     let mut css = String::new();
     let mut inner = String::new();
+    // 문서 안에서 겹치지 않는 SVG id
+    let id = format!("s{}x{}", sh.id, (w * 7.0 + h * 13.0) as u64);
     match sh.kind {
-        ShapeKind::Chart => {
-            match &sh.chart {
-                Some(ch) => inner.push_str(&crate::chart_svg::chart_svg(ch, w, h, theme, &|c| {
-                    draw_color(c, theme)
-                })),
-                None => inner.push_str("<div class=\"rc-chart\">차트</div>"),
-            }
-        }
+        ShapeKind::Chart => match &sh.chart {
+            Some(ch) => inner.push_str(&crate::chart_svg::chart_svg(ch, w, h, theme, &|c| {
+                draw_color(c, theme)
+            })),
+            None => inner.push_str("<div class=\"rc-chart\">차트</div>"),
+        },
         ShapeKind::Picture => {
             let img = sh
                 .target
@@ -282,79 +562,330 @@ fn shape_body(
                     base64(&p.data)
                 );
             }
+            // 그림 테두리
+            if let Some(line) = shape_line(sh, obj, theme).filter(|_| {
+                obj.and_then(shape::sp_pr)
+                    .and_then(|p| p.child_ns(shape::A, "ln"))
+                    .is_some()
+            }) {
+                let _ = write!(
+                    css,
+                    "outline:{:.1}px solid {};outline-offset:-{:.1}px;",
+                    line.px, line.color, line.px / 2.0
+                );
+            }
         }
         ShapeKind::Connector => {
-            let (stroke, px, dash) =
-                shape_line(sh, obj, theme).unwrap_or_else(|| ("#000000".into(), 1.0, None));
+            let line = shape_line(sh, obj, theme).unwrap_or(Line {
+                color: "#000000".into(),
+                alpha: 1.0,
+                px: 1.0,
+                dash: None,
+                cap: "butt",
+                join: "miter",
+                head: None,
+                tail: None,
+            });
+            let mut defs = String::new();
+            let attrs = stroke_attrs(&line, &mut defs, &id);
+            // 연결선 모양: 직선 또는 꺾인·굽은 연결선 (뒤집기는 경로를 뒤집어 그린다)
             let flip_h = sh.xfrm.as_ref().is_some_and(|x| x.flip_h);
             let flip_v = sh.xfrm.as_ref().is_some_and(|x| x.flip_v);
-            let (ax, bx) = if flip_h { (w, 0.0) } else { (0.0, w) };
-            let (ay, by) = if flip_v { (h, 0.0) } else { (0.0, h) };
-            let mut defs = String::new();
-            let mut marks = String::new();
-            for (which, attr) in [("headEnd", "marker-start"), ("tailEnd", "marker-end")] {
-                if obj.and_then(|o| shape::line_end(o, which)).is_some() {
-                    let id = format!("m{}{}", sh.id, which);
-                    let _ = write!(
-                        defs,
-                        "<marker id=\"{id}\" viewBox=\"0 0 10 10\" refX=\"{}\" refY=\"5\" markerWidth=\"4\" markerHeight=\"4\" orient=\"auto-start-reverse\"><path d=\"M0,0L10,5L0,10Z\" fill=\"{stroke}\"/></marker>",
-                        if which == "tailEnd" { 9 } else { 1 }
-                    );
-                    let _ = write!(marks, " {attr}=\"url(#{id})\"");
-                }
-            }
-            let da = dash
-                .map(|d| format!(" stroke-dasharray=\"{d}\""))
-                .unwrap_or_default();
+            let prst = obj
+                .and_then(shape::geometry)
+                .and_then(|g| g.attr("prst"))
+                .or(sh.geometry.as_deref())
+                .unwrap_or("straightConnector1");
+            let adj = obj.and_then(shape::geometry).map(shape::adjusts).unwrap_or_default();
+            let d = shape::preset_path(prst, w, h, &adj)
+                .unwrap_or_else(|| format!("M0,0L{w:.1},{h:.1}"));
+            let tf = match (flip_h, flip_v) {
+                (false, false) => String::new(),
+                _ => format!(
+                    " transform=\"translate({:.1},{:.1}) scale({},{})\"",
+                    if flip_h { w } else { 0.0 },
+                    if flip_v { h } else { 0.0 },
+                    if flip_h { -1 } else { 1 },
+                    if flip_v { -1 } else { 1 }
+                ),
+            };
+            // 가로·세로 선은 크기가 0 이다 — SVG 상자는 1px 로 두고 넘쳐 그린다
             let _ = write!(
                 inner,
-                "<svg width=\"{w:.1}\" height=\"{h:.1}\" style=\"overflow:visible\"><defs>{defs}</defs><line x1=\"{ax:.1}\" y1=\"{ay:.1}\" x2=\"{bx:.1}\" y2=\"{by:.1}\" stroke=\"{stroke}\" stroke-width=\"{px:.2}\"{da}{marks}/></svg>"
+                "<svg class=\"rc-geom\" width=\"{:.1}\" height=\"{:.1}\"><defs>{defs}</defs><path d=\"{d}\" fill=\"none\"{attrs}{tf}/></svg>",
+                w.max(1.0),
+                h.max(1.0)
             );
             css.push_str("overflow:visible;");
         }
         _ => {
             let mut defs = String::new();
-            let fill = shape_fill(sh, obj, theme, &mut defs, &format!("g{}", sh.id));
+            let fill = shape_fill(wb, sh, obj, theme, &mut defs, &format!("{id}f"));
             let line = shape_line(sh, obj, theme);
             // 모양 경로: 원본 XML 이 있으면 그것으로, 없으면 모델의 모양 이름
             let paths = obj.and_then(|o| shape::paths(o, w, h)).or_else(|| {
                 let prst = sh.geometry.as_deref()?;
-                shape::preset_path(prst, w, h, &std::collections::HashMap::new())
-                    .map(|d| vec![(d, true, true)])
+                shape::preset_paths(prst, w, h, &std::collections::HashMap::new())
             });
             if let Some(paths) = paths.filter(|_| fill.is_some() || line.is_some()) {
-                let mut svg = format!(
-                    "<svg class=\"rc-geom\" width=\"{w:.1}\" height=\"{h:.1}\" viewBox=\"0 0 {w:.1} {h:.1}\"><defs>{defs}</defs>"
-                );
-                for (d, f, st) in paths {
-                    let fill_attr = if f {
-                        fill.clone().unwrap_or_else(|| "none".into())
-                    } else {
-                        "none".into()
+                let stroke = line
+                    .as_ref()
+                    .map(|l| stroke_attrs(l, &mut defs, &id))
+                    .unwrap_or_default();
+                let mut body = String::new();
+                for p in &paths {
+                    let fill_attr = match (&fill, p.fill) {
+                        (Some((f, a)), pf) if pf != shape::PathFill::None => {
+                            let mut v = format!(" fill=\"{f}\"");
+                            if *a < 1.0 {
+                                let _ = write!(v, " fill-opacity=\"{a:.3}\"");
+                            }
+                            v
+                        }
+                        _ => " fill=\"none\"".to_string(),
                     };
-                    let stroke_attr = match (&line, st) {
-                        (Some((c, px, dash)), true) => format!(
-                            " stroke=\"{c}\" stroke-width=\"{px:.2}\"{}",
-                            dash.as_ref()
-                                .map(|d| format!(" stroke-dasharray=\"{d}\""))
-                                .unwrap_or_default()
-                        ),
-                        _ => String::new(),
-                    };
-                    let _ = write!(svg, "<path d=\"{d}\" fill=\"{fill_attr}\"{stroke_attr}/>");
+                    let st = if p.stroke { stroke.as_str() } else { "" };
+                    let _ = write!(
+                        body,
+                        "<path d=\"{}\" fill-rule=\"evenodd\"{fill_attr}{st}/>",
+                        p.d
+                    );
+                    // 어둡게·밝게: 같은 경로에 반투명 검정·흰색을 덧칠한다
+                    if fill.is_some()
+                        && let Some((c, o)) = p.fill.overlay()
+                    {
+                        let _ = write!(
+                            body,
+                            "<path d=\"{}\" fill-rule=\"evenodd\" fill=\"{c}\" fill-opacity=\"{o}\"/>",
+                            p.d
+                        );
+                    }
                 }
-                svg.push_str("</svg>");
-                inner.push_str(&svg);
+                let _ = write!(
+                    inner,
+                    "<svg class=\"rc-geom\" width=\"{w:.1}\" height=\"{h:.1}\" viewBox=\"0 0 {w:.1} {h:.1}\"><defs>{defs}</defs>{body}</svg>"
+                );
                 css.push_str("overflow:visible;");
             }
-            if let Some(t) = &sh.text {
-                inner.push_str(&text_html(t, theme));
+            // 글: 원본 txBody 가 있으면 그것으로 (줄 간격·문단 간격·테마 글꼴), 없으면 모델
+            let tx = obj.and_then(|o| o.child_ns(shape::XDR, "txBody"));
+            let font_color = obj
+                .and_then(|o| o.child_ns(shape::XDR, "style"))
+                .and_then(|st| st.child_ns(shape::A, "fontRef"))
+                .and_then(|r| r.elements().next())
+                .and_then(|e| color_el(e, theme))
+                .map(|c| c.0);
+            match tx {
+                Some(tx) => inner.push_str(&txbody_html(tx, theme, font_color.as_deref())),
+                None => {
+                    if let Some(t) = &sh.text {
+                        inner.push_str(&text_html(t, theme));
+                    }
+                }
             }
         }
     }
     format!("{css}\">{inner}")
 }
 
+/// 테마 글꼴 참조(+mn-lt, +mn-ea, +mj-lt, +mj-ea …)를 글꼴 이름으로
+fn theme_font<'a>(name: &'a str, theme: &'a Theme) -> Option<&'a str> {
+    match name {
+        "+mn-lt" | "+mn-ea" | "+mn-cs" => theme.minor_font.as_deref().or(Some("맑은 고딕")),
+        "+mj-lt" | "+mj-ea" | "+mj-cs" => theme.major_font.as_deref().or(Some("맑은 고딕")),
+        "" => None,
+        n => Some(n),
+    }
+}
+
+/// 글 조각 서식 (a:rPr / a:defRPr / a:endParaRPr) → CSS. 크기(pt) 도 돌려준다
+fn run_css(r: Option<&Element>, theme: &Theme, base_color: Option<&str>) -> (String, Option<f64>) {
+    let mut st = String::new();
+    let Some(r) = r else {
+        if let Some(c) = base_color {
+            let _ = write!(st, "color:{c};");
+        }
+        return (st, None);
+    };
+    let size = r.attr_f64("sz").map(|v| v / 100.0);
+    if let Some(z) = size {
+        let _ = write!(st, "font-size:{z}pt;");
+    }
+    match r.attr_bool("b") {
+        Some(true) => st.push_str("font-weight:bold;"),
+        Some(false) => st.push_str("font-weight:normal;"),
+        None => {}
+    }
+    if r.attr_bool("i") == Some(true) {
+        st.push_str("font-style:italic;");
+    }
+    let mut deco = Vec::new();
+    if r.attr("u").is_some_and(|u| u != "none") {
+        deco.push("underline");
+    }
+    if r.attr("strike").is_some_and(|u| u != "noStrike") {
+        deco.push("line-through");
+    }
+    if !deco.is_empty() {
+        let _ = write!(st, "text-decoration:{};", deco.join(" "));
+    }
+    if let Some(b) = r.attr_f64("baseline").filter(|b| *b != 0.0) {
+        st.push_str(if b > 0.0 {
+            "vertical-align:super;"
+        } else {
+            "vertical-align:sub;"
+        });
+    }
+    if let Some(sp) = r.attr_f64("spc").filter(|v| *v != 0.0) {
+        let _ = write!(st, "letter-spacing:{:.2}pt;", sp / 100.0);
+    }
+    let color = r
+        .child_ns(shape::A, "solidFill")
+        .and_then(|f| f.elements().next())
+        .and_then(|e| color_el(e, theme))
+        .map(|c| c.0)
+        .or_else(|| base_color.map(str::to_string));
+    if let Some(c) = color {
+        let _ = write!(st, "color:{c};");
+    }
+    let face = r
+        .child_ns(shape::A, "ea")
+        .or_else(|| r.child_ns(shape::A, "latin"))
+        .and_then(|f| f.attr("typeface"))
+        .and_then(|f| theme_font(f, theme));
+    if let Some(f) = face {
+        let _ = write!(st, "font-family:{};", font_family(f));
+    }
+    (st, size)
+}
+
+/// 원본 txBody → HTML (문단·조각·줄 간격·문단 간격·안쪽 여백·세로 맞춤·세로 글)
+fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String {
+    let body = tx.child_ns(shape::A, "bodyPr");
+    let ins = |n: &str, d: f64| body.and_then(|b| b.attr_f64(n)).unwrap_or(d) / EMU;
+    let justify = match body.and_then(|b| b.attr("anchor")) {
+        Some("ctr") => "center",
+        Some("b") => "flex-end",
+        _ => "flex-start",
+    };
+    let vert = match body.and_then(|b| b.attr("vert")) {
+        Some("vert" | "eaVert" | "wordArtVertRtl") => "writing-mode:vertical-rl;",
+        Some("vert270") => "writing-mode:vertical-rl;transform:rotate(180deg);",
+        _ => "",
+    };
+    let wrap = if body.and_then(|b| b.attr("wrap")) == Some("none") {
+        "white-space:pre"
+    } else {
+        "white-space:pre-wrap"
+    };
+    // 글자 줄이기 (normAutofit fontScale)
+    let scale = body
+        .and_then(|b| b.child_ns(shape::A, "normAutofit"))
+        .and_then(|a| a.attr_f64("fontScale"))
+        .map_or(1.0, |v| v / 100_000.0);
+    let mut s = format!(
+        "<div class=\"rc-text\" style=\"justify-content:{justify};padding:{:.1}px {:.1}px {:.1}px {:.1}px;{wrap};{vert}\">",
+        ins("tIns", 45720.0),
+        ins("rIns", 91440.0),
+        ins("bIns", 45720.0),
+        ins("lIns", 91440.0)
+    );
+    let lst = tx.child_ns(shape::A, "lstStyle");
+    let lvl1 = lst
+        .and_then(|l| l.child_ns(shape::A, "lvl1pPr"))
+        .and_then(|p| p.child_ns(shape::A, "defRPr"));
+    for p in tx.elements().filter(|e| e.is(shape::A, "p")) {
+        let ppr = p.child_ns(shape::A, "pPr");
+        let align = match ppr.and_then(|x| x.attr("algn")) {
+            Some("ctr") => "center",
+            Some("r") => "right",
+            Some("just") | Some("dist") => "justify",
+            _ => "left",
+        };
+        // 문단 글꼴 크기: 조각 중 가장 큰 것 (없으면 문단 끝 서식, 기본 11pt)
+        let mut size: Option<f64> = None;
+        for r in p.elements().filter(|e| e.is(shape::A, "r") || e.is(shape::A, "endParaRPr")) {
+            let rp = if r.is(shape::A, "r") {
+                r.child_ns(shape::A, "rPr")
+            } else {
+                Some(r)
+            };
+            if let Some(z) = rp.and_then(|x| x.attr_f64("sz")) {
+                size = Some(size.map_or(z / 100.0, |s| s.max(z / 100.0)));
+            }
+        }
+        let size = size
+            .or_else(|| lvl1.and_then(|d| d.attr_f64("sz")).map(|v| v / 100.0))
+            .unwrap_or(11.0)
+            * scale;
+        // 줄 간격: spcPct 100% = 글꼴 크기의 1.2 배, spcPts 는 그대로
+        let lnspc = ppr.and_then(|x| x.child_ns(shape::A, "lnSpc"));
+        let line = match lnspc.and_then(|l| l.child_ns(shape::A, "spcPct")) {
+            Some(pct) => format!("{:.3}", 1.2 * pct.attr_f64("val").unwrap_or(100_000.0) / 100_000.0),
+            None => match lnspc.and_then(|l| l.child_ns(shape::A, "spcPts")) {
+                Some(pts) => format!("{:.2}pt", pts.attr_f64("val").unwrap_or(0.0) / 100.0),
+                None => "1.2".into(),
+            },
+        };
+        let space = |n: &str| -> f64 {
+            let Some(sp) = ppr.and_then(|x| x.child_ns(shape::A, n)) else {
+                return 0.0;
+            };
+            if let Some(p) = sp.child_ns(shape::A, "spcPts") {
+                p.attr_f64("val").unwrap_or(0.0) / 100.0 * 4.0 / 3.0
+            } else if let Some(p) = sp.child_ns(shape::A, "spcPct") {
+                p.attr_f64("val").unwrap_or(0.0) / 100_000.0 * size * 1.2 * 4.0 / 3.0
+            } else {
+                0.0
+            }
+        };
+        let indent = ppr
+            .and_then(|x| x.attr_f64("marL"))
+            .map_or(0.0, |v| v / EMU);
+        let first = ppr
+            .and_then(|x| x.attr_f64("indent"))
+            .map_or(0.0, |v| v / EMU);
+        let _ = write!(
+            s,
+            "<p style=\"text-align:{align};font-size:{size:.2}pt;line-height:{line};margin:{:.1}px 0 {:.1}px {indent:.1}px;text-indent:{first:.1}px\">",
+            space("spcBef"),
+            space("spcAft")
+        );
+        // 글머리 기호
+        if let Some(bu) = ppr.and_then(|x| x.child_ns(shape::A, "buChar")) {
+            let _ = write!(s, "{} ", esc(bu.attr("char").unwrap_or("•")));
+        }
+        let mut any = false;
+        for r in p.elements() {
+            if r.is(shape::A, "br") {
+                s.push_str("<br>");
+                continue;
+            }
+            if !(r.is(shape::A, "r") || r.is(shape::A, "fld")) {
+                continue;
+            }
+            let t = r.child_ns(shape::A, "t").map(|t| t.text()).unwrap_or_default();
+            let (mut st, _) = run_css(r.child_ns(shape::A, "rPr").or(lvl1), theme, base_color);
+            if scale != 1.0
+                && let Some(z) = r
+                    .child_ns(shape::A, "rPr")
+                    .and_then(|x| x.attr_f64("sz"))
+            {
+                let _ = write!(st, "font-size:{:.2}pt;", z / 100.0 * scale);
+            }
+            let _ = write!(s, "<span style=\"{st}\">{}</span>", esc(&t));
+            any = true;
+        }
+        if !any {
+            s.push_str("&nbsp;");
+        }
+        s.push_str("</p>");
+    }
+    s.push_str("</div>");
+    s
+}
+
+/// 모델의 글 (원본 XML 이 없을 때: 레거시·바이너리)
 fn text_html(t: &TextBody, theme: &Theme) -> String {
     let pad = |v: Option<i64>, d: i64| v.unwrap_or(d) as f64 / EMU;
     let justify = match t.anchor.as_deref() {
@@ -386,7 +917,16 @@ fn text_html(t: &TextBody, theme: &Theme) -> String {
             Some("just") | Some("dist") => "justify",
             _ => "left",
         };
-        let _ = write!(s, "<p style=\"text-align:{align}\">");
+        let size = p
+            .runs
+            .iter()
+            .filter_map(|r| r.size)
+            .max()
+            .map_or(11.0, |z| z as f64 / 100.0);
+        let _ = write!(
+            s,
+            "<p style=\"text-align:{align};font-size:{size}pt;line-height:1.2\">"
+        );
         if p.runs.is_empty() {
             s.push_str("&nbsp;");
         }
@@ -411,7 +951,12 @@ fn text_html(t: &TextBody, theme: &Theme) -> String {
             if let Some(c) = r.color.as_ref().and_then(|c| draw_color(c, theme)) {
                 let _ = write!(st, "color:{c};");
             }
-            if let Some(f) = r.ea.as_ref().or(r.latin.as_ref()) {
+            if let Some(f) = r
+                .ea
+                .as_deref()
+                .or(r.latin.as_deref())
+                .and_then(|f| theme_font(f, theme))
+            {
                 let _ = write!(st, "font-family:{};", font_family(f));
             }
             let _ = write!(s, "<span style=\"{st}\">{}</span>", esc(&r.text));

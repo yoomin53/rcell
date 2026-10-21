@@ -28,9 +28,14 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 pub use layout::{book_metrics, default_col_px, default_col_width};
-pub use metrics::{FontMetrics, col_px, default_col_chars, row_px};
+pub use metrics::{FontMetrics, col_px, default_col_chars, is_wide, row_px};
 pub use numfit::{general, general_fit};
 pub use sparkline::{Extras, SparklineGroup};
+
+/// DrawingML 미리 정의된 점선 → SVG stroke-dasharray (선 굵기 px 배수). 차트도 쓴다
+pub fn dash_pattern(d: &str, px: f64) -> Option<String> {
+    draw::dash_array(d, px)
+}
 
 use cell::CellView;
 use crate::model::{Alignment, CellRef, CellValue, RichText, Sheet, Workbook, Xf};
@@ -659,17 +664,38 @@ pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Ex
                 let cf = cfx.get(&(r, c));
                 let span = ov.span.get(&(r, c)).copied().unwrap_or((0, 0));
                 inner = cell::cell_content(v, cf, &theme, w, h, span);
-                // 테두리 (넘친 글자가 지나가는 세로 경계는 지운다)
-                let mut b = v.borders.clone();
-                if ov.no_vline.contains(&(r, ec)) {
-                    b.right = None;
+            }
+            // 테두리: 병합 영역은 가장자리 칸들의 테두리 (위·왼쪽은 왼쪽 위 칸, 오른쪽은 오른쪽 위 칸,
+            // 아래는 왼쪽 아래 칸). 넘친 글자가 지나가는 세로 경계는 지운다 (한셀 화면: 위·아래 선은 남는다)
+            let style_at = |rr: u32, cc: u32| {
+                cells
+                    .get(&(rr, cc))
+                    .map(|x| x.style)
+                    .unwrap_or_else(|| sheet.effective_style(rr, cc))
+            };
+            let mut b = match lay.merge_end.get(&(r, c)) {
+                Some(&(r1, c1)) => {
+                    let at = |rr, cc| borders_of(st.xf(style_at(rr, cc)), wb, &theme);
+                    let (tl, tr, bl) = (at(r, c), at(r, c1), at(r1, c));
+                    paint::CellBorders {
+                        left: tl.left,
+                        top: tl.top,
+                        right: tr.right,
+                        bottom: bl.bottom,
+                        down: tl.down,
+                        up: tl.up,
+                    }
                 }
-                if prev_col.get(&c).is_some_and(|&p| ov.no_vline.contains(&(r, p))) {
-                    b.left = None;
-                }
-                if !b.is_empty() {
-                    inner.push_str(&paint::borders_svg(&b, w, h));
-                }
+                None => views.get(&(r, c)).map(|v| v.borders.clone()).unwrap_or_default(),
+            };
+            if ov.no_vline.contains(&(r, ec)) {
+                b.right = None;
+            }
+            if prev_col.get(&c).is_some_and(|&p| ov.no_vline.contains(&(r, p))) {
+                b.left = None;
+            }
+            if !b.is_empty() {
+                inner.push_str(&paint::borders_svg(&b, w, h));
             }
             if let Some((gi, vals)) = sparks.get(&(r, c))
                 && let Some(g) = spark_groups.get(*gi)
@@ -761,7 +787,7 @@ table.rc-sheet thead th.rc-corner{left:0;z-index:5}\
 table.rc-sheet tbody th{position:sticky;left:0;text-align:center}\
 .rc-t{position:absolute;left:0;top:0;overflow:hidden;box-sizing:border-box;white-space:pre;z-index:1}\
 .rc-t>span{position:absolute;white-space:pre}\
-.rc-w,.rc-flex{display:flex;flex-direction:column;padding:0 2px 0 3px}\
+.rc-w,.rc-flex{display:flex;flex-direction:column;padding:0 2px}\
 .rc-w>span,.rc-flex>span{position:static}\
 .rc-ov{z-index:2}\
 .rc-rot{position:absolute;white-space:pre}\
