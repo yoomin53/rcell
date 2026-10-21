@@ -133,11 +133,16 @@ impl Props {
     fn set(&mut self, pid: u16, v: u32) {
         self.0.push((pid, v, Vec::new()));
     }
+    /// 복합 속성 (내용 바이트 그대로)
+    fn complex(&mut self, pid: u16, d: Vec<u8>) {
+        self.0.push((pid | 0xC000, d.len() as u32, d));
+    }
     fn string(&mut self, pid: u16, s: &str) {
         let mut d = Buf::new();
         d.utf16(s).u16(0);
         let d = d.take();
-        self.0.push((pid | 0x8000, d.len() as u32, d));
+        // 복합 속성: fComplex 0x8000 + fBid 0x4000 (관측: 한셀의 이름·설명 0xC380·0xC381)
+        self.0.push((pid | 0xC000, d.len() as u32, d));
     }
     fn record(mut self) -> Vec<u8> {
         self.0.sort_by_key(|p| p.0 & 0x3FFF);
@@ -241,9 +246,10 @@ pub(crate) struct Art {
     pub text_para: Option<u32>,
 }
 
-/// 글이 있는 도형 (글 상자 TXO 를 쓰는 도형)
+/// 글이 있는 도형 (글 상자 TXO 를 쓰는 도형). XML 의 글 상자(`xdr:cNvSpPr txBox="1"`)는 글이 비어도 쓴다
 pub(crate) fn shape_has_text(s: &Shape) -> bool {
-    s.text.as_ref().is_some_and(|t| !t.paragraphs.is_empty()) && !s.plain_text().is_empty()
+    (s.text.as_ref().is_some_and(|t| !t.paragraphs.is_empty()) && !s.plain_text().is_empty())
+        || s.raw.as_deref().is_some_and(|r| r.contains("txBox=\"1\""))
 }
 
 /// 통합 문서에 글이 있는 도형이 있나 (그룹 안까지)
@@ -555,7 +561,8 @@ impl Art {
                         .first()
                         .and_then(|r| r.font.as_ref())
                         .map_or(0, |f| ctx.font_like(f));
-                    let txo = txo(&c.text.text, font, self.text_para.unwrap_or(0));
+                    // 메모의 TXO 문단은 기본 문단 모양 0 번을 가리킨다 (글 상자 문단 모양이 있어도)
+                    let txo = txo(&c.text.text, font, 0);
                     parts.push(Part {
                         sp,
                         obj: obj.take(),
@@ -664,35 +671,48 @@ impl Art {
         sp.extend(rec(2, shape_type, 0xF00A, &fsp.0));
         let mut p = Props(Vec::new());
         let has_text = shape_has_text(s);
-        p.set(
-            0x007F,
-            if s.kind == ShapeKind::Picture {
-                0x0284_0284
-            } else if has_text {
-                0x0300_0300
-            } else {
-                0x0200_0200
-            },
-        );
-        if let Some(t) = &s.text {
-            for (k, v) in t.insets.iter().enumerate() {
-                if let Some(v) = v {
-                    p.set(0x0081 + k as u16, *v as u32);
-                }
-            }
-            if t.wrap.as_deref() == Some("none") {
-                p.set(0x0085, 2);
-            }
-            match t.anchor.as_deref() {
-                Some("ctr") => p.set(0x0087, 1),
-                Some("b") => p.set(0x0087, 2),
-                _ => {}
-            }
+        let raw = s.raw.as_deref().unwrap_or("");
+        // 보호 속성: 그림 0x02840284, 그 밖의 도형은 글이 있어도 0x02000200 (+ 선택 잠금 0x00200020 —
+        // XML 의 `a:spLocks noSelect="1"`). 글 상자 여백·줄 바꿈·세로 맞춤(0x0081–0x0087)은 한셀이 쓰지 않는다
+        // (관측: 말뭉치 한셀 레거시·XML→레거시의 도형 207개 모두)
+        let mut lock = if s.kind == ShapeKind::Picture {
+            0x0284_0284
+        } else {
+            0x0200_0200
+        };
+        if s.kind != ShapeKind::Picture && raw.contains("noSelect=\"1\"") {
+            lock |= 0x0020_0020;
         }
+        p.set(0x007F, lock);
         if s.kind == ShapeKind::Picture
             && let Some(pib) = s.target.as_ref().and_then(|t| self.pib.get(t))
         {
             p.set(0x4104, *pib);
+        }
+        // 빈 사용자 정의 경로(`a:custGeom` 의 `a:pathLst/`): 좌표계 오른쪽·아래 = 도형 크기(EMU), 경로 종류 4,
+        // 빈 0x0155, 글 상자 사각형 0x0157 (IMsoArray 1/4/16 + l·t·r·b) — 관측: 서식 파일의 AutoShape 33개
+        if s.geometry.is_none() && raw.contains("<a:custGeom>") && raw.contains("<a:pathLst/>") {
+            let (cx, cy) = s.xfrm.as_ref().map_or((0, 0), |x| (x.cx, x.cy));
+            p.set(0x0142, cx as u32);
+            p.set(0x0143, cy as u32);
+            p.set(0x0144, 4);
+            p.complex(0x0155, Vec::new());
+            let side = |n: &str| -> i32 {
+                let k = format!(" {n}=\"");
+                raw.find("<a:rect ")
+                    .and_then(|i| {
+                        let r = &raw[i..];
+                        let j = r.find(&k)? + k.len();
+                        r[j..].split('"').next()?.parse().ok()
+                    })
+                    .unwrap_or(0)
+            };
+            let mut b = Buf::new();
+            b.u16(1).u16(4).u16(16);
+            for n in ["l", "t", "r", "b"] {
+                b.i32(side(n));
+            }
+            p.complex(0x0157, b.take());
         }
         if s.kind == ShapeKind::Picture {
             // 그림: 채우기·선 없음 (한셀: 0x01BF = 0x00100000, 0x01FF = 0x00080000, 0x033F = 0x00100010)
@@ -710,13 +730,25 @@ impl Art {
         if s.kind != ShapeKind::Group && s.kind != ShapeKind::Picture {
             match &s.fill {
                 Some(Paint::Solid(c)) => {
-                    if let Some(rgb) = draw_rgb(c) {
+                    // 흰색은 기본 채우기 색이라 쓰지 않는다 (관측)
+                    if let Some(rgb) = draw_rgb(c).filter(|&v| v != 0xFF_FFFF) {
                         p.set(0x0181, super::writer::colorref_of(rgb));
                     }
                     p.set(0x01BF, 0x0010_0010);
                 }
                 Some(Paint::None) => p.set(0x01BF, 0x0010_0000),
                 _ => {}
+            }
+            // 선 끝 제한 1.0, 이음 둥글게 — 한셀은 모든 도형에 쓴다 (관측: XML 의 선은 모두 `a:round`)
+            p.set(0x01CC, 0x0001_0000);
+            p.set(0x01D6, 2);
+            // 그림자: XML 의 `a:effectLst/a:outerShdw` (거리·방향 → x·y 오프셋 EMU, 색) — 관측: dist 17961,
+            // dir 2700000 → 0x319C·0x319C, 색 0, 0x023F = 0x00020002
+            if let Some((dx, dy, rgb)) = outer_shadow(raw) {
+                p.set(0x0201, super::writer::colorref_of(rgb));
+                p.set(0x0205, dx as u32);
+                p.set(0x0206, dy as u32);
+                p.set(0x023F, 0x0002_0002);
             }
             if let Some(l) = &s.line {
                 if let Some(w) = l.width.filter(|&w| w != 9525) {
@@ -762,12 +794,18 @@ impl Art {
         let anchor = legacy_anchor(&s.anchor, ctx);
         sp.extend(client_anchor(flag, anchor));
         sp.extend(rec(0, 0, 0xF011, &[]));
+        // ftCmo 플래그: 0x0001 잠금, 0x0010 인쇄 — XML 의 `xdr:clientData fPrintsWithSheet="0"` 이면 인쇄 끔
+        // (관측: 서식 파일의 배경 도형)
+        let mut cmo = 0x0011u16;
+        if raw.contains("fPrintsWithSheet=\"0\"") {
+            cmo &= !0x0010;
+        }
         let mut obj = Buf::new();
         obj.u16(0x15)
             .u16(0x12)
             .u16(ot)
             .u16(*obj_id)
-            .u16(0x0011)
+            .u16(cmo)
             .bytes(&[0; 12]);
         obj.u32(0);
         let txo = has_text.then(|| {
@@ -804,6 +842,32 @@ impl Art {
     }
 }
 
+/// XML 원본 앵커의 바깥 그림자 `a:outerShdw dist=… dir=…` 와 색(`a:srgbClr`) → (x, y 오프셋 EMU, RGB)
+fn outer_shadow(raw: &str) -> Option<(i64, i64, u32)> {
+    let at = raw.find("<a:outerShdw")?;
+    let rest = &raw[at..];
+    let end = rest.find("</a:outerShdw>").unwrap_or(rest.len());
+    let body = &rest[..end];
+    let attr = |n: &str| -> Option<f64> {
+        let k = format!(" {n}=\"");
+        let i = body.find(&k)? + k.len();
+        body[i..].split('"').next()?.parse().ok()
+    };
+    let dist = attr("dist").unwrap_or(0.0);
+    let dir = attr("dir").unwrap_or(0.0) / 60000.0;
+    let rad = dir.to_radians();
+    let rgb = body
+        .find("<a:srgbClr val=\"")
+        .and_then(|i| body.get(i + 16..i + 22))
+        .and_then(|v| u32::from_str_radix(v, 16).ok())
+        .unwrap_or(0);
+    Some((
+        (dist * rad.cos()).round() as i64,
+        (dist * rad.sin()).round() as i64,
+        rgb,
+    ))
+}
+
 /// 도형 글 상자의 TXO 가 가리키는 모델 글꼴: 첫 글 조각의 글꼴 ([`super::writer::drawing_run_font`])
 fn shape_text_font(s: &Shape, wb: &Workbook) -> Option<usize> {
     let r = s
@@ -817,9 +881,15 @@ fn shape_text_font(s: &Shape, wb: &Workbook) -> Option<usize> {
 /// 문단마다 u32 (관측: 도형 3, 메모 0)
 fn txo(text: &str, font: u16, para: u32) -> Vec<u8> {
     let paragraphs = text.split('\n').count().max(1) as u16;
+    // 글이 없으면 서식 런도 없다: 런 수 0, 문단 모양 번호만 (관측: 빈 글 상자 TXO `… 00 00 01 00 00 00 00 …`)
+    let runs = u16::from(!text.is_empty());
     let mut b = Buf::new();
-    b.u16(0).u16(1).u16(1).u16(1).u16(paragraphs);
+    b.u16(0).u16(1).u16(1).u16(runs).u16(paragraphs);
     b.u16(units(text) as u16).u8(0).utf16(text);
+    if runs == 0 {
+        b.u32(para);
+        return b.take();
+    }
     b.u16(0).u16(font).u32(para);
     for _ in 1..paragraphs {
         b.u32(para);

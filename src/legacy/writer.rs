@@ -596,6 +596,13 @@ fn like_font(
     italic: bool,
     rgb: Option<u32>,
 ) -> Option<usize> {
+    // 테마 글꼴 `+mn-…`/`+mj-…` 은 테마의 바탕·제목 글꼴 (한글 글꼴)로 푼다
+    let theme = wb.theme.as_ref();
+    let name = match name {
+        Some(v) if v.starts_with("+mn") => theme.and_then(|t| t.minor_font.as_deref()),
+        Some(v) if v.starts_with("+mj") => theme.and_then(|t| t.major_font.as_deref()),
+        v => v,
+    };
     let any_name = name.is_none_or(|v| v.starts_with('+'));
     wb.styles.fonts.iter().position(|x| {
         (any_name || x.name.as_deref() == name)
