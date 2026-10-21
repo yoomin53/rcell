@@ -1316,35 +1316,75 @@ fn protection_key(p: Option<&crate::model::SheetProtection>) -> String {
     )
 }
 
-/// 외부 참조 `'[n]시트'!` 의 따옴표가 시트 이름 때문에 필요한 것이 아니면 뗀다.
-/// 한셀은 외부 연결의 상태(경로 없음, 갱신 오류)에 따라 이 따옴표를 붙이기도 떼기도 한다 — 같은 참조다.
+/// 시트 참조 `'시트'!`·`'[n]시트'!` 의 따옴표가 시트 이름 때문에 필요한 것이 아니면 뗀다 (문자열 안은 그대로).
+/// 한셀은 외부 연결의 상태(경로 없음, 갱신 오류)에 따라 외부 참조의 따옴표를 붙이기도 떼기도 하고, 바이너리를 거친
+/// 수식은 필요한 따옴표만 남는다 — 같은 참조다.
 fn unquote_external(f: &str) -> String {
+    let c: Vec<char> = f.chars().collect();
     let mut out = String::with_capacity(f.len());
-    let mut rest = f;
-    while let Some(i) = rest.find("'[") {
-        out.push_str(&rest[..i]);
-        let tail = &rest[i + 1..];
-        let end = tail.find("'!");
-        let inner = end.map(|e| &tail[..e]);
-        match inner.and_then(|s| s.split_once(']').map(|(n, sh)| (s, n, sh))) {
-            Some((s, n, sheet))
-                if n[1..].chars().all(|c| c.is_ascii_digit())
-                    && !sheet.is_empty()
-                    && sheet
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '.') =>
-            {
-                out.push_str(s);
-                out.push('!');
-                rest = &tail[s.len() + 2..];
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            '"' => {
+                // 문자열: 닫는 따옴표까지 그대로 ("" 는 따옴표 하나)
+                out.push('"');
+                i += 1;
+                while i < c.len() {
+                    out.push(c[i]);
+                    i += 1;
+                    if c[i - 1] == '"' {
+                        if c.get(i) == Some(&'"') {
+                            out.push('"');
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                }
             }
-            _ => {
-                out.push('\'');
-                rest = tail;
+            '\'' => {
+                // 따옴표 시트 이름: 닫는 ' 뒤에 ! 가 와야 참조다
+                let mut j = i + 1;
+                let mut inner = String::new();
+                while j < c.len() {
+                    if c[j] == '\'' {
+                        if c.get(j + 1) == Some(&'\'') {
+                            inner.push('\'');
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    inner.push(c[j]);
+                    j += 1;
+                }
+                if j < c.len() && c.get(j + 1) == Some(&'!') {
+                    let sheet = match inner.strip_prefix('[').and_then(|r| r.split_once(']')) {
+                        Some((n, sh)) if n.chars().all(|d| d.is_ascii_digit()) => sh,
+                        _ => inner.as_str(),
+                    };
+                    let plain = !sheet.is_empty()
+                        && !sheet.contains(':')
+                        && crate::legacy::formula::quote_sheet(sheet) == sheet;
+                    if plain {
+                        out.push_str(&inner);
+                    } else {
+                        out.push('\'');
+                        out.push_str(&inner.replace('\'', "''"));
+                        out.push('\'');
+                    }
+                    i = j + 1;
+                } else {
+                    out.push(c[i]);
+                    i += 1;
+                }
+            }
+            ch => {
+                out.push(ch);
+                i += 1;
             }
         }
     }
-    out.push_str(rest);
     out
 }
 
@@ -1622,7 +1662,7 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
                     let f = c
                         .formula
                         .as_ref()
-                        .map(|f| f.text.clone())
+                        .map(|f| unquote_external(&f.text))
                         .unwrap_or_default();
                     ((c.r.row, c.r.col), (value_key(&c.value), f, style))
                 })

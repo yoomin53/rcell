@@ -108,6 +108,21 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
     if let Some(pr) = root.sml_child("workbookPr") {
         wb.date1904 = pr.attr_bool("date1904").unwrap_or(false);
     }
+    if let Some(v) = root
+        .sml_child("bookViews")
+        .and_then(|b| b.sml_child("workbookView"))
+    {
+        let n = |k: &str| v.attr(k).and_then(|s| s.trim().parse::<i64>().ok());
+        wb.book_view = Some(crate::model::BookView {
+            x_window: n("xWindow").unwrap_or(0) as i32,
+            y_window: n("yWindow").unwrap_or(0) as i32,
+            window_width: n("windowWidth").unwrap_or(0).max(0) as u32,
+            window_height: n("windowHeight").unwrap_or(0).max(0) as u32,
+            tab_ratio: n("tabRatio").unwrap_or(600).max(0) as u32,
+            first_sheet: n("firstSheet").unwrap_or(0).max(0) as u32,
+            active_tab: n("activeTab").unwrap_or(0).max(0) as u32,
+        });
+    }
     if let Some(p) = root.sml_child("workbookProtection") {
         wb.protection = Some(crate::model::WorkbookProtection {
             lock_structure: p.attr_bool("lockStructure").unwrap_or(false),
@@ -204,6 +219,7 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
         && let Some(e) = pkg.read_xml(&sst.target)?
     {
         wb.shared_strings = shared_strings::parse_shared_strings(&e);
+        wb.shared_strings_count = e.attr_u32("count");
     }
     if let Some(th) = wb_rels.iter().find(|r| rel_is(r, "/theme"))
         && let Some(e) = pkg.read_xml(&th.target)?

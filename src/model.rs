@@ -25,6 +25,9 @@ pub struct Workbook {
     pub date1904: bool,
     pub sheets: Vec<Sheet>,
     pub shared_strings: Vec<RichText>,
+    /// 공유 문자열 참조 수 (`x:sst/@count`, 바이너리 BrtBeginSst 의 cstTotal). 한셀이 바이너리에 그대로 옮겨 쓴다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_strings_count: Option<u32>,
     pub styles: Styles,
     pub defined_names: Vec<DefinedName>,
     /// 원본 그대로 옮겨 쓰는 파트 (차트·그림과 그 관계 파일)
@@ -39,6 +42,22 @@ pub struct Workbook {
     /// 테마 (xl/theme/theme1.xml). 없으면 렌더링 때 Office 기본 테마를 쓴다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<crate::theme::Theme>,
+    /// 통합 문서 창 (`bookViews/workbookView`, 바이너리 BrtBookView)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub book_view: Option<BookView>,
+}
+
+/// 통합 문서 창의 위치·크기 (`x:workbookView`). 한셀은 바이너리에 그대로 옮겨 쓴다 (BrtBookView)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct BookView {
+    pub x_window: i32,
+    pub y_window: i32,
+    pub window_width: u32,
+    pub window_height: u32,
+    /// 탭 영역의 너비 비율 (1/1000, 한셀 기본 500)
+    pub tab_ratio: u32,
+    pub first_sheet: u32,
+    pub active_tab: u32,
 }
 
 /// 외부 통합 문서 연결 (`xl/externalLinks/externalLinkN.xml`, 레거시 SUPBOOK).

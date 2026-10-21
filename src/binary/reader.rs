@@ -1015,6 +1015,19 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
                 });
             }
             153 => wb.date1904 = r.u32().is_some_and(|f| f & 0x01 != 0),
+            158 => {
+                // BrtBookView: xWn i32, yWn i32, dxWn u32, dyWn u32, iTabRatio u32, itabFirst u32, itabCur u32, 플래그 u8
+                let v: Vec<u32> = (0..7).map(|_| r.u32().unwrap_or(0)).collect();
+                wb.book_view = Some(crate::model::BookView {
+                    x_window: v[0] as i32,
+                    y_window: v[1] as i32,
+                    window_width: v[2],
+                    window_height: v[3],
+                    tab_ratio: v[4],
+                    first_sheet: v[5],
+                    active_tab: v[6],
+                });
+            }
             534 => {
                 // BrtBookProtection: protpwdBook u16, protpwdRev u16, 플래그 u16 (1 구조, 2 창, 4 변경 내용)
                 let (Some(pw), Some(_rev), Some(f)) = (r.u16(), r.u16(), r.u16()) else {
@@ -1089,6 +1102,9 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
     if let Some(sst) = rels.iter().find(|r| r.rel_type.ends_with("/sharedStrings")) {
         let data = read_part(pkg, &sst.target)?;
         for rec in biff12::records(&data) {
+            if rec.rtype == 159 {
+                wb.shared_strings_count = Rd::new(rec.data).u32();
+            }
             if rec.rtype == 19 {
                 let mut r = Rd::new(rec.data);
                 wb.shared_strings
@@ -1239,6 +1255,9 @@ fn read_sheet(
     let mut brk_kind = 0u8;
     // BrtSel 이 활성 창 것과 맞았는지
     let mut sel_matched = false;
+    // 데이터 막대의 x14 확장: (GUID, 조건부 서식 번호, 규칙 번호), 지금 읽는 x14 규칙
+    let mut x14_bars: Vec<([u8; 16], usize, usize)> = Vec::new();
+    let mut x14_cur: Option<(usize, usize)> = None;
     // 공유 수식: (범위, 토큰열). XLSB 의 PtgExp 는 기준 행만 가리키므로 범위로 찾는다.
     let mut shared: Vec<(CellRange, Vec<u8>)> = Vec::new();
     let find_shared = |shared: &[(CellRange, Vec<u8>)], master_row: u32, at: CellRef| {
@@ -1287,8 +1306,9 @@ fn read_sheet(
             }
             137 => {
                 // BrtBeginWsView (한셀 30바이트): flags u16, xlView u32, rwTop u32, colLeft u32,
-                // icvHdr u8, 예약 u8, ? u16, 현재 확대율 u16 (18), 기본 u16 (20), 페이지 나누기 미리 보기 u16 (22),
-                // 페이지 레이아웃 u16 (24), iWbkView u32 — [MS-XLSB] 순서. 한셀의 XML 과는 일관되지 않다 (문서 참고)
+                // icvHdr u8, 예약 u8, ? u16, 현재 확대율 u16 (18), 보조 확대율 u16 (20)·(22), 페이지 레이아웃 u16 (24),
+                // iWbkView u32. 한셀은 (22) 를 zoomScaleNormal, (20) 을 zoomScaleSheetLayoutView 로 읽는다
+                // (X.bin.as.cell 대조 — [MS-XLSB] 이름과 반대). 한셀이 쓰는 쪽은 일관되지 않다 (문서 참고)
                 let Some(flags) = r.u16() else { continue };
                 sheet.show_grid_lines = flags & 0x0004 != 0;
                 let v = &mut sheet.view;
@@ -1308,8 +1328,8 @@ fn read_sheet(
                 r.take(4);
                 let z = |x: Option<u16>| x.filter(|&z| z != 0).map(u32::from);
                 v.zoom_scale = z(r.u16());
-                v.zoom_scale_normal = z(r.u16());
                 v.zoom_scale_sheet_layout_view = z(r.u16());
+                v.zoom_scale_normal = z(r.u16());
             }
             151 => {
                 // BrtPane: xnumXSplit f64, xnumYSplit f64, rwTop u32, colLeft u32, pnnAct u32, flags u8
@@ -1490,6 +1510,32 @@ fn read_sheet(
                     } else if let Some(d) = rule.data_bar.as_mut() {
                         d.color = c;
                     }
+                }
+            }
+            1146 => {
+                // BrtCFRuleExt: 예약 u32 + GUID — 직전 규칙(데이터 막대)을 x14 확장과 잇는다
+                if let (Some(_), Some(g)) = (r.u32(), r.take(16))
+                    && let Some(ci) = sheet.conditional_formats.len().checked_sub(1)
+                    && let Some(ri) = sheet.conditional_formats[ci].rules.len().checked_sub(1)
+                {
+                    x14_bars.push((g.try_into().unwrap_or([0; 16]), ci, ri));
+                }
+            }
+            1048 => {
+                // BrtBeginCFRule14: FRT 머리, 종류, 틀, 차등 서식, 우선순위 … GUID(50번째 바이트부터)
+                x14_cur = rec
+                    .data
+                    .get(50..66)
+                    .and_then(|g| x14_bars.iter().find(|x| x.0[..] == *g))
+                    .map(|x| (x.1, x.2));
+            }
+            1051 => {
+                // BrtBeginDatabar14: FRT 머리 u32, 막대 최소·최대 길이 u8 (한셀은 실제 길이를 여기에 쓴다)
+                if let (Some((ci, ri)), Some(&[min, max])) = (x14_cur, rec.data.get(4..6))
+                    && let Some(d) = sheet.conditional_formats[ci].rules[ri].data_bar.as_mut()
+                {
+                    d.min_length = (min != 10).then_some(u32::from(min));
+                    d.max_length = (max != 90).then_some(u32::from(max));
                 }
             }
             64 => {
@@ -1842,6 +1888,38 @@ fn read_sheet(
                         ..Default::default()
                     }),
                 });
+            }
+            426 => {
+                // BrtArrFmla: RfX + 플래그 u8 + 수식. 기준 셀(직전 셀)의 PtgExp 가 자기 자신을 가리킨다
+                if let (Some(r1), Some(r2), Some(c1), Some(c2)) =
+                    (r.u32(), r.u32(), r.u32(), r.u32())
+                    && r.u8().is_some()
+                    && let Some(tokens) = parsed_formula(&mut r)
+                    && let Some(cell) = sheet.cells.last_mut()
+                    && cell.r == (CellRef { row: r1, col: c1 })
+                    && let Some(f) = cell.formula.as_mut()
+                    && f.text.is_empty()
+                {
+                    let ctx = Context {
+                        xti_sheets,
+                        names,
+                        xti_names: &[],
+                        base: cell.r,
+                        xlsb: true,
+                        row_shift: 0,
+                    };
+                    if let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx) {
+                        f.text = t;
+                        f.kind = crate::model::FormulaKind::Array;
+                        f.range = Some(
+                            CellRange {
+                                start: CellRef { row: r1, col: c1 },
+                                end: CellRef { row: r2, col: c2 },
+                            }
+                            .to_string(),
+                        );
+                    }
+                }
             }
             427 => {
                 // BrtShrFmla: RfX + formula

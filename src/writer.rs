@@ -1020,7 +1020,7 @@ fn comments_xml(sheet: &Sheet) -> String {
 }
 
 /// 메모 도형 VML (`xl/drawings/vmlDrawingN.vml`). 위치는 Excel 기본 자리 (셀 오른쪽 위).
-fn comments_vml(sheet: &Sheet, n: usize) -> String {
+pub(crate) fn comments_vml(sheet: &Sheet, n: usize) -> String {
     let mut s = format!(
         "<xml xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:x=\"urn:schemas-microsoft-com:office:excel\"><o:shapelayout v:ext=\"edit\"><o:idmap v:ext=\"edit\" data=\"{n}\"/></o:shapelayout><v:shapetype id=\"_x0000_t202\" coordsize=\"21600,21600\" o:spt=\"202\" path=\"m,l,21600r21600,l21600,xe\"><v:stroke joinstyle=\"miter\"/><v:path gradientshapeok=\"t\" o:connecttype=\"rect\"/></v:shapetype>"
     );
@@ -2011,13 +2011,13 @@ const DML: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const DML_CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 
 /// 그리기 관계: (ID, 종류, 대상, 외부)
-type Rel = (String, String, String, bool);
+pub(crate) type Rel = (String, String, String, bool);
 
 const CHART_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
 
 /// 그리기 파트와 그 관계. XML 원본의 앵커는 그대로, 나머지는 모델로 쓴다. 모델의 차트(레거시에서 읽은 것)는
-/// 차트 파트를 새로 만들어 `chart_parts` 에 (파트 이름, XML) 로 더한다.
-fn drawing_xml(
+/// 차트 파트를 새로 만들어 `chart_parts` 에 (파트 이름, XML) 로 더한다. 바이너리 쓰기도 쓴다.
+pub(crate) fn drawing_xml(
     sheet: &Sheet,
     mdw: u32,
     raw_parts: &[crate::model::RawPart],
