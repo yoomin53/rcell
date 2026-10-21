@@ -1309,6 +1309,45 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             v.join(" ")
         };
         diff(format!("{s} 메모"), notes(sa), notes(sb));
+        // 메모 상자: 자리(px)·채우기·선·그림자·셀 고정·글 맞춤. 선 색은 한셀이 레거시에서 읽지 못한다
+        // (메모 대조 실험) — 도형 세부와 함께 뺀다. 1 pt 선은 0.75 pt 로 본다: 한셀은 1 pt(VML 기본값)를 XML 에 쓰지
+        // 않고, 두께가 없으면 0.75 pt 로 읽는다
+        let note_boxes = |sh: &Sheet| {
+            let mut v: Vec<String> = sh
+                .comments
+                .iter()
+                .map(|c| {
+                    let b = c
+                        .shape
+                        .clone()
+                        .unwrap_or_else(|| crate::model::CommentShape::implied(c.cell));
+                    format!(
+                        "{}@{:?} fill={} line={}/{}pt{}{}{} align={}/{}",
+                        c.cell,
+                        b.anchor,
+                        b.fill_color,
+                        if opts.ignore_shape_detail {
+                            "-"
+                        } else {
+                            &b.stroke_color
+                        },
+                        if b.stroke_weight == 1.0 {
+                            0.75
+                        } else {
+                            b.stroke_weight
+                        },
+                        if b.shadow { " shadow" } else { "" },
+                        if b.move_with_cells { " move" } else { "" },
+                        if b.size_with_cells { " size" } else { "" },
+                        b.text_halign.as_deref().unwrap_or("Left"),
+                        b.text_valign.as_deref().unwrap_or("Top")
+                    )
+                })
+                .collect();
+            v.sort();
+            v.join("\n      ")
+        };
+        diff(format!("{s} 메모 상자"), note_boxes(sa), note_boxes(sb));
         let shapes = |w: &Workbook, sh: &Sheet| {
             sh.shapes
                 .iter()

@@ -1538,6 +1538,60 @@ pub struct Comment {
     pub text: RichText,
     /// 항상 표시 (VML `x:Visible`, 레거시 NOTE 0x0002)
     pub visible: bool,
+    /// 메모 상자의 자리와 모양. 없으면 기본 자리(셀 오른쪽 위)에 쓴다 ([`CommentShape::implied`])
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<CommentShape>,
+}
+
+/// 메모 상자: VML `v:shape` + `x:ClientData` (XML·바이너리), 레거시는 OfficeArt 도형(앵커·채우기·선·그림자)과
+/// TXO 의 맞춤. 한셀이 다시 쓰는 값만 담는다 (메모 대조 실험 — `margin-left` 같은 style 위치, `z-index`,
+/// `x:AutoFill` 은 한셀이 버리거나 새로 쓴다)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CommentShape {
+    /// `x:Anchor`: 왼쪽 열, 오프셋(px), 위 행, 오프셋, 오른쪽 열, 오프셋, 아래 행, 오프셋
+    pub anchor: [u32; 8],
+    /// 채우기 색 `#rrggbb` (`fillcolor`)
+    pub fill_color: String,
+    /// 선 색 `#rrggbb` (`strokecolor`)
+    pub stroke_color: String,
+    /// 선 두께 (pt). VML 기본은 1 pt, 한셀의 메모는 0.75 pt
+    pub stroke_weight: f64,
+    /// 그림자 (`v:shadow on="t"`)
+    pub shadow: bool,
+    /// 셀과 함께 옮김·크기 바꿈. VML 은 반대로 `x:MoveWithCells`·`x:SizeWithCells` 가 있으면 고정이다
+    /// (레거시 앵커 플래그 0 = 둘 다, 2 = 옮김만, 3 = 고정)
+    pub move_with_cells: bool,
+    pub size_with_cells: bool,
+    /// `x:TextHAlign` (없으면 `Left`): `Center`, `Right`, `Justify`, `Distributed`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_halign: Option<String>,
+    /// `x:TextVAlign` (없으면 `Top`): `Center`, `Bottom`, `Justify`, `Distributed`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_valign: Option<String>,
+}
+
+impl CommentShape {
+    /// 한셀이 새 메모에 쓰는 모양 (COM 으로 만든 메모: 노란 채우기, 0.75 pt 검정 선, 셀에 고정)
+    pub fn hcell_default(anchor: [u32; 8]) -> CommentShape {
+        CommentShape {
+            anchor,
+            fill_color: "#ffffe1".into(),
+            stroke_color: "#000000".into(),
+            stroke_weight: 0.75,
+            shadow: false,
+            move_with_cells: false,
+            size_with_cells: false,
+            text_halign: None,
+            text_valign: None,
+        }
+    }
+
+    /// 모양이 없는 메모를 rcell 이 쓰는 자리: 셀 오른쪽 위 (Excel 기본 자리)
+    pub fn implied(cell: CellRef) -> CommentShape {
+        let (row, col) = (cell.row, cell.col);
+        let top = row.saturating_sub(1);
+        CommentShape::hcell_default([col + 1, 15, top, 10, col + 3, 15, top + 4, 4])
+    }
 }
 
 /// 시트 보기 (`sheetView`, 레거시 WINDOW2/SCL/SELECTION/PANE, XLSB BrtBeginWsView/BrtSel/BrtPane).

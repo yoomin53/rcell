@@ -17,7 +17,7 @@ use super::formula::{self, Context, Decoded};
 use crate::error::{Error, Result};
 use crate::model::{
     AbstractNum, Alignment, Anchor, AnchorKind, Border, BorderEdge, Cell, CellRange, CellRef,
-    CellValue, CfRule, Cfvo, ColInfo, Color, ColorScale, Comment, ConditionalFormat,
+    CellValue, CfRule, Cfvo, ColInfo, Color, ColorScale, Comment, CommentShape, ConditionalFormat,
     DYNAMIC_FILTER_TYPES, DataBar, DefinedName, DrawColor, DrawingPara, DrawingRun, ExternalLink,
     FILTER_OPERATORS, Fill, FilterColumn, Font, Formula, FormulaKind, GradientFill, GradientStop,
     HancomFontExt, HancomXfExt, HeaderFooter, Hyperlink, IconSet, Marker, NamedStyle, NumFmt,
@@ -1549,6 +1549,8 @@ fn read_sheet(
     // 메모: OBJ(ftCmo, 종류 0x19) 번호 → 바로 뒤 TXO 의 내용. NOTE 가 번호로 가리킨다
     let mut last_note_obj: Option<u16> = None;
     let mut note_texts: HashMap<u16, RichText> = HashMap::new();
+    // 메모마다 NOTE 의 idObj (메모 상자는 그 번호의 OBJ 와 짝인 OfficeArt 도형)
+    let mut note_objs: Vec<u16> = Vec::new();
     // 그리기: MSODRAWING 을 이어 붙인 OfficeArt 스트림, OBJ 목록(종류, 번호, TXO 내용)
     let mut art: Vec<u8> = Vec::new();
     let mut objs: Vec<ObjRec> = Vec::new();
@@ -2297,11 +2299,20 @@ fn read_sheet(
                     continue;
                 };
                 last_note_obj = (ft == 0x15 && ot == 0x19).then_some(id);
-                objs.push(ObjRec { ot, text: None });
+                objs.push(ObjRec {
+                    ot,
+                    id,
+                    text: None,
+                    align: (1, 0),
+                });
             }
             0x01B6 => {
-                // TXO (한컴): 머리 10바이트, cch u16, flag u8, UTF-16 (CONTINUE 없이 바로),
-                // 뒤에 (ich u16, ifnt u16, 예약 u32) 런
+                // TXO (한컴): 머리 10바이트 (4 가로 맞춤 u8, 5 세로 맞춤 u8), cch u16, flag u8, UTF-16
+                // (CONTINUE 없이 바로), 뒤에 (ich u16, ifnt u16, 예약 u32) 런
+                let align = (
+                    d.get(4).copied().unwrap_or(1),
+                    d.get(5).copied().unwrap_or(0),
+                );
                 r.take(10);
                 let cch = r.u16().unwrap_or(0) as usize;
                 let _flag = r.u8();
@@ -2313,6 +2324,7 @@ fn read_sheet(
                 }
                 if let Some(o) = objs.last_mut() {
                     o.text = Some((text.clone(), runs));
+                    o.align = align;
                 }
                 let Some(id) = last_note_obj.take() else {
                     continue;
@@ -2349,7 +2361,9 @@ fn read_sheet(
                     author: r.utf16(cch).unwrap_or_default(),
                     text: note_texts.remove(&id).unwrap_or_default(),
                     visible: grbit & 0x0002 != 0,
+                    shape: None,
                 });
+                note_objs.push(id);
             }
             0x0041 => {
                 // PANE: x u16, y u32, rwTop u32, colLeft u16, pnnAct u16.
@@ -2801,15 +2815,20 @@ fn read_sheet(
             ..Default::default()
         })
         .collect();
+    // 메모 상자: OBJ 번호 → 모양
+    let mut note_shapes: HashMap<u16, CommentShape> = HashMap::new();
     if !art.is_empty() {
         let mut k = 0;
         shapes.extend(
             escher::parse(&art)
                 .iter()
-                .filter_map(|e| legacy_shape(e, &objs, &mut k, sheet, wb, mdw)),
+                .filter_map(|e| legacy_shape(e, &objs, &mut k, sheet, wb, mdw, &mut note_shapes)),
         );
     }
     sheet.shapes = shapes;
+    for (c, id) in sheet.comments.iter_mut().zip(&note_objs) {
+        c.shape = note_shapes.remove(id);
+    }
     if prot {
         let mut states = [false; 16];
         states[0] = true;
@@ -2843,18 +2862,79 @@ fn read_sheet(
     Ok(())
 }
 
+/// 레거시 앵커의 열 안 오프셋 → 픽셀: dx 는 (열 픽셀 − 1)의 1/32768
+fn anchor_col_px(sheet: &Sheet, c: u32, dx: u32, mdw: u32) -> u32 {
+    let eff = crate::units::sheet_col_px(sheet, c, mdw).saturating_sub(1) as f64;
+    (dx as f64 * eff / 32768.0).round() as u32
+}
+
+/// 레거시 앵커의 행 안 오프셋 → 픽셀: dy 는 (행 픽셀 − 1)의 1/8192
+fn anchor_row_px(sheet: &Sheet, r: u32, dy: u32) -> u32 {
+    let eff = crate::units::sheet_row_px(sheet, r).saturating_sub(1) as f64;
+    (dy as f64 * eff / 8192.0).round() as u32
+}
+
+/// 레거시 메모 상자 (OfficeArt 도형 + OBJ 의 TXO) → 모델. 앵커는 그리기와 같은 단위를 VML 처럼 픽셀로 (메모 대조
+/// 실험: 한셀의 레거시 읽기와 같은 `x:Anchor`), 채우기 0x0181 (없으면 흰색), 선 색 0x01C0·두께 0x01CB (EMU, 없으면
+/// 검정·9525), 그림자 0x023F (0x02, 사용 0x20000), 셀 고정은 앵커 플래그 (0 옮김·크기, 2 옮김, 3 고정).
+/// TXO 의 맞춤: 가로 1 왼쪽, 2 가운데, 3 오른쪽, 5 양쪽, 7 균등 / 세로 0 위, 1 가운데, 2 아래, 3 양쪽, 4 균등
+fn legacy_comment_shape(
+    e: &escher::EscherShape,
+    a: [u32; 8],
+    align: (u8, u8),
+    sheet: &Sheet,
+    mdw: u32,
+) -> CommentShape {
+    let [c1, dx1, r1, dy1, c2, dx2, r2, dy2] = a;
+    let hex = |v: u32| {
+        let c = art_color(v);
+        format!(
+            "#{}",
+            c.value.trim_start_matches("srgb:").to_ascii_lowercase()
+        )
+    };
+    let shadow = matches!(e.prop(0x023F), Some(b) if b & 0x0002_0000 != 0 && b & 0x02 != 0);
+    CommentShape {
+        anchor: [
+            c1,
+            anchor_col_px(sheet, c1, dx1, mdw),
+            r1,
+            anchor_row_px(sheet, r1, dy1),
+            c2,
+            anchor_col_px(sheet, c2, dx2, mdw),
+            r2,
+            anchor_row_px(sheet, r2, dy2),
+        ],
+        fill_color: hex(e.prop(0x0181).unwrap_or(0x00FF_FFFF)),
+        stroke_color: hex(e.prop(0x01C0).unwrap_or(0)),
+        stroke_weight: e.prop(0x01CB).unwrap_or(9525) as f64 / 12700.0,
+        shadow,
+        move_with_cells: e.anchor_flag != 3,
+        size_with_cells: e.anchor_flag == 0,
+        text_halign: match align.0 {
+            2 => Some("Center".into()),
+            3 => Some("Right".into()),
+            5 => Some("Justify".into()),
+            7 => Some("Distributed".into()),
+            _ => None,
+        },
+        text_valign: match align.1 {
+            1 => Some("Center".into()),
+            2 => Some("Bottom".into()),
+            3 => Some("Justify".into()),
+            4 => Some("Distributed".into()),
+            _ => None,
+        },
+    }
+}
+
 /// 레거시 앵커 → 모델. dx 는 (열 픽셀 − 1)의 1/32768, dy 는 (행 픽셀 − 1)의 1/8192 이고
 /// 픽셀 단위로 반올림한다 (한셀 대조, docs/format/cell-legacy.md).
 fn legacy_anchor(a: [u32; 8], flag: u16, sheet: &Sheet, mdw: u32) -> Anchor {
     let [c1, dx1, r1, dy1, c2, dx2, r2, dy2] = a;
-    let col_off = |c: u32, dx: u32| {
-        let eff = crate::units::sheet_col_px(sheet, c, mdw).saturating_sub(1) as f64;
-        (dx as f64 * eff / 32768.0).round() as i64 * crate::units::EMU_PER_PX
-    };
-    let row_off = |r: u32, dy: u32| {
-        let eff = crate::units::sheet_row_px(sheet, r).saturating_sub(1) as f64;
-        (dy as f64 * eff / 8192.0).round() as i64 * crate::units::EMU_PER_PX
-    };
+    let col_off =
+        |c: u32, dx: u32| anchor_col_px(sheet, c, dx, mdw) as i64 * crate::units::EMU_PER_PX;
+    let row_off = |r: u32, dy: u32| anchor_row_px(sheet, r, dy) as i64 * crate::units::EMU_PER_PX;
     Anchor {
         kind: AnchorKind::TwoCell,
         edit_as: match flag {
@@ -3108,10 +3188,15 @@ fn legacy_icon_set(r: &mut Rd, dec: &CfvoDecoder) -> Option<IconSet> {
 /// OBJ 레코드 요약: 종류(ot)와 뒤따른 TXO 의 내용·런
 struct ObjRec {
     ot: u16,
+    /// ftCmo 의 개체 번호 (NOTE 의 idObj 가 가리킨다)
+    id: u16,
+    /// TXO 의 가로·세로 맞춤 (메모 상자의 x:TextHAlign·x:TextVAlign)
+    align: (u8, u8),
     text: Option<(String, Vec<(u16, u16)>)>,
 }
 
 /// OfficeArt 도형 하나 → 모델 (OBJ 는 문서 순서로 하나씩 짝짓는다). 메모(ot 0x19)는 건너뛴다.
+#[allow(clippy::too_many_arguments)]
 fn legacy_shape(
     e: &escher::EscherShape,
     objs: &[ObjRec],
@@ -3119,6 +3204,7 @@ fn legacy_shape(
     sheet: &Sheet,
     wb: &Workbook,
     mdw: u32,
+    notes: &mut HashMap<u16, CommentShape>,
 ) -> Option<Shape> {
     let obj = objs.get(*k);
     *k += 1;
@@ -3126,10 +3212,16 @@ fn legacy_shape(
     let children: Vec<Shape> = e
         .children
         .iter()
-        .filter_map(|c| legacy_shape(c, objs, k, sheet, wb, mdw))
+        .filter_map(|c| legacy_shape(c, objs, k, sheet, wb, mdw, notes))
         .collect();
-    // 0x19 메모 (NOTE 가 따로 읽는다), 0x14 콤보 상자 (자동 필터의 단추)
-    if ot == 0x19 || ot == 0x14 {
+    // 0x19 메모 (NOTE 가 따로 읽는다 — 여기서는 상자의 모양만), 0x14 콤보 상자 (자동 필터의 단추)
+    if ot == 0x19 {
+        if let (Some(o), Some(a)) = (obj, e.anchor) {
+            notes.insert(o.id, legacy_comment_shape(e, a, o.align, sheet, mdw));
+        }
+        return None;
+    }
+    if ot == 0x14 {
         return None;
     }
     let kind = if e.is_group() {

@@ -512,7 +512,7 @@ fn escher(file: &Path) -> rcell::Result<()> {
                 })
                 .collect();
             println!(
-                "{}type={} spid={:#x} flags={:#x} obj={:?} name={:?} anchor={:?} child={:?} tb={}\n{}  {}",
+                "{}type={} spid={:#x} flags={:#x} obj={:?} name={:?} anchor={:?} (flag {}) child={:?} tb={}\n{}  {}",
                 "  ".repeat(depth),
                 s.shape_type,
                 s.spid,
@@ -520,6 +520,7 @@ fn escher(file: &Path) -> rcell::Result<()> {
                 obj,
                 s.string(0x0380),
                 s.anchor,
+                s.anchor_flag,
                 s.child_anchor,
                 s.has_textbox,
                 "  ".repeat(depth),

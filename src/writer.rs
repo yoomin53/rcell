@@ -1169,22 +1169,51 @@ fn comments_xml(sheet: &Sheet) -> String {
     s
 }
 
-/// 메모 도형 VML (`xl/drawings/vmlDrawingN.vml`). 위치는 Excel 기본 자리 (셀 오른쪽 위).
+/// 메모 도형 VML (`xl/drawings/vmlDrawingN.vml`). 한셀이 쓰는 꼴: 선·채우기는 `v:shape` 속성과 `v:stroke`, 그림자는
+/// `v:shadow`, 셀 고정은 `x:MoveWithCells`·`x:SizeWithCells` (있으면 고정). 모양이 없는 메모는 셀 오른쪽 위에 둔다
 fn comments_vml(sheet: &Sheet, n: usize) -> String {
     let mut s = format!(
         "<xml xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:x=\"urn:schemas-microsoft-com:office:excel\"><o:shapelayout v:ext=\"edit\"><o:idmap v:ext=\"edit\" data=\"{n}\"/></o:shapelayout><v:shapetype id=\"_x0000_t202\" coordsize=\"21600,21600\" o:spt=\"202\" path=\"m,l,21600r21600,l21600,xe\"><v:stroke joinstyle=\"miter\"/><v:path gradientshapeok=\"t\" o:connecttype=\"rect\"/></v:shapetype>"
     );
     for (k, c) in sheet.comments.iter().enumerate() {
         let (row, col) = (c.cell.row, c.cell.col);
-        let top = row.saturating_sub(1);
+        let sh = c
+            .shape
+            .clone()
+            .unwrap_or_else(|| crate::model::CommentShape::implied(c.cell));
+        let a = sh.anchor.map(|v| v.to_string()).join(", ");
+        let w = num(sh.stroke_weight);
         let _ = write!(
             s,
-            "<v:shape id=\"_x0000_s{}\" type=\"#_x0000_t202\" style=\"position:absolute;visibility:{}\" fillcolor=\"#ffffe1\" o:insetmode=\"auto\"><v:fill color2=\"#ffffe1\"/><v:path o:connecttype=\"none\"/><v:textbox style=\"mso-direction-alt:auto\"/><x:ClientData ObjectType=\"Note\"><x:MoveWithCells/><x:SizeWithCells/><x:Anchor>{}, 15, {top}, 10, {}, 15, {}, 4</x:Anchor><x:AutoFill>False</x:AutoFill><x:Row>{row}</x:Row><x:Column>{col}</x:Column>{}</x:ClientData></v:shape>",
+            "<v:shape id=\"_x0000_s{}\" type=\"#_x0000_t202\" style=\"position:absolute;visibility:{};z-index:{k}\" o:insetmode=\"auto\" stroked=\"t\" strokecolor=\"{}\" strokeweight=\"{w}pt\" filled=\"t\" fillcolor=\"{}\"><v:stroke weight=\"{w}pt\" color=\"{}\" joinstyle=\"miter\" filltype=\"solid\"/>{}<v:path o:connecttype=\"none\"/><v:textbox style=\"mso-direction-alt:auto\"/><x:ClientData ObjectType=\"Note\">{}{}<x:Anchor>{a}</x:Anchor><x:AutoFill>False</x:AutoFill>{}{}<x:Row>{row}</x:Row><x:Column>{col}</x:Column>{}</x:ClientData></v:shape>",
             n * 1024 + k + 1,
             if c.visible { "visible" } else { "hidden" },
-            col + 1,
-            col + 3,
-            top + 4,
+            esc(&sh.stroke_color),
+            esc(&sh.fill_color),
+            esc(&sh.stroke_color),
+            if sh.shadow {
+                "<v:shadow on=\"t\" obscured=\"t\" color=\"#000000\"/>"
+            } else {
+                ""
+            },
+            if sh.move_with_cells {
+                ""
+            } else {
+                "<x:MoveWithCells/>"
+            },
+            if sh.size_with_cells {
+                ""
+            } else {
+                "<x:SizeWithCells/>"
+            },
+            sh.text_halign
+                .as_ref()
+                .map(|v| format!("<x:TextHAlign>{}</x:TextHAlign>", esc(v)))
+                .unwrap_or_default(),
+            sh.text_valign
+                .as_ref()
+                .map(|v| format!("<x:TextVAlign>{}</x:TextVAlign>", esc(v)))
+                .unwrap_or_default(),
             if c.visible { "<x:Visible/>" } else { "" }
         );
     }

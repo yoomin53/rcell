@@ -153,7 +153,7 @@ fn written_cell_uses_hancom_package_conventions() {
 
 #[test]
 fn comments_roundtrip() {
-    use rcell::model::{CellRef, Comment, RichText};
+    use rcell::model::{CellRef, Comment, CommentShape, RichText};
     let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
     for (row, col, author, text, visible) in [
         (0, 0, "yoomin53", "첫 메모", false),
@@ -167,13 +167,33 @@ fn comments_roundtrip() {
                 runs: Vec::new(),
             },
             visible,
+            shape: None,
         });
     }
+    // 둘째 메모: 자리·색·선·그림자·셀 고정·맞춤 (메모 대조 실험의 값)
+    let shape = CommentShape {
+        anchor: [3, 5, 1, 7, 6, 20, 8, 3],
+        fill_color: "#c0ffc0".into(),
+        stroke_color: "#ff0000".into(),
+        stroke_weight: 2.0,
+        shadow: true,
+        move_with_cells: true,
+        size_with_cells: false,
+        text_halign: Some("Right".into()),
+        text_valign: Some("Bottom".into()),
+    };
+    a.sheets[0].comments[1].shape = Some(shape.clone());
     let out = write(&a, Flavor::Cell).unwrap();
     let b = rcell::from_bytes(out).unwrap();
     let diffs = compare(&a, &b, Options::default());
     assert!(diffs.is_empty(), "{}", diffs.join("\n"));
     assert_eq!(b.sheets[0].comments.len(), 2);
+    assert_eq!(b.sheets[0].comments[1].shape, Some(shape));
+    // 모양이 없는 메모는 셀 오른쪽 위에 둔다
+    assert_eq!(
+        b.sheets[0].comments[0].shape,
+        Some(CommentShape::implied(CellRef { row: 0, col: 0 }))
+    );
 }
 
 #[test]

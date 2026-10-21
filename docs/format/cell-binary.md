@@ -58,6 +58,8 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
   경로를 잃은 연결의 표시(관계 종류 `xlPathMissing` → 보통의 `externalLinkPath`). 한셀은 이 둘에 따라 이름 참조의
   따옴표를 정하므로, 바이너리를 거친 문서는 이름의 표기가 달라질 수 있다.
 
+- 글꼴 없는 글 조각만 있는 메모(`<x:text><x:t>…</x:t></x:text>`, `<x:r>` 에 `x:rPr` 가 없는 것)는 `BrtCommentText` 를
+  쓰지 않아 내용을 잃는다 (메모 대조 실험). 메모 상자는 XML 과 같은 VML 파트라 그대로다.
 - 캐시 값(`<v>`)이 없는 수식 셀이 있으면 바이너리 저장이 실패한다 (COM `RPC_E_SERVERFAULT`). 한셀이 저장한 문서는
   늘 캐시 값이 있으므로 조작한 문서에서만 생긴다.
 - `draft`, `autoPageBreaks="0"` 이 저장되지 않는다.
