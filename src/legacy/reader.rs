@@ -2802,13 +2802,10 @@ fn read_sheet(
                 .filter_map(|e| legacy_shape(e, &objs, &mut k, sheet, wb, mdw)),
         );
         // 메모 도형: 이름·상자 자리(픽셀)·그리기 차례를 메모에 붙인다 (VML 의 id·x:Anchor·도형 차례와 같은 뜻)
-        let mut notes: Vec<(u16, Option<String>, Option<[u32; 8]>)> = Vec::new();
-        fn walk(
-            e: &escher::EscherShape,
-            objs: &[ObjRec],
-            k: &mut usize,
-            out: &mut Vec<(u16, Option<String>, Option<[u32; 8]>)>,
-        ) {
+        // (OBJ 번호, 이름, 앵커)
+        type NoteShape = (u16, Option<String>, Option<[u32; 8]>);
+        let mut notes: Vec<NoteShape> = Vec::new();
+        fn walk(e: &escher::EscherShape, objs: &[ObjRec], k: &mut usize, out: &mut Vec<NoteShape>) {
             let obj = objs.get(*k);
             *k += 1;
             for c in &e.children {
