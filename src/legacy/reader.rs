@@ -1566,7 +1566,8 @@ fn read_sheet(
 ) -> Result<()> {
     let style = |ixfe: u16| cell_map.get(&ixfe).copied().unwrap_or(0);
     let mut pending_string_cell: Option<usize> = None;
-    let mut shared: HashMap<(u32, u32), (Vec<u8>, CellRef)> = HashMap::new();
+    // 공유 수식: 기준 셀 → (공유 토큰열, 기준 셀, 공유 번호 si)
+    let mut shared: HashMap<(u32, u32), (Vec<u8>, CellRef, u32)> = HashMap::new();
     // 활성 창 번호 (PANE 이 없으면 왼쪽 위 = 3)
     let mut active_pane: u8 = 3;
     // SELECTION 이 활성 창 것과 맞았는지 (안 맞으면 마지막 것을 쓴다)
@@ -1850,9 +1851,10 @@ fn read_sheet(
                         }
                     }
                     Ok(Decoded::SharedRef(master)) => {
+                        let si = shared.get(&(master.row, master.col)).map(|s| s.2);
                         let text = shared
                             .get(&(master.row, master.col))
-                            .and_then(|(tokens, _)| {
+                            .and_then(|(tokens, _, _)| {
                                 tokens_at.insert((row, col as u32), tokens.clone());
                                 let c = Context {
                                     xti_sheets,
@@ -1868,8 +1870,15 @@ fn read_sheet(
                                 }
                             })
                             .unwrap_or_default();
+                        // 공유 수식의 종속 셀 (기준 셀은 SHRFMLA 에서 고친다)
                         Formula {
                             text,
+                            kind: if si.is_some() {
+                                FormulaKind::Shared
+                            } else {
+                                FormulaKind::Normal
+                            },
+                            shared_index: si,
                             ..Default::default()
                         }
                     }
@@ -1889,14 +1898,14 @@ fn read_sheet(
             }
             0x04BC => {
                 // SHRFMLA: 범위 + 공유 토큰열. 직전 FORMULA 가 기준 셀이다.
-                let (Some(r1), Some(_r2), Some(c1), Some(_c2)) =
-                    (r.u32(), r.u32(), r.u16(), r.u16())
+                let (Some(r1), Some(r2), Some(c1), Some(c2)) = (r.u32(), r.u32(), r.u16(), r.u16())
                 else {
                     continue;
                 };
                 let _res = r.u16();
                 let cce = r.u16().unwrap_or(0) as usize;
                 if let Some(tokens) = r.take(cce) {
+                    let si = shared.len() as u32;
                     shared.insert(
                         (r1, c1 as u32),
                         (
@@ -1905,8 +1914,20 @@ fn read_sheet(
                                 row: r1,
                                 col: c1 as u32,
                             },
+                            si,
                         ),
                     );
+                    let range = crate::model::CellRange {
+                        start: CellRef {
+                            row: r1,
+                            col: c1 as u32,
+                        },
+                        end: CellRef {
+                            row: r2,
+                            col: c2 as u32,
+                        },
+                    }
+                    .to_string();
                     // 직전 수식 셀을 다시 해석
                     if let Some(cell) = sheet.cells.last_mut()
                         && cell.formula.as_ref().is_some_and(|f| f.text.is_empty())
@@ -1921,10 +1942,12 @@ fn read_sheet(
                         };
                         if let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx) {
                             tokens_at.insert((cell.r.row, cell.r.col), tokens.to_vec());
+                            // 공유 수식의 기준 셀: XML 의 `t="shared" ref=… si=…` 와 같게
                             cell.formula = Some(Formula {
                                 text: t,
-                                kind: FormulaKind::Normal,
-                                ..Default::default()
+                                kind: FormulaKind::Shared,
+                                shared_index: Some(si),
+                                range: Some(range),
                             });
                         }
                     }

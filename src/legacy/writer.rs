@@ -2768,7 +2768,7 @@ fn write_cells(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
                     out.rec_buf(0x0205, &mut b);
                 }
                 CellRec::Formula(xf, ci) => {
-                    write_formula(out, ctx, cells[*ci], *xf)?;
+                    write_formula(out, ctx, cells[*ci], *xf, sst)?;
                 }
             }
             i += 1;
@@ -2807,7 +2807,7 @@ fn cell_rec(c: &Cell, ci: usize, ctx: &SheetCtx, sst: &mut Sst) -> CellRec {
     }
 }
 
-fn write_formula(out: &mut Out, ctx: &SheetCtx, c: &Cell, xf: u16) -> Result<()> {
+fn write_formula(out: &mut Out, ctx: &SheetCtx, c: &Cell, xf: u16, sst: &mut Sst) -> Result<()> {
     let Some(enc) = ctx.enc.formulas.get(&(c.r.row, c.r.col)) else {
         return Ok(());
     };
@@ -2851,8 +2851,10 @@ fn write_formula(out: &mut Out, ctx: &SheetCtx, c: &Cell, xf: u16) -> Result<()>
         s.u16(0).u16(tokens.len() as u16).bytes(tokens);
         out.rec_buf(0x04BC, &mut s);
     }
+    // 수식의 문자열 값(STRING)도 SST 의 전체 참조 수(cstTotal)에 든다 (관측: 서식 파일 30개, cstTotal = LABELSST 수 + STRING 수)
     if let Some(s) = string {
         out.rec_buf(0x0207, Buf::new().str16(s));
+        sst.total += 1;
     }
     Ok(())
 }
