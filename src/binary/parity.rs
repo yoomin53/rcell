@@ -181,8 +181,10 @@ fn compare_part(na: &str, nb: &str, da: &[u8], db: &[u8]) -> PartReport {
                 if ra[i].data == rb[j].data {
                     rep.identical += 1;
                 } else {
-                    *rep.differing.entry(ra[i].rtype).or_default() += 1;
-                    if rep.samples.len() < 12 {
+                    let seen = rep.differing.entry(ra[i].rtype).or_default();
+                    *seen += 1;
+                    // 종류마다 처음 3개까지
+                    if *seen <= 3 && rep.samples.len() < 60 {
                         let at = ra[i]
                             .data
                             .iter()

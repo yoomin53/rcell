@@ -92,6 +92,9 @@ enum Cmd {
         /// 바이너리 저장의 BrtAbsPath15 에 쓸 폴더 (한셀은 저장한 폴더를 쓴다; 생략하면 빈 문자열)
         #[arg(long)]
         abs_path: Option<String>,
+        /// 바이너리 저장에서 한셀이 잃는 값도 똑같이 잃는다 (한셀과 같은 결과를 볼 때)
+        #[arg(long)]
+        exact: bool,
     },
     /// 바이너리 .cell 두 개를 레코드 단위로 비교 (A: rcell 이 쓴 것, B: 한셀이 쓴 것) — 리버스 엔지니어링용
     Bindiff {
@@ -206,7 +209,8 @@ fn main() -> ExitCode {
             output,
             format,
             abs_path,
-        } => convert(&input, &output, format.as_deref(), abs_path),
+            exact,
+        } => convert(&input, &output, format.as_deref(), abs_path, exact),
         Cmd::Bindiff { a, b, samples } => bindiff(&a, &b, samples),
         Cmd::Diff {
             a,
@@ -660,6 +664,7 @@ fn convert(
     output: &Path,
     format: Option<&str>,
     abs_path: Option<String>,
+    exact: bool,
 ) -> rcell::Result<()> {
     let format = match format.map(str::to_ascii_lowercase).as_deref() {
         None => rcell::SaveFormat::from_path(output),
@@ -675,8 +680,10 @@ fn convert(
     };
     let wb = open_doc(input)?;
     if format == rcell::SaveFormat::Binary {
-        let out =
-            rcell::binary::writer::write_report(&wb, &rcell::binary::writer::Options { abs_path })?;
+        let out = rcell::binary::writer::write_report(
+            &wb,
+            &rcell::binary::writer::Options { abs_path, exact },
+        )?;
         for w in &out.warnings {
             eprintln!("경고: {w}");
         }

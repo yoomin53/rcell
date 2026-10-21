@@ -133,21 +133,21 @@ fn corpus_roundtrips_through_binary() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// (b) 레코드 대조: rcell 이 X.cell 에서 쓴 바이너리 대 한셀의 X.bin.cell
-#[test]
-fn corpus_records_match_hancell() {
-    let Some(pairs) = corpus_pairs() else {
-        eprintln!("RCELL_CORPUS 미설정 — 건너뜀");
-        return;
-    };
-    let mut total = (0usize, 0usize, 0usize);
-    let mut differing: BTreeMap<u32, usize> = BTreeMap::new();
-    let mut only_a: BTreeMap<u32, usize> = BTreeMap::new();
-    let mut only_b: BTreeMap<u32, usize> = BTreeMap::new();
-    let mut xml_diff: BTreeMap<String, usize> = BTreeMap::new();
-    let mut part_diff: BTreeMap<String, usize> = BTreeMap::new();
-    let verbose = std::env::var_os("RCELL_PARITY_VERBOSE").is_some();
-    for (xml, bin) in &pairs {
+/// 레코드 대조 한 벌의 합계
+#[derive(Default)]
+struct Parity {
+    /// 한셀 레코드 수, 종류가 맞은 수, 내용까지 같은 수
+    total: (usize, usize, usize),
+    differing: BTreeMap<u32, usize>,
+    only_a: BTreeMap<u32, usize>,
+    only_b: BTreeMap<u32, usize>,
+    xml_diff: BTreeMap<String, usize>,
+    part_diff: BTreeMap<String, usize>,
+}
+
+fn parity(pairs: &[(PathBuf, PathBuf)], exact: bool, verbose: bool) -> Parity {
+    let mut s = Parity::default();
+    for (xml, bin) in pairs {
         let a = rcell::open(xml).expect("XML 읽기");
         // 한셀은 저장한 폴더를 BrtAbsPath15 에 쓴다 — 같은 폴더를 넣어 비교한다
         let dir = format!("{}\\", xml.parent().unwrap().display()).replace('/', "\\");
@@ -155,72 +155,93 @@ fn corpus_records_match_hancell() {
             &a,
             &Options {
                 abs_path: Some(dir),
+                exact,
             },
         )
         .expect("바이너리 쓰기");
         let rep =
             rcell::binary::parity::compare(&out.bytes, &std::fs::read(bin).unwrap()).expect("대조");
         let (b, m, i) = rep.totals();
-        total = (total.0 + b, total.1 + m, total.2 + i);
-        eprintln!(
-            "{:>6}/{:<6} 같음  {}",
-            i,
-            b,
-            bin.file_name().unwrap().to_string_lossy()
-        );
+        s.total = (s.total.0 + b, s.total.1 + m, s.total.2 + i);
         if verbose {
+            eprintln!(
+                "{:>6}/{:<6} 같음  {}",
+                i,
+                b,
+                bin.file_name().unwrap().to_string_lossy()
+            );
             eprint!("{}", rcell::binary::parity::format(&rep, 4));
         }
         for p in &rep.parts {
             for (t, n) in &p.differing {
-                *differing.entry(*t).or_default() += n;
+                *s.differing.entry(*t).or_default() += n;
             }
             for (t, n) in &p.only_a {
-                *only_a.entry(*t).or_default() += n;
+                *s.only_a.entry(*t).or_default() += n;
             }
             for (t, n) in &p.only_b {
-                *only_b.entry(*t).or_default() += n;
+                *s.only_b.entry(*t).or_default() += n;
             }
             if p.xml_equal == Some(false) {
                 let k = p.name.chars().filter(|c| !c.is_ascii_digit()).collect();
-                *xml_diff.entry(k).or_default() += 1;
+                *s.xml_diff.entry(k).or_default() += 1;
             }
         }
         for n in rep.only_a.iter().chain(&rep.only_b) {
             let k = n.chars().filter(|c| !c.is_ascii_digit()).collect();
-            *part_diff.entry(k).or_default() += 1;
+            *s.part_diff.entry(k).or_default() += 1;
         }
     }
+    s
+}
+
+fn show_parity(title: &str, s: &Parity) {
     let name = |t: &u32| format!("{}({t})", rcell::binary::biff12::record_name(*t));
     eprintln!(
-        "한셀 레코드 {}, 종류가 맞은 레코드 {}, 내용까지 같은 레코드 {} ({:.1}%)",
-        total.0,
-        total.1,
-        total.2,
-        100.0 * total.2 as f64 / total.0.max(1) as f64
+        "[{title}] 한셀 레코드 {}, 종류가 맞은 레코드 {}, 내용까지 같은 레코드 {} ({:.2}%)",
+        s.total.0,
+        s.total.1,
+        s.total.2,
+        100.0 * s.total.2 as f64 / s.total.0.max(1) as f64
     );
-    let show = |title: &str, m: &BTreeMap<u32, usize>| {
+    let show = |what: &str, m: &BTreeMap<u32, usize>| {
         let mut v: Vec<_> = m.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));
-        let s: Vec<String> = v.iter().map(|(t, n)| format!("{}×{n}", name(t))).collect();
-        eprintln!("{title}: {}", s.join(" "));
+        let x: Vec<String> = v.iter().map(|(t, n)| format!("{}×{n}", name(t))).collect();
+        eprintln!("    {what}: {}", x.join(" "));
     };
-    show("내용 다름", &differing);
-    show("rcell 에만", &only_a);
-    show("한셀에만", &only_b);
-    eprintln!("다른 XML 파트: {xml_diff:?}");
-    eprintln!("한쪽에만 있는 파트: {part_diff:?}");
-    // 회귀 막기: 한셀 레코드의 90% 이상이 바이트까지 같아야 한다
+    show("내용 다름", &s.differing);
+    show("rcell 에만", &s.only_a);
+    show("한셀에만", &s.only_b);
+    eprintln!("    다른 XML 파트: {:?}", s.xml_diff);
+    eprintln!("    한쪽에만 있는 파트: {:?}", s.part_diff);
+}
+
+/// (b) 레코드 대조: rcell 이 X.cell 에서 쓴 바이너리 대 한셀의 X.bin.cell — 한셀처럼 잃는 쓰기(`exact`)와 기본 쓰기
+#[test]
+fn corpus_records_match_hancell() {
+    let Some(pairs) = corpus_pairs() else {
+        eprintln!("RCELL_CORPUS 미설정 — 건너뜀");
+        return;
+    };
+    let verbose = std::env::var_os("RCELL_PARITY_VERBOSE").is_some();
+    let exact = parity(&pairs, true, verbose);
+    let lossless = parity(&pairs, false, false);
+    show_parity("exact", &exact);
+    show_parity("기본", &lossless);
+    // 회귀 막기: 한셀 레코드의 98% 이상이 바이트까지 같아야 한다
     assert!(
-        total.2 as f64 >= 0.9 * total.0 as f64,
+        exact.total.2 as f64 >= 0.98 * exact.total.0 as f64,
         "레코드 일치율이 낮다: {}/{}",
-        total.2,
-        total.0
+        exact.total.2,
+        exact.total.0
     );
 }
 
-/// (c) 한셀의 읽기: `RCELL_BINW_ORACLE` 폴더의 `X.binw.as.cell` (한셀이 rcell 의 바이너리를 .xlsb 로 열어 XML 로
-/// 저장한 것) 대 코퍼스의 `X.bin.as.cell` (한셀이 자기 바이너리를 같은 길로 연 것)
+/// (c) 한셀의 읽기: `RCELL_BINW_ORACLE` 폴더의 `X.binx.as.cell`·`X.binw.as.cell` (한셀이 rcell 의 `exact`·기본 바이너리를
+/// .xlsb 로 열어 XML 로 저장한 것, tools/probe/binw-oracle.ps1) 대 코퍼스의 `X.bin.as.cell` (한셀이 자기 바이너리를 같은
+/// 길로 연 것). `exact` 는 차이가 없어야 하고, 기본 쓰기는 한셀의 바이너리 저장이 잃는 값(차등 서식 맞춤·표시 형식,
+/// draft, 구조 잠금 없는 통합 문서 보호)에서만 달라야 한다 — 한셀은 rcell 이 더 쓴 값을 그대로 읽는다
 #[test]
 fn hancell_reads_rcell_binary_like_its_own() {
     let (Some(pairs), Some(oracle)) = (
@@ -235,7 +256,8 @@ fn hancell_reads_rcell_binary_like_its_own() {
         ..Default::default()
     };
     let mut failures = Vec::new();
-    let mut checked = 0;
+    let mut checked = (0, 0);
+    let mut lossless_extra: BTreeMap<String, usize> = BTreeMap::new();
     for (xml, bin) in &pairs {
         let stem = xml
             .file_name()
@@ -249,20 +271,43 @@ fn hancell_reads_rcell_binary_like_its_own() {
             .map(|n| n.to_string_lossy().into_owned())
             .filter(|n| n != "rcell-corpus")
             .unwrap_or_default();
-        let ours = oracle.join(&sub).join(format!("{stem}.binw.as.cell"));
         let theirs = bin.with_file_name(format!("{stem}.bin.as.cell"));
-        if !ours.exists() || !theirs.exists() {
+        if !theirs.exists() {
             continue;
         }
         let a = rcell::open(&theirs).expect("한셀이 읽은 한셀 바이너리");
-        let b = rcell::open(&ours).expect("한셀이 읽은 rcell 바이너리");
-        let diffs = compare(&a, &b, opts);
-        checked += 1;
-        eprintln!("{:>4} 차이  {}", diffs.len(), ours.display());
-        if !diffs.is_empty() {
-            failures.push(format!("{}:\n{}", ours.display(), diffs.join("\n")));
+        for (suffix, exact) in [("binx", true), ("binw", false)] {
+            let ours = oracle.join(&sub).join(format!("{stem}.{suffix}.as.cell"));
+            if !ours.exists() {
+                continue;
+            }
+            let b = rcell::open(&ours).expect("한셀이 읽은 rcell 바이너리");
+            let diffs = compare(&a, &b, opts);
+            if exact {
+                checked.0 += 1;
+                eprintln!("{:>4} 차이  {}", diffs.len(), ours.display());
+                if !diffs.is_empty() {
+                    failures.push(format!("{}:\n{}", ours.display(), diffs.join("\n")));
+                }
+                continue;
+            }
+            checked.1 += 1;
+            for d in diffs {
+                let head = d.lines().next().unwrap_or("").to_string();
+                let allowed = head.ends_with("조건부 서식")
+                    || head.ends_with("인쇄")
+                    || head == "통합 문서 보호";
+                if allowed {
+                    *lossless_extra.entry(head).or_default() += 1;
+                } else {
+                    failures.push(format!("{} (기본 쓰기):\n{d}", ours.display()));
+                }
+            }
         }
     }
-    eprintln!("비교한 쌍: {checked}");
+    eprintln!(
+        "비교한 쌍: exact {}, 기본 {} — 기본 쓰기에서 한셀 바이너리보다 더 남은 값: {lossless_extra:?}",
+        checked.0, checked.1
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

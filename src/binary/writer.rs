@@ -33,6 +33,10 @@ pub struct Options {
     /// `BrtAbsPath15` 에 쓸 저장 폴더 (한셀은 저장한 폴더의 절대 경로를 쓴다, 끝에 `\`).
     /// 없으면 빈 문자열 — 개인정보 보호 (XML 쓰기가 `x15ac:absPath` 를 쓰지 않는 것과 같다)
     pub abs_path: Option<String>,
+    /// 한셀의 바이너리 저장이 잃는 값도 똑같이 잃는다 (차등 서식의 맞춤·표시 형식, `draft`·자동 페이지 나누기 끔,
+    /// 요약 열 왼쪽, 구조 잠금 없는 통합 문서 보호, 나눈 창의 활성 창 — docs/format/cell-binary.md 2.1).
+    /// 기본은 잃지 않는다 (한셀은 rcell 이 더 쓴 값을 그대로 읽는다)
+    pub exact: bool,
 }
 
 /// 쓴 결과와, 쓰면서 버린 것 (토큰으로 바꾸지 못한 수식 등)
@@ -583,7 +587,7 @@ fn xfprop(out: &mut Vec<u8>, ty: u16, v: &[u8]) {
 /// BrtDXF: 플래그 u16 (0x8000 fNewBorder — 한셀은 위·아래·왼쪽·오른쪽을 모두 지정한 테두리에 켠다), 예약 u16,
 /// XFProp 수 u16, XFProp 들 (채우기, 글꼴, 테두리, 보호 순, 묶음 안은 번호 순 — 관측). 표시 형식·맞춤은
 /// 한셀도 바이너리에 쓰지 않는다 (docs/format/cell-binary.md 2.1)
-fn dxf_record(d: &Dxf) -> P {
+fn dxf_record(d: &Dxf, fmt_id: Option<u16>, exact: bool) -> P {
     let mut props = Vec::new();
     let mut n = 0u16;
     let mut add = |props: &mut Vec<u8>, ty: u16, v: &[u8]| {
@@ -716,8 +720,9 @@ fn dxf_record(d: &Dxf) -> P {
             add(&mut props, 0x0E, &[1]);
         }
     }
-    // 맞춤·표시 형식: 한셀은 바이너리 차등 서식에 쓰지 않아 잃는다 (docs/format/cell-binary.md 2.1) — rcell 은 쓴다
-    if let Some(a) = &d.alignment {
+    // 맞춤: 한셀은 바이너리 차등 서식에 쓰지 않아 잃는다 (docs/format/cell-binary.md 2.1) — rcell 은 쓴다 (한셀도 읽는다,
+    // 관측: dxfprobe2). `exact` 면 한셀처럼 버린다
+    if let Some(a) = d.alignment.as_ref().filter(|_| !exact) {
         if let Some(h) = index_of(&H_ALIGN, a.horizontal.as_deref()) {
             add(&mut props, 0x0F, &[h as u8]);
         }
@@ -740,14 +745,11 @@ fn dxf_record(d: &Dxf) -> P {
             add(&mut props, 0x16, &[1]);
         }
     }
-    if let Some(n) = &d.num_fmt {
-        add(&mut props, 0x29, &(n.id.min(0xFFFF) as u16).to_le_bytes());
-        let u: Vec<u16> = n.code.encode_utf16().collect();
-        let mut v = (u.len() as u16).to_le_bytes().to_vec();
-        for x in u {
-            v.extend_from_slice(&x.to_le_bytes());
-        }
-        add(&mut props, 0x26, &v);
+    // 표시 형식: 번호(0x29)만, 사용자 정의 번호를 BrtFmt 표에 올린다 ([`dxf_formats`]). 한셀의 바이너리 읽기는 형식 문자열
+    // (0x26)을 빈 형식으로, 내장 번호를 다른 형식으로 읽고, 표에 올린 사용자 번호는 무시한다 (차등 서식 표시 형식 대조
+    // 실험) — 한셀에는 해가 없고 rcell 은 다시 읽는다
+    if let Some(id) = fmt_id.filter(|_| !exact) {
+        add(&mut props, 0x29, &id.to_le_bytes());
     }
     if let Some(pr) = &d.protection {
         if let Some(l) = pr.locked {
@@ -764,12 +766,36 @@ fn dxf_record(d: &Dxf) -> P {
     p
 }
 
-fn styles_bin(st: &Styles, fonts: &FontTable) -> Vec<u8> {
+/// 차등 서식의 표시 형식 → (BrtFmt 표, 차등 서식마다의 번호). 같은 형식 문자열이 표에 있으면 그 번호, 없으면 사용자 정의
+/// 번호(164 이상)를 새로 준다. `exact` 면 차등 서식의 표시 형식을 쓰지 않는다 (한셀처럼)
+fn dxf_formats(st: &Styles, exact: bool) -> (Vec<crate::model::NumFmt>, Vec<Option<u16>>) {
+    let mut fmts = st.num_fmts.clone();
+    let ids = st
+        .dxfs
+        .iter()
+        .map(|d| {
+            let n = d.num_fmt.as_ref().filter(|_| !exact)?;
+            if let Some(f) = fmts.iter().find(|f| f.code == n.code && f.id >= 164) {
+                return Some(f.id as u16);
+            }
+            let id = fmts.iter().map(|f| f.id).max().unwrap_or(163).max(163) + 1;
+            fmts.push(crate::model::NumFmt {
+                id,
+                code: n.code.clone(),
+            });
+            Some(id as u16)
+        })
+        .collect();
+    (fmts, ids)
+}
+
+fn styles_bin(st: &Styles, fonts: &FontTable, exact: bool) -> Vec<u8> {
     let mut o = Out::default();
     o.e(278); // BrtBeginStyleSheet
-    if !st.num_fmts.is_empty() {
-        o.p(615, P::new().u32(st.num_fmts.len() as u32));
-        for n in &st.num_fmts {
+    let (num_fmts, dxf_fmt) = dxf_formats(st, exact);
+    if !num_fmts.is_empty() {
+        o.p(615, P::new().u32(num_fmts.len() as u32));
+        for n in &num_fmts {
             o.p(44, P::new().u16(n.id as u16).wstr(&n.code));
         }
         o.e(616);
@@ -855,8 +881,8 @@ fn styles_bin(st: &Styles, fonts: &FontTable) -> Vec<u8> {
     }
     o.e(620);
     o.p(505, P::new().u32(st.dxfs.len() as u32));
-    for d in &st.dxfs {
-        o.p(507, &dxf_record(d));
+    for (d, id) in st.dxfs.iter().zip(dxf_fmt) {
+        o.p(507, &dxf_record(d, id, exact));
     }
     o.e(506);
     // 표 스타일 묶음: 한셀 문서에는 늘 있다 (기본 이름만이라도). 모델에 없으면 쓰지 않는다
@@ -1204,6 +1230,8 @@ struct SheetCtx<'a, 'b> {
     mdw: u32,
     /// 모델로 새로 쓰는 차트 파트 (레거시에서 읽은 차트): (파트 이름, XML)
     charts: &'a mut Vec<(String, String)>,
+    /// [`Options::exact`]
+    exact: bool,
 }
 
 /// 데이터 막대의 x14 확장 GUID. 한셀은 새로 만든다 (임의 값) — rcell 은 문서 안 순서로 정한다
@@ -1394,7 +1422,7 @@ impl SheetCtx<'_, '_> {
         let mut o = Out::default();
         let mut rels: Vec<Rel> = Vec::new();
         o.e(129); // BrtBeginSheet
-        self.ws_prop(&mut o, sheet);
+        self.ws_prop(&mut o, sheet, index);
         self.dimension(&mut o, sheet);
         self.views(&mut o, sheet, selected);
         // BrtWsFmtInfo: 기본 열 너비(1/256), 기본 너비 글자 수 8, 기본 행 높이(twips), 플래그, 개요 수준 (한셀은 0)
@@ -1471,7 +1499,11 @@ impl SheetCtx<'_, '_> {
                     .wstr(h.display.as_deref().unwrap_or("")),
             );
         }
-        page(&mut o, sheet);
+        let hf_font = self
+            .exact
+            .then(|| self.fonts.fonts.first().and_then(|f| f.name.clone()))
+            .flatten();
+        page(&mut o, sheet, self.exact, hf_font.as_deref());
         let mut drawing = None;
         if let Some(name) = drawing_name {
             let id = format!("rId{}", rels.len() + 1);
@@ -1526,15 +1558,16 @@ impl SheetCtx<'_, '_> {
     }
 
     /// BrtWsProp: 플래그 3바이트, 탭 색, rwSync, colSync, 코드 이름
-    fn ws_prop(&mut self, o: &mut Out, sheet: &Sheet) {
+    fn ws_prop(&mut self, o: &mut Out, sheet: &Sheet, index: usize) {
         let p = &sheet.page;
         // 0x01 자동 페이지 나누기 표시, 0x08 (한셀이 늘 켠다), 0x40 요약 행 아래, 0x80 요약 열 오른쪽. 한셀은
         // 0x80 을 늘 켜서 요약 열 왼쪽을 잃는다 (docs/format/cell-binary.md 2.1) — rcell 은 지킨다
         let mut b0 = 0x08u8;
-        if !sheet.summary_left {
+        if !sheet.summary_left || self.exact {
             b0 |= 0x80;
         }
-        if p.auto_page_breaks.unwrap_or(true) {
+        // 한셀은 자동 페이지 나누기 끔도 저장하지 않는다
+        if p.auto_page_breaks.unwrap_or(true) || self.exact {
             b0 |= 0x01;
         }
         if !sheet.summary_above {
@@ -1562,7 +1595,13 @@ impl SheetCtx<'_, '_> {
                 .raw(&tab)
                 .u32(0xFFFF_FFFF)
                 .u32(0xFFFF_FFFF)
-                .wstr(sheet.code_name.as_deref().unwrap_or("")),
+                // 코드 이름이 없으면 한셀은 SheetN 을 채운다 (관측: filter2)
+                .wstr(
+                    &sheet
+                        .code_name
+                        .clone()
+                        .unwrap_or_else(|| format!("Sheet{}", index + 1)),
+                ),
         );
     }
 
@@ -1649,7 +1688,17 @@ impl SheetCtx<'_, '_> {
                 .u16(100)
                 .u32(0),
         );
-        let active = v.pane.as_ref().and_then(|p| p.active_pane.as_deref());
+        let mut active = v.pane.as_ref().and_then(|p| p.active_pane.as_deref());
+        // 한셀은 나눈 창(고정 아님)의 활성 창을 잃는다: 창 0, 선택은 창 3 (docs/format/cell-binary.md 2.1)
+        let split = v
+            .pane
+            .as_ref()
+            .is_some_and(|p| !matches!(p.state.as_deref(), Some("frozen" | "frozenSplit")));
+        let mut sel_pane = None;
+        if self.exact && split {
+            active = Some("bottomRight");
+            sel_pane = Some(3);
+        }
         if let Some(p) = &v.pane {
             let t = p
                 .top_left_cell
@@ -1687,7 +1736,9 @@ impl SheetCtx<'_, '_> {
         }
         let iact = sq.iter().position(|r| r.contains(ac)).unwrap_or(0) as u32;
         let mut p = P::new();
-        p.u32(if v.pane.is_some() {
+        p.u32(if let Some(n) = sel_pane {
+            n
+        } else if v.pane.is_some() {
             pane_number(active)
         } else {
             3
@@ -2311,8 +2362,50 @@ fn auto_filter(o: &mut Out, sheet: &Sheet) {
     o.e(162);
 }
 
+/// 머리글·바닥글 구역(`&L`·`&C`·`&R`)마다 글꼴 코드(`&"…"`)가 없으면 기본 글꼴 코드 `&"글꼴,Regular"` 를 앞에 넣는다 —
+/// 한셀의 바이너리 저장이 하는 일 (관측: view_print `&L왼쪽` → `&L&"맑은 고딕,Regular"왼쪽`). 구역 표시가 없는 글은 가운데
+/// 구역 하나로 본다
+fn hf_with_font(s: &str, font: &str) -> String {
+    let code = format!("&\"{font},Regular\"");
+    // (구역 표시, 내용)
+    let mut parts: Vec<(String, String)> = Vec::new();
+    let mut cur = (String::new(), String::new());
+    let c: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < c.len() {
+        if c[i] == '&'
+            && c.get(i + 1)
+                .is_some_and(|x| matches!(x, 'L' | 'C' | 'R' | 'l' | 'c' | 'r'))
+        {
+            if !cur.0.is_empty() || !cur.1.is_empty() {
+                parts.push(std::mem::take(&mut cur));
+            }
+            cur.0 = c[i..i + 2].iter().collect();
+            i += 2;
+            continue;
+        }
+        if c[i] == '&' && c.get(i + 1) == Some(&'&') {
+            cur.1.push_str("&&");
+            i += 2;
+            continue;
+        }
+        cur.1.push(c[i]);
+        i += 1;
+    }
+    parts.push(cur);
+    let mut out = String::new();
+    for (mark, text) in parts {
+        out.push_str(&mark);
+        if !text.is_empty() && !text.contains("&\"") {
+            out.push_str(&code);
+        }
+        out.push_str(&text);
+    }
+    out
+}
+
 /// 인쇄: BrtPrintOptions, BrtMargins, BrtPageSetup, 머리글·바닥글, 페이지 나누기
-fn page(o: &mut Out, sheet: &Sheet) {
+fn page(o: &mut Out, sheet: &Sheet, exact: bool, hf_font: Option<&str>) {
     let p = &sheet.page;
     // 0x01 가로 가운데, 0x02 세로 가운데, 0x04 머리글, 0x08 눈금선. 0x10 은 한셀 내부 상태 —
     // printOptions 가 없는 시트 104/108, 있는 시트 2/51 에 켜져 있다 (관측)
@@ -2346,7 +2439,7 @@ fn page(o: &mut Out, sheet: &Sheet) {
     );
     // BrtPageSetup: 모델에 없으면 쓰지 않는다 (한셀 문서에는 늘 있다)
     if let Some(s) = &p.setup {
-        page_setup(o, s);
+        page_setup(o, s, exact);
     }
     // 머리글·바닥글은 글이 있을 때만 (한셀은 빈 headerFooter 를 쓰지 않는다, 관측)
     if let Some(h) = &p.header_footer {
@@ -2366,15 +2459,19 @@ fn page(o: &mut Out, sheet: &Sheet) {
             let mut q = P::new();
             q.u16(flags);
             for t in texts {
-                q.nwstr(t.as_deref());
+                match (t, hf_font) {
+                    (Some(t), Some(f)) => q.nwstr(Some(&hf_with_font(t, f))),
+                    _ => q.nwstr(t.as_deref()),
+                };
             }
             o.p(479, &q);
             o.e(480);
         }
     }
     for (begin, end, list, max) in [
-        (392u16, 393u16, &p.row_breaks, 16383u32),
-        (394, 395, &p.col_breaks, 1_048_575),
+        // 끝 칸: 한셀은 행 나누기에 1048575, 열 나누기에 16383 을 쓴다 (관측: view_print — XML 의 max 와 반대)
+        (392u16, 393u16, &p.row_breaks, 1_048_575u32),
+        (394, 395, &p.col_breaks, 16383),
     ] {
         if list.is_empty() {
             continue;
@@ -2390,7 +2487,7 @@ fn page(o: &mut Out, sheet: &Sheet) {
     }
 }
 
-fn page_setup(o: &mut Out, s: &crate::model::PageSetup) {
+fn page_setup(o: &mut Out, s: &crate::model::PageSetup, exact: bool) {
     let mut flags = 0u16;
     if s.page_order.as_deref() == Some("overThenDown") {
         flags |= 0x0001;
@@ -2406,7 +2503,8 @@ fn page_setup(o: &mut Out, s: &crate::model::PageSetup) {
     if s.black_and_white {
         flags |= 0x0008;
     }
-    if s.draft {
+    // 한셀은 draft 를 저장하지 않는다
+    if s.draft && !exact {
         flags |= 0x0010;
     }
     if s.use_first_page_number {
@@ -2567,6 +2665,7 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
             guid_seed: 0,
             mdw: crate::units::max_digit_width(wb),
             charts: &mut model_charts,
+            exact: opts.exact,
         };
         for (i, sh) in worksheets.iter().enumerate() {
             if !sh.comments.is_empty() {
@@ -2583,7 +2682,7 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
         }
     }
     let sst_bin = sst.bin(&mut fonts);
-    let styles = styles_bin(&wb.styles, &fonts);
+    let styles = styles_bin(&wb.styles, &fonts, opts.exact);
 
     // ---- workbook.bin ----
     let mut wbrels: Vec<Rel> = Vec::new();
@@ -2652,7 +2751,11 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
             .wstr("ThisWorkbook"),
     );
     // BrtBookProtection: 한셀은 구조 잠금이 없으면 통째로 잃는다 (docs/format/cell-binary.md 2.1) — rcell 은 쓴다
-    if let Some(p) = wb.protection.as_ref() {
+    if let Some(p) = wb
+        .protection
+        .as_ref()
+        .filter(|p| p.lock_structure || !opts.exact)
+    {
         let pw = p
             .password
             .as_deref()
@@ -3073,6 +3176,20 @@ mod tests {
         assert_eq!(rk(0.1), None);
         assert_eq!(rk(1e15), None);
         assert_eq!(rk(std::f64::consts::PI), None);
+    }
+
+    #[test]
+    fn header_footer_gets_default_font_codes_like_hancell() {
+        // 관측: view_print 의 머리글을 한셀이 바이너리로 저장한 것
+        assert_eq!(
+            hf_with_font("&L왼쪽&C&\"굴림,Bold\"가운데&R&P / &N", "맑은 고딕"),
+            "&L&\"맑은 고딕,Regular\"왼쪽&C&\"굴림,Bold\"가운데&R&\"맑은 고딕,Regular\"&P / &N"
+        );
+        assert_eq!(
+            hf_with_font("&C&D &T", "맑은 고딕"),
+            "&C&\"맑은 고딕,Regular\"&D &T"
+        );
+        assert_eq!(hf_with_font("&L&C&R", "X"), "&L&C&R");
     }
 
     #[test]

@@ -919,6 +919,15 @@ fn parse_styles(data: &[u8]) -> Styles {
             _ => {}
         }
     }
+    // 차등 서식의 표시 형식이 번호(0x29)만 있으면 BrtFmt 표에서 형식을 찾는다 (rcell 이 쓰는 꼴, docs/format/cell-binary.md 4절)
+    for d in &mut st.dxfs {
+        if let Some(n) = d.num_fmt.as_mut()
+            && let Some(f) = st.num_fmts.iter().find(|f| f.id == n.id)
+            && (n.code.is_empty() || n.id >= 164)
+        {
+            n.code = f.code.clone();
+        }
+    }
     st
 }
 
