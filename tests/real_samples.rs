@@ -26,7 +26,7 @@ fn files_with_suffix(dir: &Path, suffix: &str) -> Vec<PathBuf> {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.to_ascii_lowercase().ends_with(suffix))
+                .is_some_and(|n| !n.starts_with("~$") && n.to_ascii_lowercase().ends_with(suffix))
         })
         .collect();
     files.sort();
