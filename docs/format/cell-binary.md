@@ -178,7 +178,8 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 | `[Content_Types].xml` | Default: `rels`, `xml`, 메모가 있으면 `vml`, 그림 확장자(`png`·`jpeg` …), **외부 연결 대상의 확장자**(`xls` → `application/vnd.ms-excel`). Override: 나머지 파트를 이름 순으로 (`xl/workbook.bin` = `…sheet.binary.macroEnabled.main`, 시트 `…ms-excel.worksheet`, `…styles`, `…sharedStrings`, `…comments`, `…externalLink`) |
 | 루트 관계 | rId1 officeDocument, rId2 core-properties, rId3 extended-properties |
 | 통합 문서 관계 | rId1 테마, rId2 styles.bin, rId3 sharedStrings.bin, rId4… 시트, 그 뒤 외부 연결 (`externalLinks/externalLinkN.bin`). 문자열이 하나도 없으면 sharedStrings.bin 과 그 관계·콘텐츠 타입이 없고 시트가 rId3 부터다 (3차원 참조 대조 실험의 숫자·수식만 있는 문서) |
-| 시트 관계 | 하이퍼링크(외부), 그리기, VML, 메모 순. 대상은 상대 경로 (`../drawings/drawing1.xml`) |
+| 시트 관계 | 하이퍼링크(외부), 그리기, VML, 표, 피벗 표, 메모 순 (한 시트에 다 넣은 COM 문서). 대상은 상대 경로 (`../drawings/drawing1.xml`) |
+| 표 파트 | `xl/tables/tableN.bin` (`application/vnd.ms-excel.table`), N 은 문서 안 시트·표 순서로 1부터 (같은 세션의 XML 저장본과 같은 번호 — 세션 번호가 아니다). 레코드는 2절 표, 시트 끝의 `BrtBeginListParts`(660: 표 수) `BrtListPart`(661: 관계 ID)×n `BrtEndListParts`(662) |
 | 외부 연결 파트 | `BrtBeginSupBook`(360: `sbt 0`, 관계 ID `rId1`, 빈 문자열 0xFFFFFFFF), `BrtSupTabs`(359), `BrtEndSupBook`(588). 관계는 경로를 잃은 연결도 보통의 `externalLinkPath` |
 | 그리기·차트·그림·VML | XML 파트 그대로 (차트는 모델에서 `chart_xml` 로). 한셀은 그리기·차트·그림 파트에 **세션 전체의 번호**를 붙인다 (같은 문서의 `X.cell` 은 `drawing69.xml`, `X.bin.cell` 은 `drawing70.xml`) — 문서의 정보가 아니다. 메모 VML 은 XML 저장본과 같은 꼴 ([cell-2024.md](cell-2024.md) 7.5절: 이름, 시트 안 `o:spid`, 그리기 개체 수에서 이어지는 z-index, `idmap 0`, 세션 GUID `x:ShapeUri`) — rcell 은 메모 상자 모델(`CommentShape`, 이름 포함)에서 같은 꼴로 쓴다 (코퍼스 6개 문서의 VML 이 `x:ShapeUri` 말고 같다) |
 | docProps | app.xml: `Application` Cell, 시트 이름 목록(`TitlesOfParts`), `TotalTime` 원본 값(서식 파일 51 → 51, 없으면 0), `AppVersion` 12.0300. core.xml 은 늘 쓰고 끝에 `cp:version` 1300.0100.01 (바이너리 113개 모두). 수정 번호(+1)·수정 날짜(저장 시각)는 저장할 때 바뀐다 — rcell 은 모델 값을 쓰고, 대조(`binary::parity`)와 `rcell diff` 는 이 둘과 수정한 사람을 뺀다 |
@@ -196,6 +197,9 @@ rcell diff X.bin.cell X.cell --ignore-hancom
   관측한 다섯 꼴 `[외부1, 자신]`, `[외부1, 자신, 외부2]`, `[외부1, 외부2]`, `[자신]`, 없음이 모두 이 규칙이다.
 - **XTI**: 수식에 처음 나오는 순서 — 이름 정의, 시트마다 셀·조건부 서식·유효성, 그리고 **차트 계열의 참조**
   (`Sheet1!$A$1:$A$5`). 차트만 있는 문서도 `BrtSupSelf` + `BrtExternSheet` 가 있는 까닭이다 (차트 문서 68개).
+  **표가 있는 시트**는 쓰이지 않아도 그 시트의 수식보다 먼저 XTI 를 받는다 (XTI 순서 실험: 시트 셋에 수식·표·이름을
+  나눠 넣은 COM 문서 셋 — `S1` 에 표와 `=S3!A1+1`, `S2` 에 표 → `[S1, S3, S2]`; 이름 `'S1'!$A$1` 이 있으면 이름이 먼저).
+  구조적 참조(PtgList)의 `ixti` 가 이 XTI 다.
 - **이름**: 모델 순서 그대로, `_xlnm.` 은 떼고 `fBuiltin`(0x20). 수식에 쓰였지만 정의되지 않은 이름은 수식 없는
   이름(cce 0)으로 덧붙인다 (`=XYZ` → `BrtName XYZ`). 주석은 0xFFFFFFFF.
 - 구조 잠금이 걸린 통합 문서는 ECMA-376 표준 암호화로 감싼다 (4.10절).
@@ -206,7 +210,8 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 `BrtEndWsViews`, `BrtWsFmtInfo`, [`BrtBeginColInfos` `BrtColInfo`×n `BrtEndColInfos`], `BrtBeginSheetData` (행·셀)
 `BrtEndSheetData`, [`BrtSheetProtection`], [자동 필터], [병합], [조건부 서식]×n, [유효성], [`BrtHLink`×n],
 `BrtPrintOptions`, `BrtMargins`, `BrtPageSetup`, [머리글·바닥글], [행 나누기], [열 나누기], [`BrtDrawing`],
-[`BrtLegacyDrawing`], 643·645 (빈 ActiveX 묶음), 660(개수 0)·662 (빈 표 목록), [x14 조건부 서식 확장], `BrtEndSheet`.
+[`BrtLegacyDrawing`], 643·645 (빈 ActiveX 묶음), 660(표 수)·[661 × 표]·662 (표 목록 — 표가 없어도 쓴다), [x14 조건부 서식
+확장], `BrtEndSheet`.
 
 | 레코드 | 한셀 |
 |---|---|
@@ -259,6 +264,7 @@ XML 의 공유 문자열 순서를 지킨다 (서식 파일 28개 모두; 조작
 | 이름 정의는 참조 클래스, 합집합은 `PtgMemFunc`(0x29 + 길이)로 감싼다 | 인쇄 영역 `A,B` |
 | 상대 토큰(공유 수식·조건부 서식·유효성)의 행 오프셋은 **20비트** (`-7` → `F9 FF 0F 00`), 열은 14비트 | 서식 파일의 공유 수식 |
 | 상대 위치 수식의 3차원 참조는 `PtgRef3d`/`PtgArea3d` 그대로, 상대 축만 오프셋 (`PtgRefN` 같은 3차원 토큰은 없다) | 3차원 참조 대조 실험 (2절) — 읽기는 `legacy::formula::decode_relative` |
+| 구조적 참조는 `PtgList`(`18 19`, 2절): 열 하나면 끝 열 0, 형식 비트(10–11)는 `#This Row` 에만 1 — 함수 인자·연산자 자리와 상관없이 나머지는 0. 이름만 쓴 표(`COUNTA(Table1)`)도 열 없는 PtgList (XML 에는 `Table1[]`) | 표 대조 실험 (tbl2 의 구조적 참조 수식 16개가 한셀 토큰과 바이트까지 같다) |
 | 공백은 쓰지 않는다 (`tAttrSpace` 없음). 한셀은 수식을 받을 때 공백·줄 바꿈을 지운다 — 남는 것은 교집합 연산자뿐 | 공백 대조 실험: COM 으로 넣은 `=A1 + B1`, `=SUM( A1 )`, `= A1*2`, `=A1+⏎B1` 등 20개가 XML 에서 `A1+B1`, `SUM(A1)` …, 바이너리에 `19 40` 없음 |
 
 ### 4.7 조건부 서식·유효성·자동 필터
@@ -313,8 +319,7 @@ XML 이 같은데 바이너리가 다른 칸 — rcell 은 가장 흔한 값을 
 이중 회계 밑줄(XML 은 단일 회계로 쓴다), 데이터 막대의 GUID, 동적 필터가 데이터로 계산한 값(원본에 없을 때),
 `BrtAbsPath15` 의 폴더, 메모 VML 의 `x:ShapeUri` (세션 GUID — 레코드 대조는 뺀다). rcell 모델에 없어 다른 것: 다시
 부호화한 그림과 조작한 XML 의 그림 앵커 정규화 (2.1절). 데이터 막대의 x14 확장(방향·축·플래그·x14 기준 값·색)은 모델(`DataBar::ext`)에서 쓰고 `rcell diff` 가
-비교한다 (x14 조건부 서식 실험). 표·피벗·매크로 프로젝트는 바이너리 쓰기가 아직 쓰지 않는다 (XML 쓰기는 쓴다 —
-[cell-2024.md](cell-2024.md) 7.10절).
+비교한다 (x14 조건부 서식 실험).
 
 ### 4.10 구조 잠금 문서의 암호화 컨테이너 (`src/binary/encrypt.rs`)
 
@@ -339,3 +344,13 @@ OLE2 복합 문서 판 3 (0x3E, 512바이트 섹터) 안에 스트림 `Encryptio
   감싸지 않았다 — 조건 미확인. 한셀이 감싼 바이너리를 다시 열어 XML 로 저장하면 그것도 감싼다 (X.bin.as.cell).
 - 한셀 대조: rcell 이 감싼 outline 바이너리를 한셀이 .xlsb 로 열어 XML 로 저장한 결과가 한셀 자기 바이너리를 같은
   길로 연 것과 차이 0 (exact·기본 모두), 그 XML 도 한셀이 감싼다.
+
+### 4.11 표 (`table_part`)
+
+표 모델(`Sheet::tables`)에서 표 파트를 쓴다 — XML 원본의 표 파트(XML)는 옮기지 않는다. 계산 열 수식은 `BrtListCCFmla`(351),
+요약 행 사용자 수식은 `BrtListTrFmla`(352: `fArray u8` + CellParsedFormula), 셀 수식·이름의 구조적 참조는 PtgList (4.6절).
+한셀 대조 (표 문서 14개 — 표 대조 실험 tbl·tbl2·s·v 와 COM 문서): rcell 이 XML 저장본에서 쓴 바이너리가 한셀의 바이너리와
+레코드까지 같고 (`BrtAbsPath15` 말고), 한셀이 .xlsb 로 읽은 결과가 한셀 자기 바이너리를 읽은 것과 차이 0. 바이너리 원본 →
+rcell 바이너리도 차이 0. 한셀의 `.xlsb` 읽기는 요약 행을 버린다 — 자기 바이너리도 `totalsRowCount="1"` 이 사라지고
+`totalsRowShown="0"` 이 된다 (tbl·tbl2) — 그래서 요약 행은 레코드 대조로 확인했다. 조작한 XML 의 계산 열 수식(351)은 한셀이
+읽지 않고 버린다 (XML 읽기와 같다).

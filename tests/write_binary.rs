@@ -45,6 +45,73 @@ fn fixture_roundtrips_through_binary() {
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
+/// 표: 표 파트(`xl/tables/table1.bin`)와 구조적 참조(PtgList)가 바이너리를 거쳐 그대로 돌아온다
+#[test]
+fn tables_and_structured_references_roundtrip() {
+    use rcell::model::{Cell, CellRef, CellValue, Formula, Table, TableColumn, TableStyleInfo};
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    let put = |s: &mut rcell::model::Sheet, row: u32, col: u32, v: CellValue, f: Option<&str>| {
+        s.cells.push(Cell {
+            r: CellRef { row, col },
+            style: 0,
+            value: v,
+            formula: f.map(|t| Formula {
+                text: t.into(),
+                ..Default::default()
+            }),
+        });
+    };
+    {
+        let s = &mut a.sheets[1];
+        put(s, 0, 4, CellValue::Text("안녕 & 반가워".into()), None);
+        put(s, 0, 5, CellValue::Text("굵게 보통".into()), None);
+        put(s, 1, 4, CellValue::Number(1.0), None);
+        put(s, 1, 5, CellValue::Number(3.0), None);
+        put(s, 2, 4, CellValue::Number(2.0), None);
+        put(s, 2, 5, CellValue::Number(4.0), None);
+        s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+        s.tables.push(Table {
+            id: 1,
+            name: "표1".into(),
+            display_name: "표1".into(),
+            range: "E1:F3".into(),
+            totals_shown: false,
+            columns: vec![
+                TableColumn {
+                    id: 1,
+                    name: "안녕 & 반가워".into(),
+                    ..Default::default()
+                },
+                TableColumn {
+                    id: 2,
+                    name: "굵게 보통".into(),
+                    ..Default::default()
+                },
+            ],
+            style: Some(TableStyleInfo {
+                name: Some("TableStyleMedium2".into()),
+                row_stripes: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+    {
+        let s = &mut a.sheets[0];
+        put(s, 0, 3, CellValue::Number(7.0), Some("SUM(표1[굵게 보통])"));
+        put(s, 1, 3, CellValue::Number(6.0), Some("COUNTA(표1[])"));
+        s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    }
+    let out = write_report(&a, &Options::default()).unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let t = rcell::container::read_entry(&out.bytes, "xl/tables/table1.bin").unwrap();
+    // BrtBeginList(343) 로 시작해 BrtEndList(344) 로 끝난다
+    assert_eq!(&t[..2], &[0xD7, 0x02]);
+    let (diffs, warnings) = roundtrip_diffs(&a);
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
 #[test]
 fn binary_is_detected_by_name() {
     use rcell::SaveFormat;

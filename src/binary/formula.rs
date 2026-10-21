@@ -36,6 +36,21 @@ pub trait Resolver {
     fn name(&mut self, sheet: Option<&str>, name: &str) -> u32;
     /// 외부 문서의 이름 `[book]!이름` → (XTI, 이름 번호)
     fn extern_name(&mut self, book: usize, name: &str) -> Option<(u16, u32)>;
+    /// 구조적 참조의 표 (표시 이름) → 표 번호, 열 이름, 표가 있는 시트의 XTI. 없는 표면 None
+    fn table(&mut self, _name: &str) -> Option<ListRef> {
+        None
+    }
+}
+
+/// 구조적 참조(PtgList)가 가리키는 표
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListRef {
+    /// 표 번호 (`idList`)
+    pub id: u32,
+    /// 열 이름 (순서가 열 번호)
+    pub columns: Vec<String>,
+    /// 표가 있는 시트의 XTI
+    pub ixti: u16,
 }
 
 /// 수식이 놓이는 곳
@@ -114,6 +129,8 @@ enum Tok {
     Word(String),
     /// `[book]first[:last]!` (book 만 있으면 외부 이름 접두)
     Sheet(SheetRef),
+    /// 구조적 참조 `표[…]`: (표 이름, 바깥 대괄호 안의 글 — 작은따옴표 가림은 그대로)
+    List(String, String),
     Space,
 }
 
@@ -315,6 +332,13 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
             c0 if is_word_char(c0) => {
                 let (w, end) = word(&c, i);
                 i = end;
+                // 구조적 참조: 표이름[…]
+                if c.get(i) == Some(&'[') {
+                    let (spec, end) = bracket(&c, i)?;
+                    i = end;
+                    out.push(Tok::List(w, spec));
+                    continue;
+                }
                 // 시트 접두: 이름! 또는 첫:끝!
                 if c.get(i) == Some(&'!') {
                     i += 1;
@@ -362,6 +386,127 @@ fn starts_row_word(c: &[char], i: usize) -> bool {
         }
         k > s && !c.get(k).is_some_and(|x| is_word_char(*x) || *x == '(')
     }
+}
+
+/// `c[start]` 의 `[` 와 짝인 `]` 까지: (안쪽 글, `]` 다음 위치). 작은따옴표는 다음 글자를 가린다 (`'[`, `''`)
+fn bracket(c: &[char], start: usize) -> Result<(String, usize), String> {
+    let mut depth = 0;
+    let mut j = start;
+    while j < c.len() {
+        match c[j] {
+            '\'' => {
+                j += 2;
+                continue;
+            }
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((c[start + 1..j].iter().collect(), j + 1));
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    Err("구조적 참조가 닫히지 않음".into())
+}
+
+/// 대괄호·작은따옴표 가림 밖의 `sep` 로 나눈다
+fn split_top(s: &str, sep: char) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0;
+    let mut it = s.chars();
+    while let Some(ch) = it.next() {
+        match ch {
+            '\'' => {
+                cur.push(ch);
+                if let Some(n) = it.next() {
+                    cur.push(n);
+                }
+                continue;
+            }
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            _ if ch == sep && depth == 0 => {
+                out.push(std::mem::take(&mut cur));
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(ch);
+    }
+    out.push(cur);
+    out
+}
+
+/// 열 이름의 작은따옴표 가림을 푼다 (`a'[1']` → `a[1]`)
+fn unescape_list_name(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(ch) = it.next() {
+        if ch == '\'' {
+            if let Some(n) = it.next() {
+                out.push(n);
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// 구조적 참조의 안쪽 글 → (행 종류 비트, 열 이름 0–2개). 행 종류: 0x01 `#All`, 0x02 `#Headers`, 0x04 `#Data`,
+/// 0x08 `#Totals`, 0x10 `#This Row` (`@열` 도). 꼴: 빈 글(`표[]`), 열 하나(`표[열]`), 행 종류 하나(`표[#All]`),
+/// `[…],[…]` 목록 — 항목마다 `[행 종류]`, `[열]`, `[열]:[열]`
+fn parse_list_spec(spec: &str) -> Result<(u16, Vec<String>), String> {
+    let s = spec.trim();
+    if s.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    let items: Vec<String> = if s.starts_with('[') {
+        split_top(s, ',')
+    } else {
+        vec![format!("[{s}]")]
+    };
+    let mut rows = 0u16;
+    let mut cols = Vec::new();
+    for it in items {
+        for part in split_top(it.trim(), ':') {
+            let p = part.trim();
+            let inner = p
+                .strip_prefix('[')
+                .and_then(|x| x.strip_suffix(']'))
+                .ok_or_else(|| format!("구조적 참조 항목 {p}"))?;
+            if let Some(spec) = inner.strip_prefix('#') {
+                rows |= match spec.trim().to_ascii_lowercase().as_str() {
+                    "all" => 0x01,
+                    "headers" => 0x02,
+                    "data" => 0x04,
+                    "totals" => 0x08,
+                    "this row" => 0x10,
+                    other => return Err(format!("구조적 참조 행 종류 #{other}")),
+                };
+            } else if let Some(col) = inner.strip_prefix('@') {
+                rows |= 0x10;
+                let col = col.trim();
+                let col = col
+                    .strip_prefix('[')
+                    .and_then(|x| x.strip_suffix(']'))
+                    .unwrap_or(col);
+                if !col.is_empty() {
+                    cols.push(unescape_list_name(col));
+                }
+            } else {
+                cols.push(unescape_list_name(inner));
+            }
+        }
+    }
+    if cols.len() > 2 {
+        return Err(format!("구조적 참조의 열이 너무 많음: {spec}"));
+    }
+    Ok((rows, cols))
 }
 
 fn word(c: &[char], start: usize) -> (String, usize) {
@@ -425,6 +570,8 @@ enum Node {
     Missing,
     Ref(Option<SheetRef>, Area),
     Name(Option<SheetRef>, String),
+    /// 구조적 참조 (표 이름, 안쪽 글)
+    List(String, String),
     Func(String, Vec<Node>),
     Neg(Box<Node>),
     Plus(Box<Node>),
@@ -559,7 +706,7 @@ impl Parser<'_> {
             self.skip_space();
             let starts_operand = matches!(
                 self.t.get(self.i),
-                Some(Tok::Word(_)) | Some(Tok::Sheet(_)) | Some(Tok::Op("("))
+                Some(Tok::Word(_)) | Some(Tok::Sheet(_)) | Some(Tok::List(..)) | Some(Tok::Op("("))
             );
             if !starts_operand || !is_reference(&n) {
                 self.i = save;
@@ -650,6 +797,7 @@ impl Parser<'_> {
             }
             Tok::Str(s) => Ok(Node::Str(s)),
             Tok::Err(e) => Ok(Node::Err(e)),
+            Tok::List(t, s) => Ok(Node::List(t, s)),
             Tok::Op("(") => {
                 let n = self.expr(true)?;
                 if !self.eat(")") {
@@ -776,7 +924,7 @@ impl Parser<'_> {
 
 fn is_reference(n: &Node) -> bool {
     match n {
-        Node::Ref(..) | Node::Name(..) => true,
+        Node::Ref(..) | Node::Name(..) | Node::List(..) => true,
         Node::Bin(op, ..) => matches!(*op, ":" | " " | ","),
         Node::Paren(x) => is_reference(x),
         Node::Func(name, _) => {
@@ -891,6 +1039,7 @@ impl Gen<'_> {
             Node::Missing => self.out.push(0x16),
             Node::Ref(sheet, area) => self.reference(sheet.as_ref(), area, want)?,
             Node::Name(sheet, name) => self.name(sheet.as_ref(), name, want)?,
+            Node::List(table, spec) => self.list(table, spec)?,
             Node::Neg(x) => {
                 if let Node::Num(v) = x.as_ref() {
                     // 수 앞의 '-' 는 음수 하나로 (한셀: ABS(-5) → PtgNum -5)
@@ -1075,7 +1224,51 @@ impl Gen<'_> {
         Ok(())
     }
 
+    /// PtgList (0x18 0x19): `ixti u16, 플래그 u16, 표 번호 u32, 첫 열 u16, 끝 열 u16` — 한셀이 쓰는 꼴 (표 대조 실험:
+    /// tbl2 의 `Table1[…]` 수식 16개). 플래그 비트 0–1 열 (0 없음, 1 하나 — 끝 열 0, 2 범위), 비트 2–6 행 종류, 비트
+    /// 10–11 형식은 `#This Row` 에만 1 (나머지는 함수 인자·연산자 자리와 상관없이 0). `ixti` 는 표가 있는 시트의 XTI
+    fn list(&mut self, table: &str, spec: &str) -> Result<(), String> {
+        let l = self
+            .r
+            .table(table)
+            .ok_or_else(|| format!("없는 표 {table}"))?;
+        let (rows, cols) = parse_list_spec(spec)?;
+        let index = |name: &str| -> Result<u16, String> {
+            l.columns
+                .iter()
+                .position(|c| c == name)
+                .or_else(|| {
+                    l.columns
+                        .iter()
+                        .position(|c| c.to_lowercase() == name.to_lowercase())
+                })
+                .map(|i| i as u16)
+                .ok_or_else(|| format!("표 {table} 에 없는 열 {name}"))
+        };
+        let (kind, c1, c2) = match cols.as_slice() {
+            [] => (0u16, 0u16, 0u16),
+            [a] => (1, index(a)?, 0),
+            [a, b] => (2, index(a)?, index(b)?),
+            _ => unreachable!(),
+        };
+        let mut flags = kind | (rows << 2);
+        if rows == 0x10 {
+            flags |= 0x0400;
+        }
+        self.out.extend_from_slice(&[0x18, 0x19]);
+        self.u16(l.ixti);
+        self.u16(flags);
+        self.u32(l.id);
+        self.u16(c1);
+        self.u16(c2);
+        Ok(())
+    }
+
     fn name(&mut self, sheet: Option<&SheetRef>, name: &str, want: ArgClass) -> Result<(), String> {
+        // 이름만 쓴 표 (`COUNTA(Table1)`)는 열 없는 구조적 참조다 — 한셀은 XML 에 `Table1[]` 로 쓴다 (표 대조 실험)
+        if sheet.is_none() && self.r.table(name).is_some() {
+            return self.list(name, "");
+        }
         let cls = class_bits(want);
         match sheet {
             Some(SheetRef {
@@ -1306,6 +1499,87 @@ mod tests {
         fn extern_name(&mut self, _book: usize, _name: &str) -> Option<(u16, u32)> {
             None
         }
+        /// 표 대조 실험의 Table1 (Sheet1, 열 이름·수량·단가·금액)
+        fn table(&mut self, name: &str) -> Option<ListRef> {
+            if name != "Table1" {
+                return None;
+            }
+            Some(ListRef {
+                id: 1,
+                columns: ["이름", "수량", "단가", "금액"].map(String::from).to_vec(),
+                ixti: self.xti(None, "Sheet1", None)?,
+            })
+        }
+    }
+
+    // 표 대조 실험 (tbl2): 한셀이 바이너리에 쓴 토큰열
+    #[test]
+    fn structured_references_match_hancell_tokens() {
+        let cases = [
+            (
+                "SUM(Table1[수량])",
+                "18 19 00 00 01 00 01 00 00 00 01 00 00 00 19 10 00 00",
+            ),
+            (
+                "Table1[[#This Row],[수량]]*Table1[[#This Row],[단가]]",
+                "18 19 00 00 41 04 01 00 00 00 01 00 00 00 18 19 00 00 41 04 01 00 00 00 02 00 00 00 05",
+            ),
+            (
+                "ROWS(Table1[#All])",
+                "18 19 00 00 04 00 01 00 00 00 00 00 00 00 41 4c 00",
+            ),
+            (
+                "COUNTA(Table1[#Headers])",
+                "18 19 00 00 08 00 01 00 00 00 00 00 00 00 42 01 a9 00",
+            ),
+            (
+                "SUM(Table1[#Totals])",
+                "18 19 00 00 20 00 01 00 00 00 00 00 00 00 19 10 00 00",
+            ),
+            (
+                "SUM(Table1[[#Data],[수량]:[단가]])",
+                "18 19 00 00 12 00 01 00 00 00 01 00 02 00 19 10 00 00",
+            ),
+            (
+                "SUBTOTAL(109,Table1[수량])",
+                "1e 6d 00 18 19 00 00 01 00 01 00 00 00 01 00 00 00 42 02 58 01",
+            ),
+            (
+                "SUM(Table1[금액])/2",
+                "18 19 00 00 01 00 01 00 00 00 03 00 00 00 19 10 00 00 1e 02 00 06",
+            ),
+            (
+                "SUM(Table1[[#Data],[#Headers],[수량]])",
+                "18 19 00 00 19 00 01 00 00 00 01 00 00 00 19 10 00 00",
+            ),
+            (
+                "COUNTA(Table1[])",
+                "18 19 00 00 00 00 01 00 00 00 00 00 00 00 42 01 a9 00",
+            ),
+            (
+                "COUNTA(Table1)",
+                "18 19 00 00 00 00 01 00 00 00 00 00 00 00 42 01 a9 00",
+            ),
+            (
+                "SUM(Table1[[#Data],[#Totals],[금액]])",
+                "18 19 00 00 31 00 01 00 00 00 03 00 00 00 19 10 00 00",
+            ),
+            (
+                "INDEX(Table1[수량],1)",
+                "18 19 00 00 01 00 01 00 00 00 01 00 00 00 1e 01 00 42 02 1d 00",
+            ),
+        ];
+        for (f, want) in cases {
+            assert_eq!(enc(f), hex(want), "{f}");
+        }
+        assert_eq!(
+            parse_list_spec("[#This Row],[a'[1']]").unwrap(),
+            (0x10, vec!["a[1]".to_string()])
+        );
+        assert_eq!(
+            parse_list_spec("@수량").unwrap(),
+            (0x10, vec!["수량".to_string()])
+        );
     }
 
     fn hex(s: &str) -> Vec<u8> {
