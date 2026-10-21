@@ -100,6 +100,9 @@ enum Cmd {
         /// 요약 한 줄만
         #[arg(long)]
         summary: bool,
+        /// SST 문자열 차례를 보지 않는다 (문자열을 내용 차례로 맞춘 뒤 비교)
+        #[arg(long)]
+        ignore_sst_order: bool,
     },
     /// 두 문서의 의미 비교 (저장 형식이 달라도 됨). 차이가 있으면 종료 코드 1
     Diff {
@@ -206,7 +209,13 @@ fn main() -> ExitCode {
             output,
             format,
         } => convert(&input, &output, format.as_deref()),
-        Cmd::RecDiff { a, b, max, summary } => rec_diff(&a, &b, max, summary),
+        Cmd::RecDiff {
+            a,
+            b,
+            max,
+            summary,
+            ignore_sst_order,
+        } => rec_diff(&a, &b, max, summary, ignore_sst_order),
         Cmd::Diff {
             a,
             b,
@@ -687,10 +696,17 @@ fn convert(input: &Path, output: &Path, format: Option<&str>) -> rcell::Result<(
     }
 }
 
-fn rec_diff(a: &Path, b: &Path, max: usize, summary: bool) -> rcell::Result<()> {
+fn rec_diff(
+    a: &Path,
+    b: &Path,
+    max: usize,
+    summary: bool,
+    ignore_sst_order: bool,
+) -> rcell::Result<()> {
     let sa = rcell::container::read_entry(&std::fs::read(a)?, "/Workbook")?;
     let sb = rcell::container::read_entry(&std::fs::read(b)?, "/Workbook")?;
-    let r = rcell::legacy::recdiff::compare(&sa, &sb);
+    let opts = rcell::legacy::recdiff::Options { ignore_sst_order };
+    let r = rcell::legacy::recdiff::compare_with(&sa, &sb, opts);
     if summary {
         println!("{}", r.summary());
         return Ok(());

@@ -140,7 +140,8 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
             }
         }
         lines(&mut s.shapes);
-        if let Some(m) = &mut s.page.margins {
+        // 레거시에서 읽은 여백은 이미 한셀이 읽은 HWPUNIT 값이라 그대로 다시 읽힌다 (writer::margin)
+        if let Some(m) = s.page.margins.as_mut().filter(|_| !wb.styles.from_legacy) {
             for v in [
                 &mut m.left,
                 &mut m.right,

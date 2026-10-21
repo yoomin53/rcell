@@ -2299,9 +2299,22 @@ impl SheetCtx<'_> {
 }
 
 /// 여백: 한셀은 문서를 열 때 인치 값을 HWPUNIT(1/7200 인치) 정수로 잘라 들고 있다가 f32 로 바꿔 f64 로 넓혀 쓴다
-/// (관측: 머리글 0.51180553 → 3684 → 00 00 00 c0 92 5f e0 3f, 왼쪽 0.74805557 → 5386 → 00 00 00 40 12 f0 e7 3f)
-fn margin(v: f64) -> f64 {
-    (((v * 7200.0).trunc() / 7200.0) as f32) as f64
+/// (관측: 머리글 0.51180553 → 3684 → 00 00 00 c0 92 5f e0 3f, 왼쪽 0.74805557 → 5386 → 00 00 00 40 12 f0 e7 3f).
+///
+/// 레거시에서 읽은 값(`from_legacy`)은 이미 한셀이 읽은 HWPUNIT N (읽기가 자른 값)이다: 한셀이 다시 읽어 N 이 되는
+/// 가장 작은 K (N 또는 N+1) 의 f32 를 쓴다 — 한셀이 원래 쓴 값이 그것이다 (f32 가 정확한 값보다 작으면 읽을 때
+/// 한 칸 내려가므로, 그대로 쓰면 다시 읽을 때마다 한 칸씩 준다)
+fn margin(v: f64, from_legacy: bool) -> f64 {
+    let f = |k: f64| ((k / 7200.0) as f32) as f64;
+    if !from_legacy {
+        return f((v * 7200.0).trunc());
+    }
+    let n = (v * 7200.0).round();
+    if (f(n) * 7200.0).trunc() == n {
+        f(n)
+    } else {
+        f(n + 1.0)
+    }
 }
 
 pub(crate) fn range_ref8(b: &mut Buf, r: &CellRange) {
@@ -2431,7 +2444,7 @@ fn write_sheet(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
         (0x0028, m.top),
         (0x0029, m.bottom),
     ] {
-        out.rec(rt, &margin(v).to_le_bytes());
+        out.rec(rt, &margin(v, wb.styles.from_legacy).to_le_bytes());
     }
     {
         let s = sheet.page.setup.clone().unwrap_or_default();
@@ -2463,8 +2476,8 @@ fn write_sheet(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
             .u16(g)
             .u16(s.horizontal_dpi.unwrap_or(0) as u16)
             .u16(s.vertical_dpi.unwrap_or(0) as u16)
-            .f64(margin(m.header))
-            .f64(margin(m.footer))
+            .f64(margin(m.header, wb.styles.from_legacy))
+            .f64(margin(m.footer, wb.styles.from_legacy))
             .u16(s.copies.unwrap_or(1) as u16);
         out.rec_buf(0x00A1, &mut b);
     }

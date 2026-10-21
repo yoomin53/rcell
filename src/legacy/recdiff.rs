@@ -174,10 +174,81 @@ fn hex(d: &[u8], at: usize, n: usize) -> String {
         .join(" ")
 }
 
+/// 비교 조건
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Options {
+    /// SST 문자열 차례를 보지 않는다: SST 의 문자열을 내용 차례로 늘어놓고 LABELSST 의 번호를 그에 맞춘다.
+    /// 한셀의 SST 차례는 문서를 읽어 온 내력(해시 표)에 따라 달라 파일에서 정할 수 없다 (5.7절)
+    pub ignore_sst_order: bool,
+}
+
+/// SST 의 문자열 하나하나 (머리 8바이트 뒤, 5.7절의 한컴 꼴) — 바이트 그대로
+fn sst_strings(d: &[u8]) -> Option<Vec<&[u8]>> {
+    let unique = u32::from_le_bytes(d.get(4..8)?.try_into().ok()?) as usize;
+    let mut v = Vec::with_capacity(unique);
+    let mut p = 8;
+    for _ in 0..unique {
+        let cch = u16::from_le_bytes(d.get(p..p + 2)?.try_into().ok()?) as usize;
+        let flags = *d.get(p + 2)?;
+        let mut q = p + 3 + cch * 2;
+        if flags & 0x01 != 0 {
+            let runs = u16::from_le_bytes(d.get(q..q + 2)?.try_into().ok()?) as usize;
+            q += 2 + runs * 4;
+        }
+        v.push(d.get(p..q)?);
+        p = q;
+    }
+    Some(v)
+}
+
+/// SST 를 내용 차례로 바꾸고 LABELSST 의 번호를 고친다
+fn canonical_sst(secs: &mut [Vec<Rec>]) {
+    let Some(sst) = secs
+        .first_mut()
+        .and_then(|s| s.iter_mut().find(|r| r.rtype == 0x00FC))
+    else {
+        return;
+    };
+    let Some(strings) = sst_strings(&sst.data) else {
+        return;
+    };
+    let mut order: Vec<usize> = (0..strings.len()).collect();
+    order.sort_by(|&x, &y| strings[x].cmp(strings[y]));
+    let mut rank = vec![0u32; strings.len()];
+    for (k, &i) in order.iter().enumerate() {
+        rank[i] = k as u32;
+    }
+    let mut data = sst.data[..8].to_vec();
+    for &i in &order {
+        data.extend_from_slice(strings[i]);
+    }
+    sst.data = data;
+    for s in secs.iter_mut() {
+        for r in s
+            .iter_mut()
+            .filter(|r| r.rtype == 0x00FD && r.data.len() >= 12)
+        {
+            let i = u32::from_le_bytes(r.data[8..12].try_into().unwrap()) as usize;
+            if let Some(&k) = rank.get(i) {
+                r.data[8..12].copy_from_slice(&k.to_le_bytes());
+            }
+        }
+    }
+}
+
 /// 두 스트림 비교
 pub fn compare(a: &[u8], b: &[u8]) -> RecDiff {
-    let sa = sections(a);
-    let sb = sections(b);
+    compare_with(a, b, Options::default())
+}
+
+/// 두 스트림 비교 (조건)
+pub fn compare_with(a: &[u8], b: &[u8], opts: Options) -> RecDiff {
+    let mut sa = sections(a);
+    let mut sb = sections(b);
+    if opts.ignore_sst_order {
+        canonical_sst(&mut sa);
+        canonical_sst(&mut sb);
+    }
     let mut r = RecDiff::default();
     for k in 0..sa.len().max(sb.len()) {
         let empty = Vec::new();
@@ -299,5 +370,34 @@ mod tests {
         let r = compare(&a, &b);
         assert_eq!((r.same, r.changed, r.only_a, r.only_b), (2, 1, 1, 1));
         assert_eq!(compare(&a, &a).same, 4);
+    }
+
+    #[test]
+    fn sst_order_can_be_ignored() {
+        // SST: cstTotal, cstUnique, ("가", "B") 또는 ("B", "가"); LABELSST 가 같은 문자열을 가리킨다
+        let s = |t: &str| {
+            let mut v = (t.encode_utf16().count() as u16).to_le_bytes().to_vec();
+            v.push(0);
+            for u in t.encode_utf16() {
+                v.extend_from_slice(&u.to_le_bytes());
+            }
+            v
+        };
+        let sst = |x: &str, y: &str| {
+            let mut v = vec![2, 0, 0, 0, 2, 0, 0, 0];
+            v.extend(s(x));
+            v.extend(s(y));
+            v
+        };
+        let label = |isst: u8| vec![0, 0, 0, 0, 0, 0, 15, 0, isst, 0, 0, 0];
+        let (sa, sb) = (sst("가", "B"), sst("B", "가"));
+        let (la, lb) = (label(0), label(1));
+        let a = stream(&[(0x0809, &[1]), (0x00FC, &sa), (0x0809, &[1]), (0x00FD, &la)]);
+        let b = stream(&[(0x0809, &[1]), (0x00FC, &sb), (0x0809, &[1]), (0x00FD, &lb)]);
+        assert_eq!(compare(&a, &b).changed, 2);
+        let opts = Options {
+            ignore_sst_order: true,
+        };
+        assert_eq!(compare_with(&a, &b, opts).changed, 0);
     }
 }
