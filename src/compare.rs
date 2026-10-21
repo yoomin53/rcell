@@ -16,8 +16,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::model::{
-    Border, BorderEdge, CellRange, CellValue, Color, Font, Sheet, Styles, Workbook,
+    AutoFilter, Border, BorderEdge, CellRange, CellValue, Color, Font, PartLink, Sheet, Styles,
+    Table, Workbook,
 };
+use crate::xml::Element;
 
 /// 비교 옵션.
 #[derive(Debug, Clone, Copy, Default)]
@@ -31,7 +33,8 @@ pub struct Options {
     /// 바이너리 OOXML(xlCellb)은 한컴 확장을 저장하지 않는다 (docs/format/cell-binary.md).
     pub ignore_hancom_ext: bool,
     /// 도형의 글·사용자 정의 모양 비교 생략. 한셀은 레거시 도형(OfficeArt + TXO)에서 이 둘을
-    /// 읽지 못한다 (docs/format/cell-legacy.md).
+    /// 읽지 못한다 (docs/format/cell-legacy.md). 레거시에서 한셀이 버리는 묶기 잠금(noGrp) 도형과
+    /// 메모 상자의 선 색도 뺀다.
     pub ignore_shape_detail: bool,
     /// 차트 내용(종류·축·계열·제목·범례·3차원·영역) 비교 생략. 차트 도형의 앵커는 그래도 비교한다.
     pub ignore_chart: bool,
@@ -342,6 +345,39 @@ pub fn style_key(styles: &Styles, xf_index: u32, opts: Options) -> String {
     )
 }
 
+/// 셀 수식: 원문, 배열 수식은 범위, 데이터 표는 범위와 입력 (2변수 표의 행 입력 표시는 뜻이 없어 뺀다 — 한셀은
+/// 쓰지 않는다). 공유 수식은 저장 방식일 뿐이라 원문만 본다
+fn formula_key(f: &crate::model::Formula) -> String {
+    use crate::model::FormulaKind;
+    match (f.kind, &f.data_table) {
+        (FormulaKind::Array, _) => format!(
+            "{{{}}} 배열 {}",
+            unquote_external(&f.text),
+            norm_ranges(f.range.as_deref())
+        ),
+        (FormulaKind::DataTable, Some(d)) => format!(
+            "데이터 표 {} {}{}{}{}{}",
+            norm_ranges(f.range.as_deref()),
+            if d.two_d {
+                "2변수"
+            } else if d.row_input {
+                "행 입력"
+            } else {
+                "열 입력"
+            },
+            d.r1.as_deref()
+                .map(|r| format!(" r1={r}"))
+                .unwrap_or_default(),
+            d.r2.as_deref()
+                .map(|r| format!(" r2={r}"))
+                .unwrap_or_default(),
+            if d.del1 { " del1" } else { "" },
+            if d.del2 { " del2" } else { "" }
+        ),
+        _ => unquote_external(&f.text),
+    }
+}
+
 fn value_key(v: &CellValue) -> String {
     match v {
         CellValue::Empty => "∅".into(),
@@ -388,12 +424,57 @@ fn shape_key(
         }
         Some(crate::model::Paint::Other(n)) => n.clone(),
     };
+    // 화살표가 없는 끝은 없음과 같다 (한셀은 레거시에서 읽은 선에 늘 `w="med" len="med"` 를 쓴다)
+    let end = |e: &Option<crate::model::LineEnd>| match e {
+        Some(e) if e.kind.as_deref().is_some_and(|k| k != "none") => format!(
+            "{}:{}:{}",
+            e.kind.as_deref().unwrap_or("-"),
+            e.w.as_deref().unwrap_or("med"),
+            e.len.as_deref().unwrap_or("med")
+        ),
+        _ => "-".into(),
+    };
     let line = s.line.as_ref().map_or("-".to_string(), |l| {
         format!(
-            "{}/{}/{}",
+            "{}/{}/{}/{}/{}/{} {}>{}",
             l.width.map_or("-".into(), |w| w.to_string()),
             paint(&l.fill),
-            l.dash.as_deref().unwrap_or("-")
+            l.dash.as_deref().unwrap_or("-"),
+            l.cap.as_deref().unwrap_or("-"),
+            l.compound.as_deref().unwrap_or("-"),
+            l.join.as_deref().unwrap_or("-"),
+            end(&l.head),
+            end(&l.tail)
+        )
+    });
+    // 그림자: 거리는 100 EMU 단위로 (한셀은 레거시의 X·Y 거리에서 다시 계산해 1 EMU 씩 다르다), 기준점이 없으면 b
+    let shadow = s.shadow.as_ref().map_or("-".to_string(), |d| {
+        format!(
+            "{}/{}/{}/{}",
+            (d.dist as f64 / 100.0).round() as i64,
+            d.dir,
+            d.align.as_deref().unwrap_or("b"),
+            paint(&Some(crate::model::Paint::Solid(d.color.clone())))
+        )
+    });
+    let client = format!(
+        "{}{}",
+        if s.locks_with_sheet.unwrap_or(true) {
+            "L"
+        } else {
+            "-"
+        },
+        if s.prints_with_sheet.unwrap_or(true) {
+            "P"
+        } else {
+            "-"
+        }
+    );
+    let overflow = s.text.as_ref().map_or(String::new(), |t| {
+        format!(
+            " overflow={}/{}",
+            t.vert_overflow.as_deref().unwrap_or("overflow"),
+            t.horz_overflow.as_deref().unwrap_or("overflow")
         )
     });
     let children = if s.children.is_empty() {
@@ -409,7 +490,7 @@ fn shape_key(
         )
     };
     format!(
-        "{:?} {:?} [{}] {}→{} {} fill={} line={} text={:?}{}",
+        "{:?} {:?} [{}] {}→{} {} fill={} line={} shadow={} locks={:?} client={} text={:?}{}{}",
         s.kind,
         s.name,
         a.edit_as.as_deref().unwrap_or("twoCell"),
@@ -421,11 +502,15 @@ fn shape_key(
             .unwrap_or("-"),
         paint(&s.fill),
         line,
+        shadow,
+        s.locks,
+        client,
         if no_text {
             String::new()
         } else {
             s.plain_text()
         },
+        if no_text { "" } else { &overflow },
         children
     ) + &match (&s.chart, no_chart) {
         (Some(c), false) => format!(" chart={}", chart_key(c)),
@@ -1184,9 +1269,11 @@ fn cf_key(styles: &Styles, sh: &Sheet) -> String {
                 let v: Vec<String> = d.cfvos.iter().map(cfvo).collect();
                 let _ = write!(
                     k,
-                    " bar={v:?}{} show={}",
+                    " bar={v:?}{} show={} len={}-{}",
                     color_key(d.color.as_ref()),
-                    d.show_value
+                    d.show_value,
+                    d.min_length.unwrap_or(10),
+                    d.max_length.unwrap_or(90)
                 );
             }
             if let Some(i) = &r.icon_set {
@@ -1205,6 +1292,77 @@ fn cf_key(styles: &Styles, sh: &Sheet) -> String {
             }
             let _ = write!(k, " {}", dxf_key(styles, r.dxf_id));
             rules.push((sq.clone(), r.priority, k));
+        }
+    }
+    rules.sort();
+    rules
+        .iter()
+        .map(|(sq, p, k)| format!("{sq}#{p} {k}"))
+        .collect::<Vec<_>>()
+        .join("\n      ")
+}
+
+/// 조건부 서식의 x14 확장 (레거시에 남지 않는 정보): 데이터 막대의 확장 — 없으면 한셀이 저장할 때 만드는 값
+/// ([`crate::model::DataBarExt::implied`]) — 과 아이콘 집합의 사용자 지정 아이콘.
+/// 색은 자동과 검정을 같게 본다: 한셀은 바이너리에 둘을 같은 바이트로 쓴다 (x14 조건부 서식 실험)
+fn x14_key(sh: &Sheet) -> String {
+    let color = |c: &Option<Color>| match color_key(c.as_ref()).as_str() {
+        "auto" => "000000".to_string(),
+        k => k.to_string(),
+    };
+    let mut rules: Vec<(String, u32, String)> = Vec::new();
+    for cf in &sh.conditional_formats {
+        let sq = norm_ranges(Some(&cf.sqref));
+        for r in &cf.rules {
+            if let Some(d) = &r.data_bar {
+                let e = d
+                    .ext
+                    .clone()
+                    .unwrap_or_else(|| crate::model::DataBarExt::implied(d));
+                let v: Vec<String> = e
+                    .cfvos
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "{}{}",
+                            c.kind,
+                            c.val
+                                .as_deref()
+                                .map(|v| format!("={v}"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect();
+                let colors: Vec<String> = [
+                    &e.border_color,
+                    &e.negative_fill_color,
+                    &e.negative_border_color,
+                    &e.axis_color,
+                ]
+                .into_iter()
+                .map(color)
+                .collect();
+                rules.push((
+                    sq.clone(),
+                    r.priority,
+                    format!(
+                        "bar {v:?} border={} gradient={} dir={} negSame={} negBorderSame={} axis={} colors={colors:?}",
+                        e.border,
+                        e.gradient,
+                        e.direction.as_deref().unwrap_or("context"),
+                        e.negative_same_as_positive,
+                        e.negative_border_same_as_positive,
+                        e.axis_position.as_deref().unwrap_or("automatic")
+                    ),
+                ));
+            }
+            if let Some(i) = r.icon_set.as_ref().filter(|i| !i.custom_icons.is_empty()) {
+                rules.push((
+                    sq.clone(),
+                    r.priority,
+                    format!("icons={:?}", i.custom_icons),
+                ));
+            }
         }
     }
     rules.sort();
@@ -1249,7 +1407,13 @@ fn dv_key(sh: &Sheet) -> String {
 /// 와일드카드 없는 `equal` 조건만 `or` 로 이은 사용자 지정 필터는 같은 값 목록 필터로 본다
 /// (한셀은 값 두 개 이하의 목록을 레거시에 그렇게 저장하고, 다시 읽을 때 사용자 지정으로 보여 준다).
 fn filter_key(sh: &Sheet) -> String {
-    let af = sh.auto_filter.as_ref().map_or("-".into(), |f| {
+    let af = sh.auto_filter.as_ref().map_or("-".into(), af_key);
+    format!("filterMode={} {af}", sh.filter_mode)
+}
+
+/// 자동 필터 범위와 열 조건 (시트와 표가 함께 쓴다)
+fn af_key(f: &AutoFilter) -> String {
+    {
         let cols: Vec<String> = f
             .columns
             .iter()
@@ -1265,6 +1429,14 @@ fn filter_key(sh: &Sheet) -> String {
                 } else {
                     (c.values.iter().collect(), &c.custom)
                 };
+                // 동적 필터의 val·maxVal 은 없으면 0 (한셀은 종류에 따라 val="0" 을 쓰기도 안 쓰기도 한다)
+                let dynamic = c.dynamic.as_ref().map(|t| {
+                    format!(
+                        "{t}({},{})",
+                        c.dynamic_val.unwrap_or(0.0),
+                        c.dynamic_max_val.unwrap_or(0.0)
+                    )
+                });
                 format!(
                     "#{} values={:?}{} custom={:?}{} top10={:?} dyn={:?}",
                     c.col_id,
@@ -1277,13 +1449,285 @@ fn filter_key(sh: &Sheet) -> String {
                         ""
                     },
                     c.top10,
-                    c.dynamic
+                    dynamic
                 )
             })
             .collect();
         format!("{} [{}]", norm_ranges(Some(&f.range)), cols.join("; "))
+    }
+}
+
+/// 표: 이름·번호·범위·머리글/요약 행·종류·열(요약 함수·글·수식, 계산 열)·자동 필터·스타일. 차등 서식은 번호가
+/// 아니라 내용으로 본다 (한셀은 레거시를 읽을 때 같은 내용이 된 차등 서식을 하나로 합쳐 번호가 바뀐다).
+/// `no_format` = 차등 서식·셀 스타일 생략
+fn tables_key(styles: &Styles, sh: &Sheet, no_format: bool) -> String {
+    let mut v: Vec<String> = sh
+        .tables
+        .iter()
+        .map(|t| table_key(styles, t, no_format))
+        .collect();
+    v.sort();
+    v.join("\n      ")
+}
+
+fn table_key(styles: &Styles, t: &Table, no_format: bool) -> String {
+    let dxfs = |names: &[&str], ids: &[Option<u32>]| {
+        let mut s = String::new();
+        if !no_format {
+            for (n, id) in names.iter().zip(ids) {
+                if id.is_some() {
+                    let _ = write!(s, " {n}={}", dxf_key(styles, *id));
+                }
+            }
+        }
+        s
+    };
+    let cols: Vec<String> = t
+        .columns
+        .iter()
+        .map(|c| {
+            let mut s = format!("{}:{}", c.id, c.name);
+            for (k, v) in [
+                ("고유", &c.unique_name),
+                ("요약", &c.totals_function),
+                ("요약 글", &c.totals_label),
+                ("요약 수식", &c.totals_formula),
+                ("계산", &c.calculated_formula),
+            ] {
+                if let Some(v) = v {
+                    let _ = write!(s, " {k}={v:?}");
+                }
+            }
+            if let Some(q) = c.query_table_field_id {
+                let _ = write!(s, " 쿼리 필드={q}");
+            }
+            s + &dxfs(&["머리글", "데이터", "요약"], &c.dxfs)
+        })
+        .collect();
+    let mut s = format!(
+        "{}({}) #{} {} 머리글 {} 요약 {}{}",
+        t.name,
+        t.display_name,
+        t.id,
+        t.range,
+        t.header_rows,
+        t.totals_rows,
+        if t.totals_shown { "" } else { " 요약 숨김" }
+    );
+    if let Some(v) = &t.table_type {
+        let _ = write!(s, " 종류={v}");
+    }
+    if let Some(v) = &t.comment {
+        let _ = write!(s, " 설명={v:?}");
+    }
+    if let Some(v) = t.connection_id {
+        let _ = write!(s, " 연결={v}");
+    }
+    let _ = write!(
+        s,
+        " 필터={} 열=[{}]",
+        t.auto_filter.as_ref().map_or("-".into(), af_key),
+        cols.join("; ")
+    );
+    if let Some(st) = &t.style {
+        let _ = write!(
+            s,
+            " 스타일={}{}{}{}{}",
+            st.name.as_deref().unwrap_or("-"),
+            if st.first_column { " 첫 열" } else { "" },
+            if st.last_column { " 끝 열" } else { "" },
+            if st.row_stripes { " 행 줄무늬" } else { "" },
+            if st.column_stripes {
+                " 열 줄무늬"
+            } else {
+                ""
+            }
+        );
+    }
+    s.push_str(&dxfs(
+        &[
+            "머리글",
+            "데이터",
+            "요약",
+            "테두리",
+            "머리글 테두리",
+            "요약 테두리",
+        ],
+        &t.dxfs,
+    ));
+    if !no_format {
+        for (n, v) in ["머리글", "데이터", "요약"].iter().zip(&t.cell_styles) {
+            if let Some(v) = v {
+                let _ = write!(s, " {n} 셀 스타일={v:?}");
+            }
+        }
+    }
+    s
+}
+
+/// 원본 그대로 옮겨 쓴 파트의 XML
+fn raw_xml(w: &Workbook, part: &str) -> Option<Element> {
+    let p = w.raw_parts.iter().find(|p| p.name == part)?;
+    let s = String::from_utf8_lossy(&p.data);
+    crate::xml::parse(s.trim_start_matches('\u{feff}'), part).ok()
+}
+
+/// 피벗 표 (XML 원본에서 그대로 옮긴 파트): 이름, 위치, 캐시의 원본·필드, 필드 축, 행·열·페이지·데이터 필드,
+/// 스타일. 데이터 필드의 함수는 없으면 sum (한셀은 늘 쓴다)
+fn pivots_key(w: &Workbook, sh: &Sheet) -> String {
+    let mut v: Vec<String> = sh
+        .part_links
+        .iter()
+        .filter(|l| l.rel_type.ends_with("/pivotTable"))
+        .map(|l| pivot_key(w, &l.part))
+        .collect();
+    v.sort();
+    v.join("\n      ")
+}
+
+fn pivot_key(w: &Workbook, part: &str) -> String {
+    let Some(root) = raw_xml(w, part) else {
+        return format!("{part}?");
+    };
+    let a = |e: &Element, n: &str| e.attr(n).unwrap_or("").to_string();
+    let cache = root
+        .attr_u32("cacheId")
+        .and_then(|id| w.part_links.iter().find(|l| l.cache_id == Some(id)))
+        .and_then(|l| raw_xml(w, &l.part))
+        .map_or("-".into(), |c| {
+            let src = c.sml_child("cacheSource").map_or(String::new(), |s| {
+                let ws = s.sml_child("worksheetSource").map_or(String::new(), |x| {
+                    format!(" {}!{}{}", a(x, "sheet"), a(x, "ref"), a(x, "name"))
+                });
+                format!("{}{ws}", a(s, "type"))
+            });
+            let fields: Vec<String> = c
+                .sml_child("cacheFields")
+                .into_iter()
+                .flat_map(|f| f.sml_children("cacheField"))
+                .map(|f| a(f, "name"))
+                .collect();
+            format!("{src} [{}]", fields.join(","))
+        });
+    let loc = root.sml_child("location").map_or(String::new(), |l| {
+        format!(
+            "{} {}/{}/{}",
+            a(l, "ref"),
+            a(l, "firstHeaderRow"),
+            a(l, "firstDataRow"),
+            a(l, "firstDataCol")
+        )
     });
-    format!("filterMode={} {af}", sh.filter_mode)
+    let fields: Vec<String> = root
+        .sml_child("pivotFields")
+        .into_iter()
+        .flat_map(|f| f.sml_children("pivotField"))
+        .map(|f| {
+            format!(
+                "{}{}",
+                f.attr("axis").unwrap_or("-"),
+                if f.attr_bool("dataField") == Some(true) {
+                    "+data"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect();
+    let list = |n: &str, c: &str, at: &str| {
+        root.sml_child(n)
+            .into_iter()
+            .flat_map(|f| f.sml_children(c))
+            .map(|f| a(f, at))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let data: Vec<String> = root
+        .sml_child("dataFields")
+        .into_iter()
+        .flat_map(|f| f.sml_children("dataField"))
+        .map(|d| {
+            format!(
+                "{}={}:{}",
+                a(d, "name"),
+                a(d, "fld"),
+                d.attr("subtotal").unwrap_or("sum")
+            )
+        })
+        .collect();
+    format!(
+        "{} @{loc} 캐시={cache} 필드=[{}] 행=[{}] 열=[{}] 페이지=[{}] 데이터=[{}] 스타일={}",
+        a(&root, "name"),
+        fields.join(","),
+        list("rowFields", "field", "x"),
+        list("colFields", "field", "x"),
+        list("pageFields", "pageField", "fld"),
+        data.join(";"),
+        root.sml_child("pivotTableStyleInfo")
+            .map_or(String::new(), |s| a(s, "name"))
+    )
+}
+
+/// 원본 그대로 옮긴 파트의 관계 종류 (피벗 표·피벗 캐시·한컴 매크로는 따로 비교한다)
+fn links_key(links: &[PartLink]) -> String {
+    let mut v: Vec<&str> = links
+        .iter()
+        .filter(|l| {
+            !l.rel_type.ends_with("/pivotTable")
+                && !l.rel_type.ends_with("/pivotCacheDefinition")
+                && l.rel_type != crate::ns::REL_HANCOM_VBS_PROJECT
+        })
+        .map(|l| l.rel_type.rsplit('/').next().unwrap_or(""))
+        .collect();
+    v.sort();
+    v.join(" ")
+}
+
+/// 한컴 매크로 프로젝트 (`_VBS_PROJECT_W` 스트림): 길이, 바이트 지문(FNV-1a), 글 (머리 0x104 바이트 뒤
+/// 글자 수 u32 + UTF-16 — 패키지 파트 실험)
+fn macro_key(w: &Workbook) -> String {
+    let Some(b) = &w.hancom.vbs_project else {
+        return "-".into();
+    };
+    let n = b
+        .get(0x104..0x108)
+        .map_or(0, |x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]) as usize);
+    let units: Vec<u16> = b
+        .get(0x108..)
+        .unwrap_or(&[])
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .take(n)
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &x in b.iter() {
+        h ^= u64::from(x);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    let text: String = String::from_utf16_lossy(&units).chars().take(80).collect();
+    format!("{} 바이트 {h:016x} {text:?}", b.len())
+}
+
+/// 두 시트에 모두 있는 상위/하위 기준값(filterVal)을 열 번호 순으로
+fn filter_vals(a: &Sheet, b: &Sheet) -> (String, String) {
+    let cols = |s: &Sheet| -> Vec<(u32, f64)> {
+        s.auto_filter
+            .iter()
+            .flat_map(|f| &f.columns)
+            .filter_map(|c| c.filter_val.map(|v| (c.col_id, v)))
+            .collect()
+    };
+    let (ca, cb) = (cols(a), cols(b));
+    let pick = |x: &[(u32, f64)], y: &[(u32, f64)]| {
+        x.iter()
+            .filter(|(c, _)| y.iter().any(|(d, _)| d == c))
+            .map(|(c, v)| format!("#{c}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    (pick(&ca, &cb), pick(&cb, &ca))
 }
 
 /// 개요 요약 행·열의 위치
@@ -1316,35 +1760,75 @@ fn protection_key(p: Option<&crate::model::SheetProtection>) -> String {
     )
 }
 
-/// 외부 참조 `'[n]시트'!` 의 따옴표가 시트 이름 때문에 필요한 것이 아니면 뗀다.
-/// 한셀은 외부 연결의 상태(경로 없음, 갱신 오류)에 따라 이 따옴표를 붙이기도 떼기도 한다 — 같은 참조다.
+/// 시트 참조 `'시트'!`·`'[n]시트'!` 의 따옴표가 시트 이름 때문에 필요한 것이 아니면 뗀다 (문자열 안은 그대로).
+/// 한셀은 외부 연결의 상태(경로 없음, 갱신 오류)에 따라 외부 참조의 따옴표를 붙이기도 떼기도 하고, 바이너리를 거친
+/// 수식은 필요한 따옴표만 남는다 — 같은 참조다.
 fn unquote_external(f: &str) -> String {
+    let c: Vec<char> = f.chars().collect();
     let mut out = String::with_capacity(f.len());
-    let mut rest = f;
-    while let Some(i) = rest.find("'[") {
-        out.push_str(&rest[..i]);
-        let tail = &rest[i + 1..];
-        let end = tail.find("'!");
-        let inner = end.map(|e| &tail[..e]);
-        match inner.and_then(|s| s.split_once(']').map(|(n, sh)| (s, n, sh))) {
-            Some((s, n, sheet))
-                if n[1..].chars().all(|c| c.is_ascii_digit())
-                    && !sheet.is_empty()
-                    && sheet
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '.') =>
-            {
-                out.push_str(s);
-                out.push('!');
-                rest = &tail[s.len() + 2..];
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            '"' => {
+                // 문자열: 닫는 따옴표까지 그대로 ("" 는 따옴표 하나)
+                out.push('"');
+                i += 1;
+                while i < c.len() {
+                    out.push(c[i]);
+                    i += 1;
+                    if c[i - 1] == '"' {
+                        if c.get(i) == Some(&'"') {
+                            out.push('"');
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                }
             }
-            _ => {
-                out.push('\'');
-                rest = tail;
+            '\'' => {
+                // 따옴표 시트 이름: 닫는 ' 뒤에 ! 가 와야 참조다
+                let mut j = i + 1;
+                let mut inner = String::new();
+                while j < c.len() {
+                    if c[j] == '\'' {
+                        if c.get(j + 1) == Some(&'\'') {
+                            inner.push('\'');
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    inner.push(c[j]);
+                    j += 1;
+                }
+                if j < c.len() && c.get(j + 1) == Some(&'!') {
+                    let sheet = match inner.strip_prefix('[').and_then(|r| r.split_once(']')) {
+                        Some((n, sh)) if n.chars().all(|d| d.is_ascii_digit()) => sh,
+                        _ => inner.as_str(),
+                    };
+                    let plain = !sheet.is_empty()
+                        && !sheet.contains(':')
+                        && crate::legacy::formula::quote_sheet(sheet) == sheet;
+                    if plain {
+                        out.push_str(&inner);
+                    } else {
+                        out.push('\'');
+                        out.push_str(&inner.replace('\'', "''"));
+                        out.push('\'');
+                    }
+                    i = j + 1;
+                } else {
+                    out.push(c[i]);
+                    i += 1;
+                }
+            }
+            ch => {
+                out.push(ch);
+                i += 1;
             }
         }
     }
-    out.push_str(rest);
     out
 }
 
@@ -1498,10 +1982,15 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             .filter(|d| !d.name.starts_with("_xlnm._FilterDatabase"))
             .map(|d| {
                 format!(
-                    "{}@{:?}={}",
+                    "{}@{:?}{}={}{}",
                     d.name,
                     d.local_sheet_id,
-                    unquote_external(&d.formula)
+                    if d.hidden { "(숨김)" } else { "" },
+                    unquote_external(&d.formula),
+                    d.comment
+                        .as_deref()
+                        .map(|c| format!(" //{c:?}"))
+                        .unwrap_or_default()
                 )
             })
             .collect();
@@ -1540,6 +2029,33 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
         )
     };
     diff("문서 속성".into(), props(a), props(b));
+    // 통합 문서 창: 위치·크기(1/20 pt), 탭 비율, 첫 탭, 스크롤 막대·시트 탭 표시. 활성 탭은 시트 보기의 선택으로 본다
+    let wv = |w: &Workbook| {
+        let v = w.view.clone().unwrap_or_default();
+        format!(
+            "{},{} {}x{} tabRatio={} first={} hscroll={} vscroll={} tabs={}",
+            v.x_window,
+            v.y_window,
+            v.window_width,
+            v.window_height,
+            v.tab_ratio,
+            v.first_sheet,
+            v.show_horizontal_scroll,
+            v.show_vertical_scroll,
+            v.show_sheet_tabs
+        )
+    };
+    diff("통합 문서 보기".into(), wv(a), wv(b));
+    // 편집 시간 (app.xml TotalTime, 분). 한셀은 원본 값을 그대로 쓴다 (없으면 0)
+    diff(
+        "편집 시간".into(),
+        a.total_time.unwrap_or(0).to_string(),
+        b.total_time.unwrap_or(0).to_string(),
+    );
+    // 코드 이름은 둘 다 있을 때만 (한셀은 없는 코드 이름을 ThisWorkbook 으로 채운다)
+    if let (Some(x), Some(y)) = (&a.code_name, &b.code_name) {
+        diff("통합 문서 코드 이름".into(), x.clone(), y.clone());
+    }
     // 테마: 색 12개와 글꼴. 레거시에는 테마가 없다 (한셀은 다시 열 때 자기 기본 테마를 붙인다) → 둘 다 있을 때만
     if let (Some(ta), Some(tb)) = (&a.theme, &b.theme) {
         let tk = |t: &crate::theme::Theme| {
@@ -1605,6 +2121,12 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             .join(" ")
     };
     diff("외부 연결 상태".into(), caches(a), caches(b));
+    diff(
+        "패키지 파트".into(),
+        links_key(&a.part_links),
+        links_key(&b.part_links),
+    );
+    diff("매크로 프로젝트".into(), macro_key(a), macro_key(b));
 
     for (sa, sb) in a.sheets.iter().zip(&b.sheets) {
         let s = &sa.name;
@@ -1619,11 +2141,7 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
                     } else {
                         style_key(&w.styles, c.style, opts)
                     };
-                    let f = c
-                        .formula
-                        .as_ref()
-                        .map(|f| f.text.clone())
-                        .unwrap_or_default();
+                    let f = c.formula.as_ref().map(formula_key).unwrap_or_default();
                     ((c.r.row, c.r.col), (value_key(&c.value), f, style))
                 })
                 .collect()
@@ -1685,9 +2203,50 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             v.join(" ")
         };
         diff(format!("{s} 메모"), notes(sa), notes(sb));
+        // 메모 상자: 자리(px)·채우기·선·그림자·셀 고정·글 맞춤. 선 색은 한셀이 레거시에서 읽지 못한다
+        // (메모 대조 실험) — 도형 세부와 함께 뺀다. 1 pt 선은 0.75 pt 로 본다: 한셀은 1 pt(VML 기본값)를 XML 에 쓰지
+        // 않고, 두께가 없으면 0.75 pt 로 읽는다
+        let note_boxes = |sh: &Sheet| {
+            let mut v: Vec<String> = sh
+                .comments
+                .iter()
+                .map(|c| {
+                    let b = c
+                        .shape
+                        .clone()
+                        .unwrap_or_else(|| crate::model::CommentShape::implied(c.cell));
+                    format!(
+                        "{}@{:?} fill={} line={}/{}pt{}{}{} align={}/{}",
+                        c.cell,
+                        b.anchor,
+                        b.fill_color,
+                        if opts.ignore_shape_detail {
+                            "-"
+                        } else {
+                            &b.stroke_color
+                        },
+                        if b.stroke_weight == 1.0 {
+                            0.75
+                        } else {
+                            b.stroke_weight
+                        },
+                        if b.shadow { " shadow" } else { "" },
+                        if b.move_with_cells { " move" } else { "" },
+                        if b.size_with_cells { " size" } else { "" },
+                        b.text_halign.as_deref().unwrap_or("Left"),
+                        b.text_valign.as_deref().unwrap_or("Top")
+                    )
+                })
+                .collect();
+            v.sort();
+            v.join("\n      ")
+        };
+        diff(format!("{s} 메모 상자"), note_boxes(sa), note_boxes(sb));
+        // 도형 세부를 뺄 때는 묶기 잠금(noGrp) 도형도 뺀다: 한셀은 레거시를 읽을 때 이 도형을 버린다 (도형 대조 실험)
         let shapes = |w: &Workbook, sh: &Sheet| {
             sh.shapes
                 .iter()
+                .filter(|s| !(opts.ignore_shape_detail && s.locks.iter().any(|l| l == "noGrp")))
                 .map(|s| shape_key(s, &w.raw_parts, opts.ignore_shape_detail, opts.ignore_chart))
                 .collect::<Vec<_>>()
                 .join("\n      ")
@@ -1731,6 +2290,7 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
                 cf_key(&a.styles, sa),
                 cf_key(&b.styles, sb),
             );
+            diff(format!("{s} x14 확장"), x14_key(sa), x14_key(sb));
         }
         diff(format!("{s} 유효성"), dv_key(sa), dv_key(sb));
         diff(format!("{s} 보기"), view_key(sa), view_key(sb));
@@ -1806,6 +2366,10 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
         diff(format!("{s} 개요"), summary_key(sa), summary_key(sb));
         if !opts.ignore_filter {
             diff(format!("{s} 자동 필터"), filter_key(sa), filter_key(sb));
+            // 상위/하위의 기준값(filterVal)은 한셀이 필터를 적용할 때 계산해 넣는 값이라 저장본에 있기도 없기도
+            // 하다 → 양쪽에 다 있는 열만 비교한다
+            let (fa, fb) = filter_vals(sa, sb);
+            diff(format!("{s} 자동 필터 기준값"), fa, fb);
         }
         diff(
             format!("{s} 시트 보호"),
@@ -1820,13 +2384,22 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
                     let range = crate::model::CellRange::parse(&h.range)
                         .map(|r| r.to_string())
                         .unwrap_or_else(|| h.range.clone());
+                    // 화면 설명: 주소를 되풀이한 것은 없는 것으로 본다 — 한셀은 레거시의 설명을 저장하지 않고,
+                    // 레거시를 읽을 때 주소(대상, 없으면 위치)를 설명으로 채운다 (하이퍼링크 대조 실험). 줄 바꿈은
+                    // 빈칸으로: 한셀은 XML 속성에 줄 바꿈을 그대로 써서 다시 읽으면 빈칸이 된다
+                    let tip = h
+                        .tooltip
+                        .as_deref()
+                        .filter(|t| Some(*t) != h.target.as_deref().or(h.location.as_deref()))
+                        .map(|t| t.replace(['\n', '\r', '\t'], " "));
                     format!(
-                        "{range}→{}{}",
+                        "{range}→{}{}{}",
                         h.target.as_deref().unwrap_or(""),
                         h.location
                             .as_deref()
                             .map(|l| format!("#{l}"))
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
+                        tip.map(|t| format!(" ({t:?})")).unwrap_or_default()
                     )
                 })
                 .collect::<Vec<_>>()
@@ -1837,6 +2410,17 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             format!("{s} 눈금선"),
             sa.show_grid_lines.to_string(),
             sb.show_grid_lines.to_string(),
+        );
+        diff(
+            format!("{s} 표"),
+            tables_key(&a.styles, sa, opts.ignore_table_styles),
+            tables_key(&b.styles, sb, opts.ignore_table_styles),
+        );
+        diff(format!("{s} 피벗 표"), pivots_key(a, sa), pivots_key(b, sb));
+        diff(
+            format!("{s} 패키지 파트"),
+            links_key(&sa.part_links),
+            links_key(&sb.part_links),
         );
     }
     out

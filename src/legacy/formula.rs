@@ -34,7 +34,12 @@ pub struct Context<'a> {
     pub xlsb: bool,
     /// 행 반복(0xB002)으로 복사된 행: 행 상대 참조를 이만큼 옮긴다
     pub row_shift: i64,
+    /// 구조적 참조(PtgList)가 가리키는 표: (표 번호, 이름, 열 이름)
+    pub tables: &'a [TableName],
 }
+
+/// 표 번호, 이름, 열 이름 — PtgList 를 글로 바꿀 때 쓴다
+pub type TableName = (u32, String, Vec<String>);
 
 /// 디코딩 실패. 알 수 없는 토큰이나 잘린 데이터.
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +147,28 @@ fn with_flags(col: u16, col_rel: bool, row_rel: bool) -> u16 {
 }
 
 /// 시트 이름을 수식에 쓸 꼴로 (공백·기호가 있으면 작은따옴표).
+/// PtgName 이 가리키는 이름 목록을 시트 하나에 맞춘다: 다른 시트 범위의 이름은 `시트!이름` 으로 쓴다 — 그 시트에서
+/// 이름만 쓰면 자기 시트의 같은 이름이 되기 때문이다 (수식 대조 실험: Sheet2 의 `=Sheet1!L`, 두 시트에 범위 이름 L).
+/// `scopes[i]` 는 i 번째 이름의 시트 번호(0부터, 없으면 통합 문서 범위)
+pub fn names_for_sheet(
+    names: &[String],
+    scopes: &[Option<u32>],
+    sheet_names: &[String],
+    sheet: usize,
+) -> Vec<String> {
+    names
+        .iter()
+        .zip(scopes.iter().chain(std::iter::repeat(&None)))
+        .map(|(n, scope)| match scope.map(|s| s as usize) {
+            Some(s) if s != sheet => match sheet_names.get(s) {
+                Some(sh) => format!("{}!{n}", quote_sheet(sh)),
+                None => n.clone(),
+            },
+            _ => n.clone(),
+        })
+        .collect()
+}
+
 pub fn quote_sheet(name: &str) -> String {
     let plain = !name.is_empty()
         && !name.starts_with(|c: char| c.is_ascii_digit())
@@ -246,10 +273,24 @@ pub enum Decoded {
     Text(String),
     /// PtgExp — 공유 수식/배열 수식의 기준 셀
     SharedRef(CellRef),
+    /// PtgTbl — 데이터 표의 왼쪽 위 셀 (레거시 TABLE 0x0236 이 뜻을 담는다)
+    TableRef(CellRef),
 }
 
 /// 수식 토큰열을 원문으로 바꾼다.
 pub fn decode(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
+    decode_with(rgce, ctx, false)
+}
+
+/// 상대 위치 수식(XLSB 의 공유 수식·조건부 서식·유효성)의 토큰열을 원문으로 바꾼다. 3차원 참조
+/// (PtgRef3d/PtgArea3d)도 상대 플래그가 선 축은 [`Context::base`] 에서의 오프셋이다 (RgceLocRel —
+/// 한셀 바이너리 대조 실험: 공유 수식 D1:D6 `Sheet2!C1+1` → 열 0x3FFF = -1, E2:E6 `SUM(Sheet2!B1:C2)` → 행
+/// 0xFFFFF = -1, 조건부 서식 B3 의 `Sheet2!B3` → 0, 0).
+pub fn decode_relative(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
+    decode_with(rgce, ctx, true)
+}
+
+fn decode_with(rgce: &[u8], ctx: &Context, rel3d: bool) -> Result<Decoded, DecodeError> {
     let mut r = Reader { b: rgce, pos: 0 };
     let mut stack: Vec<String> = Vec::new();
     while r.pos < rgce.len() {
@@ -270,6 +311,12 @@ pub fn decode(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
                     r.u16()? as u32
                 };
                 return Ok(Decoded::SharedRef(CellRef { row, col }));
+            }
+            0x02 => {
+                // PtgTbl: 행 u32 + 열 u16 (레거시. 바이너리의 데이터 표 셀은 수식 없이 값만 쓴다)
+                let row = r.u32()?;
+                let col = r.u16()? as u32;
+                return Ok(Decoded::TableRef(CellRef { row, col }));
             }
             0x03..=0x11 => {
                 let b = pop(&mut stack)?;
@@ -319,6 +366,22 @@ pub fn decode(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
                     r.take(cch)?.iter().map(|&b| b as char).collect()
                 };
                 stack.push(format!("\"{}\"", s.replace('"', "\"\"")));
+            }
+            0x18 => {
+                // PtgList (0x18 0x19, XLSB·한셀 레거시 같은 꼴): ixti u16, 플래그 u16 (열 0·1 = 없음·하나·범위, 2–6 행 종류),
+                // 표 번호 u32, 첫 열 u16, 끝 열 u16 (표 대조 실험)
+                let eptg = r.u8()?;
+                if eptg != 0x19 {
+                    return Err(DecodeError(format!(
+                        "알 수 없는 확장 토큰 0x18 0x{eptg:02X} (위치 {})",
+                        r.pos - 2
+                    )));
+                }
+                let _ixti = r.u16()?;
+                let flags = r.u16()?;
+                let list = r.u32()?;
+                let (c1, c2) = (r.u16()?, r.u16()?);
+                stack.push(structured_ref(ctx, flags, list, c1, c2));
             }
             0x19 => {
                 let flags = r.u8()?;
@@ -463,6 +526,37 @@ pub fn decode(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
                     .unwrap_or_else(|| format!("#NAMEX{idx}"));
                 stack.push(name);
             }
+            0x3A if rel3d => {
+                let ixti = r.u16()?;
+                let row = r.u32()?;
+                let colf = r.u16()?;
+                let (_, col_rel, row_rel) = split_col(colf);
+                let rr = rel_row(ctx.base.row, row, row_rel);
+                let cc = rel_col(ctx.base.col, colf & 0x3FFF, col_rel);
+                stack.push(format!(
+                    "{}{}",
+                    sheet_prefix(ctx, ixti),
+                    ref_text(rr, with_flags(cc, col_rel, row_rel))
+                ));
+            }
+            0x3B if rel3d => {
+                let ixti = r.u16()?;
+                let r1 = r.u32()?;
+                let r2 = r.u32()?;
+                let c1f = r.u16()?;
+                let c2f = r.u16()?;
+                let (_, c1r, r1r) = split_col(c1f);
+                let (_, c2r, r2r) = split_col(c2f);
+                let a = rel_row(ctx.base.row, r1, r1r);
+                let b = rel_row(ctx.base.row, r2, r2r);
+                let c = rel_col(ctx.base.col, c1f & 0x3FFF, c1r);
+                let d = rel_col(ctx.base.col, c2f & 0x3FFF, c2r);
+                stack.push(format!(
+                    "{}{}",
+                    sheet_prefix(ctx, ixti),
+                    area_text(a, b, with_flags(c, c1r, r1r), with_flags(d, c2r, r2r))
+                ));
+            }
             0x3A => {
                 let ixti = r.u16()?;
                 let row = r.u32()?;
@@ -515,9 +609,106 @@ pub fn decode(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
     }
 }
 
+/// 구조적 참조의 글: 한셀이 XML 에 쓰는 꼴 (표 대조 실험). 행 종류는 0 기본(데이터), 0x01 `#All`, 0x02 `#Headers`,
+/// 0x04 `#Data`, 0x08 `#Totals`, 0x10 `#This Row` 이고 겹친 종류는 `#Data`·`#Headers`·`#Totals` 순으로 쓴다
+/// (`Table1[[#Headers],[#Data],[수량]]` → `Table1[[#Data],[#Headers],[수량]]`). 열이 없으면 `Table1[]`, 열 하나는
+/// `Table1[수량]`, 범위는 `Table1[[수량]:[단가]]`. 모르는 표는 `#REF!`
+fn structured_ref(ctx: &Context, flags: u16, list: u32, c1: u16, c2: u16) -> String {
+    let Some((_, name, cols)) = ctx.tables.iter().find(|t| t.0 == list) else {
+        return "#REF!".into();
+    };
+    // 열 이름의 특수 문자는 작은따옴표로 가린다
+    let col = |i: u16| {
+        cols.get(i as usize).map_or("#REF!".to_string(), |c| {
+            c.chars().fold(String::new(), |mut s, ch| {
+                if matches!(ch, '[' | ']' | '#' | '\'') {
+                    s.push('\'');
+                }
+                s.push(ch);
+                s
+            })
+        })
+    };
+    let row_type = (flags >> 2) & 0x1F;
+    let mut items: Vec<&str> = Vec::new();
+    match row_type {
+        0 => {}
+        0x01 => items.push("#All"),
+        0x10 => items.push("#This Row"),
+        t => {
+            for (bit, s) in [(0x04, "#Data"), (0x02, "#Headers"), (0x08, "#Totals")] {
+                if t & bit != 0 {
+                    items.push(s);
+                }
+            }
+        }
+    }
+    let cols = match flags & 0x03 {
+        0 => None,
+        1 => Some(format!("[{}]", col(c1))),
+        _ => Some(format!("[{}]:[{}]", col(c1), col(c2))),
+    };
+    let spec: Vec<String> = items.iter().map(|i| format!("[{i}]")).collect();
+    match (spec.len(), cols) {
+        (0, None) => format!("{name}[]"),
+        (0, Some(c)) if flags & 0x03 == 1 => format!("{name}{c}"),
+        (0, Some(c)) => format!("{name}[{c}]"),
+        (1, None) => format!("{name}{}", spec[0]),
+        (_, None) => format!("{name}[{}]", spec.join(",")),
+        (_, Some(c)) => format!("{name}[{},{c}]", spec.join(",")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_references() {
+        let tables = [(
+            1u32,
+            "Table1".to_string(),
+            vec!["이름".into(), "수량".into(), "단가".into(), "금액".into()],
+        )];
+        let c = Context {
+            tables: &tables,
+            ..ctx()
+        };
+        // 표 대조 실험 (한셀 바이너리·레거시의 토큰과 한셀이 XML 에 쓴 글)
+        for (flags, c1, c2, text) in [
+            (0x0001, 1, 0, "Table1[수량]"),
+            (0x0441, 1, 0, "Table1[[#This Row],[수량]]"),
+            (0x0004, 0, 0, "Table1[#All]"),
+            (0x0008, 0, 0, "Table1[#Headers]"),
+            (0x0020, 0, 0, "Table1[#Totals]"),
+            (0x0012, 1, 2, "Table1[[#Data],[수량]:[단가]]"),
+            (0x0019, 1, 0, "Table1[[#Data],[#Headers],[수량]]"),
+            (0x0000, 0, 0, "Table1[]"),
+            (0x0031, 3, 0, "Table1[[#Data],[#Totals],[금액]]"),
+            (0x0002, 1, 2, "Table1[[수량]:[단가]]"),
+        ] {
+            let mut t = vec![0x18, 0x19, 0, 0];
+            t.extend_from_slice(&u16::to_le_bytes(flags));
+            t.extend_from_slice(&1u32.to_le_bytes());
+            t.extend_from_slice(&u16::to_le_bytes(c1));
+            t.extend_from_slice(&u16::to_le_bytes(c2));
+            assert_eq!(
+                decode(&t, &c).unwrap(),
+                Decoded::Text(text.into()),
+                "{flags:#x}"
+            );
+        }
+        // SUM(Table1[금액])/2 — 요약 행 사용자 수식 (레거시 0xB00B 끝)
+        let t = hex("18 19 00 00 01 00 01 00 00 00 03 00 00 00 19 10 00 00 1e 02 00 06");
+        assert_eq!(
+            decode(&t, &c).unwrap(),
+            Decoded::Text("SUM(Table1[금액])/2".into())
+        );
+        assert_eq!(
+            decode(&hex("18 19 00 00 01 00 09 00 00 00 00 00 00 00"), &c).unwrap(),
+            Decoded::Text("#REF!".into())
+        );
+    }
 
     fn ctx() -> Context<'static> {
         Context {
@@ -527,6 +718,7 @@ mod tests {
             base: CellRef::default(),
             xlsb: false,
             row_shift: 0,
+            tables: &[],
         }
     }
 
@@ -604,6 +796,7 @@ mod tests {
             base: CellRef { row: 28, col: 8 },
             xlsb: false,
             row_shift: 0,
+            tables: &[],
         };
         // BIFF8 변형: 행 u32 + 열 u16
         let d = decode(&hex("01 1b 00 00 00 08 00"), &c).unwrap();
@@ -623,6 +816,7 @@ mod tests {
             base: CellRef::default(),
             xlsb: false,
             row_shift: 2,
+            tables: &[],
         };
         // A1(행·열 상대) + $B$1(절대)
         let d = decode(&hex("44 00 00 00 00 00 c0 44 00 00 00 00 01 00 03"), &c).unwrap();
@@ -639,6 +833,7 @@ mod tests {
             base: CellRef::default(),
             xlsb: false,
             row_shift: 0,
+            tables: &[],
         };
         let d = decode(&hex("5a 00 00 00 00 00 00 00 c0 1e 02 00 05"), &c).unwrap();
         assert_eq!(d, Decoded::Text("Sheet2!A1*2".into()));

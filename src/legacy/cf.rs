@@ -254,16 +254,22 @@ fn frt_ref(rt: u16, r: &CellRange) -> Buf {
     b
 }
 
-fn cfvo(b: &mut Buf, c: &Cfvo) {
+/// CFVO: 종류 u8 (1 num, 2 min, 3 max, 4 percent, 5 percentile, 7 formula), 수식 cce u16 + 토큰, 수식이 없고
+/// 최소·최대가 아니면 숫자 f64 (x14 조건부 서식 실험: `$H$12` → `07 07 00 44 0b 00 00 00 07 00`)
+fn cfvo(b: &mut Buf, c: &Cfvo, tokens: Option<&[u8]>) {
     let ty: u8 = match c.kind.as_str() {
         "num" => 1,
         "min" => 2,
         "max" => 3,
         "percent" => 4,
         "percentile" => 5,
-        "formula" => 6,
+        "formula" => 7,
         _ => 1,
     };
+    if let Some(t) = tokens {
+        b.u8(ty).u16(t.len() as u16).bytes(t);
+        return;
+    }
     b.u8(ty).u16(0);
     if !matches!(ty, 2 | 3) {
         b.f64(c.val.as_deref().and_then(|v| v.parse().ok()).unwrap_or(0.0));
@@ -291,9 +297,10 @@ fn cf_color(b: &mut Buf, c: Option<&Color>, ctx: &SheetCtx) {
     }
 }
 
-/// CF12 의 종류별 내용 (CFGradient / CFDatabar / CFMultistate)
-fn cf12_content(r: &CfRule, ctx: &SheetCtx) -> Vec<u8> {
+/// CF12 의 종류별 내용 (CFGradient / CFDatabar / CFMultistate). `key` = (서식 번호, 규칙 번호) — 기준 값 수식을 찾는다
+fn cf12_content(r: &CfRule, ctx: &SheetCtx, key: (usize, usize)) -> Vec<u8> {
     let mut b = Buf::new();
+    let tok = |k: usize| ctx.enc_cfvo(key.0, key.1, k);
     if let Some(cs) = &r.color_scale {
         b.u8(0)
             .u8(cs.cfvos.len() as u8)
@@ -301,7 +308,7 @@ fn cf12_content(r: &CfRule, ctx: &SheetCtx) -> Vec<u8> {
             .u8(0x03);
         let n = cs.cfvos.len().max(1);
         for (i, c) in cs.cfvos.iter().enumerate() {
-            cfvo(&mut b, c);
+            cfvo(&mut b, c, tok(i));
             b.f64(i as f64 / (n - 1).max(1) as f64);
         }
         let m = cs.colors.len().max(1);
@@ -310,14 +317,21 @@ fn cf12_content(r: &CfRule, ctx: &SheetCtx) -> Vec<u8> {
             cf_color(&mut b, Some(c), ctx);
         }
     } else if let Some(d) = &r.data_bar {
-        let flags = if d.show_value { 0 } else { 0x02 };
+        // 플래그: 0x01 오른쪽에서 왼쪽 (x14 확장의 방향), 0x02 값 숨김
+        let mut flags = if d.show_value { 0 } else { 0x02 };
+        if d.ext
+            .as_ref()
+            .is_some_and(|e| e.direction.as_deref() == Some("rightToLeft"))
+        {
+            flags |= 0x01;
+        }
         b.u8(0)
             .u8(flags)
             .u8(d.min_length.unwrap_or(10) as u8)
             .u8(d.max_length.unwrap_or(90) as u8);
         cf_color(&mut b, d.color.as_ref(), ctx);
-        for c in d.cfvos.iter().take(2) {
-            cfvo(&mut b, c);
+        for (k, c) in d.cfvos.iter().take(2).enumerate() {
+            cfvo(&mut b, c, tok(k));
         }
     } else if let Some(i) = &r.icon_set {
         const SETS: [&str; 20] = [
@@ -351,15 +365,15 @@ fn cf12_content(r: &CfRule, ctx: &SheetCtx) -> Vec<u8> {
             flags |= 0x04;
         }
         b.u8(0).u8(i.cfvos.len() as u8).u8(set).u8(flags);
-        for c in &i.cfvos {
-            cfvo(&mut b, c);
+        for (k, c) in i.cfvos.iter().enumerate() {
+            cfvo(&mut b, c, tok(k));
             b.u8(c.gte as u8).u32(0);
         }
     }
     b.take()
 }
 
-fn cf12_record(out: &mut Out, r: &CfRule, ctx: &SheetCtx) {
+fn cf12_record(out: &mut Out, r: &CfRule, ctx: &SheetCtx, key: (usize, usize)) {
     let (ct, _cp, tmpl, params) = template(r);
     let mut b = Buf::new();
     b.u16(0x087A).u16(0).bytes(&[0; 8]);
@@ -374,7 +388,7 @@ fn cf12_record(out: &mut Out, r: &CfRule, ctx: &SheetCtx) {
         .u16(tmpl as u16)
         .u8(16)
         .bytes(&params);
-    let content = cf12_content(r, ctx);
+    let content = cf12_content(r, ctx, key);
     b.u16(content.len() as u16).bytes(&content);
     out.rec_buf(0x087A, &mut b);
 }
@@ -423,7 +437,7 @@ pub(crate) fn conditional_formats(out: &mut Out, ctx: &SheetCtx) {
         }
     }
     // CF12 만 있는 범위: CONDFMT12 + CF12
-    for g in &groups {
+    for (gi, g) in groups.iter().enumerate() {
         if g.rules.iter().any(|(_, r)| !is_cf12(r)) || g.rules.is_empty() {
             continue;
         }
@@ -431,23 +445,23 @@ pub(crate) fn conditional_formats(out: &mut Out, ctx: &SheetCtx) {
         let mut b = frt_ref(0x0879, &bb);
         condfmt_body(&mut b, g.rules.len(), g.nid, &g.ranges);
         out.rec_buf(0x0879, &mut b);
-        for (_, r) in &g.rules {
-            cf12_record(out, r, ctx);
+        for (ri, r) in &g.rules {
+            cf12_record(out, r, ctx, (gi, *ri));
         }
     }
     // CFEX
-    for g in &groups {
+    for (gi, g) in groups.iter().enumerate() {
         if !g.rules.iter().any(|(_, r)| !is_cf12(r)) {
             continue;
         }
         let bb = bounding(&g.ranges);
         let mut icf = 0u16;
-        for (_, r) in &g.rules {
+        for (ri, r) in &g.rules {
             let mut b = frt_ref(0x087B, &bb);
             if is_cf12(r) {
                 b.u32(1).u16(g.nid);
                 out.rec_buf(0x087B, &mut b);
-                cf12_record(out, r, ctx);
+                cf12_record(out, r, ctx, (gi, *ri));
                 continue;
             }
             let (_, cp, tmpl, params) = template(r);

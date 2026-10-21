@@ -3,10 +3,12 @@
 //
 // rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
 
-//! 암호화된 OOXML 패키지 풀기 ([MS-OFFCRYPTO] ECMA-376 표준 암호화와 Agile 암호화).
+//! 암호화된 OOXML 패키지 풀기·감싸기 ([MS-OFFCRYPTO] ECMA-376 표준 암호화와 Agile 암호화).
 //!
-//! 한셀은 보호(시트·통합 문서 보호)가 걸린 문서를 바이너리 `.cell` 로 저장하거나 레거시 문서를 다시
-//! XML 로 저장할 때 OLE2 컨테이너 안에 `EncryptionInfo` + `EncryptedPackage` 로 암호화한다 (관측).
+//! 한셀은 통합 문서 구조 잠금(`lockStructure`)이 걸린 문서를 바이너리 `.cell` 로 저장하거나 레거시 문서를 다시
+//! XML 로 저장할 때 OLE2 컨테이너 안에 `EncryptionInfo` + `EncryptedPackage` 로 암호화한다 (관측 — 시트 보호나
+//! 창 잠금만 걸린 문서는 감싸지 않는다: 코퍼스 filter2·filter3). 감싸기는 [`encrypt_package`],
+//! 컨테이너는 [`crate::binary::encrypt`].
 //! 암호를 지정하지 않으면 Office 의 기본 암호 `VelvetSweatshop` 이 쓰인다. 사용자가 문서 암호를 걸어 저장해도
 //! 한셀은 같은 표준 암호화를 쓴다 (관측: 한셀 2024, `EncryptionInfo` 224 바이트). Agile 암호화는 Excel 이 만든
 //! 암호 문서(.xlsx)를 위한 것이다.
@@ -528,6 +530,57 @@ pub fn aes128_ecb_decrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// 블록 하나 암호 (FIPS 197 5.1, 상태는 열 우선 16바이트)
+fn encrypt_block(rk: &[[u8; 16]], block: &mut [u8]) {
+    let add = |s: &mut [u8], k: &[u8; 16]| {
+        for (x, y) in s.iter_mut().zip(k) {
+            *x ^= y;
+        }
+    };
+    let nr = rk.len() - 1;
+    add(block, &rk[0]);
+    for (round, key) in rk.iter().enumerate().skip(1) {
+        // SubBytes
+        for x in block.iter_mut() {
+            *x = SBOX[*x as usize];
+        }
+        // ShiftRows: 행 r 을 왼쪽으로 r 칸
+        let s = block.to_vec();
+        for c in 0..4 {
+            for r in 0..4 {
+                block[c * 4 + r] = s[((c + r) % 4) * 4 + r];
+            }
+        }
+        if round < nr {
+            // MixColumns
+            for c in 0..4 {
+                let a = [
+                    block[c * 4],
+                    block[c * 4 + 1],
+                    block[c * 4 + 2],
+                    block[c * 4 + 3],
+                ];
+                block[c * 4] = gmul(a[0], 2) ^ gmul(a[1], 3) ^ a[2] ^ a[3];
+                block[c * 4 + 1] = a[0] ^ gmul(a[1], 2) ^ gmul(a[2], 3) ^ a[3];
+                block[c * 4 + 2] = a[0] ^ a[1] ^ gmul(a[2], 2) ^ gmul(a[3], 3);
+                block[c * 4 + 3] = gmul(a[0], 3) ^ a[1] ^ a[2] ^ gmul(a[3], 2);
+            }
+        }
+        add(block, key);
+    }
+}
+
+/// AES-128 ECB 암호. 길이가 16의 배수가 아니면 0 으로 채운다
+pub fn aes128_ecb_encrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let rk = expand_key(key);
+    let mut out = data.to_vec();
+    out.resize(data.len().div_ceil(16) * 16, 0);
+    for b in out.chunks_mut(16) {
+        encrypt_block(&rk, b);
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // ECMA-376 표준 암호화
 // ---------------------------------------------------------------------------
@@ -608,6 +661,45 @@ pub fn decrypt_package(info: &[u8], package: &[u8], password: &str) -> Result<Ve
     let mut plain = aes128_ecb_decrypt(&key, &package[8..]);
     plain.truncate(size);
     Ok(plain)
+}
+
+/// 표준 암호화의 CSP 이름 (한셀 2024 관측)
+const AES_CSP: &str = "Microsoft Enhanced RSA and AES Cryptographic Provider";
+
+/// ZIP 패키지를 표준 암호화(AES-128 ECB, SHA-1)로 감싼다 → (`EncryptionInfo`, `EncryptedPackage`).
+/// `EncryptionInfo` 는 한셀 2024 가 쓰는 꼴 그대로다: 버전 4.2, 플래그 0x24 (fCryptoAPI | fAES), 머리 140 바이트
+/// (AES-128 0x660E, SHA-1 0x8004, 키 128비트, 공급자 0x18, CSP 이름), 검증자 해시 뒤는 0 — 모두 224 바이트.
+/// `EncryptedPackage` 는 원래 길이(u64) + 16바이트 단위로 0 을 채운 암호문이다.
+pub fn encrypt_package(
+    plain: &[u8],
+    password: &str,
+    salt: &[u8; 16],
+    verifier: &[u8; 16],
+) -> (Vec<u8>, Vec<u8>) {
+    let key: [u8; 16] = derive_key(password, salt, 128)
+        .try_into()
+        .unwrap_or([0; 16]);
+    let csp: Vec<u8> = AES_CSP
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let mut info = Vec::with_capacity(224);
+    info.extend_from_slice(&[0x04, 0x00, 0x02, 0x00]);
+    info.extend_from_slice(&0x24u32.to_le_bytes());
+    info.extend_from_slice(&(32 + csp.len() as u32).to_le_bytes());
+    for v in [0x24u32, 0, 0x660E, 0x8004, 128, 0x18, 0, 0] {
+        info.extend_from_slice(&v.to_le_bytes());
+    }
+    info.extend_from_slice(&csp);
+    info.extend_from_slice(&16u32.to_le_bytes());
+    info.extend_from_slice(salt);
+    info.extend_from_slice(&aes128_ecb_encrypt(&key, verifier));
+    info.extend_from_slice(&20u32.to_le_bytes());
+    info.extend_from_slice(&aes128_ecb_encrypt(&key, &sha1(verifier)));
+    let mut package = (plain.len() as u64).to_le_bytes().to_vec();
+    package.extend_from_slice(&aes128_ecb_encrypt(&key, plain));
+    (info, package)
 }
 
 // ---------------------------------------------------------------------------
@@ -810,50 +902,35 @@ mod tests {
             aes128_ecb_decrypt(&key, &ct),
             hex("00112233445566778899aabbccddeeff")
         );
+        assert_eq!(
+            aes128_ecb_encrypt(&key, &hex("00112233445566778899aabbccddeeff")),
+            ct
+        );
         assert_eq!(SBOX[0x00], 0x63);
         assert_eq!(SBOX[0x53], 0xED);
     }
 
-    /// 시험용 AES-128 암호화 (FIPS 197 순방향)
-    fn encrypt_block(rk: &[[u8; 16]; 11], block: &mut [u8]) {
-        let add = |s: &mut [u8], k: &[u8; 16]| s.iter_mut().zip(k).for_each(|(x, y)| *x ^= y);
-        add(block, &rk[0]);
-        for (round, key) in rk.iter().enumerate().skip(1) {
-            for x in block.iter_mut() {
-                *x = SBOX[*x as usize];
-            }
-            let s = block.to_vec();
-            for c in 0..4 {
-                for r in 0..4 {
-                    block[c * 4 + r] = s[((c + r) % 4) * 4 + r];
-                }
-            }
-            if round < 10 {
-                for c in 0..4 {
-                    let a = [
-                        block[c * 4],
-                        block[c * 4 + 1],
-                        block[c * 4 + 2],
-                        block[c * 4 + 3],
-                    ];
-                    for r in 0..4 {
-                        block[c * 4 + r] = gmul(a[r], 2)
-                            ^ gmul(a[(r + 1) % 4], 3)
-                            ^ a[(r + 2) % 4]
-                            ^ a[(r + 3) % 4];
-                    }
-                }
-            }
-            add(block, key);
-        }
+    #[test]
+    fn hancell_style_standard_encryption() {
+        let plain: Vec<u8> = (0..5000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let salt = [0x5Au8; 16];
+        let (info, package) = encrypt_package(&plain, DEFAULT_PASSWORD, &salt, &salt);
+        // 한셀 2024 의 EncryptionInfo 와 같은 길이·머리
+        assert_eq!(info.len(), 224);
+        assert_eq!(&info[..12], &hex("04 00 02 00 24 00 00 00 8c 00 00 00")[..]);
+        assert_eq!(package.len(), 8 + 5008);
+        assert_eq!(
+            decrypt_package(&info, &package, DEFAULT_PASSWORD).unwrap(),
+            plain
+        );
+        assert!(matches!(
+            decrypt_package(&info, &package, "다른 암호"),
+            Err(Error::WrongPassword)
+        ));
     }
 
     fn encrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
-        let rk = expand_key(key);
-        let mut out = data.to_vec();
-        out.resize(data.len().div_ceil(16) * 16, 0);
-        out.chunks_mut(16).for_each(|b| encrypt_block(&rk, b));
-        out
+        aes128_ecb_encrypt(key, data)
     }
 
     #[test]

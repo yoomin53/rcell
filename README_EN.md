@@ -102,6 +102,8 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 ### Output
 
 - XML `.cell` / `.xlsx` — converts legacy and binary documents to modern `.cell`
+- Binary `.cell` (`xlCellb`) — written the way Hancom Cell saves it (98.9% of records byte-identical)
+- Legacy `.cell` (`xlCell8`) — written the way Hancom Cell saves it with -2005 (97.7% of records identical to Hancom Cell opening the XML and saving legacy, ignoring per-save values such as the SST order; charts and tables not yet)
 - CSV, document-model JSON
 
 ### Verification (Hancom Cell as the oracle)
@@ -188,6 +190,8 @@ rcell html    book.cell -o book.html     # HTML, as Hancom Cell shows it
 rcell csv     book.cell -s 0             # first sheet as CSV
 rcell convert old.cell new.cell          # legacy/binary → modern XML .cell
 rcell convert book.cell book.xlsx        # to Excel format
+rcell convert book.cell book.bin.cell    # to binary .cell (--format bin; --exact loses what Hancom Cell loses)
+rcell convert book.cell book.legacy.cell # to legacy .cell (--format legacy)
 rcell dump    book.cell --no-cells       # document model as JSON
 rcell info    locked.cell --password pw  # documents with a user password
 ```

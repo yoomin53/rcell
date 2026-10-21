@@ -17,7 +17,7 @@ use super::formula::{self, Context, Decoded};
 use crate::error::{Error, Result};
 use crate::model::{
     AbstractNum, Alignment, Anchor, AnchorKind, Border, BorderEdge, Cell, CellRange, CellRef,
-    CellValue, CfRule, Cfvo, ColInfo, Color, ColorScale, Comment, ConditionalFormat,
+    CellValue, CfRule, Cfvo, ColInfo, Color, ColorScale, Comment, CommentShape, ConditionalFormat,
     DYNAMIC_FILTER_TYPES, DataBar, DefinedName, DrawColor, DrawingPara, DrawingRun, ExternalLink,
     FILTER_OPERATORS, Fill, FilterColumn, Font, Formula, FormulaKind, GradientFill, GradientStop,
     HancomFontExt, HancomXfExt, HeaderFooter, Hyperlink, IconSet, Marker, NamedStyle, NumFmt,
@@ -849,6 +849,8 @@ struct PendingName {
     local: Option<u32>,
     hidden: bool,
     rgce: Vec<u8>,
+    /// 설명 글 (XML `comment`)
+    comment: Option<String>,
 }
 
 /// 레거시 `/Workbook` 스트림을 통합 문서 모델로 읽는다.
@@ -891,6 +893,9 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
     let mut para_refs: Vec<u32> = Vec::new();
     // MSODRAWINGGROUP: OfficeArtDggContainer (그림 저장소)
     let mut dgg: Vec<u8> = Vec::new();
+    // 표 (0xB005…0xB00D), 그리고 요약 행 수식 (표 번호, 열 번호, 토큰열) — 표를 모두 읽은 뒤 글로 바꾼다
+    let mut tables: Vec<crate::model::Table> = Vec::new();
+    let mut table_formulas: Vec<(usize, usize, Vec<u8>)> = Vec::new();
 
     // 전역 부분: 첫 EOF 까지
     for rec in recs.iter().skip(1) {
@@ -899,19 +904,58 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         match rec.rtype {
             0x000A => break,
             0x0022 => wb.date1904 = r.u16() == Some(1),
-            0x00EB => dgg.extend_from_slice(d),
-            // WINDOW1: 창 위치·크기 (트윕), grbit, 활성 탭, 첫 탭, 선택한 탭 수, 탭 비율
-            0x003D if d.len() >= 18 => {
-                let v = |i: usize| u16::from_le_bytes([d[i], d[i + 1]]);
-                wb.book_view = Some(crate::model::BookView {
-                    x_window: v(0) as i16 as i32,
-                    y_window: v(2) as i16 as i32,
-                    window_width: v(4) as u32,
-                    window_height: v(6) as u32,
-                    tab_ratio: Some(v(16) as u32),
-                    active_tab: v(10) as u32,
-                    first_sheet: v(12) as u32,
+            0x003D if wb.view.is_none() => {
+                // WINDOW1 (BIFF8 그대로): xWn i16, yWn i16, dxWn u16, dyWn u16, grbit u16 (0x08 가로 스크롤,
+                // 0x10 세로 스크롤, 0x20 시트 탭), itabCur u16, itabFirst u16, ctabSel u16, wTabRatio u16
+                let (Some(x), Some(y), Some(w), Some(h), Some(f), Some(cur), Some(first)) = (
+                    r.u16(),
+                    r.u16(),
+                    r.u16(),
+                    r.u16(),
+                    r.u16(),
+                    r.u16(),
+                    r.u16(),
+                ) else {
+                    continue;
+                };
+                let _sel = r.u16();
+                wb.view = Some(crate::model::WorkbookView {
+                    x_window: x as i16 as i32,
+                    y_window: y as i16 as i32,
+                    window_width: w as u32,
+                    window_height: h as u32,
+                    tab_ratio: r.u16().map_or(600, u32::from),
+                    first_sheet: first as u32,
+                    active_tab: cur as u32,
+                    show_horizontal_scroll: f & 0x08 != 0,
+                    show_vertical_scroll: f & 0x10 != 0,
+                    show_sheet_tabs: f & 0x20 != 0,
                 });
+            }
+            0x01BA => {
+                // 전역의 CODENAME 은 통합 문서의 코드 이름 (시트 것은 시트 BOF 뒤에 있다)
+                let cch = r.u16().unwrap_or(0) as usize;
+                let _flag = r.u8();
+                wb.code_name = r.utf16(cch).filter(|s| !s.is_empty());
+            }
+            0x00EB => dgg.extend_from_slice(d),
+            // 표 (한컴): 0xB005 = BrtBeginList, 0xB00B = BrtBeginListCol (+ 요약 행 수식), 0xB00C = BrtTableStyleClient,
+            // 0xB00D 끝 — 바이너리 표 파트와 같은 꼴이다. 어느 시트의 표인지는 시트의 0xB00A 가 정한다 (표 대조 실험)
+            0xB005 => tables.extend(crate::binary::reader::begin_list(d)),
+            0xB00B => {
+                if let Some((c, totals)) = crate::binary::reader::list_col(d, true)
+                    && let Some(i) = tables.len().checked_sub(1)
+                {
+                    if let Some(rgce) = totals {
+                        table_formulas.push((i, tables[i].columns.len(), rgce));
+                    }
+                    tables[i].columns.push(c);
+                }
+            }
+            0xB00C => {
+                if let Some(t) = tables.last_mut() {
+                    t.style = crate::binary::reader::table_style_client(d);
+                }
             }
             // 통합 문서 보호: PROTECT (구조), WINDOWPROTECT (창), PASSWORD
             0x0012 | 0x0019 | 0x0013 => {
@@ -1159,7 +1203,8 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 let cce = r.u16().unwrap_or(0) as usize;
                 let _res = r.u16();
                 let itab = r.u16().unwrap_or(0);
-                r.take(4);
+                // 사용자 메뉴·설명·도움말·상태 표시줄 글의 길이 (u8 × 4) — 글은 수식 뒤에 (flag u8 + UTF-16)
+                let lens: Vec<usize> = (0..4).map(|_| r.u8().unwrap_or(0) as usize).collect();
                 let _flag = r.u8();
                 let mut name = r.utf16(cch).unwrap_or_default();
                 if grbit & 0x0020 != 0 {
@@ -1167,11 +1212,21 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                     name = builtin_name(name.chars().next().map(|c| c as u32).unwrap_or(0));
                 }
                 let rgce = r.take(cce).map(<[u8]>::to_vec).unwrap_or_default();
+                let mut texts = lens.iter().map(|&n| {
+                    (n > 0)
+                        .then(|| {
+                            r.u8()?;
+                            r.utf16(n)
+                        })
+                        .flatten()
+                });
+                let comment = texts.nth(1).flatten();
                 pending_names.push(PendingName {
                     name,
                     local: (itab != 0).then(|| itab as u32 - 1),
                     hidden: grbit & 0x0001 != 0,
                     rgce,
+                    comment,
                 });
             }
             _ => {}
@@ -1301,6 +1356,23 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         })
         .collect();
     let name_list: Vec<String> = pending_names.iter().map(|n| n.name.clone()).collect();
+    let table_names = crate::binary::reader::table_names(tables.iter());
+    for (i, col, rgce) in table_formulas {
+        let ctx = Context {
+            xti_sheets: &xti_sheets,
+            names: &name_list,
+            xti_names: &xti_names,
+            base: CellRef::default(),
+            xlsb: false,
+            row_shift: 0,
+            tables: &table_names,
+        };
+        if let Ok(Decoded::Text(t)) = formula::decode(&rgce, &ctx)
+            && let Some(c) = tables[i].columns.get_mut(col)
+        {
+            c.totals_formula = Some(t);
+        }
+    }
 
     // 수식이 없는 NAME 은 정의되지 않은 이름(=XYZ)이나 _xlfn. 함수 이름 자리다.
     wb.defined_names = pending_names
@@ -1314,10 +1386,11 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 base: CellRef::default(),
                 xlsb: false,
                 row_shift: 0,
+                tables: &table_names,
             };
             let formula = match formula::decode(&n.rgce, &ctx) {
                 Ok(Decoded::Text(t)) => t,
-                Ok(Decoded::SharedRef(_)) => String::new(),
+                Ok(Decoded::SharedRef(_) | Decoded::TableRef(_)) => String::new(),
                 Err(e) => format!("#ERR({})", e.0),
             };
             DefinedName {
@@ -1325,6 +1398,7 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 local_sheet_id: n.local,
                 hidden: n.hidden,
                 formula,
+                comment: n.comment.clone(),
             }
         })
         .collect();
@@ -1341,7 +1415,10 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         }
     }
 
-    // 시트. 차트 레코드는 (시트 번호, 레코드들) — 시트의 앞 도형들이 차례로 그 차트다
+    // 시트. 다른 시트 범위의 이름은 시트 이름을 붙여 읽는다. 차트 레코드는 (시트 번호, 레코드들) — 시트의 앞
+    // 도형들이 차례로 그 차트다
+    let name_scopes: Vec<Option<u32>> = pending_names.iter().map(|n| n.local).collect();
+    let sheet_names: Vec<String> = sheets.iter().map(|s| s.name.clone()).collect();
     let mut pending_charts: Vec<(usize, Vec<Vec<u8>>)> = Vec::new();
     for bs in sheets {
         let mut sheet = Sheet {
@@ -1358,7 +1435,15 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 .iter()
                 .position(|r| r.offset == bs.offset as usize)
                 .ok_or_else(|| bad("BOUNDSHEET 위치에 BOF 가 없습니다"))?;
-            let ctx_sheets = (&xti_sheets, &name_list, &xti_names);
+            let local_names =
+                formula::names_for_sheet(&name_list, &name_scopes, &sheet_names, wb.sheets.len());
+            let ctx_sheets = (
+                &xti_sheets,
+                &local_names,
+                &xti_names,
+                &table_names[..],
+                &tables[..],
+            );
             let mut charts = Vec::new();
             read_sheet(
                 &recs[start..],
@@ -1555,12 +1640,21 @@ fn rk_value(rk: u32) -> f64 {
 }
 
 /// 시트 하나. `charts` 에는 한컴 차트(0x7EF0) 레코드를 나온 순서대로 담는다 — 시트의 앞 도형들이 그 차트다
+/// 시트 수식에 필요한 통합 문서 정보: XTI 별 시트, 이름, XTI 별 외부 이름, 표 이름, 표
+type SheetRefs<'a> = (
+    &'a Vec<Option<String>>,
+    &'a Vec<String>,
+    &'a Vec<Vec<String>>,
+    &'a [formula::TableName],
+    &'a [crate::model::Table],
+);
+
 fn read_sheet(
     recs: &[Logical],
     sheet: &mut Sheet,
     wb: &Workbook,
     cell_map: &HashMap<u16, u32>,
-    (xti_sheets, names, xti_names): (&Vec<Option<String>>, &Vec<String>, &Vec<Vec<String>>),
+    (xti_sheets, names, xti_names, list_names, lists): SheetRefs,
     dxf_extra: &mut Vec<(u32, Dxfn)>,
     charts: &mut Vec<Vec<u8>>,
 ) -> Result<()> {
@@ -1576,8 +1670,8 @@ fn read_sheet(
     // 메모: OBJ(ftCmo, 종류 0x19) 번호 → 바로 뒤 TXO 의 내용. NOTE 가 번호로 가리킨다
     let mut last_note_obj: Option<u16> = None;
     let mut note_texts: HashMap<u16, RichText> = HashMap::new();
-    // NOTE 의 idObj → 메모 번호 (메모 도형의 이름·자리를 나중에 붙인다)
-    let mut note_ids: Vec<(u16, usize)> = Vec::new();
+    // 메모마다 NOTE 의 idObj (메모 상자는 그 번호의 OBJ 와 짝인 OfficeArt 도형)
+    let mut note_objs: Vec<u16> = Vec::new();
     // 그리기: MSODRAWING 을 이어 붙인 OfficeArt 스트림, OBJ 목록(종류, 번호, TXO 내용)
     let mut art: Vec<u8> = Vec::new();
     let mut objs: Vec<ObjRec> = Vec::new();
@@ -1588,6 +1682,8 @@ fn read_sheet(
     let mut cf_rules: HashMap<(u16, u16), (usize, usize)> = HashMap::new();
     let mut cf_current: Option<(u16, u16)> = None;
     let mut cf12_target: Option<usize> = None;
+    // 배열 수식의 왼쪽 위 셀 (범위 안 다른 셀의 PtgExp 가 가리킨다)
+    let mut array_masters: std::collections::HashSet<(u32, u32)> = Default::default();
     // 수식 셀의 토큰열 (공유 수식은 기준 셀의 토큰) — 행 반복(0xB002) 때 다시 해석한다
     let mut tokens_at: HashMap<(u32, u32), Vec<u8>> = HashMap::new();
     // 시트 보호: PROTECT, OBJPROTECT, SCENPROTECT, PASSWORD, FEATHDR 의 EnhancedProtection
@@ -1595,6 +1691,8 @@ fn read_sheet(
     let mut prot_enh: Option<u32> = None;
     // 자동 필터: AUTOFILTER12 의 범위 (_FilterDatabase 이름이 없을 때 쓴다)
     let mut af_ref: Option<String> = None;
+    // 마지막 AUTOFILTER12 가 동적 필터면 (열, 읽은 숫자 조건 수) — 뒤따르는 ContinueFrt12 의 val·maxVal
+    let mut af12_dynamic: Option<(u32, usize)> = None;
 
     for rec in recs.iter().skip(1) {
         let d = &rec.data[..];
@@ -1723,6 +1821,7 @@ fn read_sheet(
                                 base: copy.r,
                                 xlsb: false,
                                 row_shift: (row - first) as i64,
+                                tables: list_names,
                             };
                             if let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx) {
                                 copy.formula = Some(Formula {
@@ -1843,15 +1942,25 @@ fn read_sheet(
                     base: at,
                     xlsb: false,
                     row_shift: 0,
+                    tables: list_names,
                 };
                 let formula = match formula::decode(rgce, &ctx) {
                     Ok(Decoded::Text(t)) => {
                         tokens_at.insert((row, col as u32), rgce.to_vec());
-                        Formula {
+                        Some(Formula {
                             text: t,
                             ..Default::default()
-                        }
+                        })
                     }
+                    // 배열 수식·데이터 표 범위 안의 다른 셀: 수식은 왼쪽 위 셀에만 둔다 (XML 과 같다)
+                    Ok(Decoded::SharedRef(master))
+                        if master != at && array_masters.contains(&(master.row, master.col)) =>
+                    {
+                        None
+                    }
+                    Ok(Decoded::TableRef(master)) if master != at => None,
+                    // 데이터 표의 왼쪽 위: 뒤따르는 TABLE 이 채운다
+                    Ok(Decoded::TableRef(_)) => Some(Formula::default()),
                     Ok(Decoded::SharedRef(master)) => {
                         let si = shared.get(&(master.row, master.col)).map(|s| s.2);
                         let text = shared
@@ -1865,6 +1974,7 @@ fn read_sheet(
                                     base: at,
                                     xlsb: false,
                                     row_shift: 0,
+                                    tables: list_names,
                                 };
                                 match formula::decode(tokens, &c) {
                                     Ok(Decoded::Text(t)) => Some(t),
@@ -1873,7 +1983,7 @@ fn read_sheet(
                             })
                             .unwrap_or_default();
                         // 공유 수식의 종속 셀 (기준 셀은 SHRFMLA 에서 고친다)
-                        Formula {
+                        Some(Formula {
                             text,
                             kind: if si.is_some() {
                                 FormulaKind::Shared
@@ -1882,21 +1992,137 @@ fn read_sheet(
                             },
                             shared_index: si,
                             ..Default::default()
-                        }
+                        })
                     }
-                    Err(e) => Formula {
+                    Err(e) => Some(Formula {
                         text: format!("#ERR({})", e.0),
                         ..Default::default()
-                    },
+                    }),
                 };
                 let is_string = val[6] == 0xFF && val[7] == 0xFF && val[0] == 0;
                 sheet.cells.push(Cell {
                     r: at,
                     style: style(ixfe),
                     value,
-                    formula: Some(formula),
+                    formula,
                 });
                 pending_string_cell = is_string.then(|| sheet.cells.len() - 1);
+            }
+            // 이 시트의 표 (전역 0xB005… 의 표 번호), 이어지는 0xB006·0xB007(열 수)은 그 표의 자동 필터 — 필터 조건은
+            // 레거시에 남지 않는다 (표 대조 실험)
+            0xB00A => {
+                if let Some(id) = r.u32()
+                    && let Some(t) = lists.iter().find(|t| t.id == id)
+                {
+                    sheet.tables.push(t.clone());
+                }
+            }
+            0xB006 => {
+                if let Some(t) = sheet.tables.last_mut()
+                    && let Some(mut rg) = CellRange::parse(&t.range)
+                {
+                    rg.end.row = rg.end.row.saturating_sub(t.totals_rows);
+                    t.auto_filter = Some(crate::model::AutoFilter {
+                        range: rg.to_string(),
+                        columns: Vec::new(),
+                    });
+                }
+            }
+            0x0221 => {
+                // ARRAY: rwFirst u32, rwLast u32, colFirst u16, colLast u16, grbit u16, chn u32, cce u16 + 토큰.
+                // 직전 FORMULA(PtgExp 가 자기 자신)가 왼쪽 위 셀이다 (수식 대조 실험)
+                let (Some(r1), Some(r2), Some(c1), Some(c2)) = (r.u32(), r.u32(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                r.take(6);
+                let cce = r.u16().unwrap_or(0) as usize;
+                let Some(tokens) = r.take(cce) else { continue };
+                let start = CellRef {
+                    row: r1,
+                    col: c1 as u32,
+                };
+                let ctx = Context {
+                    xti_sheets,
+                    names,
+                    xti_names,
+                    base: start,
+                    xlsb: false,
+                    row_shift: 0,
+                    tables: list_names,
+                };
+                if let Some(cell) = sheet.cells.last_mut()
+                    && cell.r == start
+                    && let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx)
+                {
+                    array_masters.insert((r1, c1 as u32));
+                    cell.formula = Some(Formula {
+                        text: t,
+                        kind: FormulaKind::Array,
+                        range: Some(
+                            CellRange {
+                                start,
+                                end: CellRef {
+                                    row: r2,
+                                    col: c2 as u32,
+                                },
+                            }
+                            .to_string(),
+                        ),
+                        ..Default::default()
+                    });
+                }
+            }
+            0x0236 => {
+                // TABLE (한컴 변형): rwFirst u32, rwLast u32, colFirst u16, colLast u16, grbit u16 (0x04 행 입력,
+                // 0x08 2변수), 입력 1 (rw u32, col u16), 입력 2 (rw u32, col u16 — 없으면 FF) — 직전 FORMULA
+                // (PtgTbl 이 자기 자신)가 왼쪽 위 셀이다 (수식 대조 실험)
+                let (Some(r1), Some(r2), Some(c1), Some(c2), Some(grbit)) =
+                    (r.u32(), r.u32(), r.u16(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                let mut input = || -> Option<String> {
+                    let (row, col) = (r.u32()?, r.u16()?);
+                    (row != u32::MAX && col != u16::MAX).then(|| {
+                        CellRef {
+                            row,
+                            col: col as u32,
+                        }
+                        .to_string()
+                    })
+                };
+                let (in1, in2) = (input(), input());
+                let start = CellRef {
+                    row: r1,
+                    col: c1 as u32,
+                };
+                if let Some(cell) = sheet.cells.last_mut()
+                    && cell.r == start
+                {
+                    cell.formula = Some(Formula {
+                        kind: FormulaKind::DataTable,
+                        range: Some(
+                            CellRange {
+                                start,
+                                end: CellRef {
+                                    row: r2,
+                                    col: c2 as u32,
+                                },
+                            }
+                            .to_string(),
+                        ),
+                        data_table: Some(crate::model::DataTableInput {
+                            two_d: grbit & 0x08 != 0,
+                            row_input: grbit & 0x04 != 0,
+                            r1: in1,
+                            r2: in2,
+                            del1: grbit & 0x10 != 0,
+                            del2: grbit & 0x20 != 0,
+                        }),
+                        ..Default::default()
+                    });
+                }
             }
             0x04BC => {
                 // SHRFMLA: 범위 + 공유 토큰열. 직전 FORMULA 가 기준 셀이다.
@@ -1941,6 +2167,7 @@ fn read_sheet(
                             base: cell.r,
                             xlsb: false,
                             row_shift: 0,
+                            tables: list_names,
                         };
                         if let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx) {
                             tokens_at.insert((cell.r.row, cell.r.col), tokens.to_vec());
@@ -1950,6 +2177,7 @@ fn read_sheet(
                                 kind: FormulaKind::Shared,
                                 shared_index: Some(si),
                                 range: Some(range),
+                                ..Default::default()
                             });
                         }
                     }
@@ -2060,6 +2288,7 @@ fn read_sheet(
                         base,
                         xlsb: false,
                         row_shift: 0,
+                        tables: list_names,
                     };
                     match formula::decode(t, &ctx) {
                         Ok(Decoded::Text(x)) => Some(x),
@@ -2169,6 +2398,7 @@ fn read_sheet(
                         base,
                         xlsb: false,
                         row_shift: 0,
+                        tables: list_names,
                     };
                     match formula::decode(t, &ctx) {
                         Ok(Decoded::Text(x)) => x,
@@ -2268,18 +2498,47 @@ fn read_sheet(
                     priority: pri as u32,
                     ..Default::default()
                 };
+                // 기준 값의 수식 (기준 셀 = 범위의 왼쪽 위)
+                let base = CellRange::parse(
+                    sheet.conditional_formats[fi]
+                        .sqref
+                        .split(' ')
+                        .next()
+                        .unwrap_or(""),
+                )
+                .map(|x| x.start)
+                .unwrap_or_default();
+                let dec = |t: &[u8]| {
+                    let ctx = Context {
+                        xti_sheets,
+                        names,
+                        xti_names,
+                        base,
+                        xlsb: false,
+                        row_shift: 0,
+                        tables: list_names,
+                    };
+                    match formula::decode(t, &ctx) {
+                        Ok(Decoded::Text(x)) => Some(x),
+                        _ => None,
+                    }
+                };
                 match ct {
                     3 => {
                         rule.kind = "colorScale".into();
-                        rule.color_scale = legacy_color_scale(&mut r);
+                        rule.color_scale = legacy_color_scale(&mut r, &dec);
                     }
                     4 => {
                         rule.kind = "dataBar".into();
-                        rule.data_bar = legacy_data_bar(&mut r);
+                        rule.data_bar = legacy_data_bar(&mut r, &dec);
                     }
                     6 => {
                         rule.kind = "iconSet".into();
-                        rule.icon_set = legacy_icon_set(&mut r);
+                        rule.icon_set = legacy_icon_set(&mut r, &dec);
+                        // Excel 2010 아이콘 집합은 x14 구역의 규칙이다
+                        rule.x14 = rule.icon_set.as_ref().is_some_and(|i| {
+                            crate::model::X14_ONLY_ICON_SETS.contains(&i.set.as_str())
+                        });
                     }
                     _ => {
                         rule.kind = "expression".into();
@@ -2318,12 +2577,23 @@ fn read_sheet(
                 else {
                     continue;
                 };
+                let grbit = r.u16().unwrap_or(0x0011);
                 last_note_obj = (ft == 0x15 && ot == 0x19).then_some(id);
-                objs.push(ObjRec { ot, id, text: None });
+                objs.push(ObjRec {
+                    ot,
+                    grbit,
+                    id,
+                    text: None,
+                    align: (1, 0),
+                });
             }
             0x01B6 => {
-                // TXO (한컴): 머리 10바이트, cch u16, flag u8, UTF-16 (CONTINUE 없이 바로),
-                // 뒤에 (ich u16, ifnt u16, 예약 u32) 런
+                // TXO (한컴): 머리 10바이트 (4 가로 맞춤 u8, 5 세로 맞춤 u8), cch u16, flag u8, UTF-16
+                // (CONTINUE 없이 바로), 뒤에 (ich u16, ifnt u16, 예약 u32) 런
+                let align = (
+                    d.get(4).copied().unwrap_or(1),
+                    d.get(5).copied().unwrap_or(0),
+                );
                 r.take(10);
                 let cch = r.u16().unwrap_or(0) as usize;
                 let _flag = r.u8();
@@ -2335,6 +2605,7 @@ fn read_sheet(
                 }
                 if let Some(o) = objs.last_mut() {
                     o.text = Some((text.clone(), runs));
+                    o.align = align;
                 }
                 let Some(id) = last_note_obj.take() else {
                     continue;
@@ -2363,7 +2634,6 @@ fn read_sheet(
                 };
                 let cch = r.u16().unwrap_or(0) as usize;
                 let _flag = r.u8();
-                note_ids.push((id, sheet.comments.len()));
                 sheet.comments.push(Comment {
                     cell: CellRef {
                         row,
@@ -2374,6 +2644,7 @@ fn read_sheet(
                     visible: grbit & 0x0002 != 0,
                     ..Default::default()
                 });
+                note_objs.push(id);
             }
             0x0041 => {
                 // PANE: x u16, y u32, rwTop u32, colLeft u16, pnnAct u16.
@@ -2533,6 +2804,12 @@ fn read_sheet(
                 };
                 if grbit & 0x10 != 0 {
                     fc.top10 = Some((grbit & 0x20 != 0, grbit & 0x40 != 0, (grbit >> 7) as f64));
+                    // 첫 DOPER = 기준값 (filterVal, 한셀은 RK 로 쓴다 — 필터 대조 실험)
+                    fc.filter_val = dopers[0].and_then(|d| match d[0] {
+                        0x02 => Some(rk_value(u32::from_le_bytes([d[2], d[3], d[4], d[5]]))),
+                        0x04 => d[2..10].try_into().ok().map(f64::from_le_bytes),
+                        _ => None,
+                    });
                 } else {
                     for d in dopers.into_iter().flatten() {
                         let op = FILTER_OPERATORS.get(d[1] as usize).copied().unwrap_or("");
@@ -2629,6 +2906,7 @@ fn read_sheet(
                 let dynamic = DYNAMIC_FILTER_TYPES
                     .get(cft as usize)
                     .filter(|s| cft != 0 && !s.is_empty());
+                af12_dynamic = None;
                 if let (Some(t), Some(fc)) = (
                     dynamic,
                     sheet
@@ -2639,7 +2917,31 @@ fn read_sheet(
                     fc.custom.clear();
                     fc.custom_and = false;
                     fc.dynamic = Some(t.to_string());
+                    af12_dynamic = Some((entry as u32, 0));
                 }
+            }
+            0x087F => {
+                // ContinueFrt12: 바로 앞 AUTOFILTER12 의 조건(AF12Criteria) — FrtRefHeader 12 + DOPER 10.
+                // 동적 필터면 숫자 DOPER 가 차례로 val, maxVal (평균은 하나, 기간은 >= 시작 · < 끝)
+                let Some((col, n)) = af12_dynamic else {
+                    continue;
+                };
+                let Some(dp) = d.get(12..22).filter(|dp| dp[0] == 0x04) else {
+                    continue;
+                };
+                let v = f64::from_le_bytes(dp[2..10].try_into().unwrap_or_default());
+                if let Some(fc) = sheet
+                    .auto_filter
+                    .as_mut()
+                    .and_then(|f| f.columns.iter_mut().find(|c| c.col_id == col))
+                {
+                    match n {
+                        0 => fc.dynamic_val = Some(v).filter(|&v| v != 0.0),
+                        1 => fc.dynamic_max_val = Some(v).filter(|&v| v != 0.0),
+                        _ => {}
+                    }
+                }
+                af12_dynamic = Some((col, n + 1));
             }
             0x002A | 0x002B | 0x0083 | 0x0084 => {
                 let on = r.u16().unwrap_or(0) != 0;
@@ -2774,10 +3076,33 @@ fn read_sheet(
                 }
             }
             0x0800 => {
-                // HLINKTOOLTIP: frtRefHeaderNoGrbit(rt u16 + ref) + wzTooltip
-                if let Some(last) = sheet.hyperlinks.last_mut() {
-                    let body = d.get(4 + 12..).unwrap_or_default();
-                    last.tooltip = Some(crate::text::utf16le_nul(body));
+                // HLINKTOOLTIP ([MS-XLS]): frtRefHeaderNoGrbit = rt u16 + Ref8U (행·열 u16 × 4) 10바이트, 그 뒤
+                // wzTooltip (UTF-16, NUL 끝). 한셀은 이 레코드를 쓰지도 읽지도 않는다 (하이퍼링크 대조 실험) — 다른
+                // 프로그램이 쓴 것을 위해 범위가 같은 하이퍼링크(없으면 마지막)에 붙인다
+                let (Some(_rt), Some(r1), Some(r2), Some(c1), Some(c2)) =
+                    (r.u16(), r.u16(), r.u16(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                let range = CellRange {
+                    start: CellRef {
+                        row: r1 as u32,
+                        col: c1 as u32,
+                    },
+                    end: CellRef {
+                        row: r2 as u32,
+                        col: c2 as u32,
+                    },
+                }
+                .to_string();
+                let tip = crate::text::utf16le_nul(d.get(10..).unwrap_or_default());
+                let i = sheet
+                    .hyperlinks
+                    .iter()
+                    .rposition(|h| h.range == range)
+                    .or_else(|| sheet.hyperlinks.len().checked_sub(1));
+                if let Some(h) = i.and_then(|i| sheet.hyperlinks.get_mut(i)) {
+                    h.tooltip = Some(tip);
                 }
             }
             _ => {}
@@ -2794,43 +3119,50 @@ fn read_sheet(
             ..Default::default()
         })
         .collect();
+    // 메모 상자: OBJ 번호 → 모양
+    let mut note_shapes: HashMap<u16, CommentShape> = HashMap::new();
     if !art.is_empty() {
         let tree = escher::parse(&art);
         let mut k = 0;
         shapes.extend(
             tree.iter()
-                .filter_map(|e| legacy_shape(e, &objs, &mut k, sheet, wb, mdw)),
+                .filter_map(|e| legacy_shape(e, &objs, &mut k, sheet, wb, mdw, &mut note_shapes)),
         );
-        // 메모 도형: 이름·상자 자리(픽셀)·그리기 차례를 메모에 붙인다 (VML 의 id·x:Anchor·도형 차례와 같은 뜻)
-        // (OBJ 번호, 이름, 앵커)
-        type NoteShape = (u16, Option<String>, Option<[u32; 8]>);
-        let mut notes: Vec<NoteShape> = Vec::new();
-        fn walk(e: &escher::EscherShape, objs: &[ObjRec], k: &mut usize, out: &mut Vec<NoteShape>) {
+        // 메모 도형의 이름과 그리기 차례 (VML 의 도형 id·도형 차례와 같은 뜻): (OBJ 번호, 이름)
+        let mut notes: Vec<(u16, Option<String>)> = Vec::new();
+        fn walk(
+            e: &escher::EscherShape,
+            objs: &[ObjRec],
+            k: &mut usize,
+            out: &mut Vec<(u16, Option<String>)>,
+        ) {
             let obj = objs.get(*k);
             *k += 1;
             for c in &e.children {
                 walk(c, objs, k, out);
             }
             if let Some(o) = obj.filter(|o| o.ot == 0x19) {
-                out.push((o.id, e.string(0x0380), e.anchor));
+                out.push((o.id, e.string(0x0380)));
             }
         }
         let mut k = 0;
         for e in &tree {
             walk(e, &objs, &mut k, &mut notes);
         }
-        for (z, (id, name, anchor)) in notes.into_iter().enumerate() {
-            let Some(&(_, ci)) = note_ids.iter().find(|(n, _)| *n == id) else {
+        for (z, (id, name)) in notes.into_iter().enumerate() {
+            let Some(ci) = note_objs.iter().position(|n| *n == id) else {
                 continue;
             };
-            let px = anchor.map(|a| note_px(a, sheet, mdw));
-            let c = &mut sheet.comments[ci];
-            c.shape_name = name;
-            c.z_order = Some(z as u32);
-            c.anchor = px;
+            if let Some(c) = sheet.comments.get_mut(ci) {
+                c.shape_name = name;
+                c.z_order = Some(z as u32);
+            }
         }
     }
     sheet.shapes = shapes;
+    for (c, id) in sheet.comments.iter_mut().zip(&note_objs) {
+        c.shape = note_shapes.remove(id);
+    }
     if prot {
         let mut states = [false; 16];
         states[0] = true;
@@ -2864,41 +3196,79 @@ fn read_sheet(
     Ok(())
 }
 
-/// 메모 상자의 레거시 앵커 → VML `x:Anchor` 꼴 (열, 오프셋 px, 행, 오프셋 px, …) — [`legacy_anchor`] 와 같은 식
-fn note_px(a: [u32; 8], sheet: &Sheet, mdw: u32) -> [u32; 8] {
+/// 레거시 앵커의 열 안 오프셋 → 픽셀: dx 는 (열 픽셀 − 1)의 1/32768
+fn anchor_col_px(sheet: &Sheet, c: u32, dx: u32, mdw: u32) -> u32 {
+    let eff = crate::units::sheet_col_px(sheet, c, mdw).saturating_sub(1) as f64;
+    (dx as f64 * eff / 32768.0).round() as u32
+}
+
+/// 레거시 앵커의 행 안 오프셋 → 픽셀: dy 는 (행 픽셀 − 1)의 1/8192
+fn anchor_row_px(sheet: &Sheet, r: u32, dy: u32) -> u32 {
+    let eff = crate::units::sheet_row_px(sheet, r).saturating_sub(1) as f64;
+    (dy as f64 * eff / 8192.0).round() as u32
+}
+
+/// 레거시 메모 상자 (OfficeArt 도형 + OBJ 의 TXO) → 모델. 앵커는 그리기와 같은 단위를 VML 처럼 픽셀로 (메모 대조
+/// 실험: 한셀의 레거시 읽기와 같은 `x:Anchor`), 채우기 0x0181 (없으면 흰색), 선 색 0x01C0·두께 0x01CB (EMU, 없으면
+/// 검정·9525), 그림자 0x023F (0x02, 사용 0x20000), 셀 고정은 앵커 플래그 (0 옮김·크기, 2 옮김, 3 고정).
+/// TXO 의 맞춤: 가로 1 왼쪽, 2 가운데, 3 오른쪽, 5 양쪽, 7 균등 / 세로 0 위, 1 가운데, 2 아래, 3 양쪽, 4 균등
+fn legacy_comment_shape(
+    e: &escher::EscherShape,
+    a: [u32; 8],
+    align: (u8, u8),
+    sheet: &Sheet,
+    mdw: u32,
+) -> CommentShape {
     let [c1, dx1, r1, dy1, c2, dx2, r2, dy2] = a;
-    let px_c = |c: u32, dx: u32| {
-        let eff = crate::units::sheet_col_px(sheet, c, mdw).saturating_sub(1) as f64;
-        (dx as f64 * eff / 32768.0).round() as u32
+    let hex = |v: u32| {
+        let c = art_color(v);
+        format!(
+            "#{}",
+            c.value.trim_start_matches("srgb:").to_ascii_lowercase()
+        )
     };
-    let px_r = |r: u32, dy: u32| {
-        let eff = crate::units::sheet_row_px(sheet, r).saturating_sub(1) as f64;
-        (dy as f64 * eff / 8192.0).round() as u32
-    };
-    [
-        c1,
-        px_c(c1, dx1),
-        r1,
-        px_r(r1, dy1),
-        c2,
-        px_c(c2, dx2),
-        r2,
-        px_r(r2, dy2),
-    ]
+    let shadow = matches!(e.prop(0x023F), Some(b) if b & 0x0002_0000 != 0 && b & 0x02 != 0);
+    CommentShape {
+        anchor: [
+            c1,
+            anchor_col_px(sheet, c1, dx1, mdw),
+            r1,
+            anchor_row_px(sheet, r1, dy1),
+            c2,
+            anchor_col_px(sheet, c2, dx2, mdw),
+            r2,
+            anchor_row_px(sheet, r2, dy2),
+        ],
+        fill_color: hex(e.prop(0x0181).unwrap_or(0x00FF_FFFF)),
+        stroke_color: hex(e.prop(0x01C0).unwrap_or(0)),
+        stroke_weight: e.prop(0x01CB).unwrap_or(9525) as f64 / 12700.0,
+        shadow,
+        move_with_cells: e.anchor_flag != 3,
+        size_with_cells: e.anchor_flag == 0,
+        text_halign: match align.0 {
+            2 => Some("Center".into()),
+            3 => Some("Right".into()),
+            5 => Some("Justify".into()),
+            7 => Some("Distributed".into()),
+            _ => None,
+        },
+        text_valign: match align.1 {
+            1 => Some("Center".into()),
+            2 => Some("Bottom".into()),
+            3 => Some("Justify".into()),
+            4 => Some("Distributed".into()),
+            _ => None,
+        },
+    }
 }
 
 /// 레거시 앵커 → 모델. dx 는 (열 픽셀 − 1)의 1/32768, dy 는 (행 픽셀 − 1)의 1/8192 이고
 /// 픽셀 단위로 반올림한다 (한셀 대조, docs/format/cell-legacy.md).
 fn legacy_anchor(a: [u32; 8], flag: u16, sheet: &Sheet, mdw: u32) -> Anchor {
     let [c1, dx1, r1, dy1, c2, dx2, r2, dy2] = a;
-    let col_off = |c: u32, dx: u32| {
-        let eff = crate::units::sheet_col_px(sheet, c, mdw).saturating_sub(1) as f64;
-        (dx as f64 * eff / 32768.0).round() as i64 * crate::units::EMU_PER_PX
-    };
-    let row_off = |r: u32, dy: u32| {
-        let eff = crate::units::sheet_row_px(sheet, r).saturating_sub(1) as f64;
-        (dy as f64 * eff / 8192.0).round() as i64 * crate::units::EMU_PER_PX
-    };
+    let col_off =
+        |c: u32, dx: u32| anchor_col_px(sheet, c, dx, mdw) as i64 * crate::units::EMU_PER_PX;
+    let row_off = |r: u32, dy: u32| anchor_row_px(sheet, r, dy) as i64 * crate::units::EMU_PER_PX;
     Anchor {
         kind: AnchorKind::TwoCell,
         edit_as: match flag {
@@ -3000,35 +3370,48 @@ fn apply_cf_template(rule: &mut CfRule, tmpl: u32, params: &[u8]) {
     }
 }
 
-/// CFVO (레거시): 종류 u8, 수식 cce u16 + 토큰, 숫자 f64 (최소·최대 말고)
-fn legacy_cfvo(r: &mut Rd) -> Option<Cfvo> {
+/// 기준 값 수식의 토큰열 → 글
+type CfvoDecoder<'a> = dyn Fn(&[u8]) -> Option<String> + 'a;
+
+/// CFVO (레거시): 종류 u8 (1 num, 2 min, 3 max, 4 percent, 5 percentile, 7 formula), 수식 cce u16 + 토큰,
+/// 수식이 없고 최소·최대가 아니면 숫자 f64. 한셀은 x14 구역에서 읽은 값(`xm:f`)을 수식(PtgInt 등)으로 쓴다
+/// (x14 조건부 서식 실험 — 3Stars 의 `percent` 값 0·33·67 이 `1e 00 00` …)
+fn legacy_cfvo(r: &mut Rd, dec: &CfvoDecoder) -> Option<Cfvo> {
     let ty = r.u8()?;
     let cce = r.u16()? as usize;
-    r.take(cce);
-    let num = if matches!(ty, 2 | 3) { None } else { r.f64() };
+    let tokens = r.take(cce)?;
+    let num = if cce > 0 || matches!(ty, 2 | 3) {
+        None
+    } else {
+        r.f64()
+    };
     let kind = match ty {
         1 => "num",
         2 => "min",
         3 => "max",
         4 => "percent",
         5 => "percentile",
-        6 => "formula",
+        6 | 7 => "formula",
         _ => "num",
     };
     Some(Cfvo {
         kind: kind.into(),
-        val: num
-            .filter(|_| matches!(ty, 1 | 4 | 5))
-            .map(formula::number_text),
+        val: if cce > 0 {
+            dec(tokens)
+        } else {
+            num.filter(|_| matches!(ty, 1 | 4 | 5))
+                .map(formula::number_text)
+        },
         gte: true,
     })
 }
 
-/// CFColor: 종류 u32 (2 = RGB), 값 4바이트, 밝기 f64
+/// CFColor: 종류 u32 (2 = RGB, 3 = 테마), 값 4바이트, 밝기 f64. 레거시는 테마 색을 테마 번호 + 밝기로 지킨다
+/// (XML 은 한셀이 RGB 로 바꿔 쓴다: 테마 5, 밝기 -0.25 → `ffeb5800` — x14 조건부 서식 실험)
 fn legacy_cf_color(r: &mut Rd) -> Option<Color> {
     let ty = r.u32()?;
     let v = r.take(4)?;
-    r.take(8);
+    let tint = r.f64().filter(|t| *t != 0.0);
     match ty {
         2 => Some(Color {
             rgb: Some(format!("ff{:02x}{:02x}{:02x}", v[0], v[1], v[2])),
@@ -3036,6 +3419,7 @@ fn legacy_cf_color(r: &mut Rd) -> Option<Color> {
         }),
         3 => Some(Color {
             theme: Some(v[0] as u32),
+            tint,
             ..Default::default()
         }),
         _ => Some(Color {
@@ -3046,12 +3430,12 @@ fn legacy_cf_color(r: &mut Rd) -> Option<Color> {
 }
 
 /// CFGradient: 예약 u8, 보간 수 u8, 색 수 u8, 플래그 u8, (CFVO + 영역 f64) × n, (위치 f64 + CFColor) × m
-fn legacy_color_scale(r: &mut Rd) -> Option<ColorScale> {
+fn legacy_color_scale(r: &mut Rd, dec: &CfvoDecoder) -> Option<ColorScale> {
     r.take(1);
     let (ni, nc, _f) = (r.u8()?, r.u8()?, r.u8()?);
     let mut cs = ColorScale::default();
     for _ in 0..ni {
-        cs.cfvos.push(legacy_cfvo(r)?);
+        cs.cfvos.push(legacy_cfvo(r, dec)?);
         r.take(8);
     }
     for _ in 0..nc {
@@ -3061,32 +3445,41 @@ fn legacy_color_scale(r: &mut Rd) -> Option<ColorScale> {
     Some(cs)
 }
 
-/// CFDatabar: 예약 u8, 플래그 u8 (0x02 값 숨김 — 한컴), 최소·최대 길이 u8, CFColor, CFVO × 2
-fn legacy_data_bar(r: &mut Rd) -> Option<DataBar> {
+/// CFDatabar: 예약 u8, 플래그 u8 (0x01 오른쪽에서 왼쪽, 0x02 값 숨김), 최소·최대 길이 u8, CFColor, CFVO × 2.
+/// x14 확장 가운데 레거시에 남는 것은 길이와 방향(오른쪽에서 왼쪽만)뿐이다 — 테두리·음수 색·축은 저장되지 않는다
+/// (x14 조건부 서식 실험. 한셀은 다시 읽을 때 방향도 버리고 `negativeBarColorSameAsPositive="1"
+/// axisPosition="none"` 을 채운다)
+fn legacy_data_bar(r: &mut Rd, dec: &CfvoDecoder) -> Option<DataBar> {
     r.take(1);
     let (flags, min, max) = (r.u8()?, r.u8()?, r.u8()?);
     let color = legacy_cf_color(r);
     let mut cfvos = Vec::new();
     for _ in 0..2 {
-        cfvos.extend(legacy_cfvo(r));
+        cfvos.extend(legacy_cfvo(r, dec));
     }
+    let ext = (flags & 0x01 != 0).then(|| crate::model::DataBarExt {
+        cfvos: cfvos.clone(),
+        direction: Some("rightToLeft".into()),
+        ..Default::default()
+    });
     Some(DataBar {
         cfvos,
         color,
         show_value: flags & 0x02 == 0,
         min_length: Some(min as u32).filter(|&v| v != 10),
         max_length: Some(max as u32).filter(|&v| v != 90),
+        ext,
     })
 }
 
 /// CFMultistate: 예약 u8, 아이콘 수 u8, 집합 번호 u8, 플래그 u8 (0x01 아이콘만, 0x04 거꾸로),
-/// (CFVO + fEqual u8 + 예약 u32) × n
-fn legacy_icon_set(r: &mut Rd) -> Option<IconSet> {
+/// (CFVO + fEqual u8 + 예약 u32) × n. 사용자 지정 아이콘은 저장되지 않는다 (x14 조건부 서식 실험)
+fn legacy_icon_set(r: &mut Rd, dec: &CfvoDecoder) -> Option<IconSet> {
     r.take(1);
     let (n, set, flags) = (r.u8()?, r.u8()?, r.u8()?);
     let mut cfvos = Vec::new();
     for _ in 0..n {
-        let mut c = legacy_cfvo(r)?;
+        let mut c = legacy_cfvo(r, dec)?;
         c.gte = r.u8()? != 0;
         r.take(4);
         cfvos.push(c);
@@ -3122,18 +3515,24 @@ fn legacy_icon_set(r: &mut Rd) -> Option<IconSet> {
         show_value: flags & 0x01 == 0,
         reverse: flags & 0x04 != 0,
         percent: true,
+        custom_icons: Vec::new(),
     })
 }
 
 /// OBJ 레코드 요약: 종류(ot)와 뒤따른 TXO 의 내용·런
 struct ObjRec {
     ot: u16,
+    /// ftCmo 플래그 (0x0001 잠금, 0x0010 인쇄)
+    grbit: u16,
     /// ftCmo 의 개체 번호 (NOTE 의 idObj 가 가리킨다)
     id: u16,
+    /// TXO 의 가로·세로 맞춤 (메모 상자의 x:TextHAlign·x:TextVAlign)
+    align: (u8, u8),
     text: Option<(String, Vec<(u16, u16)>)>,
 }
 
 /// OfficeArt 도형 하나 → 모델 (OBJ 는 문서 순서로 하나씩 짝짓는다). 메모(ot 0x19)는 건너뛴다.
+#[allow(clippy::too_many_arguments)]
 fn legacy_shape(
     e: &escher::EscherShape,
     objs: &[ObjRec],
@@ -3141,6 +3540,7 @@ fn legacy_shape(
     sheet: &Sheet,
     wb: &Workbook,
     mdw: u32,
+    notes: &mut HashMap<u16, CommentShape>,
 ) -> Option<Shape> {
     let obj = objs.get(*k);
     *k += 1;
@@ -3148,10 +3548,16 @@ fn legacy_shape(
     let children: Vec<Shape> = e
         .children
         .iter()
-        .filter_map(|c| legacy_shape(c, objs, k, sheet, wb, mdw))
+        .filter_map(|c| legacy_shape(c, objs, k, sheet, wb, mdw, notes))
         .collect();
-    // 0x19 메모 (NOTE 가 따로 읽는다), 0x14 콤보 상자 (자동 필터의 단추)
-    if ot == 0x19 || ot == 0x14 {
+    // 0x19 메모 (NOTE 가 따로 읽는다 — 여기서는 상자의 모양만), 0x14 콤보 상자 (자동 필터의 단추)
+    if ot == 0x19 {
+        if let (Some(o), Some(a)) = (obj, e.anchor) {
+            notes.insert(o.id, legacy_comment_shape(e, a, o.align, sheet, mdw));
+        }
+        return None;
+    }
+    if ot == 0x14 {
         return None;
     }
     let kind = if e.is_group() {
@@ -3185,6 +3591,30 @@ fn legacy_shape(
         Some(b) if b & 0x0008_0000 != 0 => b & 0x08 != 0,
         _ => true,
     };
+    // 선: 점선 0x01CE (MSOLINEDASHING), 겹선 0x01CD, 이음 0x01D6 (없으면 한셀은 miter 로 읽는다), 끝 0x01D7 (없으면
+    // flat), 화살표 0x01D0·0x01D1 (종류) + 0x01D2–0x01D5 (너비·길이) — 도형 대조 실험
+    let arrow = |kind: u16, w: u16, len: u16| {
+        let size = |v: Option<u32>| {
+            match v.unwrap_or(1) {
+                0 => "sm",
+                2 => "lg",
+                _ => "med",
+            }
+            .to_string()
+        };
+        Some(crate::model::LineEnd {
+            kind: match prop(kind).unwrap_or(0) {
+                1 => Some("triangle".into()),
+                2 => Some("stealth".into()),
+                3 => Some("diamond".into()),
+                4 => Some("oval".into()),
+                5 => Some("arrow".into()),
+                _ => None,
+            },
+            w: Some(size(prop(w))),
+            len: Some(size(prop(len))),
+        })
+    };
     let line = (kind != ShapeKind::Group && kind != ShapeKind::Chart).then(|| Outline {
         width: Some(prop(0x01CB).unwrap_or(9525) as i64),
         fill: Some(if lined {
@@ -3194,16 +3624,122 @@ fn legacy_shape(
         }),
         dash: Some(
             match prop(0x01CE).unwrap_or(0) {
-                1 => "dash",
+                1 => "sysDash",
                 2 => "sysDot",
-                3 => "dashDot",
-                4 => "lgDashDotDot",
-                6 => "lgDash",
+                3 => "sysDashDot",
+                4 => "sysDashDotDot",
+                5 => "dot",
+                6 => "dash",
+                7 => "lgDash",
+                8 => "dashDot",
+                9 => "lgDashDot",
+                10 => "lgDashDotDot",
                 _ => "solid",
             }
             .into(),
         ),
+        cap: Some(
+            match prop(0x01D7).unwrap_or(2) {
+                0 => "rnd",
+                1 => "sq",
+                _ => "flat",
+            }
+            .into(),
+        ),
+        compound: Some(
+            match prop(0x01CD).unwrap_or(0) {
+                1 => "dbl",
+                2 => "thickThin",
+                3 => "thinThick",
+                4 => "tri",
+                _ => "sng",
+            }
+            .into(),
+        ),
+        join: Some(
+            match prop(0x01D6).unwrap_or(1) {
+                0 => "bevel",
+                2 => "round",
+                _ => "miter",
+            }
+            .into(),
+        ),
+        head: arrow(0x01D0, 0x01D2, 0x01D3),
+        tail: arrow(0x01D1, 0x01D4, 0x01D5),
     });
+    // 그림자: 0x023F (0x02 + 사용 0x20000), 색 0x0201 (없으면 회색), 불투명도 0x0204 (16.16), 거리 0x0205·0x0206 (EMU,
+    // 없으면 25400), 기준점 0x0210·0x0211 (16.16, ±0.5 = 왼쪽·위/오른쪽·아래 → algn). 흐림은 저장되지 않는다
+    let fixed = |pid: u16| prop(pid).map(|v| v as i32 as f64 / 65536.0);
+    let shadow =
+        matches!(prop(0x023F), Some(b) if b & 0x0002_0000 != 0 && b & 0x02 != 0).then(|| {
+            let (ox, oy) = (
+                prop(0x0205).map_or(25400, |v| v as i32) as f64,
+                prop(0x0206).map_or(25400, |v| v as i32) as f64,
+            );
+            let mut color = art_color(prop(0x0201).unwrap_or(0x0080_8080));
+            if let Some(a) = fixed(0x0204).filter(|&a| a < 1.0) {
+                color
+                    .mods
+                    .push(("alpha".into(), (a * 100_000.0).round() as i64));
+            }
+            let side = |v: Option<f64>, lo: &'static str, hi: &'static str| match v {
+                Some(x) if x < -0.25 => lo,
+                Some(x) if x > 0.25 => hi,
+                _ => "",
+            };
+            let (h, v) = (side(fixed(0x0210), "l", "r"), side(fixed(0x0211), "t", "b"));
+            let dir = (oy.atan2(ox).to_degrees().rem_euclid(360.0) * 60000.0).round() as i64;
+            crate::model::ShapeShadow {
+                dist: ox.hypot(oy).round() as i64,
+                dir: dir % 21_600_000,
+                blur: 0,
+                align: Some(if h.is_empty() && v.is_empty() {
+                    "ctr".to_string()
+                } else {
+                    format!("{v}{h}")
+                }),
+                rot_with_shape: false,
+                color,
+            }
+        });
+    // 잠금: 0x007F 비트 0–8 (묶기, 조절점, 글, 꼭짓점, 자르기, 선택, 위치, 비율, 회전), 0x033F 비트 3 (모양 종류).
+    // 한셀은 글상자를 늘 회전 잠금으로 읽는다 (도형 대조 실험)
+    let mut locks: Vec<String> = Vec::new();
+    if let Some(v) = prop(0x007F) {
+        const NAMES: [&str; 9] = [
+            "noGrp",
+            "noAdjustHandles",
+            "noTextEdit",
+            "noEditPoints",
+            "noCrop",
+            "noSelect",
+            "noMove",
+            "noChangeAspect",
+            "noRot",
+        ];
+        for (i, n) in NAMES.iter().enumerate() {
+            if v & (1 << i) != 0 && v & (1 << (i + 16)) != 0 {
+                locks.push(n.to_string());
+            }
+        }
+    }
+    if matches!(prop(0x033F), Some(v) if v & 0x08 != 0 && v & 0x80000 != 0) {
+        locks.push("noChangeShapeType".into());
+    }
+    if e.has_textbox && kind == ShapeKind::Shape && !locks.iter().any(|l| l == "noRot") {
+        locks.push("noRot".into());
+    }
+    // 종류마다 XML 에 있는 잠금만 (a:picLocks·a:cxnSpLocks 에는 noTextEdit 가 없고, noCrop 은 그림만, 그룹은 다섯 가지)
+    locks.retain(|l| match kind {
+        ShapeKind::Picture => l != "noTextEdit",
+        ShapeKind::Connector => l != "noTextEdit" && l != "noCrop",
+        ShapeKind::Group => matches!(
+            l.as_str(),
+            "noGrp" | "noSelect" | "noRot" | "noChangeAspect" | "noMove"
+        ),
+        _ => l != "noCrop",
+    });
+    locks.sort();
     let text = obj.and_then(|o| o.text.as_ref()).map(|(t, runs)| {
         let font = runs
             .first()
@@ -3219,6 +3755,9 @@ fn legacy_shape(
             }),
             wrap: prop(0x0085).map(|w| if w == 2 { "none" } else { "square" }.into()),
             vert: None,
+            // 레거시에는 글 넘침이 없다 — 한셀은 늘 자름으로 읽는다
+            vert_overflow: Some("clip".into()),
+            horz_overflow: Some("clip".into()),
             insets: [
                 prop(0x0081).map(i64::from),
                 prop(0x0082).map(i64::from),
@@ -3287,12 +3826,18 @@ fn legacy_shape(
                 12 => "star5",
                 13 => "rightArrow",
                 20 => "line",
+                32 => "straightConnector1",
                 _ => "rect",
             }
             .into()
         }),
         fill,
         line,
+        shadow,
+        locks,
+        // OBJ ftCmo: fLocked 0x0001, fPrint 0x0010
+        locks_with_sheet: obj.map(|o| o.grbit & 0x0001 != 0),
+        prints_with_sheet: obj.map(|o| o.grbit & 0x0010 != 0),
         text,
         children,
         // 그림: pib(0x0104) = 그림 저장소 번호 (1부터) → 전역에서 꺼내 둔 xl/media 파트
@@ -3421,10 +3966,16 @@ fn parse_hlink(d: &[u8]) -> Option<Hyperlink> {
             h.target = read_hstr(&mut r);
         } else {
             let clsid = r.take(16)?;
-            // URL 모니커 {79EAC9E0-BAF9-11CE-8C82-00AA004BA90B}
-            if clsid[0] == 0xE0 && clsid[1] == 0xC9 {
-                let len = r.u32()? as usize;
-                h.target = Some(crate::text::utf16le_nul(r.take(len)?));
+            match (clsid[0], clsid[1]) {
+                // URL 모니커 {79EAC9E0-BAF9-11CE-8C82-00AA004BA90B}
+                (0xE0, 0xC9) => {
+                    let len = r.u32()? as usize;
+                    h.target = Some(crate::text::utf16le_nul(r.take(len)?));
+                }
+                // 파일 모니커 {00000303-0000-0000-C000-000000000046}
+                (0x03, 0x03) => h.target = file_moniker(&mut r),
+                // 모르는 모니커: 뒤의 위치를 찾을 수 없다
+                _ => return Some(h),
             }
         }
     }
@@ -3434,6 +3985,34 @@ fn parse_hlink(d: &[u8]) -> Option<Hyperlink> {
         h.location = Some(loc);
     }
     Some(h)
+}
+
+/// 파일 모니커 ([MS-OSHARED] FileMoniker): cAnti u16, ansiLength u32, ansiPath (NUL 끝), endServer u16, 판 u16,
+/// 예약 16 + 4, cbUnicodePathSize u32 (0 이 아니면 cbUnicodePathBytes u32, usKeyValue u16, UTF-16 경로).
+/// 한셀은 드라이브나 UNC 로 시작하지 않는 경로를 `.\` 를 붙인 상대 경로로 읽는다 (하이퍼링크 대조 실험:
+/// `file:///C:/docs/book.xlsx` → `.\file:///C:/docs/book.xlsx`), `cAnti` 만큼 `..\` 를 붙인다
+fn file_moniker(r: &mut Rd) -> Option<String> {
+    let anti = r.u16()? as usize;
+    let n = r.u32()? as usize;
+    let ansi = r.take(n)?;
+    r.take(2 + 2 + 16 + 4)?;
+    let unicode = match r.u32()? {
+        0 => None,
+        _ => {
+            let bytes = r.u32()? as usize;
+            r.take(2)?;
+            Some(crate::text::utf16le(r.take(bytes)?))
+        }
+    };
+    let path = unicode.unwrap_or_else(|| {
+        let end = ansi.iter().position(|&b| b == 0).unwrap_or(ansi.len());
+        String::from_utf8_lossy(&ansi[..end]).into_owned()
+    });
+    let absolute = path.get(1..2) == Some(":") || path.starts_with("\\\\");
+    Some(match anti {
+        0 if !absolute => format!(".\\{path}"),
+        k => format!("{}{path}", "..\\".repeat(k)),
+    })
 }
 
 /// 0xA001 문단 모양 레코드 (37바이트, 문단 번호가 있으면 41바이트).
@@ -3567,6 +4146,39 @@ mod tests {
         let f = d.len();
         d.extend_from_slice(&[0x1D, 1]);
         assert_eq!(cf_dxf_id(&d, f, true, &t), Some(1));
+    }
+
+    /// x14 조건부 서식 실험에서 한셀이 쓴 CF12 의 기준 값: 수식으로 쓴 값(PtgInt), 종류 7 = 수식, 숫자 f64
+    #[test]
+    fn legacy_cfvo_values() {
+        let dec = |t: &[u8]| match t {
+            [0x1e, v, 0] => Some(v.to_string()),
+            [0x44, ..] => Some("$H$12".to_string()),
+            _ => None,
+        };
+        let mut b = vec![4, 3, 0, 0x1e, 33, 0];
+        b.extend_from_slice(&[7, 7, 0, 0x44, 0x0b, 0, 0, 0, 7, 0]);
+        b.push(5);
+        b.extend_from_slice(&[0, 0]);
+        b.extend_from_slice(&10.0f64.to_le_bytes());
+        b.extend_from_slice(&[2, 0, 0]);
+        let mut r = Rd::new(&b);
+        let v: Vec<_> = (0..4)
+            .map(|_| {
+                let c = legacy_cfvo(&mut r, &dec).unwrap();
+                (c.kind, c.val)
+            })
+            .collect();
+        assert_eq!(
+            v,
+            [
+                ("percent".into(), Some("33".into())),
+                ("formula".into(), Some("$H$12".into())),
+                ("percentile".into(), Some("10".into())),
+                ("min".into(), None)
+            ]
+        );
+        assert_eq!(r.left(), 0);
     }
 
     #[test]

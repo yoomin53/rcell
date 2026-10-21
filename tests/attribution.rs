@@ -22,7 +22,8 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let p = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
         if p.is_dir() {
-            if !SKIP_DIRS.contains(&name.as_str()) {
+            // 숨은 폴더(.git, 도구가 만든 작업 폴더 등)는 소스 트리가 아니다 (.github 에는 검사 대상 파일이 없다)
+            if !SKIP_DIRS.contains(&name.as_str()) && !name.starts_with('.') {
                 walk(&p, out);
             }
         } else if p

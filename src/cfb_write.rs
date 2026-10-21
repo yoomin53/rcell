@@ -3,22 +3,27 @@
 //
 // rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
 
-//! OLE2 복합 문서(CFB) 쓰기 — 공개 명세 [MS-CFB] 판 3 (512바이트 섹터).
+//! OLE2 복합 문서(CFB) 쓰기 — 공개 명세 [MS-CFB] 판 3 (512바이트 섹터). 루트 저장소 바로 아래 스트림만 쓴다.
 //!
-//! 섹터 배치는 한셀이 레거시 `.cell` 을 저장할 때의 배치를 따른다 (관측, 말뭉치 117개):
+//! 한셀이 쓰는 두 섹터 배치를 따른다 (관측):
 //!
 //! ```text
-//! 섹터 0      처음 만든 FAT 의 흔적 (FAT 에서는 빈 섹터): [FATSECT, ENDOFCHAIN, FREE …]
-//! 섹터 1      처음 만든 디렉터리의 흔적 (빈 섹터): Root Entry 하나
-//! 섹터 2      디렉터리
-//! 섹터 3      첫 FAT 섹터
-//! 섹터 4      미니 FAT
-//! 섹터 5…     미니 스트림 (4096바이트 미만 스트림)
-//! 그다음      나머지 FAT 섹터, 큰 스트림들 (디렉터리 순서)
+//! 파일 배치 (write — 레거시 .cell, 말뭉치 117개)   메모리 배치 (write_streams — xl/vbsProject.bin)
+//! 섹터 0   처음 만든 FAT 의 흔적 (FAT 에서는 빈 섹터)   섹터 0…  FAT (+ DIFAT)
+//! 섹터 1   처음 만든 디렉터리의 흔적 (Root Entry 하나)  그다음    디렉터리
+//! 섹터 2   디렉터리                                   그다음    미니 FAT
+//! 섹터 3   첫 FAT 섹터                                그다음    미니 스트림
+//! 섹터 4   미니 FAT                                   그다음    큰 스트림
+//! 섹터 5…  미니 스트림 (4096바이트 미만 스트림)
+//! 그다음   나머지 FAT 섹터, DIFAT, 큰 스트림
 //! ```
 //!
-//! 디렉터리는 루트 아래 스트림들을 레드·블랙 나무로 잇는다. 한셀의 두 스트림 문서(`Workbook`,
-//! `\x05SummaryInformation`)는 첫 스트림이 루트의 자식(검정), 둘째가 그 오른쪽(빨강)이다.
+//! 디렉터리 항목은 주어진 차례(한셀: `Workbook`, `_VBS_PROJECT_W`, `\x05SummaryInformation`)이고, 스트림 데이터는
+//! 그 거꾸로 놓인다 (미니 스트림에 SummaryInformation, `_VBS_PROJECT_W`, `Workbook` 차례 — 작은 레거시 문서와
+//! 매크로 문서 관측). 루트 아래는 이름 순서의 균형 레드·블랙 나무: 가운데(짝수 개면 앞쪽)가 뿌리, 가장 깊은 층만
+//! 빨강 (두 스트림이면 첫째가 뿌리·둘째가 오른쪽 빨강, 세 스트림이면 가운데가 뿌리·양쪽 빨강).
+
+use crate::error::{Error, Result};
 
 const SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 const SECTOR: usize = 512;
@@ -34,6 +39,15 @@ const NO_STREAM: u32 = 0xFFFF_FFFF;
 pub struct Stream<'a> {
     pub name: &'a str,
     pub data: &'a [u8],
+}
+
+/// 섹터 배치
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// ole32 가 파일에 쓰는 배치 (흔적 섹터 둘, 디렉터리 2, 첫 FAT 3)
+    File,
+    /// 메모리에 만든 복합 문서 (FAT 이 앞)
+    Memory,
 }
 
 /// [MS-CFB] 2.6.4 이름 비교: 길이(UTF-16 단위)가 짧은 것이 먼저, 같으면 대문자로 바꾼 코드 단위 순서
@@ -104,8 +118,31 @@ fn empty_entry() -> Entry {
     }
 }
 
-/// 스트림들로 복합 문서를 만든다. `modified` 는 루트 항목의 수정 시각 (FILETIME, 0 = 없음).
+/// 스트림들로 복합 문서를 만든다 (한셀이 레거시 `.cell` 을 쓰는 파일 배치). `modified` 는 루트 항목의 수정 시각
+/// (FILETIME, 0 = 없음).
 pub fn write(streams: &[Stream], modified: u64) -> Vec<u8> {
+    build(streams, modified, Layout::File)
+}
+
+/// 스트림들로 복합 문서를 만든다 (한셀의 `xl/vbsProject.bin` 같은 메모리 배치: FAT, 디렉터리, 미니 FAT, 미니 스트림,
+/// 큰 스트림). 이름은 1–31자.
+pub fn write_streams(streams: &[(&str, &[u8])]) -> Result<Vec<u8>> {
+    for (name, _) in streams {
+        if name.is_empty() || name.encode_utf16().count() > 31 {
+            return Err(Error::InvalidValue {
+                context: "OLE2(CFB) 쓰기".into(),
+                value: (*name).into(),
+            });
+        }
+    }
+    let s: Vec<Stream> = streams
+        .iter()
+        .map(|&(name, data)| Stream { name, data })
+        .collect();
+    Ok(build(&s, 0, Layout::Memory))
+}
+
+fn build(streams: &[Stream], modified: u64, layout: Layout) -> Vec<u8> {
     // 디렉터리 항목: 0 = 루트, 1.. = 스트림 (주어진 순서). 나무는 이름 순서로 균형 있게 잇는다
     let mut entries: Vec<Entry> = vec![Entry {
         name: "Root Entry".into(),
@@ -132,11 +169,14 @@ pub fn write(streams: &[Stream], modified: u64) -> Vec<u8> {
         });
     }
     link_tree(&mut entries);
+    // 데이터는 디렉터리의 거꾸로
+    let data_order: Vec<usize> = (0..streams.len()).rev().collect();
 
     // 미니 스트림: 작은 스트림을 64바이트 단위로 이어 붙인다
     let mut mini_stream: Vec<u8> = Vec::new();
     let mut mini_fat: Vec<u32> = Vec::new();
-    for (i, s) in streams.iter().enumerate() {
+    for &i in &data_order {
+        let s = &streams[i];
         if s.data.len() >= CUTOFF || s.data.is_empty() {
             continue;
         }
@@ -154,19 +194,21 @@ pub fn write(streams: &[Stream], modified: u64) -> Vec<u8> {
         entries[i + 1].start = first;
     }
 
-    // 섹터 배치: 0 흔적 FAT, 1 흔적 디렉터리, 2 디렉터리, 3 첫 FAT, 4 미니 FAT, 5.. 미니 스트림
     let dir_sectors = (entries.len().div_ceil(4)).max(1);
     let mini_fat_sectors = (mini_fat.len() * 4).div_ceil(SECTOR);
     let mini_stream_sectors = mini_stream.len().div_ceil(SECTOR);
-    let big: Vec<usize> = (0..streams.len())
+    let big: Vec<usize> = data_order
+        .iter()
+        .copied()
         .filter(|&i| streams[i].data.len() >= CUTOFF)
         .collect();
     let big_sectors: usize = big
         .iter()
         .map(|&i| streams[i].data.len().div_ceil(SECTOR))
         .sum();
-    // FAT 섹터 수: 모든 섹터(FAT 자신 포함)를 담을 만큼
-    let fixed = 2 + dir_sectors + mini_fat_sectors + mini_stream_sectors + big_sectors;
+    // FAT 섹터 수: 모든 섹터(FAT·DIFAT 자신 포함)를 담을 만큼
+    let stale = if layout == Layout::File { 2 } else { 0 };
+    let fixed = stale + dir_sectors + mini_fat_sectors + mini_stream_sectors + big_sectors;
     let mut fat_sectors = 1;
     while fat_sectors * (SECTOR / 4) < fixed + fat_sectors + difat_sectors(fat_sectors) {
         fat_sectors += 1;
@@ -175,29 +217,43 @@ pub fn write(streams: &[Stream], modified: u64) -> Vec<u8> {
     let total = fixed + fat_sectors + n_difat;
 
     let mut fat = vec![FREE; fat_sectors * (SECTOR / 4)];
-    let mut next = 2usize;
+    let mut fat_locs: Vec<usize> = Vec::new();
+    let mut difat_locs = Vec::new();
+    let mut next = stale;
+    fn put_fats(fat: &mut [u32], next: &mut usize, n: usize, locs: &mut Vec<usize>) {
+        for _ in 0..n {
+            fat[*next] = FAT_SECT;
+            locs.push(*next);
+            *next += 1;
+        }
+    }
+    if layout == Layout::Memory {
+        put_fats(&mut fat, &mut next, fat_sectors, &mut fat_locs);
+        for _ in 0..n_difat {
+            fat[next] = DIFAT_SECT;
+            difat_locs.push(next);
+            next += 1;
+        }
+    }
     let dir_start = next;
     chain(&mut fat, dir_start, dir_sectors);
     next += dir_sectors;
-    let mut fat_locs: Vec<usize> = vec![next];
-    fat[next] = FAT_SECT;
-    next += 1;
+    if layout == Layout::File {
+        put_fats(&mut fat, &mut next, 1, &mut fat_locs);
+    }
     let mini_fat_start = (mini_fat_sectors > 0).then_some(next);
     chain(&mut fat, next, mini_fat_sectors);
     next += mini_fat_sectors;
     let mini_start = (mini_stream_sectors > 0).then_some(next);
     chain(&mut fat, next, mini_stream_sectors);
     next += mini_stream_sectors;
-    for _ in 1..fat_sectors {
-        fat[next] = FAT_SECT;
-        fat_locs.push(next);
-        next += 1;
-    }
-    let mut difat_locs = Vec::new();
-    for _ in 0..n_difat {
-        fat[next] = DIFAT_SECT;
-        difat_locs.push(next);
-        next += 1;
+    if layout == Layout::File {
+        put_fats(&mut fat, &mut next, fat_sectors - 1, &mut fat_locs);
+        for _ in 0..n_difat {
+            fat[next] = DIFAT_SECT;
+            difat_locs.push(next);
+            next += 1;
+        }
     }
     for &i in &big {
         let n = streams[i].data.len().div_ceil(SECTOR);
@@ -241,32 +297,25 @@ pub fn write(streams: &[Stream], modified: u64) -> Vec<u8> {
         let a = SECTOR * (n + 1);
         a..a + SECTOR
     };
-    // 흔적 FAT (섹터 0) 과 흔적 디렉터리 (섹터 1)
-    {
-        let r = sector(0);
-        let s = &mut out[r];
-        s.fill(0xFF);
-        put_u32(s, 0, FAT_SECT);
-        put_u32(s, 4, END_OF_CHAIN);
-    }
-    {
-        let r = sector(1);
+    if layout == Layout::File {
+        // 흔적 FAT (섹터 0) 과 흔적 디렉터리 (섹터 1)
+        {
+            let s = &mut out[sector(0)];
+            s.fill(0xFF);
+            put_u32(s, 0, FAT_SECT);
+            put_u32(s, 4, END_OF_CHAIN);
+        }
         let root = Entry {
             name: "Root Entry".into(),
             kind: 5,
-            color: 0,
-            left: NO_STREAM,
-            right: NO_STREAM,
-            child: NO_STREAM,
             start: END_OF_CHAIN,
-            size: 0,
-            modified: 0,
+            ..empty_entry()
         };
         let mut d = dir_entry(&root).to_vec();
         for _ in 1..4 {
             d.extend_from_slice(&dir_entry(&empty_entry()));
         }
-        out[r].copy_from_slice(&d);
+        out[sector(1)].copy_from_slice(&d);
     }
     // 디렉터리
     let mut dir: Vec<u8> = Vec::with_capacity(dir_sectors * SECTOR);
@@ -286,8 +335,7 @@ pub fn write(streams: &[Stream], modified: u64) -> Vec<u8> {
     }
     // DIFAT (FAT 섹터가 109개를 넘을 때)
     for (k, &loc) in difat_locs.iter().enumerate() {
-        let r = sector(loc);
-        let s = &mut out[r];
+        let s = &mut out[sector(loc)];
         for i in 0..127 {
             let v = fat_locs.get(109 + k * 127 + i).map_or(FREE, |&x| x as u32);
             put_u32(s, i * 4, v);
@@ -330,8 +378,8 @@ fn chain(fat: &mut [u32], start: usize, n: usize) {
     }
 }
 
-/// 루트의 자식들을 이름 순서로 레드·블랙 나무로 잇는다. 한 단계짜리 균형 나무: 가운데가 뿌리(검정),
-/// 나머지는 재귀로 왼쪽·오른쪽. 깊이가 가장 깊은 잎은 빨강이다 (한셀: 두 스트림이면 둘째가 빨강).
+/// 루트의 자식들을 이름 순서로 레드·블랙 나무로 잇는다. 균형 나무: 가운데(짝수 개면 앞쪽)가 뿌리(검정),
+/// 나머지는 재귀로 왼쪽·오른쪽. 가장 깊은 층은 빨강이다 — 모든 길의 검정 수가 같다.
 fn link_tree(entries: &mut [Entry]) {
     let mut ids: Vec<usize> = (1..entries.len()).collect();
     ids.sort_by(|&a, &b| name_cmp(&entries[a].name, &entries[b].name));
@@ -339,7 +387,6 @@ fn link_tree(entries: &mut [Entry]) {
         if ids.is_empty() {
             return NO_STREAM;
         }
-        // 짝수 개면 왼쪽을 하나 적게 (뿌리를 앞쪽에)
         let mid = (ids.len() - 1) / 2;
         let id = ids[mid];
         let left = build(entries, &ids[..mid], depth + 1, max);
@@ -391,6 +438,41 @@ mod tests {
     }
 
     #[test]
+    fn small_streams_are_stored_in_reverse_directory_order() {
+        // 작은 레거시 문서: 미니 스트림의 0 번에 SummaryInformation, 그 뒤에 Workbook (관측)
+        let wbk = vec![1u8; 3000];
+        let sum = vec![2u8; 493];
+        let vbs = vec![3u8; 454];
+        let bytes = write(
+            &[
+                Stream {
+                    name: "Workbook",
+                    data: &wbk,
+                },
+                Stream {
+                    name: "_VBS_PROJECT_W",
+                    data: &vbs,
+                },
+                Stream {
+                    name: "\u{5}SummaryInformation",
+                    data: &sum,
+                },
+            ],
+            0,
+        );
+        let dir = &bytes[SECTOR * 3..];
+        let start =
+            |i: usize| u32::from_le_bytes(dir[i * 128 + 116..i * 128 + 120].try_into().unwrap());
+        assert_eq!((start(1), start(2), start(3)), (16, 8, 0));
+        // 가운데 _VBS_PROJECT_W 가 뿌리(검정), 양쪽이 빨강
+        let colors: Vec<u8> = (1..=3).map(|i| dir[i * 128 + 0x43]).collect();
+        assert_eq!(colors, [0, 1, 0]);
+        let c = Cfb::open(&bytes).unwrap();
+        assert_eq!(c.read("/Workbook").unwrap(), wbk);
+        assert_eq!(c.read("/_VBS_PROJECT_W").unwrap(), vbs);
+    }
+
+    #[test]
     fn many_fat_sectors_use_difat() {
         // FAT 섹터 109개를 넘기려면 약 7MB
         let big = vec![7u8; 8 * 1024 * 1024];
@@ -403,5 +485,57 @@ mod tests {
         );
         let c = Cfb::open(&bytes).unwrap();
         assert_eq!(c.read("/Workbook").unwrap().len(), big.len());
+        let m = write_streams(&[("Big", &big)]).unwrap();
+        assert_eq!(
+            Cfb::open(&m).unwrap().read("/Big").unwrap().len(),
+            big.len()
+        );
+    }
+
+    #[test]
+    fn written_streams_read_back() {
+        let small: Vec<u8> = (0..454u32).map(|i| (i * 7) as u8).collect();
+        let large: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        let tiny = b"x".to_vec();
+        let bytes = write_streams(&[
+            ("_VBS_PROJECT_W", &small),
+            ("Big", &large),
+            ("a", &tiny),
+            ("Empty", &[]),
+        ])
+        .unwrap();
+        let cfb = crate::cfb::Cfb::open(&bytes).unwrap();
+        assert_eq!(cfb.read("/_VBS_PROJECT_W").unwrap(), small);
+        assert_eq!(cfb.read("/Big").unwrap(), large);
+        assert_eq!(cfb.read("/a").unwrap(), tiny);
+        assert_eq!(cfb.read("/Empty").unwrap(), Vec::<u8>::new());
+        let mut names: Vec<String> = cfb.streams().into_iter().map(|s| s.0).collect();
+        names.sort();
+        assert_eq!(names, ["/Big", "/Empty", "/_VBS_PROJECT_W", "/a"]);
+        assert!(write_streams(&[("", &tiny)]).is_err());
+    }
+
+    #[test]
+    fn memory_layout_puts_fat_first() {
+        // 한셀의 xl/vbsProject.bin: FAT 0, 디렉터리 1, 미니 FAT 2, 미니 스트림 3 (관측)
+        let small = vec![5u8; 454];
+        let bytes = write_streams(&[("_VBS_PROJECT_W", &small)]).unwrap();
+        let at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+        assert_eq!((at(0x4C), at(0x30), at(0x3C)), (0, 1, 2));
+        assert_eq!(bytes.len(), 512 * 5);
+    }
+
+    #[test]
+    fn tree_colors_balance_black_height() {
+        // 이름 5개: 정렬 a, bb, ccc, dddd, eeeee → 가운데 ccc 가 뿌리, a·dddd 가 깊이 1 (검정), bb·eeeee 가 깊이 2 (빨강)
+        let data = [1u8];
+        let names = ["a", "bb", "ccc", "dddd", "eeeee"];
+        let streams: Vec<(&str, &[u8])> = names.iter().map(|n| (*n, &data[..])).collect();
+        let bytes = write_streams(&streams).unwrap();
+        let dir = &bytes[SECTOR * 2..];
+        let colors: Vec<u8> = (1..=5).map(|i| dir[i * 128 + 0x43]).collect();
+        assert_eq!(colors, [1, 0, 1, 1, 0]);
+        let cfb = crate::cfb::Cfb::open(&bytes).unwrap();
+        assert_eq!(cfb.streams().len(), 5);
     }
 }

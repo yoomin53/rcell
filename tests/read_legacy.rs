@@ -58,6 +58,17 @@ fn cell_head(row: u32, col: u16) -> Vec<u8> {
 fn workbook_stream() -> Vec<u8> {
     let mut b = Biff::default();
     b.rec(0x0809, &bof(0x0005));
+    // 통합 문서 코드 이름과 WINDOW1 (한셀이 쓴 그대로: 240,120 16000x9500, 탭 비율 723, 첫 탭 1, grbit 0x38)
+    let mut code = 6u16.to_le_bytes().to_vec();
+    code.push(0);
+    code.extend(utf16("MyBook"));
+    b.rec(0x01BA, &code);
+    b.rec(
+        0x003D,
+        &[
+            0xf0, 0, 0x78, 0, 0x80, 0x3e, 0x1c, 0x25, 0x38, 0, 0, 0, 1, 0, 1, 0, 0xd3, 0x02,
+        ],
+    );
     // BOUNDSHEET: 위치는 나중에 채운다
     let mut bs = vec![0, 0, 0, 0, 0, 0, 4, 0];
     bs.extend(utf16("Sheet"));
@@ -211,12 +222,23 @@ fn drawing_records(b: &mut Biff) {
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect();
-    let mut opt = Vec::new();
-    for (pid, v) in [
-        (0x0181u16, 0x00E1FFFFu32),
+    // 채우기, 선 없음, 가운데 맞춤 + (도형 대조 실험에서 한셀이 쓴 값) 회전 잠금, 그림자 (빨강, X·Y -17960 = 225°
+    // 25399), 선 끝 sq·겹선 dbl·이음 bevel·점선 dash
+    let props: [(u16, u32); 11] = [
+        (0x0181, 0x00E1FFFF),
         (0x01FF, 0x0008_0000),
         (0x0087, 1),
-    ] {
+        (0x007F, 0x0300_0300),
+        (0x0201, 0x0000_00FF),
+        (0x0205, (-17960i32) as u32),
+        (0x0206, (-17960i32) as u32),
+        (0x023F, 0x0002_0002),
+        (0x01D7, 1),
+        (0x01CD, 1),
+        (0x01D6, 0),
+    ];
+    let mut opt = Vec::new();
+    for (pid, v) in props {
         opt.extend_from_slice(&pid.to_le_bytes());
         opt.extend_from_slice(&v.to_le_bytes());
     }
@@ -231,7 +253,7 @@ fn drawing_records(b: &mut Biff) {
     anchor.extend_from_slice(&[0, 0]);
     let shape_head = [
         art(0x2, 1, 0xF00A, &[0x01, 0x04, 0, 0, 0x00, 0x0A, 0, 0]),
-        art(0x3, 4, 0xF00B, &opt),
+        art(0x3, props.len() as u16 + 1, 0xF00B, &opt),
         art(0x0, 0, 0xF010, &anchor),
         art(0x0, 0, 0xF011, &[]),
     ]
@@ -258,7 +280,8 @@ fn drawing_records(b: &mut Biff) {
     first.extend(shape_head);
     // MSODRAWING(도형) → OBJ(ot 0x1E) → MSODRAWING(ClientTextbox) → TXO
     b.rec(0x00EC, &first);
-    let mut obj = vec![0x15, 0, 0x12, 0, 0x1E, 0, 1, 0, 0x11, 0x60];
+    // ftCmo 플래그 0x6001: 잠금, 인쇄 안 함
+    let mut obj = vec![0x15, 0, 0x12, 0, 0x1E, 0, 1, 0, 0x01, 0x60];
     obj.extend_from_slice(&[0; 16]);
     b.rec(0x005D, &obj);
     b.rec(0x00EC, &textbox);
@@ -286,7 +309,20 @@ fn office_art_text_box_becomes_a_shape() {
         Some(Paint::Solid(c)) => assert_eq!(c.value, "srgb:FFFFE1"),
         other => panic!("{other:?}"),
     }
-    assert_eq!(t.line.as_ref().unwrap().fill, Some(Paint::None));
+    let l = t.line.as_ref().unwrap();
+    assert_eq!(l.fill, Some(Paint::None));
+    assert_eq!(
+        (l.cap.as_deref(), l.compound.as_deref(), l.join.as_deref()),
+        (Some("sq"), Some("dbl"), Some("bevel"))
+    );
+    let sd = t.shadow.as_ref().unwrap();
+    assert_eq!((sd.dist, sd.dir), (25399, 13_500_000));
+    assert_eq!(sd.color.value, "srgb:FF0000");
+    assert_eq!(t.locks, ["noRot"]);
+    assert_eq!(
+        (t.locks_with_sheet, t.prints_with_sheet),
+        (Some(true), Some(false))
+    );
     // 글꼴이 없으면 11pt → MDW 8. B 열 9 글자 → 72px, 실효 71px 의 ½ = 35.5 → 36px
     let a = &t.anchor;
     assert_eq!((a.from.col, a.from.row), (1, 1));
@@ -303,6 +339,21 @@ fn notes_join_obj_txo_and_note_records() {
     assert_eq!(c[0].author, "yoomin53");
     assert_eq!(c[0].text.text, "메모 내용");
     assert!(c[0].visible);
+}
+
+#[test]
+fn workbook_window_and_code_name() {
+    let wb = read_workbook_stream(&workbook_stream()).unwrap();
+    assert_eq!(wb.code_name.as_deref(), Some("MyBook"));
+    let v = wb.view.unwrap();
+    assert_eq!(
+        (v.x_window, v.y_window, v.window_width, v.window_height),
+        (240, 120, 16000, 9500)
+    );
+    assert_eq!((v.tab_ratio, v.first_sheet, v.active_tab), (723, 1, 0));
+    assert!(v.show_horizontal_scroll && v.show_vertical_scroll && v.show_sheet_tabs);
+    // 시트의 CODENAME 은 시트 것으로 남는다
+    assert_eq!(wb.sheets[0].code_name.as_deref(), Some("Sheet1"));
 }
 
 #[test]
@@ -464,6 +515,12 @@ fn filter_stream() -> Vec<u8> {
     af12.extend_from_slice(&[0, 0, 8, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
     af12.extend_from_slice(&[0; 16]);
     b.rec(0x087E, &af12);
+    // ContinueFrt12: 기간 시작(>=) 46314, 끝(<) 46315 — 숫자 DOPER 둘
+    for (sign, v) in [(6u8, 46314.0f64), (1, 46315.0)] {
+        let mut c = vec![0x7f, 0x08, 1, 0, 0, 0, 11, 0, 0, 0, 4, 0, 0x04, sign];
+        c.extend_from_slice(&v.to_le_bytes());
+        b.rec(0x087F, &c);
+    }
     // E열: > 20 그리고 < 100 (RK)
     b.rec(
         0x009E,
@@ -525,7 +582,12 @@ fn outline_auto_filter_and_protection() {
     );
     assert!(c[0].custom.is_empty());
     assert_eq!(c[1].top10, Some((false, true, 20.0)));
+    assert_eq!(c[1].filter_val, Some(-3.0));
     assert_eq!(c[2].dynamic.as_deref(), Some("today"));
+    assert_eq!(
+        (c[2].dynamic_val, c[2].dynamic_max_val),
+        (Some(46314.0), Some(46315.0))
+    );
     assert!(c[2].custom.is_empty());
     assert_eq!(
         c[3].custom,
@@ -535,4 +597,235 @@ fn outline_auto_filter_and_protection() {
         ]
     );
     assert!(c[3].custom_and);
+}
+
+/// 수식 대조 실험에서 한셀이 쓴 배치: 배열 수식(ARRAY 0x0221), 데이터 표(TABLE 0x0236 + PtgTbl), 시트 범위 이름
+fn formula_stream() -> Vec<u8> {
+    let mut b = Biff::default();
+    b.rec(0x0809, &bof(0x0005));
+    let mut bs_at = Vec::new();
+    for name in ["Sheet1", "Sheet2"] {
+        let mut bs = vec![0, 0, 0, 0, 0, 0, name.len() as u8, 0];
+        bs.extend(utf16(name));
+        bs_at.push(b.rec(0x0085, &bs));
+    }
+    b.rec(0x01AE, &[2, 0, 0x01, 0x04]);
+    b.rec(0x0017, &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0]);
+    // NAME: L (Sheet1 범위) = Sheet1!$B$1, L (Sheet2 범위) = Sheet2!$A$1, Note (설명 "설명") = 3
+    let name = |itab: u8, n: &str, rgce: &[u8], desc: &str| {
+        let mut d = vec![0, 0, 0, n.len() as u8];
+        d.extend_from_slice(&(rgce.len() as u16).to_le_bytes());
+        d.extend_from_slice(&[0, 0, itab, 0, 0, desc.chars().count() as u8, 0, 0, 0]);
+        d.extend(utf16(n));
+        d.extend_from_slice(rgce);
+        if !desc.is_empty() {
+            d.push(0);
+            d.extend(utf16(desc));
+        }
+        d
+    };
+    b.rec(0x0018, &name(1, "L", &[0x3a, 0, 0, 0, 0, 0, 0, 1, 0], ""));
+    b.rec(0x0018, &name(2, "L", &[0x3a, 1, 0, 0, 0, 0, 0, 0, 0], ""));
+    b.rec(0x0018, &name(0, "Note", &[0x1e, 3, 0], "설명"));
+    b.rec(0x000A, &[]);
+
+    let formula = |row: u32, col: u16, tokens: &[u8]| {
+        let mut fm = cell_head(row, col);
+        fm.extend_from_slice(&2.0f64.to_le_bytes());
+        fm.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        fm.extend_from_slice(&(tokens.len() as u16).to_le_bytes());
+        fm.extend_from_slice(tokens);
+        fm
+    };
+    let mut at = vec![b.rec(0x0809, &bof(0x0010)) as u32];
+    // A1:A2 = {B1:B2*2}: A1 의 PtgExp 는 자기 자신, 뒤에 ARRAY, A2 의 PtgExp 는 A1
+    b.rec(0x0006, &formula(0, 0, &[0x01, 0, 0, 0, 0, 0, 0]));
+    let mut arr = vec![0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tokens = [
+        0x45, 0, 0, 0, 0, 1, 0, 0, 0, 0x01, 0xc0, 0x01, 0xc0, 0x1e, 2, 0, 0x05,
+    ];
+    arr.extend_from_slice(&(tokens.len() as u16).to_le_bytes());
+    arr.extend_from_slice(&tokens);
+    b.rec(0x0221, &arr);
+    b.rec(0x0006, &formula(1, 0, &[0x01, 0, 0, 0, 0, 0, 0]));
+    // F3:F4 = 데이터 표 (열 입력 D1): F3 의 PtgTbl 은 자기 자신, 뒤에 TABLE, F4 의 PtgTbl 은 F3
+    b.rec(0x0006, &formula(2, 5, &[0x02, 2, 0, 0, 0, 5, 0]));
+    b.rec(
+        0x0236,
+        &[
+            2, 0, 0, 0, 3, 0, 0, 0, 5, 0, 5, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff,
+        ],
+    );
+    b.rec(0x0006, &formula(3, 5, &[0x02, 2, 0, 0, 0, 5, 0]));
+    // A9: 파일 모니커 + 위치 (한셀이 쓰는 HLINK), 그리고 [MS-XLS] HLINKTOOLTIP (한셀은 쓰지 않는다)
+    let mut hl = vec![8, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0];
+    hl.extend_from_slice(&[
+        0xd0, 0xc9, 0xea, 0x79, 0xf9, 0xba, 0xce, 0x11, 0x8c, 0x82, 0x00, 0xaa, 0x00, 0x4b, 0xa9,
+        0x0b, 2, 0, 0, 0, 0x09, 0, 0, 0, 0x03, 0x03, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0,
+        0x46, 0, 0, 9, 0, 0, 0,
+    ]);
+    hl.extend_from_slice(b"book.xls\0");
+    hl.extend_from_slice(&[0xff, 0xff, 0xad, 0xde]);
+    hl.extend_from_slice(&[0; 24]);
+    hl.extend_from_slice(&6u32.to_le_bytes());
+    hl.extend(utf16("part2\0"));
+    b.rec(0x01B8, &hl);
+    let mut tip = vec![0x00, 0x08, 8, 0, 8, 0, 0, 0, 0, 0];
+    tip.extend(utf16("팁\0"));
+    b.rec(0x0800, &tip);
+    b.rec(0x000A, &[]);
+    // Sheet2: A1 = Sheet1 범위의 L (이름 1), B1 = 자기 시트의 L (이름 2)
+    at.push(b.rec(0x0809, &bof(0x0010)) as u32);
+    b.rec(0x0006, &formula(0, 0, &[0x43, 1, 0, 0, 0]));
+    b.rec(0x0006, &formula(0, 1, &[0x43, 2, 0, 0, 0]));
+    b.rec(0x000A, &[]);
+    for (bs, sheet) in bs_at.into_iter().zip(at) {
+        b.0[bs + 4..bs + 8].copy_from_slice(&sheet.to_le_bytes());
+    }
+    b.0
+}
+
+#[test]
+fn array_formulas_data_tables_and_local_names() {
+    use rcell::model::FormulaKind;
+    let wb = read_workbook_stream(&formula_stream()).unwrap();
+    let s = &wb.sheets[0];
+    let f = |sh: &rcell::model::Sheet, row, col| {
+        sh.cell(CellRef { row, col })
+            .and_then(|c| c.formula.clone())
+    };
+    let a1 = f(s, 0, 0).unwrap();
+    assert_eq!(a1.kind, FormulaKind::Array);
+    assert_eq!(a1.text, "B1:B2*2");
+    assert_eq!(a1.range.as_deref(), Some("A1:A2"));
+    // 범위 안 다른 셀은 수식 없이 값만 (XML 과 같다)
+    assert!(f(s, 1, 0).is_none());
+    let t = f(s, 2, 5).unwrap();
+    assert_eq!(t.kind, FormulaKind::DataTable);
+    assert_eq!(t.range.as_deref(), Some("F3:F4"));
+    let d = t.data_table.unwrap();
+    assert!(!d.two_d && !d.row_input);
+    assert_eq!((d.r1.as_deref(), d.r2.as_deref()), (Some("D1"), None));
+    assert!(f(s, 3, 5).is_none());
+    // 다른 시트 범위의 이름은 시트 이름을 붙인다
+    let s2 = &wb.sheets[1];
+    assert_eq!(f(s2, 0, 0).unwrap().text, "Sheet1!L");
+    assert_eq!(f(s2, 0, 1).unwrap().text, "L");
+    let h = &s.hyperlinks[0];
+    assert_eq!(h.target.as_deref(), Some(r".\book.xls"));
+    assert_eq!(h.location.as_deref(), Some("part2"));
+    assert_eq!(h.tooltip.as_deref(), Some("팁"));
+    let note = wb.defined_names.iter().find(|n| n.name == "Note").unwrap();
+    assert_eq!(note.comment.as_deref(), Some("설명"));
+    assert_eq!(wb.defined_names.iter().filter(|n| n.name == "L").count(), 2);
+}
+
+/// 표 대조 실험에서 한셀이 쓴 배치: 전역의 표(0xB005 BrtBeginList, 0xB00B 열 + 요약 행 수식, 0xB00C 스타일, 0xB00D),
+/// 시트의 0xB00A(표 번호)·0xB006·0xB007(자동 필터), 구조적 참조(PtgList) 수식
+#[test]
+fn tables_and_structured_references() {
+    let le = |v: &[u32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+    let ws = |s: &str| {
+        let mut b = le(&[s.encode_utf16().count() as u32]);
+        b.extend(utf16(s));
+        b
+    };
+    let mut b = Biff::default();
+    b.rec(0x0809, &bof(0x0005));
+    let mut bs = vec![0, 0, 0, 0, 0, 0, 6, 0];
+    bs.extend(utf16("Sheet1"));
+    let bs_at = b.rec(0x0085, &bs);
+    // 표 1: A1:B4, 머리글 1, 요약 1 (요약 행을 보인 적 있음), 요약 차등 서식 2
+    let mut list = le(&[0, 3, 0, 1, 0, 1, 1, 1, 1]);
+    list.extend(le(&[u32::MAX, u32::MAX, 2, u32::MAX, u32::MAX, 0, 0]));
+    list.extend(ws("Table1"));
+    list.extend(ws("Table1"));
+    list.extend(le(&[0, 0, 0, 0]));
+    b.rec(0xB005, &list);
+    let col = |id: u32, ilta: u32, name: &str, label: &str, tail: &[u8]| {
+        let mut c = le(&[id, ilta, u32::MAX, 1, u32::MAX, 0, 0]);
+        c.extend(ws(name));
+        c.extend(ws(label));
+        c.extend(le(&[0, 0, 0]));
+        c.extend_from_slice(tail);
+        c
+    };
+    b.rec(0xB00B, &col(1, 0, "가", "합", &[0]));
+    // 요약 행 사용자 수식 SUM(Table1[나])/2: 표지 0x02, fArray, cce u16, 토큰열
+    let rgce = [
+        0x18, 0x19, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0x19, 0x10, 0, 0, 0x1e, 2, 0, 6,
+    ];
+    let mut tail = vec![2, 0, rgce.len() as u8, 0];
+    tail.extend_from_slice(&rgce);
+    b.rec(0xB00B, &col(2, 9, "나", "", &tail));
+    let mut st = vec![4, 0];
+    st.extend(ws("TableStyleLight9"));
+    b.rec(0xB00C, &st);
+    b.rec(0xB00D, &[]);
+    b.rec(0x000A, &[]);
+    let sheet_at = b.rec(0x0809, &bof(0x0010)) as u32;
+    // D1 = ROWS(Table1[#All]), D2 = SUM(Table1[[#Data],[가]:[나]])
+    let formula = |row: u32, col: u16, tokens: &[u8]| {
+        let mut fm = cell_head(row, col);
+        fm.extend_from_slice(&4.0f64.to_le_bytes());
+        fm.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        fm.extend_from_slice(&(tokens.len() as u16).to_le_bytes());
+        fm.extend_from_slice(tokens);
+        fm
+    };
+    b.rec(
+        0x0006,
+        &formula(
+            0,
+            3,
+            &[
+                0x18, 0x19, 0, 0, 4, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0x41, 0x4c, 0,
+            ],
+        ),
+    );
+    b.rec(
+        0x0006,
+        &formula(
+            1,
+            3,
+            &[
+                0x18, 0x19, 0, 0, 0x12, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0x19, 0x10, 0, 0,
+            ],
+        ),
+    );
+    b.rec(0xB00A, &le(&[1]));
+    b.rec(0xB006, &[]);
+    b.rec(0xB007, &[2, 0]);
+    b.rec(0x000A, &[]);
+    b.0[bs_at + 4..bs_at + 8].copy_from_slice(&sheet_at.to_le_bytes());
+
+    let wb = read_workbook_stream(&b.0).unwrap();
+    let s = &wb.sheets[0];
+    let t = &s.tables[0];
+    assert_eq!(
+        (t.id, t.name.as_str(), t.range.as_str()),
+        (1, "Table1", "A1:B4")
+    );
+    assert_eq!((t.header_rows, t.totals_rows, t.dxfs[2]), (1, 1, Some(2)));
+    // 레거시는 필터 조건을 담지 않는다: 범위만 (요약 행을 뺀 표 범위)
+    let af = t.auto_filter.as_ref().unwrap();
+    assert_eq!((af.range.as_str(), af.columns.len()), ("A1:B3", 0));
+    assert_eq!(t.columns[0].totals_label.as_deref(), Some("합"));
+    assert_eq!(t.columns[1].totals_function.as_deref(), Some("custom"));
+    assert_eq!(
+        t.columns[1].totals_formula.as_deref(),
+        Some("SUM(Table1[나])/2")
+    );
+    assert_eq!(
+        t.style.as_ref().unwrap().name.as_deref(),
+        Some("TableStyleLight9")
+    );
+    let f = |row, col| {
+        s.cell(CellRef { row, col })
+            .and_then(|c| c.formula.as_ref())
+            .map(|f| f.text.clone())
+    };
+    assert_eq!(f(0, 3).as_deref(), Some("ROWS(Table1[#All])"));
+    assert_eq!(f(1, 3).as_deref(), Some("SUM(Table1[[#Data],[가]:[나]])"));
 }

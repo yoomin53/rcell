@@ -1536,6 +1536,7 @@ mod tests {
                 base: CellRef::default(),
                 xlsb: false,
                 row_shift: 0,
+                tables: &[],
             };
             assert_eq!(
                 formula::decode(&t, &ctx).unwrap(),

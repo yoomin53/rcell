@@ -142,6 +142,28 @@ fn doper(op: &str, val: &str) -> ([u8; 10], Option<String>) {
 /// AUTOFILTER12 로 쓸 조건: (cft, DOPER 들, 값 문자열들)
 type Filter12 = (u32, Vec<[u8; 10]>, Vec<Option<String>>);
 
+/// 숫자 → RK ([MS-XLS] 2.5.217): 실수 꼴(아래 34비트가 0), 정수 꼴, 그 100 배 꼴 차례로. 어느 꼴도 아니면 0
+fn rk_any(v: f64) -> u32 {
+    let bits = v.to_bits();
+    if bits & 0x3_FFFF_FFFF == 0 {
+        return (bits >> 32) as u32;
+    }
+    let int = |x: f64| -> Option<u32> {
+        (x.fract() == 0.0 && (-(1i64 << 29) as f64..(1i64 << 29) as f64).contains(&x))
+            .then_some(((x as i32) << 2) as u32 | 0x02)
+    };
+    if let Some(r) = int(v) {
+        return r;
+    }
+    let x100 = (v * 100.0).round();
+    if (x100 / 100.0) == v
+        && let Some(r) = int(x100)
+    {
+        return r | 0x01;
+    }
+    0
+}
+
 /// 자동 필터: FILTERMODE, AUTOFILTERINFO, 열마다 AUTOFILTER (+ 0x009F 값, AUTOFILTER12 + CONTINUEFRT12)
 pub(crate) fn auto_filter(out: &mut Out, ctx: &SheetCtx) {
     let Some(af) = &ctx.sheet.auto_filter else {
@@ -180,9 +202,11 @@ pub(crate) fn auto_filter(out: &mut Out, ctx: &SheetCtx) {
                 g |= 0x40;
             }
             g |= ((n as u16) & 0x1FF) << 7;
+            // 첫 DOPER: 기준값(filterVal)을 RK 로 (필터 대조 실험)
             let mut d1 = [0u8; 10];
             d1[0] = 0x02;
             d1[1] = if top { 6 } else { 3 };
+            d1[2..6].copy_from_slice(&rk_any(fc.filter_val.unwrap_or(0.0)).to_le_bytes());
             b.u16(g).bytes(&d1).bytes(&[0; 10]);
         } else if let Some(t) = &fc.dynamic {
             b.u16(0x0001)
@@ -192,19 +216,23 @@ pub(crate) fn auto_filter(out: &mut Out, ctx: &SheetCtx) {
                 .iter()
                 .position(|x| x == t)
                 .unwrap_or(0) as u32;
-            // 동적 필터의 조건 (관측): 평균 위 >, 평균 아래 <, 날짜 범위 >= 와 <, 분기·달은 없음
+            // 동적 필터의 조건 (관측): 평균 위 >, 평균 아래 <, 날짜 범위 >= 와 <, 분기·달은 없음. 숫자는 차례로
+            // val·maxVal (필터 대조 실험)
             let crit: Vec<u8> = match cft {
                 1 => vec![4],
                 2 => vec![1],
                 8..=23 => vec![6, 1],
                 _ => Vec::new(),
             };
+            let vals = [fc.dynamic_val, fc.dynamic_max_val];
             let dopers = crit
                 .iter()
-                .map(|&s| {
+                .enumerate()
+                .map(|(i, &s)| {
                     let mut d = [0u8; 10];
                     d[0] = 4;
                     d[1] = s;
+                    d[2..10].copy_from_slice(&vals[i].unwrap_or(0.0).to_le_bytes());
                     d
                 })
                 .collect::<Vec<_>>();

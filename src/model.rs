@@ -19,17 +19,32 @@ pub struct Workbook {
     pub application: Option<String>,
     /// docProps/app.xml `AppVersion`
     pub app_version: Option<String>,
+    /// docProps/app.xml `TotalTime` — 편집 시간 (분). 레거시는 SummaryInformation PID 0x0A
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_time: Option<u32>,
     /// 문서 속성 (docProps/core.xml, 레거시 SummaryInformation)
     pub properties: DocProperties,
     pub file_version: Option<FileVersion>,
     pub date1904: bool,
+    /// 통합 문서 창 (`bookViews/workbookView`, 레거시 WINDOW1, XLSB BrtBookView). 없으면 기본값
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view: Option<WorkbookView>,
+    /// `workbookPr/@codeName` (레거시 전역 CODENAME, XLSB BrtWbProp 의 이름)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_name: Option<String>,
     pub sheets: Vec<Sheet>,
     pub shared_strings: Vec<RichText>,
+    /// 공유 문자열 참조 수 (`x:sst/@count`, 바이너리 BrtBeginSst 의 cstTotal). 한셀이 바이너리에 그대로 옮겨 쓴다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_strings_count: Option<u32>,
     pub styles: Styles,
     pub defined_names: Vec<DefinedName>,
-    /// 원본 그대로 옮겨 쓰는 파트 (차트·그림과 그 관계 파일)
+    /// 원본 그대로 옮겨 쓰는 파트 (차트·그림·표·피벗·매크로 프로젝트 …와 그 관계 파일)
     #[serde(skip)]
     pub raw_parts: Vec<RawPart>,
+    /// 통합 문서 관계로만 이어지는 원본 파트 (피벗 캐시·연결·XML 대응·사용자 지정 XML·매크로 프로젝트)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub part_links: Vec<PartLink>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protection: Option<WorkbookProtection>,
     /// 외부 통합 문서 연결. 수식의 `[n]` 은 이 목록의 n번째(1부터)다.
@@ -39,23 +54,6 @@ pub struct Workbook {
     /// 테마 (xl/theme/theme1.xml). 없으면 렌더링 때 Office 기본 테마를 쓴다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<crate::theme::Theme>,
-    /// 통합 문서 창 (`x:bookViews/x:workbookView`, 레거시 WINDOW1)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub book_view: Option<BookView>,
-}
-
-/// 통합 문서 창 (`x:workbookView`, 레거시 WINDOW1 0x003D). 위치·크기는 트윕
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct BookView {
-    pub x_window: i32,
-    pub y_window: i32,
-    pub window_width: u32,
-    pub window_height: u32,
-    /// 시트 탭 영역 비율 (1/1000). 없으면 600 (ECMA 기본값)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tab_ratio: Option<u32>,
-    pub active_tab: u32,
-    pub first_sheet: u32,
 }
 
 /// 외부 통합 문서 연결 (`xl/externalLinks/externalLinkN.xml`, 레거시 SUPBOOK).
@@ -123,6 +121,41 @@ impl Workbook {
     }
 }
 
+/// 통합 문서 창 하나 (`workbookView`). 위치·크기는 1/20 pt
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkbookView {
+    pub x_window: i32,
+    pub y_window: i32,
+    pub window_width: u32,
+    pub window_height: u32,
+    /// 시트 탭 영역 대 가로 스크롤 막대 (1/1000, 기본 600)
+    pub tab_ratio: u32,
+    /// 탭 줄에 처음 보이는 시트 (0부터)
+    pub first_sheet: u32,
+    /// 활성 시트 (0부터). 저장할 때는 선택된 시트(`tabSelected`)를 쓴다
+    pub active_tab: u32,
+    pub show_horizontal_scroll: bool,
+    pub show_vertical_scroll: bool,
+    pub show_sheet_tabs: bool,
+}
+
+impl Default for WorkbookView {
+    fn default() -> Self {
+        WorkbookView {
+            x_window: 0,
+            y_window: 0,
+            window_width: 0,
+            window_height: 0,
+            tab_ratio: 600,
+            first_sheet: 0,
+            active_tab: 0,
+            show_horizontal_scroll: true,
+            show_vertical_scroll: true,
+            show_sheet_tabs: true,
+        }
+    }
+}
+
 /// `x:workbook/x:fileVersion`
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct FileVersion {
@@ -139,6 +172,10 @@ pub struct HancomWorkbookExt {
     pub calc_id: Option<u32>,
     /// 한컴 매크로(VBScript) 프로젝트 파트 이름
     pub vbs_project_part: Option<String>,
+    /// 한컴 매크로 프로젝트의 `_VBS_PROJECT_W` 스트림 (XML·바이너리는 `xl/vbsProject.bin` 복합 문서 안,
+    /// 레거시는 OLE 루트의 스트림 — 세 형식에서 바이트가 같다, 패키지 파트 실험)
+    #[serde(skip)]
+    pub vbs_project: Option<Vec<u8>>,
     /// 아직 해석하지 않은 통합 문서 수준 `hs:` 속성
     pub other: BTreeMap<String, String>,
 }
@@ -214,6 +251,123 @@ pub struct Sheet {
     /// 개요 요약 행이 위 (`outlinePr summaryBelow="0"`), 요약 열이 왼쪽 (`summaryRight="0"`)
     pub summary_above: bool,
     pub summary_left: bool,
+    /// 표 (ListObject)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<Table>,
+    /// 시트 관계로만 이어지는 원본 파트 (피벗 표·쿼리 표·프린터 설정)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub part_links: Vec<PartLink>,
+}
+
+/// 원본 그대로 옮겨 쓰는 파트로 가는 관계 (XML 원본, 바이너리는 형식이 같은 파트만). 파트와 그 관계가
+/// 가리키는 파트는 [`Workbook::raw_parts`] 에 있다
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PartLink {
+    /// 관계 종류 URI
+    pub rel_type: String,
+    /// 파트 이름 (앞 `/` 없이)
+    pub part: String,
+    /// 피벗 캐시 번호 (`pivotCaches/pivotCache/@cacheId`, 피벗 캐시 관계만)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_id: Option<u32>,
+}
+
+/// 표 (ListObject): XML `x:table` 파트, 바이너리 `BrtBeginList`… 파트, 레거시 0xB005… 레코드
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Table {
+    pub id: u32,
+    pub name: String,
+    pub display_name: String,
+    /// 범위 (`ref`, 머리글·요약 행 포함)
+    pub range: String,
+    /// 머리글 행 수 (`headerRowCount`, 기본 1)
+    pub header_rows: u32,
+    /// 요약 행 수 (`totalsRowCount`, 기본 0)
+    pub totals_rows: u32,
+    /// 요약 행을 보인 적 있음 (`totalsRowShown`, 기본 참)
+    pub totals_shown: bool,
+    /// 종류 (`tableType`: 없으면 worksheet, `xml`, `queryTable`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<u32>,
+    /// 차등 서식 번호: 머리글, 데이터, 요약, 표 테두리, 머리글 테두리, 요약 테두리
+    /// (`headerRowDxfId`, `dataDxfId`, `totalsRowDxfId`, `tableBorderDxfId`, `headerRowBorderDxfId`,
+    /// `totalsRowBorderDxfId`)
+    pub dxfs: [Option<u32>; 6],
+    /// 셀 스타일 이름: 머리글, 데이터, 요약 (`headerRowCellStyle`, `dataCellStyle`, `totalsRowCellStyle`)
+    pub cell_styles: [Option<String>; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_filter: Option<AutoFilter>,
+    pub columns: Vec<TableColumn>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<TableStyleInfo>,
+    /// XML 원본의 표 파트 이름 (그대로 옮겨 쓴다). 없으면 모델로 쓴다
+    #[serde(skip)]
+    pub part: Option<String>,
+}
+
+impl Default for Table {
+    fn default() -> Self {
+        Table {
+            id: 0,
+            name: String::new(),
+            display_name: String::new(),
+            range: String::new(),
+            header_rows: 1,
+            totals_rows: 0,
+            totals_shown: true,
+            table_type: None,
+            comment: None,
+            connection_id: None,
+            dxfs: [None; 6],
+            cell_styles: [None, None, None],
+            auto_filter: None,
+            columns: Vec::new(),
+            style: None,
+            part: None,
+        }
+    }
+}
+
+/// 표의 열 (`tableColumn`, 바이너리 `BrtBeginListCol`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TableColumn {
+    pub id: u32,
+    pub name: String,
+    /// XML 대응의 고유 이름 (`uniqueName`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unique_name: Option<String>,
+    /// 요약 행 함수 (`totalsRowFunction`: sum, average, count …, custom)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub totals_function: Option<String>,
+    /// 요약 행 글 (`totalsRowLabel`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub totals_label: Option<String>,
+    /// 요약 행 사용자 수식 (`totalsRowFormula`, `=` 없이)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub totals_formula: Option<String>,
+    /// 계산 열 수식 (`calculatedColumnFormula`, `=` 없이)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calculated_formula: Option<String>,
+    /// 차등 서식 번호: 머리글, 데이터, 요약 (`headerRowDxfId`, `dataDxfId`, `totalsRowDxfId`)
+    pub dxfs: [Option<u32>; 3],
+    /// 쿼리 표 필드 (`queryTableFieldId`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_table_field_id: Option<u32>,
+}
+
+/// 표 스타일 적용 (`tableStyleInfo`, 바이너리 `BrtTableStyleClient`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TableStyleInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub first_column: bool,
+    pub last_column: bool,
+    pub row_stripes: bool,
+    pub column_stripes: bool,
 }
 
 /// 조건부 서식 하나 (`conditionalFormatting`): 범위 + 규칙들
@@ -261,12 +415,18 @@ pub struct CfRule {
     pub data_bar: Option<DataBar>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon_set: Option<IconSet>,
+    /// x14 확장 구역(`x:extLst` 의 `x14:conditionalFormatting`)에만 있는 규칙. 한셀은 Excel 2010 아이콘 집합
+    /// (3Stars·3Triangles·5Boxes)과 x14 구역에서 읽은 아이콘 집합을 이 구역에 쓴다 (x14 조건부 서식 실험)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub x14: bool,
 }
 
-/// 조건부 서식의 기준 값 (`cfvo`): `min`/`max`/`num`/`percent`/`percentile`/`formula`
+/// 조건부 서식의 기준 값 (`cfvo`): `min`/`max`/`num`/`percent`/`percentile`/`formula`,
+/// x14 데이터 막대는 `autoMin`/`autoMax` 도
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Cfvo {
     pub kind: String,
+    /// 값 또는 수식 (`=` 없이). x14 구역은 `xm:f` 의 글
     #[serde(skip_serializing_if = "Option::is_none")]
     pub val: Option<String>,
     /// 아이콘 기준: 이상(기본)/초과
@@ -282,13 +442,76 @@ pub struct ColorScale {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct DataBar {
     pub cfvos: Vec<Cfvo>,
+    /// 막대 색 (x14 의 `fillColor` 는 한셀이 쓰지 않고 이 색을 쓴다)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<Color>,
     pub show_value: bool,
+    /// 가장 짧은·긴 막대 (%, 없으면 10·90). x14 확장이 있으면 그 값이다 (한셀은 본 규칙에도 같은 값을 쓴다)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_length: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_length: Option<u32>,
+    /// x14 확장 (`x14:dataBar`). 없으면 한셀이 저장할 때 기본값으로 만든다 ([`DataBarExt::implied`])
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ext: Option<DataBarExt>,
+}
+
+/// 데이터 막대의 x14 확장 (`x14:dataBar`, XLSB BrtBeginDatabar14 1051). 기본값은 x14 스키마 그대로다
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DataBarExt {
+    /// x14 기준 값 (`autoMin`/`autoMax` 를 쓸 수 있다). 값은 `xm:f`
+    pub cfvos: Vec<Cfvo>,
+    /// 막대 테두리 (기본 거짓)
+    pub border: bool,
+    /// 그라데이션 채우기 (기본 참)
+    pub gradient: bool,
+    /// `leftToRight` / `rightToLeft` (없으면 `context`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    /// 음수 막대 색이 양수와 같음 (기본 거짓), 음수 테두리 색이 양수와 같음 (기본 참)
+    pub negative_same_as_positive: bool,
+    pub negative_border_same_as_positive: bool,
+    /// `middle` / `none` (없으면 `automatic`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub axis_position: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negative_fill_color: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negative_border_color: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub axis_color: Option<Color>,
+}
+
+impl Default for DataBarExt {
+    fn default() -> Self {
+        DataBarExt {
+            cfvos: Vec::new(),
+            border: false,
+            gradient: true,
+            direction: None,
+            negative_same_as_positive: false,
+            negative_border_same_as_positive: true,
+            axis_position: None,
+            border_color: None,
+            negative_fill_color: None,
+            negative_border_color: None,
+            axis_color: None,
+        }
+    }
+}
+
+impl DataBarExt {
+    /// x14 확장이 없는 데이터 막대를 한셀이 저장할 때 만드는 확장: 기준 값은 본 규칙 것, 방향 `leftToRight`
+    /// (x14 조건부 서식 실험 — rcell 이 확장 없이 쓴 막대, 본 규칙만 있는 막대)
+    pub fn implied(bar: &DataBar) -> DataBarExt {
+        DataBarExt {
+            cfvos: bar.cfvos.clone(),
+            direction: Some("leftToRight".into()),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -299,7 +522,13 @@ pub struct IconSet {
     pub show_value: bool,
     pub reverse: bool,
     pub percent: bool,
+    /// 사용자 지정 아이콘 (`x14:cfIcon`): 단계마다 (아이콘 집합, 번호). 집합 `NoIcons` 는 아이콘 없음
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub custom_icons: Vec<(String, u32)>,
 }
+
+/// x14 아이콘 집합만 있는 이름 (Excel 2010) — 한셀은 본 규칙에 있어도 x14 구역으로 옮겨 쓴다
+pub const X14_ONLY_ICON_SETS: [&str; 3] = ["3Stars", "3Triangles", "5Boxes"];
 
 /// 데이터 유효성 (`dataValidation`)
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -353,6 +582,18 @@ pub struct Shape {
     pub fill: Option<Paint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<Outline>,
+    /// 바깥 그림자 (`a:effectLst/a:outerShdw`, 레거시 OPT 0x023F·0x0201·0x0205·0x0206)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<ShapeShadow>,
+    /// 켜진 잠금 (`a:spLocks`·`a:cxnSpLocks`·`a:picLocks`·`a:grpSpLocks` 의 속성 이름: `noRot`, `noChangeAspect` …,
+    /// 레거시 OPT 0x007F)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub locks: Vec<String>,
+    /// `xdr:clientData` 의 시트 보호와 함께 잠금·인쇄 (없으면 참, 레거시 OBJ ftCmo 의 fLocked 0x0001·fPrint 0x0010)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locks_with_sheet: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prints_with_sheet: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<TextBody>,
     /// 그룹의 자식
@@ -458,6 +699,44 @@ pub struct Outline {
     pub fill: Option<Paint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dash: Option<String>,
+    /// 선 끝 `cap` (`rnd`/`sq`/`flat`), 겹선 `cmpd` (`sng`/`dbl`/`thickThin`/`thinThick`/`tri`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compound: Option<String>,
+    /// 이음 (`round`/`bevel`/`miter`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join: Option<String>,
+    /// 화살표 `a:headEnd`·`a:tailEnd`: (종류, 너비, 길이)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<LineEnd>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail: Option<LineEnd>,
+}
+
+/// 선 끝 화살표 (`a:headEnd`/`a:tailEnd`): 종류 `none`/`triangle`/`stealth`/`diamond`/`oval`/`arrow`, 너비·길이
+/// `sm`/`med`/`lg`
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct LineEnd {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub w: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub len: Option<String>,
+}
+
+/// 바깥 그림자 (`a:outerShdw`): 거리·흐림 EMU, 방향 1/60000 도
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ShapeShadow {
+    pub dist: i64,
+    pub dir: i64,
+    pub blur: i64,
+    /// `algn` (`ctr`, `t`, `b` …)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
+    pub rot_with_shape: bool,
+    pub color: DrawColor,
 }
 
 /// 도형 안 글 (`xdr:txBody`)
@@ -472,6 +751,11 @@ pub struct TextBody {
     pub vert: Option<String>,
     /// 안쪽 여백 왼·위·오른·아래 (EMU)
     pub insets: [Option<i64>; 4],
+    /// 글 넘침 `vertOverflow`·`horzOverflow` (`overflow`/`ellipsis`/`clip`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vert_overflow: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub horz_overflow: Option<String>,
     pub paragraphs: Vec<DrawingPara>,
 }
 
@@ -1436,15 +1720,66 @@ pub struct Comment {
     pub text: RichText,
     /// 항상 표시 (VML `x:Visible`, 레거시 NOTE 0x0002)
     pub visible: bool,
-    /// 메모 상자 자리 (VML `x:Anchor`: 왼쪽 열, 오프셋 px, 위 행, 오프셋 px, 오른쪽 열, 오프셋 px, 아래 행, 오프셋 px)
+    /// 메모 상자의 자리와 모양. 없으면 기본 자리(셀 오른쪽 위)에 쓴다 ([`CommentShape::implied`])
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<[u32; 8]>,
+    pub shape: Option<CommentShape>,
     /// 메모 도형 이름 (VML `v:shape/@id`, 레거시 OfficeArt 0x0380 — 한셀은 "메모 N")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shape_name: Option<String>,
     /// 메모 도형의 그리기 차례 (VML 도형 차례, 레거시 OBJ 차례)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub z_order: Option<u32>,
+}
+
+/// 메모 상자: VML `v:shape` + `x:ClientData` (XML·바이너리), 레거시는 OfficeArt 도형(앵커·채우기·선·그림자)과
+/// TXO 의 맞춤. 한셀이 다시 쓰는 값만 담는다 (메모 대조 실험 — `margin-left` 같은 style 위치, `z-index`,
+/// `x:AutoFill` 은 한셀이 버리거나 새로 쓴다)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CommentShape {
+    /// `x:Anchor`: 왼쪽 열, 오프셋(px), 위 행, 오프셋, 오른쪽 열, 오프셋, 아래 행, 오프셋
+    pub anchor: [u32; 8],
+    /// 채우기 색 `#rrggbb` (`fillcolor`)
+    pub fill_color: String,
+    /// 선 색 `#rrggbb` (`strokecolor`)
+    pub stroke_color: String,
+    /// 선 두께 (pt). VML 기본은 1 pt, 한셀의 메모는 0.75 pt
+    pub stroke_weight: f64,
+    /// 그림자 (`v:shadow on="t"`)
+    pub shadow: bool,
+    /// 셀과 함께 옮김·크기 바꿈. VML 은 반대로 `x:MoveWithCells`·`x:SizeWithCells` 가 있으면 고정이다
+    /// (레거시 앵커 플래그 0 = 둘 다, 2 = 옮김만, 3 = 고정)
+    pub move_with_cells: bool,
+    pub size_with_cells: bool,
+    /// `x:TextHAlign` (없으면 `Left`): `Center`, `Right`, `Justify`, `Distributed`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_halign: Option<String>,
+    /// `x:TextVAlign` (없으면 `Top`): `Center`, `Bottom`, `Justify`, `Distributed`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_valign: Option<String>,
+}
+
+impl CommentShape {
+    /// 한셀이 새 메모에 쓰는 모양 (COM 으로 만든 메모: 노란 채우기, 0.75 pt 검정 선, 셀에 고정)
+    pub fn hcell_default(anchor: [u32; 8]) -> CommentShape {
+        CommentShape {
+            anchor,
+            fill_color: "#ffffe1".into(),
+            stroke_color: "#000000".into(),
+            stroke_weight: 0.75,
+            shadow: false,
+            move_with_cells: false,
+            size_with_cells: false,
+            text_halign: None,
+            text_valign: None,
+        }
+    }
+
+    /// 모양이 없는 메모를 rcell 이 쓰는 자리: 셀 오른쪽 위 (Excel 기본 자리)
+    pub fn implied(cell: CellRef) -> CommentShape {
+        let (row, col) = (cell.row, cell.col);
+        let top = row.saturating_sub(1);
+        CommentShape::hcell_default([col + 1, 15, top, 10, col + 3, 15, top + 4, 4])
+    }
 }
 
 /// 시트 보기 (`sheetView`, 레거시 WINDOW2/SCL/SELECTION/PANE, XLSB BrtBeginWsView/BrtSel/BrtPane).
@@ -1707,9 +2042,17 @@ pub struct FilterColumn {
     /// 상위/하위: (위, 백분율, 값)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top10: Option<(bool, bool, f64)>,
+    /// 상위/하위의 기준값 (`top10/@filterVal` — 필터를 적용할 때 계산한 경계값)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_val: Option<f64>,
     /// 동적 필터 종류 (`aboveAverage`, `today` …)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dynamic: Option<String>,
+    /// 동적 필터의 `val`(평균 또는 기간 시작 일련번호)·`maxVal`(기간 끝)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic_val: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic_max_val: Option<f64>,
 }
 
 /// 시트 보호 (`sheetProtection`). 속성은 원문 그대로 (기본값 해석은 비교 쪽에서).
@@ -2022,6 +2365,8 @@ pub enum FormulaKind {
     DataTable,
 }
 
+/// 수식. 배열 수식(`t="array"`)과 데이터 표(`t="dataTable"`)는 범위의 왼쪽 위 셀에만 있고, 범위 안 다른 셀은 값만 갖는다
+/// (레거시 ARRAY 0x0221·TABLE 0x0236, 바이너리 BrtArrFmla·BrtTable 도 같은 모델로 읽는다)
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Formula {
     /// `=` 없는 수식 원문. 공유 수식의 종속 셀도 읽을 때 기준 셀 원문을 옮겨 채운다.
@@ -2029,8 +2374,28 @@ pub struct Formula {
     pub kind: FormulaKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shared_index: Option<u32>,
+    /// 공유·배열 수식, 데이터 표의 범위 (`ref`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<String>,
+    /// 데이터 표의 입력 (`t="dataTable"`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_table: Option<DataTableInput>,
+}
+
+/// 데이터 표 (What-If 분석)의 입력: `dt2D`, `dtr`, `r1`, `r2`, `del1`, `del2`
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct DataTableInput {
+    /// 2변수 표 (`dt2D`) — 이때 `r1` 은 행 입력, `r2` 는 열 입력이다
+    pub two_d: bool,
+    /// 1변수 표의 입력이 행 입력 셀 (`dtr`). 한셀은 2변수 표에는 쓰지 않는다
+    pub row_input: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r2: Option<String>,
+    /// 입력 셀이 지워짐 (`del1`, `del2`) — 한셀은 버린다 (수식 대조 실험)
+    pub del1: bool,
+    pub del2: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -2050,9 +2415,13 @@ pub struct TextRun {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DefinedName {
     pub name: String,
+    /// 시트 범위 이름이면 그 시트 번호 (0부터)
     pub local_sheet_id: Option<u32>,
     pub hidden: bool,
     pub formula: String,
+    /// 설명 (`comment`, 레거시 NAME 의 설명 글, 바이너리 BrtName 의 comment)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

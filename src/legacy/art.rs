@@ -244,6 +244,20 @@ pub(crate) struct Art {
     csp: Vec<u32>,
     /// 글 상자 문단 모양의 0xA001 번호 ([`has_text_shapes`] 일 때 표 끝에 하나 더 쓴다). TXO 의 문단이 가리킨다
     pub text_para: Option<u32>,
+    /// 메모 글의 가로 맞춤(한글 문단 정렬 번호, [`note_hangul_align`]) → 그 맞춤의 문단 모양 번호
+    pub note_para: HashMap<u8, u32>,
+}
+
+/// 메모의 가로 맞춤 → 한글 문단 정렬 번호 (2 오른쪽, 3 가운데, 0 양쪽, 4 배분). 왼쪽(기본)은 None — 메모 대조
+/// 실험: 가운데 맞춤 메모의 TXO 문단이 정렬 3 인 문단 모양을 가리킨다
+pub(crate) fn note_hangul_align(h: Option<&str>) -> Option<u8> {
+    match h {
+        Some("Center") => Some(3),
+        Some("Right") => Some(2),
+        Some("Justify") => Some(0),
+        Some("Distributed") => Some(4),
+        _ => None,
+    }
 }
 
 /// 글이 있는 도형 (글 상자 TXO 를 쓰는 도형). XML 의 글 상자(`xdr:cNvSpPr txBox="1"`)는 글이 비어도 쓴다
@@ -332,6 +346,7 @@ impl Art {
             dgid: Vec::new(),
             csp: Vec::new(),
             text_para: None,
+            note_para: HashMap::new(),
         };
         fn pictures<'a>(s: &'a Shape, out: &mut Vec<&'a str>) {
             if s.kind == ShapeKind::Picture
@@ -554,12 +569,36 @@ impl Art {
                     let mut fsp = Buf::new();
                     fsp.u32(spid).u32(0x0A00);
                     let mut sp = rec(2, 202, 0xF00A, &fsp.0);
+                    // 메모 상자 (메모 대조 실험): 채우기 0x0181 (늘), 선 색 0x01C0 (검정이면 없음), 두께 0x01CB (EMU,
+                    // 0.75 pt 면 없음), 그림자는 검정·0.70544 mm (25399 EMU) 오프셋, 숨김 0x03BF. 자리는 VML 의
+                    // x:Anchor, 모양이 없으면 셀 오른쪽 위 (XML 쓰기와 같은 자리)
+                    let b = c
+                        .shape
+                        .clone()
+                        .unwrap_or_else(|| crate::model::CommentShape::implied(c.cell));
+                    let hex = |s: &str| u32::from_str_radix(s.trim_start_matches('#'), 16).ok();
                     let mut p = Props(Vec::new());
                     p.set(0x007F, 0x0200_0200);
-                    p.set(0x0181, 0x00E1_FFFF);
+                    p.set(
+                        0x0181,
+                        super::writer::colorref_of(hex(&b.fill_color).unwrap_or(0xFF_FFE1)),
+                    );
                     p.set(0x01BF, 0x0010_0010);
+                    if let Some(rgb) = hex(&b.stroke_color).filter(|&v| v != 0) {
+                        p.set(0x01C0, super::writer::colorref_of(rgb));
+                    }
+                    let weight = (b.stroke_weight * 12700.0).round() as u32;
+                    if weight != 9525 {
+                        p.set(0x01CB, weight);
+                    }
                     p.set(0x01CC, 0x0001_0000);
                     p.set(0x01FF, 0x0008_0008);
+                    if b.shadow {
+                        p.set(0x0201, 0);
+                        p.set(0x0205, 25399);
+                        p.set(0x0206, 25399);
+                        p.set(0x023F, 0x0002_0002);
+                    }
                     let name = c
                         .shape_name
                         .clone()
@@ -569,23 +608,13 @@ impl Art {
                         p.set(0x03BF, 0x0002_0002);
                     }
                     sp.extend(p.record());
-                    // 메모 상자 자리: VML 의 x:Anchor, 없으면 셀 오른쪽 위
-                    let r = c.cell.row;
-                    let col = c.cell.col;
-                    let anchor = c.anchor.map_or(
-                        [
-                            col + 1,
-                            0x0F00,
-                            r.saturating_sub(1),
-                            0x0F00,
-                            col + 3,
-                            0x0F00,
-                            r + 3,
-                            0x0400,
-                        ],
-                        |a| note_anchor(a, ctx),
-                    );
-                    sp.extend(client_anchor(3, anchor));
+                    // 앵커 플래그: 0 셀과 함께 옮기고 크기 바꿈, 2 옮김만, 3 고정
+                    let flag = match (b.move_with_cells, b.size_with_cells) {
+                        (true, true) => 0,
+                        (true, false) => 2,
+                        _ => 3,
+                    };
+                    sp.extend(client_anchor(flag, note_anchor(b.anchor, ctx)));
                     sp.extend(rec(0, 0, 0xF011, &[]));
                     let mut obj = Buf::new();
                     obj.u16(0x15)
@@ -596,14 +625,39 @@ impl Art {
                         .bytes(&[0; 12]);
                     obj.u16(0x0D).u16(0x16).bytes(&[0; 22]);
                     obj.u32(0);
-                    let font = c
-                        .text
-                        .runs
-                        .first()
-                        .and_then(|r| r.font.as_ref())
-                        .map_or(0, |f| ctx.font_like(f));
-                    // 메모의 TXO 문단은 기본 문단 모양 0 번을 가리킨다 (글 상자 문단 모양이 있어도)
-                    let txo = txo(&c.text.text, font, 0);
+                    // 서식 런: 글꼴이 바뀌는 곳마다 (런이 없는 글은 런 0개 — 메모 대조 실험)
+                    let mut runs: Vec<(u16, u16)> = Vec::new();
+                    let mut ich = 0usize;
+                    for r in &c.text.runs {
+                        if r.text.is_empty() {
+                            continue;
+                        }
+                        let f = r.font.as_ref().map_or(0, |f| ctx.font_like(f));
+                        if runs.last().is_none_or(|&(_, last)| last != f) {
+                            runs.push((ich as u16, f));
+                        }
+                        ich += units(&r.text);
+                    }
+                    // 맞춤: 가로 1 왼쪽, 2 가운데, 3 오른쪽, 5 양쪽, 7 균등 / 세로 0 위, 1 가운데, 2 아래, 3 양쪽, 4 균등.
+                    // TXO 문단은 그 가로 맞춤의 문단 모양을 가리킨다 (왼쪽은 기본 0 번, 글 상자 문단 모양이 있어도)
+                    let h = match b.text_halign.as_deref() {
+                        Some("Center") => 2,
+                        Some("Right") => 3,
+                        Some("Justify") => 5,
+                        Some("Distributed") => 7,
+                        _ => 1,
+                    };
+                    let v = match b.text_valign.as_deref() {
+                        Some("Center") => 1,
+                        Some("Bottom") => 2,
+                        Some("Justify") => 3,
+                        Some("Distributed") => 4,
+                        _ => 0,
+                    };
+                    let para = note_hangul_align(b.text_halign.as_deref())
+                        .and_then(|a| self.note_para.get(&a).copied())
+                        .unwrap_or(0);
+                    let txo = txo(&c.text.text, (h, v), &runs, para);
                     parts.push(Part {
                         sp,
                         obj: obj.take(),
@@ -673,7 +727,22 @@ impl Art {
         let (shape_type, ot) = match s.kind {
             ShapeKind::Picture => (75u16, 0x08u16),
             ShapeKind::Group => (0, 0x00),
-            ShapeKind::Connector => (20, 0x01),
+            // 연결선: straightConnector1 은 32 (도형 대조 실험), 꺾인·굽은 연결선은 [MS-ODRAW] MSOSPT 번호
+            ShapeKind::Connector => (
+                match s.geometry.as_deref() {
+                    Some("straightConnector1") => 32,
+                    Some("bentConnector2") => 33,
+                    Some("bentConnector3") => 34,
+                    Some("bentConnector4") => 35,
+                    Some("bentConnector5") => 36,
+                    Some("curvedConnector2") => 37,
+                    Some("curvedConnector3") => 38,
+                    Some("curvedConnector4") => 39,
+                    Some("curvedConnector5") => 40,
+                    _ => 20,
+                },
+                0x01,
+            ),
             _ => (
                 match s.geometry.as_deref() {
                     Some("rect") => 1,
@@ -690,18 +759,32 @@ impl Art {
                     Some("star5") => 12,
                     Some("rightArrow") => 13,
                     Some("line") => 20,
+                    // 사용자 정의 모양: 꼭짓점을 쓰지 않으므로 모양 없음 (8절)
+                    Some("custom") | None => 0,
                     Some(_) => 1,
-                    None => 0,
                 },
                 0x1E,
             ),
         };
+        // FSP 플래그: 0x0A00 (앵커·모양 종류 있음), 자식 0x0002, 그룹 0x0001, 연결선 0x0100 (도형 대조 실험 0xB00),
+        // 뒤집기 0x0040·0x0080
         let mut flags = 0x0A00u32;
         if child {
             flags |= 0x0002;
         }
         if s.kind == ShapeKind::Group {
             flags |= 0x0001;
+        }
+        if s.kind == ShapeKind::Connector {
+            flags |= 0x0100;
+        }
+        if let Some(x) = &s.xfrm {
+            if x.flip_h {
+                flags |= 0x0040;
+            }
+            if x.flip_v {
+                flags |= 0x0080;
+            }
         }
         let mut fsp = Buf::new();
         fsp.u32(*spid).u32(flags);
@@ -713,18 +796,9 @@ impl Art {
         let mut p = Props(Vec::new());
         let has_text = shape_has_text(s);
         let raw = s.raw.as_deref().unwrap_or("");
-        // 보호 속성: 그림 0x02840284, 그 밖의 도형은 글이 있어도 0x02000200 (+ 선택 잠금 0x00200020 —
-        // XML 의 `a:spLocks noSelect="1"`). 글 상자 여백·줄 바꿈·세로 맞춤(0x0081–0x0087)은 한셀이 쓰지 않는다
-        // (관측: 말뭉치 한셀 레거시·XML→레거시의 도형 207개 모두)
-        let mut lock = if s.kind == ShapeKind::Picture {
-            0x0284_0284
-        } else {
-            0x0200_0200
-        };
-        if s.kind != ShapeKind::Picture && raw.contains("noSelect=\"1\"") {
-            lock |= 0x0020_0020;
-        }
-        p.set(0x007F, lock);
+        // 보호 속성 ([`lock_bits`]). 글 상자 여백·줄 바꿈·세로 맞춤(0x0081–0x0087)은 한셀이 쓰지 않는다
+        // (관측: 말뭉치 한셀 레거시·XML→레거시의 도형 207개 모두, 도형 대조 실험의 글 넘침·줄임표 도형)
+        p.set(0x007F, lock_bits(s));
         if s.kind == ShapeKind::Picture
             && let Some(pib) = s.target.as_ref().and_then(|t| self.pib.get(t))
         {
@@ -766,7 +840,18 @@ impl Art {
             {
                 p.set(0x01FF, 0x0008_0000);
             }
-            p.set(0x033F, 0x0010_0010);
+        }
+        // 모양 잠금 0x033F: 그림은 fPreferRelativeResize(0x10), 모양 종류 잠금(noChangeShapeType)은 0x08
+        let mut sbool = if s.kind == ShapeKind::Picture {
+            0x10
+        } else {
+            0
+        };
+        if s.locks.iter().any(|l| l == "noChangeShapeType") {
+            sbool |= 0x08;
+        }
+        if sbool != 0 {
+            p.set(0x033F, sbool | (sbool << 16));
         }
         if s.kind != ShapeKind::Group && s.kind != ShapeKind::Picture {
             match &s.fill {
@@ -778,43 +863,13 @@ impl Art {
                     p.set(0x01BF, 0x0010_0010);
                 }
                 Some(Paint::None) => p.set(0x01BF, 0x0010_0000),
+                // 연결선은 채우기가 없다 (도형 대조 실험)
+                None if s.kind == ShapeKind::Connector => p.set(0x01BF, 0x0010_0000),
                 _ => {}
             }
-            // 선 끝 제한 1.0, 이음 둥글게 — 한셀은 모든 도형에 쓴다 (관측: XML 의 선은 모두 `a:round`)
-            p.set(0x01CC, 0x0001_0000);
-            p.set(0x01D6, 2);
-            // 그림자: XML 의 `a:effectLst/a:outerShdw` (거리·방향 → x·y 오프셋 EMU, 색) — 관측: dist 17961,
-            // dir 2700000 → 0x319C·0x319C, 색 0, 0x023F = 0x00020002
-            if let Some((dx, dy, rgb)) = outer_shadow(raw) {
-                p.set(0x0201, super::writer::colorref_of(rgb));
-                p.set(0x0205, dx as u32);
-                p.set(0x0206, dy as u32);
-                p.set(0x023F, 0x0002_0002);
-            }
-            if let Some(l) = &s.line {
-                if let Some(w) = l.width.filter(|&w| w != 9525) {
-                    p.set(0x01CB, w as u32);
-                }
-                match &l.fill {
-                    Some(Paint::Solid(c)) => {
-                        if let Some(rgb) = draw_rgb(c).filter(|&v| v != 0) {
-                            p.set(0x01C0, super::writer::colorref_of(rgb));
-                        }
-                        let dash = match l.dash.as_deref() {
-                            Some("dash") => 1,
-                            Some("sysDot") => 2,
-                            Some("dashDot") => 3,
-                            Some("lgDashDotDot") => 4,
-                            Some("lgDash") => 6,
-                            _ => 0,
-                        };
-                        if dash != 0 {
-                            p.set(0x01CE, dash);
-                        }
-                        p.set(0x01FF, 0x0008_0008);
-                    }
-                    _ => p.set(0x01FF, 0x0008_0000),
-                }
+            line_props(&mut p, s.line.as_ref());
+            if let Some(sh) = &s.shadow {
+                shadow_props(&mut p, sh);
             }
         }
         if !s.name.is_empty() {
@@ -835,12 +890,14 @@ impl Art {
         let anchor = legacy_anchor(&s.anchor, ctx);
         sp.extend(client_anchor(flag, anchor));
         sp.extend(rec(0, 0, 0xF011, &[]));
-        // ftCmo 플래그: 0x0001 잠금, 0x0010 인쇄 — XML 의 `xdr:clientData fPrintsWithSheet="0"` 이면 인쇄 끔
-        // (관측: 서식 파일의 배경 도형)
-        let mut cmo = 0x0011u16;
-        if raw.contains("fPrintsWithSheet=\"0\"") {
-            cmo &= !0x0010;
-        }
+        // ftCmo 플래그: 0x0001 잠금, 0x0010 인쇄 — `xdr:clientData fPrintsWithSheet="0"` 이면 인쇄 끔 (관측: 서식
+        // 파일의 배경 도형). 잠금은 늘 켠다: 한셀은 `fLocksWithSheet="0"` 을 저장하지 않는다 (도형 대조 실험)
+        let cmo = 0x0001u16
+            | if s.prints_with_sheet.unwrap_or(true) {
+                0x0010
+            } else {
+                0
+            };
         let mut obj = Buf::new();
         obj.u16(0x15)
             .u16(0x12)
@@ -850,8 +907,20 @@ impl Art {
             .bytes(&[0; 12]);
         obj.u32(0);
         let txo = has_text.then(|| {
-            let font = shape_text_font(s, ctx.wb).map_or(0, |i| ctx.font(i as u32));
-            txo(&s.plain_text(), font, self.text_para.unwrap_or(0))
+            // 세로 맞춤은 `a:bodyPr anchor` (도형 대조 실험: anchor="ctr" → 1), 가로는 늘 왼쪽 1
+            let v = match s.text.as_ref().and_then(|t| t.anchor.as_deref()) {
+                Some("ctr") => 1,
+                Some("b") => 2,
+                Some("just") => 3,
+                Some("dist") => 4,
+                _ => 0,
+            };
+            txo(
+                &s.plain_text(),
+                (1, v),
+                &shape_text_runs(s, ctx),
+                self.text_para.unwrap_or(0),
+            )
         });
         emit(sp, obj.take(), txo);
         if s.kind == ShapeKind::Group {
@@ -883,56 +952,220 @@ impl Art {
     }
 }
 
-/// XML 원본 앵커의 바깥 그림자 `a:outerShdw dist=… dir=…` 와 색(`a:srgbClr`) → (x, y 오프셋 EMU, RGB)
-fn outer_shadow(raw: &str) -> Option<(i64, i64, u32)> {
-    let at = raw.find("<a:outerShdw")?;
-    let rest = &raw[at..];
-    let end = rest.find("</a:outerShdw>").unwrap_or(rest.len());
-    let body = &rest[..end];
-    let attr = |n: &str| -> Option<f64> {
-        let k = format!(" {n}=\"");
-        let i = body.find(&k)? + k.len();
-        body[i..].split('"').next()?.parse().ok()
-    };
-    let dist = attr("dist").unwrap_or(0.0);
-    let dir = attr("dir").unwrap_or(0.0) / 60000.0;
-    let rad = dir.to_radians();
-    let rgb = body
-        .find("<a:srgbClr val=\"")
-        .and_then(|i| body.get(i + 16..i + 22))
-        .and_then(|v| u32::from_str_radix(v, 16).ok())
-        .unwrap_or(0);
-    Some((
-        (dist * rad.cos()).round() as i64,
-        (dist * rad.sin()).round() as i64,
-        rgb,
-    ))
-}
+/// 잠금 이름 → OPT 0x007F 의 비트 (읽기의 `legacy_shape` 와 같은 차례). `noResize`·`noChangeArrowheads` 는
+/// 저장되지 않는다
+const LOCK_BITS: [&str; 9] = [
+    "noGrp",
+    "noAdjustHandles",
+    "noTextEdit",
+    "noEditPoints",
+    "noCrop",
+    "noSelect",
+    "noMove",
+    "noChangeAspect",
+    "noRot",
+];
 
-/// 도형 글 상자의 TXO 가 가리키는 모델 글꼴: 첫 글 조각의 글꼴 ([`super::writer::drawing_run_font`])
-fn shape_text_font(s: &Shape, wb: &Workbook) -> Option<usize> {
-    let r = s
-        .text
-        .as_ref()
-        .and_then(|t| t.paragraphs.iter().flat_map(|p| &p.runs).next())?;
-    super::writer::drawing_run_font(wb, r)
-}
-
-/// TXO (한컴): 머리 10바이트 (`0, 1, 1, 1, 문단 수`), `cch u16, flag u8, UTF-16`, 런 `(ich u16, ifnt u16, u32)` 과
-/// 문단마다 u32 문단 모양 번호 (도형: 표 끝의 글 상자 문단 모양, 메모: 0 — 관측). 글이 없으면 런 없이 번호만
-fn txo(text: &str, font: u16, para: u32) -> Vec<u8> {
-    let paragraphs = text.split('\n').count().max(1) as u16;
-    // 글이 없으면 서식 런도 없다: 런 수 0, 문단 모양 번호만 (관측: 빈 글 상자 TXO `… 00 00 01 00 00 00 00 …`)
-    let runs = u16::from(!text.is_empty());
-    let mut b = Buf::new();
-    b.u16(0).u16(1).u16(1).u16(runs).u16(paragraphs);
-    b.u16(units(text) as u16).u8(0).utf16(text);
-    if runs == 0 {
-        b.u32(para);
-        return b.take();
+/// OPT 0x007F (보호): 한셀은 늘 0x0200 을 켜고, 연결선·그림은 글 잠금(0x0004)도 켠다. 위 16비트는 사용 비트
+/// (도형 대조 실험: 잠금 없는 도형 0x02000200, 잠금 11개 0x03EF03EF, 연결선 noGrp 0x02050205; 말뭉치의 그림
+/// noChangeAspect 0x02840284)
+fn lock_bits(s: &Shape) -> u32 {
+    let mut v = 0x0200u32;
+    for (i, n) in LOCK_BITS.iter().enumerate() {
+        if s.locks.iter().any(|l| l == n) {
+            v |= 1 << i;
+        }
     }
-    b.u16(0).u16(font).u32(para);
-    for _ in 1..paragraphs {
+    if matches!(s.kind, ShapeKind::Connector | ShapeKind::Picture) {
+        v |= 0x0004;
+    }
+    v | (v << 16)
+}
+
+/// 점선 → MSOLINEDASHING (읽기의 반대)
+fn dash_code(d: &str) -> u32 {
+    match d {
+        "sysDash" => 1,
+        "sysDot" => 2,
+        "sysDashDot" => 3,
+        "sysDashDotDot" => 4,
+        "dot" => 5,
+        "dash" => 6,
+        "lgDash" => 7,
+        "dashDot" => 8,
+        "lgDashDot" => 9,
+        "lgDashDotDot" => 10,
+        _ => 0,
+    }
+}
+
+/// 선 속성 (도형 대조 실험): 색 0x01C0 (검정이면 없음), 두께 0x01CB (9525 면 없음), 이음 — 둥글게(지정 없음 포함)·
+/// 비스듬히는 끝 제한 0x01CC = 1.0 과 0x01D6 (2·0), 뾰족하게(miter)는 둘 다 없음 — 겹선 0x01CD, 점선 0x01CE,
+/// 끝 0x01D7 (rnd 0, sq 1, flat 은 없음), 화살표 종류 0x01D0·0x01D1 과 너비·길이 0x01D2–0x01D5 (med 는 없음)
+fn line_props(p: &mut Props, l: Option<&crate::model::Outline>) {
+    match l.and_then(|l| l.join.as_deref()) {
+        Some("miter") => {}
+        Some("bevel") => {
+            p.set(0x01CC, 0x0001_0000);
+            p.set(0x01D6, 0);
+        }
+        _ => {
+            p.set(0x01CC, 0x0001_0000);
+            p.set(0x01D6, 2);
+        }
+    }
+    let Some(l) = l else {
+        return;
+    };
+    if let Some(w) = l.width.filter(|&w| w != 9525) {
+        p.set(0x01CB, w as u32);
+    }
+    match &l.fill {
+        Some(Paint::Solid(c)) => {
+            if let Some(rgb) = draw_rgb(c).filter(|&v| v != 0) {
+                p.set(0x01C0, super::writer::colorref_of(rgb));
+            }
+            p.set(0x01FF, 0x0008_0008);
+        }
+        _ => p.set(0x01FF, 0x0008_0000),
+    }
+    let compound = match l.compound.as_deref() {
+        Some("dbl") => 1,
+        Some("thickThin") => 2,
+        Some("thinThick") => 3,
+        Some("tri") => 4,
+        _ => 0,
+    };
+    if compound != 0 {
+        p.set(0x01CD, compound);
+    }
+    if let Some(d) = l.dash.as_deref().map(dash_code).filter(|&d| d != 0) {
+        p.set(0x01CE, d);
+    }
+    match l.cap.as_deref() {
+        Some("rnd") => p.set(0x01D7, 0),
+        Some("sq") => p.set(0x01D7, 1),
+        _ => {}
+    }
+    let size = |v: Option<&str>| match v {
+        Some("sm") => Some(0),
+        Some("lg") => Some(2),
+        _ => None,
+    };
+    for (e, kind, w, len) in [
+        (&l.head, 0x01D0, 0x01D2, 0x01D3),
+        (&l.tail, 0x01D1, 0x01D4, 0x01D5),
+    ] {
+        let Some(e) = e else {
+            continue;
+        };
+        let k = match e.kind.as_deref() {
+            Some("triangle") => 1,
+            Some("stealth") => 2,
+            Some("diamond") => 3,
+            Some("oval") => 4,
+            Some("arrow") => 5,
+            _ => continue,
+        };
+        p.set(kind, k);
+        if let Some(v) = size(e.w.as_deref()) {
+            p.set(w, v);
+        }
+        if let Some(v) = size(e.len.as_deref()) {
+            p.set(len, v);
+        }
+    }
+}
+
+/// 그림자의 x·y 오프셋 (EMU): 거리 × cos·sin(방향), 0 쪽으로 자른다 (도형 대조 실험: 25400·225° → −17960)
+pub(crate) fn shadow_offsets(dist: i64, dir: i64) -> (i32, i32) {
+    let rad = (dir as f64 / 60000.0).to_radians();
+    (
+        (dist as f64 * rad.cos()).trunc() as i32,
+        (dist as f64 * rad.sin()).trunc() as i32,
+    )
+}
+
+/// 바깥 그림자 (도형 대조 실험): 색 0x0201 (기본 회색 808080 이면 없음), 불투명도 0x0204 (16.16, alpha 가
+/// 있을 때), x·y 오프셋 0x0205·0x0206 ([`shadow_offsets`]), 기준점 0x0210·0x0211 (`algn` 의 l·r / t·b → ∓0.5,
+/// 지정 없음은 b), 켬 0x023F = 0x00020002. 흐림은 저장되지 않는다
+fn shadow_props(p: &mut Props, sh: &crate::model::ShapeShadow) {
+    if let Some(rgb) = draw_rgb(&sh.color).filter(|&v| v != 0x80_8080) {
+        p.set(0x0201, super::writer::colorref_of(rgb));
+    }
+    if let Some(a) = sh
+        .color
+        .mods
+        .iter()
+        .find(|(k, _)| k == "alpha")
+        .map(|(_, v)| *v)
+        .filter(|&v| v < 100_000)
+    {
+        p.set(0x0204, (a as f64 / 100_000.0 * 65536.0).round() as u32);
+    }
+    let (ox, oy) = shadow_offsets(sh.dist, sh.dir);
+    p.set(0x0205, ox as u32);
+    p.set(0x0206, oy as u32);
+    let align = sh.align.as_deref().unwrap_or("b");
+    if align != "ctr" {
+        let half = |neg: bool| if neg { 0xFFFF_8000u32 } else { 0x8000 };
+        if align.ends_with('l') {
+            p.set(0x0210, half(true));
+        } else if align.ends_with('r') {
+            p.set(0x0210, half(false));
+        }
+        if align.starts_with('t') {
+            p.set(0x0211, half(true));
+        } else if align.starts_with('b') {
+            p.set(0x0211, half(false));
+        }
+    }
+    p.set(0x023F, 0x0002_0002);
+}
+
+/// 도형 글의 서식 런 (ich, 레거시 글꼴 번호): 글꼴이 바뀌는 곳마다 (관측: Closing_Costs 의 `0:7 85:20 89:7`).
+/// 글꼴을 못 찾은 조각은 0 번
+fn shape_text_runs(s: &Shape, ctx: &SheetCtx) -> Vec<(u16, u16)> {
+    let mut runs: Vec<(u16, u16)> = Vec::new();
+    let Some(t) = &s.text else {
+        return runs;
+    };
+    let mut ich = 0usize;
+    for (k, p) in t.paragraphs.iter().enumerate() {
+        if k > 0 {
+            ich += 1;
+        }
+        for r in &p.runs {
+            if r.text.is_empty() {
+                continue;
+            }
+            let f = super::writer::drawing_run_font(ctx.wb, r).map_or(0, |i| ctx.font(i as u32));
+            if runs.last().is_none_or(|&(_, last)| last != f) {
+                runs.push((ich as u16, f));
+            }
+            ich += units(&r.text);
+        }
+    }
+    runs
+}
+
+/// TXO (한컴): grbit u16 (0 — 0x0200 은 한셀이 같은 문서를 저장할 때마다 달라진다, 10.8절), u16 1, 가로 맞춤 u8,
+/// 세로 맞춤 u8, 서식 런 수 u16, 문단 수 u16, `cch u16, flag u8, UTF-16`, 런마다 `(ich u16, ifnt u16)`, 문단마다
+/// 문단 모양 번호 u32 (도형: 표 끝의 글 상자 문단 모양, 메모: 맞춤의 문단 모양 — 관측). 글이 없으면 런 없이 번호만
+fn txo(text: &str, align: (u8, u8), runs: &[(u16, u16)], para: u32) -> Vec<u8> {
+    let paragraphs = text.split('\n').count().max(1) as u16;
+    let mut b = Buf::new();
+    b.u16(0)
+        .u16(1)
+        .u8(align.0)
+        .u8(align.1)
+        .u16(runs.len() as u16)
+        .u16(paragraphs);
+    b.u16(units(text) as u16).u8(0).utf16(text);
+    for &(ich, f) in runs {
+        b.u16(ich).u16(f);
+    }
+    for _ in 0..paragraphs {
         b.u32(para);
     }
     b.take()

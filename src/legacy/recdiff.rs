@@ -180,6 +180,20 @@ pub struct Options {
     /// SST 문자열 차례를 보지 않는다: SST 의 문자열을 내용 차례로 늘어놓고 LABELSST 의 번호를 그에 맞춘다.
     /// 한셀의 SST 차례는 문서를 읽어 온 내력(해시 표)에 따라 달라 파일에서 정할 수 없다 (5.7절)
     pub ignore_sst_order: bool,
+    /// TXO 첫 u16 의 0x0200 을 보지 않는다: 한셀은 같은 문서를 저장할 때마다 이 비트를 다르게 쓴다
+    /// (X.legacy.cell 과 hx 대조, 10.8절)
+    pub ignore_txo_flag: bool,
+}
+
+/// TXO(0x01B6) 첫 u16 의 0x0200 을 지운다
+fn mask_txo_flag(sections: &mut [Vec<Rec>]) {
+    for r in sections.iter_mut().flatten() {
+        if r.rtype == 0x01B6
+            && let Some(b) = r.data.get_mut(1)
+        {
+            *b &= !0x02;
+        }
+    }
 }
 
 /// SST 의 문자열 하나하나 (머리 8바이트 뒤, 5.7절의 한컴 꼴) — 바이트 그대로
@@ -248,6 +262,10 @@ pub fn compare_with(a: &[u8], b: &[u8], opts: Options) -> RecDiff {
     if opts.ignore_sst_order {
         canonical_sst(&mut sa);
         canonical_sst(&mut sb);
+    }
+    if opts.ignore_txo_flag {
+        mask_txo_flag(&mut sa);
+        mask_txo_flag(&mut sb);
     }
     let mut r = RecDiff::default();
     for k in 0..sa.len().max(sb.len()) {
@@ -397,6 +415,19 @@ mod tests {
         assert_eq!(compare(&a, &b).changed, 2);
         let opts = Options {
             ignore_sst_order: true,
+            ..Default::default()
+        };
+        assert_eq!(compare_with(&a, &b, opts).changed, 0);
+    }
+
+    #[test]
+    fn txo_flag_can_be_ignored() {
+        let a = stream(&[(0x0809, &[1]), (0x01B6, &[0, 2, 1, 0])]);
+        let b = stream(&[(0x0809, &[1]), (0x01B6, &[0, 0, 1, 0])]);
+        assert_eq!(compare(&a, &b).changed, 1);
+        let opts = Options {
+            ignore_txo_flag: true,
+            ..Default::default()
         };
         assert_eq!(compare_with(&a, &b, opts).changed, 0);
     }

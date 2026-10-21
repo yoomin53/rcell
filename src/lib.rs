@@ -24,7 +24,7 @@
 pub mod binary;
 pub mod cf_eval;
 pub mod cfb;
-pub mod cfb_writer;
+pub mod cfb_write;
 pub mod chart_svg;
 pub mod chart_xml;
 pub mod compare;
@@ -116,21 +116,66 @@ pub fn from_bytes_with_password(bytes: Vec<u8>, password: Option<&str>) -> Resul
     }
 }
 
-/// 통합 문서를 XML `.cell` 로 저장한다 (확장자가 .xlsx 면 Excel 형식).
+/// 저장 형식
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveFormat {
+    /// XML `.cell` (한셀 2014 이후 기본 형식)
+    Cell,
+    /// Excel `.xlsx`
+    Xlsx,
+    /// 바이너리 `.cell` (한셀 xlCellb, -2007 — BIFF12 레코드, [MS-XLSB])
+    Binary,
+    /// 레거시 `.cell` (한셀 xlCell8, -2005 — OLE2 + BIFF8 계열 레코드)
+    Legacy,
+}
+
+impl SaveFormat {
+    /// 파일 이름으로 고른다: `.xlsx` → Excel, `.xlsb`·`*.bin.cell` → 바이너리, `*.legacy.cell` → 레거시,
+    /// 나머지 → XML `.cell`
+    pub fn from_path(path: &Path) -> SaveFormat {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if name.ends_with(".xlsx") {
+            SaveFormat::Xlsx
+        } else if name.ends_with(".xlsb") || name.ends_with(".bin.cell") {
+            SaveFormat::Binary
+        } else if name.ends_with(".legacy.cell") {
+            SaveFormat::Legacy
+        } else {
+            SaveFormat::Cell
+        }
+    }
+}
+
+/// 통합 문서를 저장한다. 형식은 파일 이름으로 정한다 ([`SaveFormat::from_path`]).
 pub fn save(wb: &Workbook, path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
-    let flavor = match path.extension().and_then(|e| e.to_str()) {
-        Some(e) if e.eq_ignore_ascii_case("xlsx") => writer::Flavor::Xlsx,
-        _ => writer::Flavor::Cell,
+    save_as(wb, path, SaveFormat::from_path(path))
+}
+
+/// 통합 문서를 주어진 형식으로 저장한다.
+pub fn save_as(wb: &Workbook, path: impl AsRef<Path>, format: SaveFormat) -> Result<()> {
+    let bytes = match format {
+        SaveFormat::Cell => writer::write(wb, writer::Flavor::Cell)?,
+        SaveFormat::Xlsx => writer::write(wb, writer::Flavor::Xlsx)?,
+        SaveFormat::Binary => binary::writer::write(wb, &Default::default())?,
+        SaveFormat::Legacy => legacy::write(wb)?,
     };
-    std::fs::write(path, writer::write(wb, flavor)?)?;
+    std::fs::write(path, bytes)?;
     Ok(())
 }
 
-/// 통합 문서를 레거시 바이너리 `.cell` (OLE2 + BIFF 계열, 한셀 `xlCell8` -2005) 로 저장한다.
+/// 통합 문서를 바이너리 `.cell` (한셀 xlCellb) 로 저장한다.
+pub fn save_binary(wb: &Workbook, path: impl AsRef<Path>) -> Result<()> {
+    save_as(wb, path, SaveFormat::Binary)
+}
+
+/// 통합 문서를 레거시 `.cell` (OLE2 + BIFF 계열, 한셀 `xlCell8` -2005) 로 저장한다.
 pub fn save_legacy(wb: &Workbook, path: impl AsRef<Path>) -> Result<()> {
-    std::fs::write(path, legacy::write(wb)?)?;
-    Ok(())
+    save_as(wb, path, SaveFormat::Legacy)
 }
 
 /// 파일에서 통합 문서를 읽는다.

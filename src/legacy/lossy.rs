@@ -46,6 +46,181 @@ pub(crate) fn with_default_fonts(s: &str, font: &str) -> String {
     out
 }
 
+/// 그리기 개체 하나(자식까지)를 레거시로 저장했다가 다시 연 모습 (`art.rs` 의 쓰기와 읽기의 `legacy_shape`):
+/// 앵커 오프셋은 정수 픽셀로 올리고, 선은 기본값(9525 EMU, 실선, 끝 flat, 겹선 sng, 이음 — 지정 없음은 둥글게,
+/// 그림은 뾰족하게)으로 채우고, 그림자는 자른 x·y 오프셋에서 다시 계산한 거리·방향과 회색 기본 색·불투명도만
+/// 남기고(흐림 없음), 잠금은 0x007F·0x033F 에 담기는 것만 남기고 글 상자에 회전 잠금을 더하고, 시트와 함께
+/// 잠금은 늘 켜고, 글 상자의 맞춤·줄 바꿈·여백은 버리고 글 넘침은 자름이 된다
+fn shape_view(s: &mut crate::model::Shape) {
+    let snap = |off: &mut i64| {
+        *off = super::art::anchor_px(*off) * crate::units::EMU_PER_PX;
+    };
+    snap(&mut s.anchor.from.col_off);
+    snap(&mut s.anchor.from.row_off);
+    if let Some(t) = &mut s.anchor.to {
+        snap(&mut t.col_off);
+        snap(&mut t.row_off);
+    }
+    let has_text = super::art::shape_has_text(s);
+    let (group, picture) = (s.kind == ShapeKind::Group, s.kind == ShapeKind::Picture);
+    // 채우기가 지정되지 않으면: 연결선은 없음으로 쓰고(도형 대조 실험 0x01BF = 0x00100000), 다른 도형은 읽을 때
+    // 흰색이다
+    if !group && !picture && s.fill.is_none() {
+        s.fill = Some(if s.kind == ShapeKind::Connector {
+            Paint::None
+        } else {
+            Paint::Solid(crate::model::DrawColor {
+                value: "srgb:FFFFFF".into(),
+                mods: Vec::new(),
+            })
+        });
+    }
+    // 그림의 채우기·선은 한셀처럼 '없음' 으로 쓴다
+    if picture {
+        s.fill.get_or_insert(Paint::None);
+        s.line.get_or_insert(crate::model::Outline {
+            fill: Some(Paint::None),
+            ..Default::default()
+        });
+    }
+    if !group && s.line.is_none() {
+        // 선이 지정되지 않으면 읽을 때 검정 실선이다
+        s.line = Some(crate::model::Outline {
+            fill: Some(Paint::Solid(crate::model::DrawColor {
+                value: "srgb:000000".into(),
+                mods: Vec::new(),
+            })),
+            ..Default::default()
+        });
+    }
+    if let Some(l) = &mut s.line {
+        l.width.get_or_insert(9525);
+        l.dash.get_or_insert_with(|| "solid".into());
+        if l.fill.is_none() {
+            l.fill = Some(Paint::None);
+        }
+        l.cap.get_or_insert_with(|| "flat".into());
+        l.compound.get_or_insert_with(|| "sng".into());
+        if picture {
+            l.join = Some("miter".into());
+        } else {
+            l.join.get_or_insert_with(|| "round".into());
+        }
+    }
+    // 그림자는 그림·그룹에 쓰지 않는다
+    if group || picture {
+        s.shadow = None;
+    }
+    if let Some(sh) = &mut s.shadow {
+        let (ox, oy) = super::art::shadow_offsets(sh.dist, sh.dir);
+        let (ox, oy) = (ox as f64, oy as f64);
+        sh.dist = ox.hypot(oy).round() as i64;
+        sh.dir =
+            ((oy.atan2(ox).to_degrees().rem_euclid(360.0) * 60000.0).round() as i64) % 21_600_000;
+        sh.blur = 0;
+        sh.rot_with_shape = false;
+        sh.align = Some(sh.align.clone().unwrap_or_else(|| "b".into()));
+        let alpha = sh
+            .color
+            .mods
+            .iter()
+            .find(|(k, _)| k == "alpha")
+            .map(|(_, v)| *v)
+            .filter(|&v| v < 100_000)
+            .map(|v| {
+                let fixed = (v as f64 / 100_000.0 * 65536.0).round();
+                (fixed / 65536.0 * 100_000.0).round() as i64
+            });
+        if !sh.color.value.starts_with("srgb:") {
+            sh.color.value = "srgb:808080".into();
+        }
+        sh.color.mods = alpha
+            .map(|a| ("alpha".to_string(), a))
+            .into_iter()
+            .collect();
+    }
+    // 잠금: 0x007F 의 아홉 가지 (연결선·그림은 글 잠금이 늘 켜진다) + 0x033F 의 모양 종류, 글 상자는 회전 잠금
+    const NAMES: [&str; 9] = [
+        "noGrp",
+        "noAdjustHandles",
+        "noTextEdit",
+        "noEditPoints",
+        "noCrop",
+        "noSelect",
+        "noMove",
+        "noChangeAspect",
+        "noRot",
+    ];
+    let mut locks: Vec<String> = NAMES
+        .iter()
+        .filter(|n| s.locks.iter().any(|l| l == *n))
+        .map(|n| n.to_string())
+        .collect();
+    if s.locks.iter().any(|l| l == "noChangeShapeType") {
+        locks.push("noChangeShapeType".into());
+    }
+    if has_text && s.kind == ShapeKind::Shape && !locks.iter().any(|l| l == "noRot") {
+        locks.push("noRot".into());
+    }
+    locks.retain(|l| match s.kind {
+        ShapeKind::Picture => l != "noTextEdit",
+        ShapeKind::Connector => l != "noTextEdit" && l != "noCrop",
+        ShapeKind::Group => matches!(
+            l.as_str(),
+            "noGrp" | "noSelect" | "noRot" | "noChangeAspect" | "noMove"
+        ),
+        _ => l != "noCrop",
+    });
+    locks.sort();
+    s.locks = locks;
+    s.locks_with_sheet = Some(true);
+    s.prints_with_sheet = Some(s.prints_with_sheet.unwrap_or(true));
+    // 사용자 정의 모양은 꼭짓점을 쓰지 않아 모양이 사라진다. 읽기가 모르는 모양 번호는 사각형으로 읽힌다
+    const KNOWN: [&str; 15] = [
+        "rect",
+        "roundRect",
+        "ellipse",
+        "diamond",
+        "triangle",
+        "rtTriangle",
+        "parallelogram",
+        "trapezoid",
+        "hexagon",
+        "octagon",
+        "plus",
+        "star5",
+        "rightArrow",
+        "line",
+        "straightConnector1",
+    ];
+    match s.geometry.as_deref() {
+        Some("custom") => s.geometry = None,
+        Some(g) if !group && !KNOWN.contains(&g) => s.geometry = Some("rect".into()),
+        _ => {}
+    }
+    if has_text {
+        if let Some(t) = &mut s.text {
+            t.anchor = None;
+            t.wrap = None;
+            t.vert = None;
+            t.insets = [None; 4];
+            t.vert_overflow = Some("clip".into());
+            t.horz_overflow = Some("clip".into());
+        } else {
+            s.text = Some(crate::model::TextBody {
+                vert_overflow: Some("clip".into()),
+                horz_overflow: Some("clip".into()),
+                ..Default::default()
+            });
+        }
+    } else {
+        s.text = None;
+    }
+    for c in &mut s.children {
+        shape_view(c);
+    }
+}
+
 /// 레거시로 저장했다가 다시 연 모습
 pub fn legacy_view(wb: &Workbook) -> Workbook {
     let mut w = wb.clone();
@@ -56,6 +231,31 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
     // 외부 값 캐시(XCT/CRN)는 쓰지 않는다; 수식·이름이 쓰지 않는 외부 연결은 다시 열 때 버린다
     for l in &mut w.external_links {
         l.sheet_data.clear();
+    }
+    // 분류·상태(DocumentSummaryInformation)는 저장되지 않는다 (관측: 문서 속성 실험의 한셀 레거시도 SummaryInformation
+    // 하나뿐)
+    w.properties.category = None;
+    w.properties.content_status = None;
+    // 원본 그대로 옮기는 패키지 파트(피벗·연결·사용자 지정 XML·프린터 설정 …)는 레거시에 없다 — 매크로
+    // 프로젝트만 `_VBS_PROJECT_W` 스트림으로 남는다
+    w.part_links
+        .retain(|l| l.rel_type == crate::ns::REL_HANCOM_VBS_PROJECT);
+    for s in &mut w.sheets {
+        s.part_links.clear();
+        // pageSetup 이 없으면 한셀의 기본 SETUP (writer: 맞춤 0·0, 세로)
+        s.page.setup.get_or_insert(crate::model::PageSetup {
+            paper_size: Some(9),
+            scale: Some(100),
+            first_page_number: Some(1),
+            fit_to_width: Some(0),
+            fit_to_height: Some(0),
+            orientation: Some("portrait".into()),
+            use_printer_defaults: true,
+            horizontal_dpi: Some(0),
+            vertical_dpi: Some(0),
+            copies: Some(1),
+            ..Default::default()
+        });
     }
     for xf in w
         .styles
@@ -107,39 +307,41 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
         s.summary_left = false;
         // 차트 내용(0x7EF0 Vt 아카이브)은 아직 쓰지 않는다
         s.shapes.retain(|x| x.kind != ShapeKind::Chart);
-        // 선의 두께·모양이 지정되지 않은 도형은 기본값(9525 EMU, 실선)으로 읽힌다
-        fn lines(v: &mut [crate::model::Shape]) {
-            for s in v {
-                // 앵커 오프셋은 정수 픽셀로 올려 저장된다
-                let snap = |off: &mut i64| {
-                    *off = super::art::anchor_px(*off) * crate::units::EMU_PER_PX;
-                };
-                snap(&mut s.anchor.from.col_off);
-                snap(&mut s.anchor.from.row_off);
-                if let Some(t) = &mut s.anchor.to {
-                    snap(&mut t.col_off);
-                    snap(&mut t.row_off);
-                }
-                // 그림의 채우기·선은 한셀처럼 '없음' 으로 쓴다
-                if s.kind == ShapeKind::Picture {
-                    s.fill.get_or_insert(Paint::None);
-                    s.line.get_or_insert(crate::model::Outline {
-                        width: None,
-                        fill: Some(Paint::None),
-                        dash: None,
-                    });
-                }
-                if let Some(l) = &mut s.line {
-                    l.width.get_or_insert(9525);
-                    l.dash.get_or_insert_with(|| "solid".into());
-                    if l.fill.is_none() {
-                        l.fill = Some(Paint::None);
-                    }
-                }
-                lines(&mut s.children);
+        for x in &mut s.shapes {
+            shape_view(x);
+        }
+        // 메모 상자: 셀과 함께 옮기지 않으면 크기도 바꾸지 않는다 (앵커 플래그 3)
+        for c in &mut s.comments {
+            if let Some(b) = &mut c.shape
+                && !b.move_with_cells
+            {
+                b.size_with_cells = false;
             }
         }
-        lines(&mut s.shapes);
+        // 하이퍼링크의 화면 설명은 저장되지 않는다 (HLINKTOOLTIP 을 쓰지 않는다)
+        for h in &mut s.hyperlinks {
+            h.tooltip = None;
+        }
+        // 조건부 서식의 x14 확장: 데이터 막대는 방향(오른쪽에서 왼쪽)만 CFDatabar 에 남고, 사용자 지정 아이콘은
+        // 저장되지 않는다 (6.3절)
+        for cf in &mut s.conditional_formats {
+            for r in &mut cf.rules {
+                if let Some(d) = &mut r.data_bar {
+                    let rtl = d
+                        .ext
+                        .as_ref()
+                        .is_some_and(|e| e.direction.as_deref() == Some("rightToLeft"));
+                    d.ext = rtl.then(|| crate::model::DataBarExt {
+                        cfvos: d.cfvos.clone(),
+                        direction: Some("rightToLeft".into()),
+                        ..Default::default()
+                    });
+                }
+                if let Some(i) = &mut r.icon_set {
+                    i.custom_icons.clear();
+                }
+            }
+        }
         // 레거시에서 읽은 여백은 이미 한셀이 읽은 HWPUNIT 값이라 그대로 다시 읽힌다 (writer::margin)
         if let Some(m) = s.page.margins.as_mut().filter(|_| !wb.styles.from_legacy) {
             for v in [

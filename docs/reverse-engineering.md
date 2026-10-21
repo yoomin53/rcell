@@ -115,6 +115,9 @@ rustup default stable-x86_64-pc-windows-gnu   # MSVC 빌드 도구가 없으면
 | 바이너리 | 한셀이 바이너리를 COM 으로 다시 열지 못하므로 같은 문서의 XML(`X.cell`)로 대신한다 (`--ignore-hancom`, 바이너리가 담지 못하는 외부 연결 상태 제외) | `rcell-out/X.bin.rcell.as.cell` |
 
 `tests/real_samples.rs` 의 `writer_output_is_read_identically_by_hancell` 이 이 기준으로 비교한다.
+`rcell-out/X.rcell.as.cell` 은 그것을 만들 때의 rcell 출력(`X.rcell.cell`)에 대한 판정이므로, 테스트는 지금의 rcell 이
+같은 원본에서 쓰는 결과를 보관된 `X.rcell.cell` 과 먼저 비교한다. 의미가 달라진 비교 항목(쓰기가 바뀐 항목)은 그
+재저장본으로 판정할 수 없어 빼고 알린다 — `rcell convert` + `resave.ps1` 로 `rcell-out` 을 다시 만들면 모든 항목을 판정한다.
 
 ### 함정
 

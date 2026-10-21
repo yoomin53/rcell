@@ -81,16 +81,30 @@ enum Cmd {
         #[arg(long)]
         sheet: Option<String>,
     },
-    /// 형식 변환: XML/바이너리/레거시 .cell → XML .cell (출력 확장자가 .xlsx 면 Excel 형식,
-    /// `--format legacy` 면 레거시 바이너리 .cell)
+    /// 형식 변환: XML/바이너리/레거시 .cell → XML .cell. 출력 이름이 .xlsx 면 Excel, .bin.cell·.xlsb 면
+    /// 바이너리 .cell (한셀 xlCellb), .legacy.cell 이면 레거시 .cell (한셀 xlCell8)
     Convert {
         input: PathBuf,
         output: PathBuf,
-        /// 출력 형식: cell (XML, 기본), xlsx, legacy (한셀 레거시 바이너리). 생략하면 확장자로 정한다
+        /// 저장 형식 (cell, xlsx, bin, legacy) — 생략하면 출력 이름으로 정한다
         #[arg(long)]
         format: Option<String>,
+        /// 바이너리 저장의 BrtAbsPath15 에 쓸 폴더 (한셀은 저장한 폴더를 쓴다; 생략하면 빈 문자열)
+        #[arg(long)]
+        abs_path: Option<String>,
+        /// 바이너리 저장에서 한셀이 잃는 값도 똑같이 잃는다 (한셀과 같은 결과를 볼 때)
+        #[arg(long)]
+        exact: bool,
     },
-    /// 두 레거시 .cell 의 레코드 비교 (종류·순서·내용) — 레거시 쓰기 검증용
+    /// 바이너리 .cell 두 개를 레코드 단위로 비교 (A: rcell 이 쓴 것, B: 한셀이 쓴 것) — 리버스 엔지니어링용
+    Bindiff {
+        a: PathBuf,
+        b: PathBuf,
+        /// 파트마다 보여 줄 차이 수
+        #[arg(long, default_value_t = 6)]
+        samples: usize,
+    },
+    /// 두 레거시 .cell 의 레코드 비교 (종류·순서·내용) — 레거시 쓰기 검증용 (A: rcell, B: 한셀)
     RecDiff {
         a: PathBuf,
         b: PathBuf,
@@ -103,6 +117,9 @@ enum Cmd {
         /// SST 문자열 차례를 보지 않는다 (문자열을 내용 차례로 맞춘 뒤 비교)
         #[arg(long)]
         ignore_sst_order: bool,
+        /// 한셀이 저장할 때마다 달라지는 값을 보지 않는다: SST 차례와 TXO 첫 u16 의 0x0200
+        #[arg(long)]
+        ignore_volatile: bool,
     },
     /// 두 문서의 의미 비교 (저장 형식이 달라도 됨). 차이가 있으면 종료 코드 1
     Diff {
@@ -120,7 +137,7 @@ enum Cmd {
         /// 한컴 확장(글꼴 hs:*, 문단 모양) 비교 생략 (바이너리 .cell 과 비교할 때)
         #[arg(long)]
         ignore_hancom: bool,
-        /// 도형의 글·사용자 정의 모양 비교 생략 (한셀은 레거시 도형에서 이 둘을 읽지 못한다)
+        /// 도형의 글·사용자 정의 모양, 묶기 잠금 도형, 메모의 선 색 비교 생략 (한셀은 레거시에서 이것들을 읽지 못한다)
         #[arg(long)]
         ignore_shape_detail: bool,
         /// 차트 내용(종류·축·계열·제목·범례 …) 비교 생략 — 차트 도형의 위치는 그래도 비교한다
@@ -135,6 +152,10 @@ enum Cmd {
         /// 사용자 정의 표 스타일 비교 생략 (한셀은 레거시의 표 스타일을 읽지 않는다)
         #[arg(long)]
         ignore_table_styles: bool,
+        /// A 에 레거시 저장의 손실(`legacy::lossy::legacy_view`)을 적용한 뒤 비교 — 레거시 쓰기 왕복 검증용
+        /// (A: 원본, B: rcell 이 쓴 레거시)
+        #[arg(long)]
+        legacy_view: bool,
     },
     /// ZIP 패키지의 파트를 다른 파일 내용으로 바꿔 새 파일로 저장 — 리버스 엔지니어링용
     Patch {
@@ -208,14 +229,27 @@ fn main() -> ExitCode {
             input,
             output,
             format,
-        } => convert(&input, &output, format.as_deref()),
+            abs_path,
+            exact,
+        } => convert(&input, &output, format.as_deref(), abs_path, exact),
+        Cmd::Bindiff { a, b, samples } => bindiff(&a, &b, samples),
         Cmd::RecDiff {
             a,
             b,
             max,
             summary,
             ignore_sst_order,
-        } => rec_diff(&a, &b, max, summary, ignore_sst_order),
+            ignore_volatile,
+        } => rec_diff(
+            &a,
+            &b,
+            max,
+            summary,
+            rcell::legacy::recdiff::Options {
+                ignore_sst_order: ignore_sst_order || ignore_volatile,
+                ignore_txo_flag: ignore_volatile,
+            },
+        ),
         Cmd::Diff {
             a,
             b,
@@ -228,10 +262,12 @@ fn main() -> ExitCode {
             ignore_cf,
             ignore_filter,
             ignore_table_styles,
+            legacy_view,
         } => match diff(
             &a,
             &b,
             max,
+            legacy_view,
             rcell::compare::Options {
                 skip_styles: no_styles,
                 ignore_font_scale,
@@ -544,7 +580,7 @@ fn escher(file: &Path) -> rcell::Result<()> {
                 })
                 .collect();
             println!(
-                "{}type={} spid={:#x} flags={:#x} obj={:?} name={:?} anchor={:?} child={:?} tb={}\n{}  {}",
+                "{}type={} spid={:#x} flags={:#x} obj={:?} name={:?} anchor={:?} (flag {}) child={:?} tb={}\n{}  {}",
                 "  ".repeat(depth),
                 s.shape_type,
                 s.spid,
@@ -552,6 +588,7 @@ fn escher(file: &Path) -> rcell::Result<()> {
                 obj,
                 s.string(0x0380),
                 s.anchor,
+                s.anchor_flag,
                 s.child_anchor,
                 s.has_textbox,
                 "  ".repeat(depth),
@@ -663,11 +700,40 @@ fn patch(input: &Path, output: &Path, parts: &[String]) -> rcell::Result<()> {
     Ok(())
 }
 
-fn convert(input: &Path, output: &Path, format: Option<&str>) -> rcell::Result<()> {
+fn convert(
+    input: &Path,
+    output: &Path,
+    format: Option<&str>,
+    abs_path: Option<String>,
+    exact: bool,
+) -> rcell::Result<()> {
+    let format = match format.map(str::to_ascii_lowercase).as_deref() {
+        None => rcell::SaveFormat::from_path(output),
+        Some("cell" | "xml") => rcell::SaveFormat::Cell,
+        Some("xlsx") => rcell::SaveFormat::Xlsx,
+        Some("bin" | "binary" | "xlsb") => rcell::SaveFormat::Binary,
+        Some("legacy") => rcell::SaveFormat::Legacy,
+        Some(other) => {
+            return Err(rcell::Error::InvalidValue {
+                context: "--format (cell, xlsx, bin, legacy)".into(),
+                value: other.into(),
+            });
+        }
+    };
     let wb = open_doc(input)?;
-    match format.map(str::to_ascii_lowercase).as_deref() {
-        None => rcell::save(&wb, output),
-        Some("legacy") => {
+    match format {
+        rcell::SaveFormat::Binary => {
+            let out = rcell::binary::writer::write_report(
+                &wb,
+                &rcell::binary::writer::Options { abs_path, exact },
+            )?;
+            for w in &out.warnings {
+                eprintln!("경고: {w}");
+            }
+            std::fs::write(output, out.bytes)?;
+            Ok(())
+        }
+        rcell::SaveFormat::Legacy => {
             let (bytes, report) = rcell::legacy::write_with_report(&wb)?;
             for w in &report.warnings {
                 eprintln!("경고: {w}");
@@ -675,25 +741,14 @@ fn convert(input: &Path, output: &Path, format: Option<&str>) -> rcell::Result<(
             std::fs::write(output, bytes)?;
             Ok(())
         }
-        Some("cell") => {
-            std::fs::write(
-                output,
-                rcell::writer::write(&wb, rcell::writer::Flavor::Cell)?,
-            )?;
-            Ok(())
-        }
-        Some("xlsx") => {
-            std::fs::write(
-                output,
-                rcell::writer::write(&wb, rcell::writer::Flavor::Xlsx)?,
-            )?;
-            Ok(())
-        }
-        Some(other) => Err(rcell::Error::InvalidValue {
-            context: "--format".into(),
-            value: other.into(),
-        }),
+        _ => rcell::save_as(&wb, output, format),
     }
+}
+
+fn bindiff(a: &Path, b: &Path, samples: usize) -> rcell::Result<()> {
+    let rep = rcell::binary::parity::compare(&std::fs::read(a)?, &std::fs::read(b)?)?;
+    print!("{}", rcell::binary::parity::format(&rep, samples));
+    Ok(())
 }
 
 fn rec_diff(
@@ -701,11 +756,10 @@ fn rec_diff(
     b: &Path,
     max: usize,
     summary: bool,
-    ignore_sst_order: bool,
+    opts: rcell::legacy::recdiff::Options,
 ) -> rcell::Result<()> {
     let sa = rcell::container::read_entry(&std::fs::read(a)?, "/Workbook")?;
     let sb = rcell::container::read_entry(&std::fs::read(b)?, "/Workbook")?;
-    let opts = rcell::legacy::recdiff::Options { ignore_sst_order };
     let r = rcell::legacy::recdiff::compare_with(&sa, &sb, opts);
     if summary {
         println!("{}", r.summary());
@@ -722,8 +776,17 @@ fn rec_diff(
 }
 
 /// 같으면 true.
-fn diff(a: &Path, b: &Path, max: usize, opts: rcell::compare::Options) -> rcell::Result<bool> {
-    let wa = open_doc(a)?;
+fn diff(
+    a: &Path,
+    b: &Path,
+    max: usize,
+    legacy_view: bool,
+    opts: rcell::compare::Options,
+) -> rcell::Result<bool> {
+    let mut wa = open_doc(a)?;
+    if legacy_view {
+        wa = rcell::legacy::lossy::legacy_view(&wa);
+    }
     let wb = open_doc(b)?;
     let diffs = rcell::compare::compare(&wa, &wb, opts);
     for d in diffs.iter().take(max) {

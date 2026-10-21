@@ -22,15 +22,19 @@ enum Value {
     Time(u64),
 }
 
-/// `\x05SummaryInformation` 스트림 → 문서 속성
-pub fn parse_summary(d: &[u8]) -> DocProperties {
+/// `\x05SummaryInformation` 스트림 → 문서 속성과 편집 시간(분, PID 0x0A).
+///
+/// 편집 시간은 [MS-OLEPS] 로는 100ns 단위 FILETIME 길이지만, 한셀은 분 수를 낮은 u32 에 넣는다
+/// (관측: app.xml `TotalTime` 1234 → `40 00 00 00 d2 04 00 00 00 00 00 00`). 높은 u32 가 0 이 아니면 100ns 로 본다.
+pub fn parse_summary(d: &[u8]) -> (DocProperties, Option<u32>) {
     let mut p = DocProperties::default();
+    let mut total_time = None;
     let u32_at = |i: usize| {
         d.get(i..i + 4)
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     };
     if d.get(0..2) != Some(&[0xFE, 0xFF]) {
-        return p;
+        return (p, total_time);
     }
     let sets = u32_at(24).unwrap_or(0) as usize;
     let Some(base) = (0..sets.min(8)).find_map(|k| {
@@ -39,7 +43,7 @@ pub fn parse_summary(d: &[u8]) -> DocProperties {
             .then(|| u32_at(at + 16))
             .flatten()
     }) else {
-        return p;
+        return (p, total_time);
     };
     let base = base as usize;
     let n = u32_at(base + 4).unwrap_or(0) as usize;
@@ -126,10 +130,19 @@ pub fn parse_summary(d: &[u8]) -> DocProperties {
             0x0B => p.last_printed = time(),
             0x0C => p.created = time(),
             0x0D => p.modified = time(),
+            0x0A => {
+                if let Some(Value::Time(t)) = value(at) {
+                    total_time = Some(if t >> 32 == 0 {
+                        t as u32
+                    } else {
+                        (t / 600_000_000).min(u32::MAX as u64) as u32
+                    });
+                }
+            }
             _ => {}
         }
     }
-    p
+    (p, total_time)
 }
 
 /// 문서 속성 → `\x05SummaryInformation` 스트림. 한셀이 쓰는 꼴 그대로 (관측, 말뭉치 117개):
@@ -137,7 +150,8 @@ pub fn parse_summary(d: &[u8]) -> DocProperties {
 /// 키워드, 설명, 마지막 수정자, 프로그램 이름, 수정 번호, 한컴 PID 0xFF·0xFE (판 문자열), 서식 파일, 만든 날짜,
 /// 저장 날짜, 마지막 인쇄, 편집 시간, 0xFD (운영 체제), 사전(PID 0). 문자열은 모두 VT_LPWSTR (끝 NUL 포함,
 /// 4바이트 맞춤), 날짜는 VT_FILETIME, 사전은 13바이트 (`1, 0, 1, 00`). 속성 집합 크기는 맞춤 없이 끝까지.
-pub fn write_summary(p: &DocProperties) -> Vec<u8> {
+/// 편집 시간(`total_time`, 분)은 VT_FILETIME 의 값 자리에 분 수 그대로 ([`parse_summary`]).
+pub fn write_summary(p: &DocProperties, total_time: Option<u32>) -> Vec<u8> {
     let wstr = |s: &str| -> Vec<u8> {
         let w: Vec<u16> = s.encode_utf16().chain([0]).collect();
         let mut v = vec![0x1F, 0, 0, 0];
@@ -174,7 +188,11 @@ pub fn write_summary(p: &DocProperties) -> Vec<u8> {
         (0x0C, time(p.created.as_ref())),
         (0x0D, time(p.modified.as_ref())),
         (0x0B, time(p.last_printed.as_ref())),
-        (0x0A, time(None)),
+        (0x0A, {
+            let mut v = vec![0x40, 0, 0, 0];
+            v.extend_from_slice(&u64::from(total_time.unwrap_or(0)).to_le_bytes());
+            v
+        }),
         (0xFD, wstr("Windows_10")),
         (0, vec![1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]),
     ];
@@ -259,6 +277,10 @@ mod tests {
         let mut t = vec![0x40, 0, 0, 0];
         t.extend_from_slice(&0x01BC_262E_3049_6A00u64.to_le_bytes());
         vals.push((0x0C, t));
+        // 편집 시간: 한셀은 분 수를 FILETIME 의 낮은 u32 에 넣는다
+        let mut e = vec![0x40, 0, 0, 0];
+        e.extend_from_slice(&1234u64.to_le_bytes());
+        vals.push((0x0A, e));
         let head = 8 + vals.len() * 8;
         let mut off = head;
         let mut body = Vec::new();
@@ -280,7 +302,8 @@ mod tests {
         d.extend_from_slice(&48u32.to_le_bytes());
         d.extend(set);
 
-        let p = parse_summary(&d);
+        let (p, total_time) = parse_summary(&d);
+        assert_eq!(total_time, Some(1234));
         assert_eq!(p.title.as_deref(), Some("자동차 경비 보고서"));
         assert_eq!(p.creator.as_deref(), Some("yoomin53"));
         assert_eq!(p.created.as_deref(), Some("1997-03-01T10:49:08Z"));

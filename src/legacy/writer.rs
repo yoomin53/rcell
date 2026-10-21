@@ -506,6 +506,11 @@ struct FontLayout {
     map: Vec<u16>,
     /// 레거시 순서대로 쓸 모델 번호 (4번 자리 제외)
     records: Vec<usize>,
+    /// 표에 같은 글꼴이 없는 메모 서식 런의 글꼴: 모델 글꼴 뒤에 처음 나온 차례로 덧붙인다 (관측: 메모 대조 실험 —
+    /// 굴림 9·맑은 고딕 11 굵게 빨강·돋움 9 기울임 런이 FONT 셋으로 끝에 붙는다)
+    extra: Vec<Font>,
+    /// `extra[0]` 의 레거시 번호
+    extra_base: u16,
 }
 
 fn same_font(a: &Font, b: &Font) -> bool {
@@ -685,7 +690,23 @@ fn layout_fonts(wb: &Workbook, styles: &StyleLayout) -> FontLayout {
         records.push(i);
         k += 1;
     }
-    FontLayout { map, records }
+    let mut extra: Vec<Font> = Vec::new();
+    for sh in &wb.sheets {
+        for c in &sh.comments {
+            for f in c.text.runs.iter().filter_map(|r| r.font.as_ref()) {
+                if run_font(wb, f).is_none() && !extra.iter().any(|e| same_font(e, f)) {
+                    extra.push(f.clone());
+                }
+            }
+        }
+    }
+    let extra_base = if k < 4 { k } else { k + 1 };
+    FontLayout {
+        map,
+        records,
+        extra,
+        extra_base,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,7 +1280,22 @@ impl Sst {
             index: HashMap::new(),
             total: 0,
         };
-        for r in &wb.shared_strings {
+        // 셀이 쓰지 않는 공유 문자열은 버린다 (관측: 셀 없이 sharedStrings 만 있는 실험 문서 — 한셀의 SST 는 비어
+        // 있다). 수식 셀의 문자열 결과도 쓰는 것으로 본다 (말뭉치 formulas 의 한셀 SST 에 남아 있다)
+        let used: std::collections::HashSet<&str> = wb
+            .sheets
+            .iter()
+            .flat_map(|sh| &sh.cells)
+            .filter_map(|c| match &c.value {
+                CellValue::Text(t) | CellValue::Date(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        for r in wb
+            .shared_strings
+            .iter()
+            .filter(|r| used.contains(r.text.as_str()))
+        {
             s.index
                 .entry(r.text.clone())
                 .or_insert(s.strings.len() as u32);
@@ -1562,6 +1598,29 @@ struct SheetEnc {
     cf: Vec<Vec<(Vec<u8>, Vec<u8>)>>,
     /// 데이터 유효성 → (수식 1, 수식 2)
     dv: Vec<(Vec<u8>, Vec<u8>)>,
+    /// CF12 기준 값의 수식: (서식 번호, 규칙 번호, 기준 값 번호) → 토큰열 ([`cfvo_formula`])
+    cfvo: HashMap<(usize, usize, usize), Vec<u8>>,
+}
+
+/// CF12 기준 값을 수식(토큰열)으로 쓰는가: 수식 기준 값, 그리고 x14 구역 규칙의 숫자 값 (한셀은 x14 구역에서 읽은
+/// `xm:f` 를 수식으로 쓴다 — x14 조건부 서식 실험: 3Stars 의 percent 33 → `1e 21 00`)
+fn cfvo_formula(r: &crate::model::CfRule, c: &crate::model::Cfvo) -> Option<String> {
+    let v = c.val.as_ref().filter(|v| !v.is_empty())?;
+    (c.kind == "formula" || (r.x14 && matches!(c.kind.as_str(), "num" | "percent" | "percentile")))
+        .then(|| v.clone())
+}
+
+/// 규칙의 기준 값들 (색조·데이터 막대(둘까지)·아이콘 집합)
+pub(crate) fn rule_cfvos(r: &crate::model::CfRule) -> Vec<&crate::model::Cfvo> {
+    if let Some(cs) = &r.color_scale {
+        cs.cfvos.iter().collect()
+    } else if let Some(d) = &r.data_bar {
+        d.cfvos.iter().take(2).collect()
+    } else if let Some(i) = &r.icon_set {
+        i.cfvos.iter().collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// 쓰기 결과의 경고 (부호화하지 못한 수식 등)
@@ -1579,26 +1638,29 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
 pub fn write_with_report(wb: &Workbook) -> Result<(Vec<u8>, Report)> {
     let mut report = Report::default();
     let stream = workbook_stream(wb, &mut report)?;
-    let summary = super::props::write_summary(&wb.properties);
+    let summary = super::props::write_summary(&wb.properties, wb.total_time);
     let modified = wb
         .properties
         .modified
         .as_deref()
         .and_then(filetime)
         .unwrap_or(0);
-    let bytes = crate::cfb_writer::write(
-        &[
-            crate::cfb_writer::Stream {
-                name: "Workbook",
-                data: &stream,
-            },
-            crate::cfb_writer::Stream {
-                name: "\u{5}SummaryInformation",
-                data: &summary,
-            },
-        ],
-        modified,
-    );
+    // 스트림 차례: Workbook, 매크로 프로젝트(있으면), SummaryInformation (관측: 매크로 문서의 디렉터리)
+    let mut streams = vec![crate::cfb_write::Stream {
+        name: "Workbook",
+        data: &stream,
+    }];
+    if let Some(vbs) = &wb.hancom.vbs_project {
+        streams.push(crate::cfb_write::Stream {
+            name: crate::ns::VBS_PROJECT_STREAM.trim_start_matches('/'),
+            data: vbs,
+        });
+    }
+    streams.push(crate::cfb_write::Stream {
+        name: "\u{5}SummaryInformation",
+        data: &summary,
+    });
+    let bytes = crate::cfb_write::write(&streams, modified);
     Ok((bytes, report))
 }
 
@@ -1694,7 +1756,11 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
         out.rec(0x005C, &b.0);
     }
     out.rec(0x0042, &1200u16.to_le_bytes());
-    out.rec_buf(0x01BA, Buf::new().str16("ThisWorkbook"));
+    // 통합 문서 코드 이름 (workbookPr/@codeName, 없으면 ThisWorkbook)
+    out.rec_buf(
+        0x01BA,
+        Buf::new().str16(wb.code_name.as_deref().unwrap_or("ThisWorkbook")),
+    );
     let prot = wb.protection.as_ref();
     // 한셀은 창 잠금을 늘 0 으로 쓴다 (6.4절)
     out.rec(0x0019, &[0, 0]);
@@ -1711,29 +1777,33 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
             .to_le_bytes(),
     );
     {
-        // WINDOW1: workbookView 의 위치·크기(트윕)·활성 탭·첫 탭·탭 비율 (tabRatio 가 없으면 600 — ECMA 기본값,
-        // 관측: 말뭉치 XML 117개). 모델에 창이 없으면 한셀의 빈 문서 값 (0, 0, 0, 0, 탭 비율 500)
+        // WINDOW1: workbookView 의 위치·크기(트윕), 스크롤 막대·탭 표시 (0x08 가로, 0x10 세로, 0x20 탭), 활성 탭,
+        // 첫 탭, 선택한 탭 수 1, 탭 비율 (tabRatio 가 없으면 600 — ECMA 기본값, 관측: 말뭉치 XML 117개).
+        // 모델에 창이 없으면 한셀의 빈 문서 값 (0, 0, 0, 0, 탭 비율 500)
         let selected = wb
             .sheets
             .iter()
             .position(|s| s.view.tab_selected)
             .unwrap_or(0) as u32;
         let last = wb.sheets.len().saturating_sub(1) as u32;
-        let v = wb.book_view.clone().unwrap_or(crate::model::BookView {
-            tab_ratio: Some(500),
+        let v = wb.view.clone().unwrap_or(crate::model::WorkbookView {
+            tab_ratio: 500,
             active_tab: selected,
             ..Default::default()
         });
+        let grbit = (u16::from(v.show_horizontal_scroll) << 3)
+            | (u16::from(v.show_vertical_scroll) << 4)
+            | (u16::from(v.show_sheet_tabs) << 5);
         let mut b = Buf::new();
         b.u16(v.x_window as i16 as u16)
             .u16(v.y_window as i16 as u16)
             .u16(v.window_width.min(0xFFFF) as u16)
             .u16(v.window_height.min(0xFFFF) as u16)
-            .u16(0x0038)
+            .u16(grbit)
             .u16(v.active_tab.min(last) as u16)
             .u16(v.first_sheet.min(last) as u16)
             .u16(1)
-            .u16(v.tab_ratio.unwrap_or(600).min(1000) as u16);
+            .u16(v.tab_ratio.min(1000) as u16);
         out.rec_buf(0x003D, &mut b);
     }
     out.rec(0x0022, &(wb.date1904 as u16).to_le_bytes());
@@ -1741,11 +1811,16 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
     out.rec(0x000E, &[1, 0]);
 
     // 글꼴
-    for (k, &i) in fonts.records.iter().enumerate() {
+    let all_fonts = fonts
+        .records
+        .iter()
+        .map(|&i| &wb.styles.fonts[i])
+        .chain(&fonts.extra);
+    for (k, f) in all_fonts.enumerate() {
         let legacy = if k >= 4 { k + 1 } else { k };
         // 레거시 번호 0–3 과 5 (= 레코드 0–4) 가 상용구
         let boiler_index = if k < 5 { k } else { legacy };
-        out.rec(0x0031, &font_record(&wb.styles.fonts[i], wb, boiler_index));
+        out.rec(0x0031, &font_record(f, wb, boiler_index));
     }
     // 표시 형식: 한국어 내장 12개, 그다음 사용자 형식
     for id in [5u32, 6, 7, 8, 23, 24, 25, 26, 41, 42, 43, 44] {
@@ -1845,7 +1920,39 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
         para_records.push(parashape_record(&p, 1));
         (para_records.len() - 1) as u32
     });
-    for r in &para_records {
+    // 메모 글의 맞춤: 왼쪽이 아니면 기본 문단 모양에 그 정렬을 준 것 (메모 대조 실험: 가운데 맞춤 메모 → 정렬 3,
+    // 표 끝에 하나)
+    let mut note_para: HashMap<u8, u32> = HashMap::new();
+    for c in wb.sheets.iter().flat_map(|s| &s.comments) {
+        let Some(a) =
+            super::art::note_hangul_align(c.shape.as_ref().and_then(|b| b.text_halign.as_deref()))
+        else {
+            continue;
+        };
+        if note_para.contains_key(&a) {
+            continue;
+        }
+        let rec = parashape_record(&ParaShape::default(), a);
+        let idx = match para_records.iter().position(|r| *r == rec) {
+            Some(i) => i,
+            None => {
+                para_records.push(rec);
+                para_records.len() - 1
+            }
+        };
+        note_para.insert(a, idx as u32);
+    }
+    // 레거시에서 읽은 문서에 문단 모양이 하나도 없으면 기본 문단 모양도 쓰지 않는다 (관측: COM 으로 만든 말뭉치 문서
+    // bigref·formulas·values … 의 한셀 레거시에는 0xA001 이 없다. 메모·도형·차트가 있으면 기본 문단 모양이 있다)
+    let no_para = wb.styles.from_legacy
+        && para_links.is_empty()
+        && text_para.is_none()
+        && note_para.is_empty()
+        && wb
+            .sheets
+            .iter()
+            .all(|s| s.comments.is_empty() && s.shapes.is_empty());
+    for r in para_records.iter().filter(|_| !no_para) {
         out.rec(0xA001, r);
     }
     for l in &para_links {
@@ -2035,6 +2142,7 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
     // 그림 저장소
     let mut art = super::art::Art::new(wb);
     art.text_para = text_para;
+    art.note_para = note_para;
     if let Some(dgg) = art.drawing_group() {
         out.rec(0x00EB, &dgg);
     }
@@ -2297,6 +2405,14 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
             let f1 = enc(synthesized.as_ref().or(r.formulas.first()));
             let f2 = enc(r.formulas.get(1));
             rules.push((f1, f2));
+            for (k, c) in rule_cfvos(r).into_iter().enumerate() {
+                if let Some(t) = cfvo_formula(r, c) {
+                    let v = enc(Some(&t));
+                    if !v.is_empty() {
+                        e.cfvo.insert((e.cf.len(), rules.len() - 1, k), v);
+                    }
+                }
+            }
         }
         e.cf.push(rules);
     }
@@ -2360,9 +2476,25 @@ impl SheetCtx<'_> {
     pub fn font(&self, i: u32) -> u16 {
         self.fonts.map.get(i as usize).copied().unwrap_or(0)
     }
-    /// 서식 런 글꼴과 같은 글꼴의 레거시 번호 ([`run_font`])
+    /// 서식 런 글꼴과 같은 글꼴의 레거시 번호 ([`run_font`], 없으면 덧붙인 글꼴)
     pub fn font_like(&self, f: &Font) -> u16 {
-        run_font(self.wb, f).map_or(0, |i| self.fonts.map[i])
+        match run_font(self.wb, f) {
+            Some(i) => self.fonts.map[i],
+            None => self
+                .fonts
+                .extra
+                .iter()
+                .position(|e| same_font(e, f))
+                .map_or(0, |k| {
+                    let idx = self.fonts.extra_base + k as u16;
+                    // 4 번 자리는 비어 있다
+                    if self.fonts.extra_base < 4 && idx >= 4 {
+                        idx + 1
+                    } else {
+                        idx
+                    }
+                }),
+        }
     }
     /// 데이터 유효성 i 의 부호화된 수식 1·2
     pub fn enc_dv(&self, i: usize) -> (&[u8], &[u8]) {
@@ -2370,6 +2502,10 @@ impl SheetCtx<'_> {
             .dv
             .get(i)
             .map_or((&[][..], &[][..]), |(a, b)| (a.as_slice(), b.as_slice()))
+    }
+    /// 조건부 서식 g 의 규칙 r 의 기준 값 k 를 수식으로 쓸 때의 토큰열
+    pub fn enc_cfvo(&self, g: usize, r: usize, k: usize) -> Option<&[u8]> {
+        self.enc.cfvo.get(&(g, r, k)).map(Vec::as_slice)
     }
     /// 조건부 서식 g 의 규칙 r 의 부호화된 수식 1·2
     pub fn enc_cf(&self, g: usize, r: usize) -> (&[u8], &[u8]) {
@@ -2530,7 +2666,16 @@ fn write_sheet(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
         out.rec(rt, &margin(v, wb.styles.from_legacy).to_le_bytes());
     }
     {
-        let s = sheet.page.setup.clone().unwrap_or_default();
+        // 시트에 pageSetup 이 없으면 한셀은 맞춤 0·0, grbit 0x02 (세로) 를 쓴다 (관측: pageSetup 없는 실험 문서
+        // 30개의 한셀 레거시)
+        let none = sheet.page.setup.is_none();
+        let s = sheet.page.setup.clone().unwrap_or(crate::model::PageSetup {
+            fit_to_width: Some(0),
+            fit_to_height: Some(0),
+            orientation: Some("portrait".into()),
+            use_printer_defaults: true,
+            ..Default::default()
+        });
         let mut g = 0u16;
         if s.page_order.as_deref() == Some("overThenDown") {
             g |= 0x01;
@@ -2540,7 +2685,7 @@ fn write_sheet(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
             Some("landscape") => {}
             _ => g |= 0x40 | 0x02,
         }
-        if !s.use_printer_defaults {
+        if !s.use_printer_defaults && !none {
             g |= 0x04;
         }
         if s.black_and_white {

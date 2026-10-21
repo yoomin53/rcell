@@ -316,7 +316,7 @@ fn writer_output_is_read_identically_by_hancell() {
     // RCELL_OUT 을 주면 `<폴더>/rcell-out` 대신 `RCELL_OUT/<폴더>` 의 결과를 쓴다 (말뭉치 밖에서 새로 만든 결과)
     let out_root = std::env::var_os("RCELL_OUT").map(PathBuf::from);
     let mut failures = Vec::new();
-    let (mut checked, mut stale) = (0, 0);
+    let (mut checked, mut chart_stale, mut stale_total) = (0, 0, 0);
     for (sub, base) in [
         ("", dir.clone()),
         ("craft", dir.join("craft")),
@@ -363,24 +363,40 @@ fn writer_output_is_read_identically_by_hancell() {
             // 레거시 차트(0x7EF0)를 쓰기 전의 rcell 이 만든 결과(rcell 출력에 차트 파트가 없음)는 차트를 빼고 본다
             let written = out.join(format!("{stem}.rcell.cell"));
             if stem.ends_with(".legacy") && !has_chart_parts(&written) && has_charts(&a) {
-                stale += 1;
+                chart_stale += 1;
                 for s in &mut a.sheets {
                     s.shapes
                         .retain(|x| x.kind != rcell::model::ShapeKind::Chart);
                 }
             }
-            let diffs: Vec<String> = rcell::compare::compare(&a, &b, opts)
+            // 한셀 재저장본은 그것을 만들 때의 rcell 출력(X.rcell.cell)을 판정한다. 지금의 rcell 이 같은 원본에서
+            // 다르게 쓰는 항목은 그 재저장본으로 판정할 수 없다 → 빼고 알린다 (rcell-out 을 다시 만들면 사라진다)
+            let stale = stale_labels(&base.join(format!("{stem}.cell")), &written);
+            let all = rcell::compare::compare(&a, &b, opts);
+            let before = all.len();
+            let diffs: Vec<String> = all
                 .into_iter()
                 .filter(|d| !(stem.ends_with(".bin") && d.starts_with("외부 연결 상태")))
+                .filter(|d| !stale.contains(d.lines().next().unwrap_or("")))
                 .collect();
             checked += 1;
+            if !stale.is_empty() {
+                stale_total += 1;
+                eprintln!(
+                    "     (재저장본이 지난 출력: {} 항목 제외, 차이 {before} 중)  {}",
+                    stale.len(),
+                    resaved.display()
+                );
+            }
             eprintln!("{:>4} 차이  {}", diffs.len(), resaved.display());
             if !diffs.is_empty() {
                 failures.push(format!("{}:\n{}", resaved.display(), diffs.join("\n")));
             }
         }
     }
-    eprintln!("비교한 쌍: {checked} (차트를 쓰기 전의 레거시 결과 {stale}개는 차트를 빼고 비교)");
+    eprintln!(
+        "비교한 쌍: {checked} (차트를 쓰기 전의 레거시 결과 {chart_stale}개는 차트를 빼고 비교, 지난 출력으로 일부 항목을 뺀 쌍: {stale_total})"
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
@@ -398,4 +414,18 @@ fn has_chart_parts(path: &Path) -> bool {
         .ok()
         .and_then(|b| rcell::Package::from_bytes(b).ok())
         .is_some_and(|p| p.part_names().iter().any(|n| n.starts_with("xl/charts/")))
+}
+
+/// 지금의 rcell 이 `source` 에서 쓰는 결과와 보관된 rcell 출력 `stored` 가 의미상 다른 비교 항목의 이름.
+/// 파일이 없으면 빈 집합 (판정에서 뺄 것이 없다).
+fn stale_labels(source: &Path, stored: &Path) -> std::collections::BTreeSet<String> {
+    let (Ok(src), Ok(old)) = (rcell::open(source), rcell::open(stored)) else {
+        return Default::default();
+    };
+    let bytes = rcell::writer::write(&src, rcell::writer::Flavor::Cell).expect("rcell 쓰기");
+    let fresh = rcell::from_bytes(bytes).expect("rcell 출력 읽기");
+    rcell::compare::compare(&old, &fresh, Default::default())
+        .iter()
+        .filter_map(|d| d.lines().next().map(str::to_string))
+        .collect()
 }
