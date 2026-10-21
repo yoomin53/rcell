@@ -418,7 +418,7 @@ fn parse_sheet_view(v: &Element) -> SheetView {
     view
 }
 
-fn parse_filter_column(c: &Element) -> FilterColumn {
+pub(crate) fn parse_filter_column(c: &Element) -> FilterColumn {
     let mut fc = FilterColumn {
         col_id: c.attr_u32("colId").unwrap_or(0),
         ..Default::default()

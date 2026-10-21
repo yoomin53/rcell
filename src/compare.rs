@@ -16,8 +16,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::model::{
-    Border, BorderEdge, CellRange, CellValue, Color, Font, Sheet, Styles, Workbook,
+    AutoFilter, Border, BorderEdge, CellRange, CellValue, Color, Font, PartLink, Sheet, Styles,
+    Table, Workbook,
 };
+use crate::xml::Element;
 
 /// 비교 옵션.
 #[derive(Debug, Clone, Copy, Default)]
@@ -899,7 +901,13 @@ fn dv_key(sh: &Sheet) -> String {
 /// 와일드카드 없는 `equal` 조건만 `or` 로 이은 사용자 지정 필터는 같은 값 목록 필터로 본다
 /// (한셀은 값 두 개 이하의 목록을 레거시에 그렇게 저장하고, 다시 읽을 때 사용자 지정으로 보여 준다).
 fn filter_key(sh: &Sheet) -> String {
-    let af = sh.auto_filter.as_ref().map_or("-".into(), |f| {
+    let af = sh.auto_filter.as_ref().map_or("-".into(), af_key);
+    format!("filterMode={} {af}", sh.filter_mode)
+}
+
+/// 자동 필터 범위와 열 조건 (시트와 표가 함께 쓴다)
+fn af_key(f: &AutoFilter) -> String {
+    {
         let cols: Vec<String> = f
             .columns
             .iter()
@@ -940,8 +948,260 @@ fn filter_key(sh: &Sheet) -> String {
             })
             .collect();
         format!("{} [{}]", norm_ranges(Some(&f.range)), cols.join("; "))
+    }
+}
+
+/// 표: 이름·번호·범위·머리글/요약 행·종류·열(요약 함수·글·수식, 계산 열)·자동 필터·스타일. 차등 서식은 번호가
+/// 아니라 내용으로 본다 (한셀은 레거시를 읽을 때 같은 내용이 된 차등 서식을 하나로 합쳐 번호가 바뀐다).
+/// `no_format` = 차등 서식·셀 스타일 생략
+fn tables_key(styles: &Styles, sh: &Sheet, no_format: bool) -> String {
+    let mut v: Vec<String> = sh
+        .tables
+        .iter()
+        .map(|t| table_key(styles, t, no_format))
+        .collect();
+    v.sort();
+    v.join("\n      ")
+}
+
+fn table_key(styles: &Styles, t: &Table, no_format: bool) -> String {
+    let dxfs = |names: &[&str], ids: &[Option<u32>]| {
+        let mut s = String::new();
+        if !no_format {
+            for (n, id) in names.iter().zip(ids) {
+                if id.is_some() {
+                    let _ = write!(s, " {n}={}", dxf_key(styles, *id));
+                }
+            }
+        }
+        s
+    };
+    let cols: Vec<String> = t
+        .columns
+        .iter()
+        .map(|c| {
+            let mut s = format!("{}:{}", c.id, c.name);
+            for (k, v) in [
+                ("고유", &c.unique_name),
+                ("요약", &c.totals_function),
+                ("요약 글", &c.totals_label),
+                ("요약 수식", &c.totals_formula),
+                ("계산", &c.calculated_formula),
+            ] {
+                if let Some(v) = v {
+                    let _ = write!(s, " {k}={v:?}");
+                }
+            }
+            if let Some(q) = c.query_table_field_id {
+                let _ = write!(s, " 쿼리 필드={q}");
+            }
+            s + &dxfs(&["머리글", "데이터", "요약"], &c.dxfs)
+        })
+        .collect();
+    let mut s = format!(
+        "{}({}) #{} {} 머리글 {} 요약 {}{}",
+        t.name,
+        t.display_name,
+        t.id,
+        t.range,
+        t.header_rows,
+        t.totals_rows,
+        if t.totals_shown { "" } else { " 요약 숨김" }
+    );
+    if let Some(v) = &t.table_type {
+        let _ = write!(s, " 종류={v}");
+    }
+    if let Some(v) = &t.comment {
+        let _ = write!(s, " 설명={v:?}");
+    }
+    if let Some(v) = t.connection_id {
+        let _ = write!(s, " 연결={v}");
+    }
+    let _ = write!(
+        s,
+        " 필터={} 열=[{}]",
+        t.auto_filter.as_ref().map_or("-".into(), af_key),
+        cols.join("; ")
+    );
+    if let Some(st) = &t.style {
+        let _ = write!(
+            s,
+            " 스타일={}{}{}{}{}",
+            st.name.as_deref().unwrap_or("-"),
+            if st.first_column { " 첫 열" } else { "" },
+            if st.last_column { " 끝 열" } else { "" },
+            if st.row_stripes { " 행 줄무늬" } else { "" },
+            if st.column_stripes {
+                " 열 줄무늬"
+            } else {
+                ""
+            }
+        );
+    }
+    s.push_str(&dxfs(
+        &[
+            "머리글",
+            "데이터",
+            "요약",
+            "테두리",
+            "머리글 테두리",
+            "요약 테두리",
+        ],
+        &t.dxfs,
+    ));
+    if !no_format {
+        for (n, v) in ["머리글", "데이터", "요약"].iter().zip(&t.cell_styles) {
+            if let Some(v) = v {
+                let _ = write!(s, " {n} 셀 스타일={v:?}");
+            }
+        }
+    }
+    s
+}
+
+/// 원본 그대로 옮겨 쓴 파트의 XML
+fn raw_xml(w: &Workbook, part: &str) -> Option<Element> {
+    let p = w.raw_parts.iter().find(|p| p.name == part)?;
+    let s = String::from_utf8_lossy(&p.data);
+    crate::xml::parse(s.trim_start_matches('\u{feff}'), part).ok()
+}
+
+/// 피벗 표 (XML 원본에서 그대로 옮긴 파트): 이름, 위치, 캐시의 원본·필드, 필드 축, 행·열·페이지·데이터 필드,
+/// 스타일. 데이터 필드의 함수는 없으면 sum (한셀은 늘 쓴다)
+fn pivots_key(w: &Workbook, sh: &Sheet) -> String {
+    let mut v: Vec<String> = sh
+        .part_links
+        .iter()
+        .filter(|l| l.rel_type.ends_with("/pivotTable"))
+        .map(|l| pivot_key(w, &l.part))
+        .collect();
+    v.sort();
+    v.join("\n      ")
+}
+
+fn pivot_key(w: &Workbook, part: &str) -> String {
+    let Some(root) = raw_xml(w, part) else {
+        return format!("{part}?");
+    };
+    let a = |e: &Element, n: &str| e.attr(n).unwrap_or("").to_string();
+    let cache = root
+        .attr_u32("cacheId")
+        .and_then(|id| w.part_links.iter().find(|l| l.cache_id == Some(id)))
+        .and_then(|l| raw_xml(w, &l.part))
+        .map_or("-".into(), |c| {
+            let src = c.sml_child("cacheSource").map_or(String::new(), |s| {
+                let ws = s.sml_child("worksheetSource").map_or(String::new(), |x| {
+                    format!(" {}!{}{}", a(x, "sheet"), a(x, "ref"), a(x, "name"))
+                });
+                format!("{}{ws}", a(s, "type"))
+            });
+            let fields: Vec<String> = c
+                .sml_child("cacheFields")
+                .into_iter()
+                .flat_map(|f| f.sml_children("cacheField"))
+                .map(|f| a(f, "name"))
+                .collect();
+            format!("{src} [{}]", fields.join(","))
+        });
+    let loc = root.sml_child("location").map_or(String::new(), |l| {
+        format!(
+            "{} {}/{}/{}",
+            a(l, "ref"),
+            a(l, "firstHeaderRow"),
+            a(l, "firstDataRow"),
+            a(l, "firstDataCol")
+        )
     });
-    format!("filterMode={} {af}", sh.filter_mode)
+    let fields: Vec<String> = root
+        .sml_child("pivotFields")
+        .into_iter()
+        .flat_map(|f| f.sml_children("pivotField"))
+        .map(|f| {
+            format!(
+                "{}{}",
+                f.attr("axis").unwrap_or("-"),
+                if f.attr_bool("dataField") == Some(true) {
+                    "+data"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect();
+    let list = |n: &str, c: &str, at: &str| {
+        root.sml_child(n)
+            .into_iter()
+            .flat_map(|f| f.sml_children(c))
+            .map(|f| a(f, at))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let data: Vec<String> = root
+        .sml_child("dataFields")
+        .into_iter()
+        .flat_map(|f| f.sml_children("dataField"))
+        .map(|d| {
+            format!(
+                "{}={}:{}",
+                a(d, "name"),
+                a(d, "fld"),
+                d.attr("subtotal").unwrap_or("sum")
+            )
+        })
+        .collect();
+    format!(
+        "{} @{loc} 캐시={cache} 필드=[{}] 행=[{}] 열=[{}] 페이지=[{}] 데이터=[{}] 스타일={}",
+        a(&root, "name"),
+        fields.join(","),
+        list("rowFields", "field", "x"),
+        list("colFields", "field", "x"),
+        list("pageFields", "pageField", "fld"),
+        data.join(";"),
+        root.sml_child("pivotTableStyleInfo")
+            .map_or(String::new(), |s| a(s, "name"))
+    )
+}
+
+/// 원본 그대로 옮긴 파트의 관계 종류 (피벗 표·피벗 캐시·한컴 매크로는 따로 비교한다)
+fn links_key(links: &[PartLink]) -> String {
+    let mut v: Vec<&str> = links
+        .iter()
+        .filter(|l| {
+            !l.rel_type.ends_with("/pivotTable")
+                && !l.rel_type.ends_with("/pivotCacheDefinition")
+                && l.rel_type != crate::ns::REL_HANCOM_VBS_PROJECT
+        })
+        .map(|l| l.rel_type.rsplit('/').next().unwrap_or(""))
+        .collect();
+    v.sort();
+    v.join(" ")
+}
+
+/// 한컴 매크로 프로젝트 (`_VBS_PROJECT_W` 스트림): 길이, 바이트 지문(FNV-1a), 글 (머리 0x104 바이트 뒤
+/// 글자 수 u32 + UTF-16 — 패키지 파트 실험)
+fn macro_key(w: &Workbook) -> String {
+    let Some(b) = &w.hancom.vbs_project else {
+        return "-".into();
+    };
+    let n = b
+        .get(0x104..0x108)
+        .map_or(0, |x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]) as usize);
+    let units: Vec<u16> = b
+        .get(0x108..)
+        .unwrap_or(&[])
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .take(n)
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &x in b.iter() {
+        h ^= u64::from(x);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    let text: String = String::from_utf16_lossy(&units).chars().take(80).collect();
+    format!("{} 바이트 {h:016x} {text:?}", b.len())
 }
 
 /// 두 시트에 모두 있는 상위/하위 기준값(filterVal)을 열 번호 순으로
@@ -1315,6 +1575,12 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             .join(" ")
     };
     diff("외부 연결 상태".into(), caches(a), caches(b));
+    diff(
+        "패키지 파트".into(),
+        links_key(&a.part_links),
+        links_key(&b.part_links),
+    );
+    diff("매크로 프로젝트".into(), macro_key(a), macro_key(b));
 
     for (sa, sb) in a.sheets.iter().zip(&b.sheets) {
         let s = &sa.name;
@@ -1566,6 +1832,17 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             format!("{s} 눈금선"),
             sa.show_grid_lines.to_string(),
             sb.show_grid_lines.to_string(),
+        );
+        diff(
+            format!("{s} 표"),
+            tables_key(&a.styles, sa, opts.ignore_table_styles),
+            tables_key(&b.styles, sb, opts.ignore_table_styles),
+        );
+        diff(format!("{s} 피벗 표"), pivots_key(a, sa), pivots_key(b, sb));
+        diff(
+            format!("{s} 패키지 파트"),
+            links_key(&sa.part_links),
+            links_key(&sb.part_links),
         );
     }
     out

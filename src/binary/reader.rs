@@ -1450,6 +1450,20 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
         })
         .collect();
 
+    // 형식이 XML 과 같은 파트 (매크로 프로젝트·사용자 지정 XML)는 그대로 옮겨 쓴다
+    wb.hancom.vbs_project_part = rels
+        .iter()
+        .find(|r| r.rel_type == crate::ns::REL_HANCOM_VBS_PROJECT)
+        .map(|r| r.target.clone());
+    wb.part_links = crate::parser::read_part_links(
+        pkg,
+        &rels,
+        crate::parser::WORKBOOK_PART_LINKS,
+        true,
+        &mut wb.raw_parts,
+    )?;
+    wb.hancom.vbs_project = crate::parser::vbs_project_of(&wb.part_links, &wb.raw_parts);
+
     // 다른 시트 범위의 이름은 시트 이름을 붙여 읽는다
     let name_scopes: Vec<Option<u32>> = names.iter().map(|n| n.1).collect();
     let sheet_names: Vec<String> = bundles.iter().map(|b| b.name.clone()).collect();
@@ -1480,6 +1494,13 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
             read_sheet(&data, &mut sheet, &wb, &srels, (&xti_sheets, &local_names))?;
             read_comments(pkg, &srels, &wb.styles.fonts, &mut sheet)?;
             crate::parser::read_sheet_drawings(pkg, &srels, &mut wb.raw_parts, &mut sheet)?;
+            sheet.part_links = crate::parser::read_part_links(
+                pkg,
+                &srels,
+                crate::parser::SHEET_PART_LINKS,
+                true,
+                &mut wb.raw_parts,
+            )?;
         }
         wb.sheets.push(sheet);
     }

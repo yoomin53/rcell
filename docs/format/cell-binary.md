@@ -19,6 +19,8 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
 | `xl/styles.bin` | `application/vnd.ms-excel.styles` |
 | `xl/sharedStrings.bin` | `application/vnd.ms-excel.sharedStrings` |
 | `xl/theme/theme1.xml` | 테마 (XML 그대로) |
+| `xl/vbsProject.bin` | 한컴 매크로 프로젝트 — XML 과 같은 복합 문서 파트 (`application/vnd.hancom-office.vbsProject`, [cell-2024.md](cell-2024.md) 7.10절) |
+| `xl/tables/tableN.bin`, `xl/pivotTables/pivotTableN.bin`, `xl/pivotCache/pivotCacheDefinitionN.bin`·`pivotCacheRecordsN.bin` | 표(`BrtBeginList` 343 …)·피벗 — 레코드 파트. rcell 은 아직 읽지 않는다 |
 
 ## 2. 한셀 고유 사항 (관측)
 

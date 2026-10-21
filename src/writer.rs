@@ -19,8 +19,9 @@ use zip::write::{SimpleFileOptions, ZipWriter};
 
 use crate::error::Result;
 use crate::model::{
-    Border, BorderEdge, CellValue, Color, Fill, Font, HancomFontExt, HancomXfExt, PageLayout,
-    PageMargins, ParaShape, RichText, Sheet, SheetKind, SheetState, Styles, Workbook, Xf,
+    AutoFilter, Border, BorderEdge, CellValue, Color, Fill, Font, HancomFontExt, HancomXfExt,
+    PageLayout, PageMargins, ParaShape, PartLink, RawPart, RichText, Sheet, SheetKind, SheetState,
+    Styles, Table, Workbook, Xf,
 };
 
 /// 저장 형식.
@@ -275,17 +276,20 @@ fn fill_xml(f: &Fill) -> String {
     }
 }
 
+/// 셀 테두리의 선 하나. 선 종류가 없어도 색은 쓴다: 한셀은 표의 데이터 영역 서식(`dataDxfId`)을 셀
+/// 테두리의 색에서 다시 만든다 (패키지 파트 실험 — 색을 버리면 표 열의 차등 서식이 사라진다)
 fn edge_xml(name: &str, e: Option<&BorderEdge>) -> String {
-    match e.and_then(|e| e.style.as_deref().map(|s| (s, e))) {
-        None => format!("<{name}/>"),
-        Some((style, e)) => match &e.color {
-            Some(c) => format!(
-                "<{name} style=\"{}\">{}</{name}>",
-                esc(style),
-                color_el("x:color", c)
-            ),
-            None => format!("<{name} style=\"{}\"/>", esc(style)),
-        },
+    let Some(e) = e else {
+        return format!("<{name}/>");
+    };
+    let style = e
+        .style
+        .as_deref()
+        .map(|s| format!(" style=\"{}\"", esc(s)))
+        .unwrap_or_default();
+    match &e.color {
+        Some(c) => format!("<{name}{style}>{}</{name}>", color_el("x:color", c)),
+        None => format!("<{name}{style}/>"),
     }
 }
 
@@ -1426,12 +1430,26 @@ fn sheet_xml(
         }
         s.push_str("</x:hyperlinks>");
     }
-    s.push_str(&page_xml(&sheet.page));
+    // 프린터 설정 파트는 pageSetup 의 r:id 로 가리킨다 (시트 관계 rIdP<n>)
+    let printer = sheet
+        .part_links
+        .iter()
+        .position(|l| l.rel_type.ends_with("/printerSettings"))
+        .map(|k| format!("rIdP{}", k + 1));
+    s.push_str(&page_xml(&sheet.page, printer.as_deref()));
     if !sheet.shapes.is_empty() {
         s.push_str("<x:drawing r:id=\"rIdDr\"/>");
     }
     if !sheet.comments.is_empty() {
         s.push_str("<x:legacyDrawing r:id=\"rIdVml\"/>");
+    }
+    // 표 (CT_Worksheet 에서 extLst 바로 앞). 관계 rIdT<n>
+    if !sheet.tables.is_empty() {
+        let _ = write!(s, "<x:tableParts count=\"{}\">", sheet.tables.len());
+        for j in 0..sheet.tables.len() {
+            let _ = write!(s, "<x:tablePart r:id=\"rIdT{}\"/>", j + 1);
+        }
+        s.push_str("</x:tableParts>");
     }
     // 시트 확장 (CT_Worksheet 의 마지막 자식)
     if !cf14.is_empty() {
@@ -1495,9 +1513,15 @@ fn protection_xml(sheet: &Sheet) -> String {
 
 /// `autoFilter` (CT_Worksheet 에서 sheetProtection 다음)
 fn auto_filter_xml(sheet: &Sheet) -> String {
-    let Some(af) = &sheet.auto_filter else {
-        return String::new();
-    };
+    sheet
+        .auto_filter
+        .as_ref()
+        .map(auto_filter_xml_of)
+        .unwrap_or_default()
+}
+
+/// `autoFilter` 요소 (시트와 표가 함께 쓴다)
+fn auto_filter_xml_of(af: &AutoFilter) -> String {
     let mut s = format!("<x:autoFilter ref=\"{}\"", esc(&af.range));
     if af.columns.is_empty() {
         s.push_str("/>");
@@ -1716,8 +1740,9 @@ fn margin(v: f64) -> String {
     }
 }
 
-/// printOptions, pageMargins, pageSetup, headerFooter, rowBreaks, colBreaks (CT_Worksheet 순서)
-fn page_xml(p: &PageLayout) -> String {
+/// printOptions, pageMargins, pageSetup, headerFooter, rowBreaks, colBreaks (CT_Worksheet 순서).
+/// `printer` = 프린터 설정 파트로 가는 관계 ID
+fn page_xml(p: &PageLayout, printer: Option<&str>) -> String {
     let mut s = String::new();
     let b = |v: bool| v as u8;
     if let Some(o) = &p.print_options {
@@ -1784,7 +1809,12 @@ fn page_xml(p: &PageLayout) -> String {
                 let _ = write!(s, " {name}=\"{v}\"");
             }
         }
+        if let Some(id) = printer {
+            let _ = write!(s, " r:id=\"{id}\"");
+        }
         s.push_str("/>");
+    } else if let Some(id) = printer {
+        let _ = write!(s, "<x:pageSetup r:id=\"{id}\"/>");
     }
     if let Some(h) = &p.header_footer {
         let _ = write!(
@@ -1912,6 +1942,64 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
         })
         .collect();
 
+    // 원본 그대로 옮겨 쓰는 파트. Excel 형식에는 매크로 프로젝트를 쓰지 않는다
+    let is_macro =
+        |l: &PartLink| l.rel_type.ends_with("/vbaProject") || l.rel_type.ends_with("/vbsProject");
+    let wb_links: Vec<&PartLink> = wb
+        .part_links
+        .iter()
+        .filter(|l| flavor == Flavor::Cell || !is_macro(l))
+        .collect();
+    let skipped: Vec<String> = wb
+        .part_links
+        .iter()
+        .filter(|l| flavor == Flavor::Xlsx && is_macro(l))
+        .flat_map(|l| [l.part.clone(), crate::package::rels_part_for(&l.part)])
+        .collect();
+    let raw_parts: Vec<&RawPart> = wb
+        .raw_parts
+        .iter()
+        .filter(|p| !skipped.contains(&p.name))
+        .collect();
+    let raw_has = |n: &str| wb.raw_parts.iter().any(|p| p.name == n);
+    // 레거시 원본의 매크로 프로젝트: `_VBS_PROJECT_W` 스트림 하나짜리 복합 문서 (한셀과 같은 파트 이름)
+    let vbs_part = match &wb.hancom.vbs_project {
+        Some(st)
+            if flavor == Flavor::Cell
+                && !wb
+                    .part_links
+                    .iter()
+                    .any(|l| l.rel_type == crate::ns::REL_HANCOM_VBS_PROJECT)
+                && !raw_has("xl/vbsProject.bin") =>
+        {
+            Some(crate::cfb_write::write_streams(&[(
+                crate::ns::VBS_PROJECT_STREAM.trim_start_matches('/'),
+                st,
+            )])?)
+        }
+        _ => None,
+    };
+    // 표 파트 이름: XML 원본의 파트는 그대로 (참), 모델로 쓰는 표는 새 이름 (거짓)
+    let mut next_table = 1;
+    let mut table_names: Vec<Vec<(String, bool)>> = Vec::new();
+    for sh in &worksheets {
+        let mut names = Vec::new();
+        for t in &sh.tables {
+            match &t.part {
+                Some(p) if raw_has(p) => names.push((p.clone(), true)),
+                _ => loop {
+                    let n = format!("xl/tables/table{next_table}.xml");
+                    next_table += 1;
+                    if !raw_has(&n) {
+                        names.push((n, false));
+                        break;
+                    }
+                },
+            }
+        }
+        table_names.push(names);
+    }
+
     let main_ct = match flavor {
         Flavor::Cell => "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
         Flavor::Xlsx => {
@@ -1953,7 +2041,20 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
             "<Override PartName=\"/{name}\" ContentType=\"application/vnd.openxmlformats-officedocument.drawing+xml\"/>"
         );
     }
-    for p in &wb.raw_parts {
+    for (n, _) in table_names.iter().flatten().filter(|(_, raw)| !raw) {
+        let _ = write!(
+            ct,
+            "<Override PartName=\"/{n}\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml\"/>"
+        );
+    }
+    if vbs_part.is_some() {
+        let _ = write!(
+            ct,
+            "<Override PartName=\"/xl/vbsProject.bin\" ContentType=\"{}\"/>",
+            crate::ns::CT_HANCOM_VBS_PROJECT
+        );
+    }
+    for p in &raw_parts {
         if let Some(t) = &p.content_type
             && !p.name.ends_with(".rels")
         {
@@ -2064,6 +2165,23 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
         }
         wbx.push_str("</x:externalReferences>");
     }
+    // 원본 그대로의 통합 문서 수준 파트 (관계 rIdX<n>)
+    for (k, l) in wb_links.iter().enumerate() {
+        let _ = write!(
+            wb_rels,
+            "<Relationship Id=\"rIdX{}\" Type=\"{}\" Target=\"/{}\"/>",
+            k + 1,
+            esc(&l.rel_type),
+            esc(&l.part)
+        );
+    }
+    if vbs_part.is_some() {
+        let _ = write!(
+            wb_rels,
+            "<Relationship Id=\"rIdVbs\" Type=\"{}\" Target=\"vbsProject.bin\"/>",
+            crate::ns::REL_HANCOM_VBS_PROJECT
+        );
+    }
     wb_rels.push_str("</Relationships>");
     let names: Vec<_> = wb
         .defined_names
@@ -2096,6 +2214,19 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
         }
         None => wbx.push_str("<x:calcPr/>"),
     }
+    // 피벗 캐시 (CT_Workbook 에서 calcPr 다음)
+    let caches: Vec<(u32, usize)> = wb_links
+        .iter()
+        .enumerate()
+        .filter_map(|(k, l)| Some((l.cache_id?, k + 1)))
+        .collect();
+    if !caches.is_empty() {
+        wbx.push_str("<x:pivotCaches>");
+        for (id, k) in caches {
+            let _ = write!(wbx, "<x:pivotCache cacheId=\"{id}\" r:id=\"rIdX{k}\"/>");
+        }
+        wbx.push_str("</x:pivotCaches>");
+    }
     wbx.push_str("</x:workbook>");
 
     // ZIP
@@ -2122,7 +2253,12 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
     for (i, (xml, links)) in sheet_parts.iter().enumerate() {
         put(&format!("xl/worksheets/sheet{}.xml", i + 1), xml.as_bytes())?;
         let notes = !worksheets[i].comments.is_empty();
-        if !links.is_empty() || notes || drawing_names[i].is_some() {
+        if !links.is_empty()
+            || notes
+            || drawing_names[i].is_some()
+            || !table_names[i].is_empty()
+            || !worksheets[i].part_links.is_empty()
+        {
             let mut r = format!(
                 "{DECL}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
             );
@@ -2160,6 +2296,26 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
                     r,
                     "<Relationship Id=\"{id}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"{}\" TargetMode=\"External\"/>",
                     esc(target)
+                );
+            }
+            for (j, (name, raw)) in table_names[i].iter().enumerate() {
+                let _ = write!(
+                    r,
+                    "<Relationship Id=\"rIdT{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/table\" Target=\"/{}\"/>",
+                    j + 1,
+                    esc(name)
+                );
+                if !raw {
+                    put(name, table_xml(&worksheets[i].tables[j]).as_bytes())?;
+                }
+            }
+            for (k, l) in worksheets[i].part_links.iter().enumerate() {
+                let _ = write!(
+                    r,
+                    "<Relationship Id=\"rIdP{}\" Type=\"{}\" Target=\"/{}\"/>",
+                    k + 1,
+                    esc(&l.rel_type),
+                    esc(&l.part)
                 );
             }
             if notes {
@@ -2248,11 +2404,132 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
             r.as_bytes(),
         )?;
     }
-    // 원본 그대로의 파트 (차트·그림과 그 관계 파일)
-    for p in &wb.raw_parts {
+    // 원본 그대로의 파트 (차트·그림·표·피벗·매크로 프로젝트 …와 그 관계 파일)
+    for p in &raw_parts {
         put(&p.name, &p.data)?;
     }
+    if let Some(v) = &vbs_part {
+        put("xl/vbsProject.bin", v)?;
+    }
     Ok(z.finish()?.into_inner())
+}
+
+/// 표 파트 (`x:table`) — 모델로 쓸 때 (바이너리·레거시 원본, XML 원본은 파트를 그대로 옮긴다)
+fn table_xml(t: &Table) -> String {
+    let mut s = format!(
+        "{DECL}<x:table xmlns:x=\"{SML}\" id=\"{}\" name=\"{}\" displayName=\"{}\" ref=\"{}\"",
+        t.id,
+        esc(&t.name),
+        esc(&t.display_name),
+        esc(&t.range)
+    );
+    if let Some(v) = &t.table_type {
+        let _ = write!(s, " tableType=\"{}\"", esc(v));
+    }
+    if t.header_rows != 1 {
+        let _ = write!(s, " headerRowCount=\"{}\"", t.header_rows);
+    }
+    if t.totals_rows != 0 {
+        let _ = write!(s, " totalsRowCount=\"{}\"", t.totals_rows);
+    }
+    if !t.totals_shown {
+        s.push_str(" totalsRowShown=\"0\"");
+    }
+    for (name, v) in [
+        "headerRowDxfId",
+        "dataDxfId",
+        "totalsRowDxfId",
+        "tableBorderDxfId",
+        "headerRowBorderDxfId",
+        "totalsRowBorderDxfId",
+    ]
+    .iter()
+    .zip(t.dxfs)
+    {
+        if let Some(v) = v {
+            let _ = write!(s, " {name}=\"{v}\"");
+        }
+    }
+    for (name, v) in ["headerRowCellStyle", "dataCellStyle", "totalsRowCellStyle"]
+        .iter()
+        .zip(&t.cell_styles)
+    {
+        if let Some(v) = v {
+            let _ = write!(s, " {name}=\"{}\"", esc(v));
+        }
+    }
+    if let Some(c) = &t.comment {
+        let _ = write!(s, " comment=\"{}\"", esc(c));
+    }
+    if let Some(c) = t.connection_id {
+        let _ = write!(s, " connectionId=\"{c}\"");
+    }
+    s.push('>');
+    if let Some(af) = &t.auto_filter {
+        s.push_str(&auto_filter_xml_of(af));
+    }
+    let _ = write!(s, "<x:tableColumns count=\"{}\">", t.columns.len());
+    for c in &t.columns {
+        let _ = write!(
+            s,
+            "<x:tableColumn id=\"{}\" name=\"{}\"",
+            c.id,
+            esc(&c.name)
+        );
+        if let Some(v) = &c.unique_name {
+            let _ = write!(s, " uniqueName=\"{}\"", esc(v));
+        }
+        if let Some(v) = &c.totals_function {
+            let _ = write!(s, " totalsRowFunction=\"{}\"", esc(v));
+        }
+        if let Some(v) = &c.totals_label {
+            let _ = write!(s, " totalsRowLabel=\"{}\"", esc(v));
+        }
+        if let Some(v) = c.query_table_field_id {
+            let _ = write!(s, " queryTableFieldId=\"{v}\"");
+        }
+        for (name, v) in ["headerRowDxfId", "dataDxfId", "totalsRowDxfId"]
+            .iter()
+            .zip(c.dxfs)
+        {
+            if let Some(v) = v {
+                let _ = write!(s, " {name}=\"{v}\"");
+            }
+        }
+        if c.calculated_formula.is_none() && c.totals_formula.is_none() {
+            s.push_str("/>");
+            continue;
+        }
+        s.push('>');
+        if let Some(f) = &c.calculated_formula {
+            let _ = write!(
+                s,
+                "<x:calculatedColumnFormula>{}</x:calculatedColumnFormula>",
+                esc(f)
+            );
+        }
+        if let Some(f) = &c.totals_formula {
+            let _ = write!(s, "<x:totalsRowFormula>{}</x:totalsRowFormula>", esc(f));
+        }
+        s.push_str("</x:tableColumn>");
+    }
+    s.push_str("</x:tableColumns>");
+    if let Some(st) = &t.style {
+        s.push_str("<x:tableStyleInfo");
+        if let Some(n) = &st.name {
+            let _ = write!(s, " name=\"{}\"", esc(n));
+        }
+        let _ = write!(
+            s,
+            " showFirstColumn=\"{}\" showLastColumn=\"{}\" showRowStripes=\"{}\" showColumnStripes=\"{}\"/>",
+            st.first_column as u8,
+            st.last_column as u8,
+            st.row_stripes as u8,
+            st.column_stripes as u8
+        );
+    }
+    s.push_str("</x:table>");
+    s
 }
 
 const XDR: &str = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";

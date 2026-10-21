@@ -39,6 +39,7 @@ OLE2 복합 문서([MS-CFB])다 (관측).
 |---|---|
 | `/Workbook` | 레코드 스트림 (아래) |
 | `/\x05SummaryInformation` | 문서 속성 ([MS-OLEPS] 속성 집합) — 아래 |
+| `/_VBS_PROJECT_W` | 한컴 매크로 프로젝트 (매크로가 있을 때만). XML·바이너리의 `xl/vbsProject.bin` 복합 문서 안 스트림과 바이트가 같다 ([cell-2024.md](cell-2024.md) 7.10절, 패키지 파트 실험) |
 
 `DocumentSummaryInformation` 은 쓰지 않는다 (분류·회사 등은 저장되지 않는다).
 

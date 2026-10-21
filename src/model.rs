@@ -36,9 +36,12 @@ pub struct Workbook {
     pub shared_strings: Vec<RichText>,
     pub styles: Styles,
     pub defined_names: Vec<DefinedName>,
-    /// 원본 그대로 옮겨 쓰는 파트 (차트·그림과 그 관계 파일)
+    /// 원본 그대로 옮겨 쓰는 파트 (차트·그림·표·피벗·매크로 프로젝트 …와 그 관계 파일)
     #[serde(skip)]
     pub raw_parts: Vec<RawPart>,
+    /// 통합 문서 관계로만 이어지는 원본 파트 (피벗 캐시·연결·XML 대응·사용자 지정 XML·매크로 프로젝트)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub part_links: Vec<PartLink>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protection: Option<WorkbookProtection>,
     /// 외부 통합 문서 연결. 수식의 `[n]` 은 이 목록의 n번째(1부터)다.
@@ -166,6 +169,10 @@ pub struct HancomWorkbookExt {
     pub calc_id: Option<u32>,
     /// 한컴 매크로(VBScript) 프로젝트 파트 이름
     pub vbs_project_part: Option<String>,
+    /// 한컴 매크로 프로젝트의 `_VBS_PROJECT_W` 스트림 (XML·바이너리는 `xl/vbsProject.bin` 복합 문서 안,
+    /// 레거시는 OLE 루트의 스트림 — 세 형식에서 바이트가 같다, 패키지 파트 실험)
+    #[serde(skip)]
+    pub vbs_project: Option<Vec<u8>>,
     /// 아직 해석하지 않은 통합 문서 수준 `hs:` 속성
     pub other: BTreeMap<String, String>,
 }
@@ -241,6 +248,123 @@ pub struct Sheet {
     /// 개요 요약 행이 위 (`outlinePr summaryBelow="0"`), 요약 열이 왼쪽 (`summaryRight="0"`)
     pub summary_above: bool,
     pub summary_left: bool,
+    /// 표 (ListObject)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<Table>,
+    /// 시트 관계로만 이어지는 원본 파트 (피벗 표·쿼리 표·프린터 설정)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub part_links: Vec<PartLink>,
+}
+
+/// 원본 그대로 옮겨 쓰는 파트로 가는 관계 (XML 원본, 바이너리는 형식이 같은 파트만). 파트와 그 관계가
+/// 가리키는 파트는 [`Workbook::raw_parts`] 에 있다
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PartLink {
+    /// 관계 종류 URI
+    pub rel_type: String,
+    /// 파트 이름 (앞 `/` 없이)
+    pub part: String,
+    /// 피벗 캐시 번호 (`pivotCaches/pivotCache/@cacheId`, 피벗 캐시 관계만)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_id: Option<u32>,
+}
+
+/// 표 (ListObject): XML `x:table` 파트, 바이너리 `BrtBeginList`… 파트, 레거시 0xB005… 레코드
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Table {
+    pub id: u32,
+    pub name: String,
+    pub display_name: String,
+    /// 범위 (`ref`, 머리글·요약 행 포함)
+    pub range: String,
+    /// 머리글 행 수 (`headerRowCount`, 기본 1)
+    pub header_rows: u32,
+    /// 요약 행 수 (`totalsRowCount`, 기본 0)
+    pub totals_rows: u32,
+    /// 요약 행을 보인 적 있음 (`totalsRowShown`, 기본 참)
+    pub totals_shown: bool,
+    /// 종류 (`tableType`: 없으면 worksheet, `xml`, `queryTable`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<u32>,
+    /// 차등 서식 번호: 머리글, 데이터, 요약, 표 테두리, 머리글 테두리, 요약 테두리
+    /// (`headerRowDxfId`, `dataDxfId`, `totalsRowDxfId`, `tableBorderDxfId`, `headerRowBorderDxfId`,
+    /// `totalsRowBorderDxfId`)
+    pub dxfs: [Option<u32>; 6],
+    /// 셀 스타일 이름: 머리글, 데이터, 요약 (`headerRowCellStyle`, `dataCellStyle`, `totalsRowCellStyle`)
+    pub cell_styles: [Option<String>; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_filter: Option<AutoFilter>,
+    pub columns: Vec<TableColumn>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<TableStyleInfo>,
+    /// XML 원본의 표 파트 이름 (그대로 옮겨 쓴다). 없으면 모델로 쓴다
+    #[serde(skip)]
+    pub part: Option<String>,
+}
+
+impl Default for Table {
+    fn default() -> Self {
+        Table {
+            id: 0,
+            name: String::new(),
+            display_name: String::new(),
+            range: String::new(),
+            header_rows: 1,
+            totals_rows: 0,
+            totals_shown: true,
+            table_type: None,
+            comment: None,
+            connection_id: None,
+            dxfs: [None; 6],
+            cell_styles: [None, None, None],
+            auto_filter: None,
+            columns: Vec::new(),
+            style: None,
+            part: None,
+        }
+    }
+}
+
+/// 표의 열 (`tableColumn`, 바이너리 `BrtBeginListCol`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TableColumn {
+    pub id: u32,
+    pub name: String,
+    /// XML 대응의 고유 이름 (`uniqueName`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unique_name: Option<String>,
+    /// 요약 행 함수 (`totalsRowFunction`: sum, average, count …, custom)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub totals_function: Option<String>,
+    /// 요약 행 글 (`totalsRowLabel`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub totals_label: Option<String>,
+    /// 요약 행 사용자 수식 (`totalsRowFormula`, `=` 없이)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub totals_formula: Option<String>,
+    /// 계산 열 수식 (`calculatedColumnFormula`, `=` 없이)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calculated_formula: Option<String>,
+    /// 차등 서식 번호: 머리글, 데이터, 요약 (`headerRowDxfId`, `dataDxfId`, `totalsRowDxfId`)
+    pub dxfs: [Option<u32>; 3],
+    /// 쿼리 표 필드 (`queryTableFieldId`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_table_field_id: Option<u32>,
+}
+
+/// 표 스타일 적용 (`tableStyleInfo`, 바이너리 `BrtTableStyleClient`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TableStyleInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub first_column: bool,
+    pub last_column: bool,
+    pub row_stripes: bool,
+    pub column_stripes: bool,
 }
 
 /// 조건부 서식 하나 (`conditionalFormatting`): 범위 + 규칙들

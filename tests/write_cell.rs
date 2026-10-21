@@ -943,3 +943,244 @@ fn unknown_drawing_anchors_are_kept() {
     let b = rcell::from_bytes(out).unwrap();
     assert_eq!(b.sheets[0].shapes.len(), 2);
 }
+
+#[test]
+fn package_parts_roundtrip() {
+    const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const PR: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+    const T: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.";
+    let rels = |list: &[(&str, &str, &str)]| {
+        let mut s = format!("<Relationships xmlns=\"{PR}\">");
+        for (id, ty, target) in list {
+            s.push_str(&format!(
+                "<Relationship Id=\"{id}\" Type=\"{ty}\" Target=\"{target}\"/>"
+            ));
+        }
+        s + "</Relationships>"
+    };
+    let ct = format!(
+        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"bin\" ContentType=\"{T}printerSettings\"/><Override PartName=\"/xl/tables/table1.xml\" ContentType=\"{T}table+xml\"/><Override PartName=\"/xl/pivotTables/pivotTable1.xml\" ContentType=\"{T}pivotTable+xml\"/><Override PartName=\"/xl/pivotCache/pivotCacheDefinition1.xml\" ContentType=\"{T}pivotCacheDefinition+xml\"/><Override PartName=\"/xl/pivotCache/pivotCacheRecords1.xml\" ContentType=\"{T}pivotCacheRecords+xml\"/><Override PartName=\"/xl/connections.xml\" ContentType=\"{T}connections+xml\"/><Override PartName=\"/xl/queryTables/queryTable1.xml\" ContentType=\"{T}queryTable+xml\"/><Override PartName=\"/xl/vbsProject.bin\" ContentType=\"application/vnd.hancom-office.vbsProject\"/></Types>"
+    );
+    let wb_rels = rels(&[
+        ("rId1", &format!("{R}/worksheet"), "worksheets/sheet1.xml"),
+        ("rId2", &format!("{R}/connections"), "connections.xml"),
+        ("rId3", &format!("{R}/customXml"), "../customXml/item1.xml"),
+        (
+            "rId4",
+            &format!("{R}/pivotCacheDefinition"),
+            "pivotCache/pivotCacheDefinition1.xml",
+        ),
+        (
+            "rId5",
+            "http://schemas.hancom.com/office/relationships/vbsProject",
+            "vbsProject.bin",
+        ),
+    ]);
+    let sheet_rels = rels(&[
+        ("rId1", &format!("{R}/table"), "../tables/table1.xml"),
+        (
+            "rId2",
+            &format!("{R}/pivotTable"),
+            "../pivotTables/pivotTable1.xml",
+        ),
+        (
+            "rId3",
+            &format!("{R}/queryTable"),
+            "../queryTables/queryTable1.xml",
+        ),
+        (
+            "rId4",
+            &format!("{R}/printerSettings"),
+            "../printerSettings/printerSettings1.bin",
+        ),
+    ]);
+    let pt_rels = rels(&[(
+        "rId1",
+        &format!("{R}/pivotCacheDefinition"),
+        "../pivotCache/pivotCacheDefinition1.xml",
+    )]);
+    let pc_rels = rels(&[(
+        "rId1",
+        &format!("{R}/pivotCacheRecords"),
+        "pivotCacheRecords1.xml",
+    )]);
+    let cx_rels = rels(&[("rId1", &format!("{R}/customXmlProps"), "itemProps1.xml")]);
+    let workbook = format!(
+        "<x:workbook xmlns:x=\"{SML}\" xmlns:r=\"{R}\"><x:sheets><x:sheet name=\"표\" sheetId=\"1\" r:id=\"rId1\"/></x:sheets><x:calcPr/><x:pivotCaches><x:pivotCache cacheId=\"3\" r:id=\"rId4\"/></x:pivotCaches></x:workbook>"
+    );
+    let sheet = format!(
+        "<x:worksheet xmlns:x=\"{SML}\" xmlns:r=\"{R}\"><x:sheetData><x:row r=\"1\"><x:c r=\"A1\" t=\"inlineStr\"><x:is><x:t>이름</x:t></x:is></x:c><x:c r=\"B1\" t=\"inlineStr\"><x:is><x:t>수량</x:t></x:is></x:c></x:row><x:row r=\"2\"><x:c r=\"B2\"><x:v>5</x:v></x:c></x:row></x:sheetData><x:pageMargins left=\"0.7\" right=\"0.7\" top=\"0.75\" bottom=\"0.75\" header=\"0.3\" footer=\"0.3\"/><x:pageSetup paperSize=\"9\" orientation=\"landscape\" r:id=\"rId4\"/><x:tableParts count=\"1\"><x:tablePart r:id=\"rId1\"/></x:tableParts></x:worksheet>"
+    );
+    let table = format!(
+        "<table xmlns=\"{SML}\" id=\"4\" name=\"Table4\" displayName=\"Table4\" ref=\"A1:B3\" totalsRowCount=\"1\" totalsRowDxfId=\"0\"><autoFilter ref=\"A1:B2\"><filterColumn colId=\"1\"><filters><filter val=\"5\"/></filters></filterColumn></autoFilter><tableColumns count=\"2\"><tableColumn id=\"1\" name=\"이름\" totalsRowLabel=\"합계\"/><tableColumn id=\"2\" name=\"수량\" totalsRowFunction=\"custom\" dataDxfId=\"0\"><calculatedColumnFormula>Table4[[#This Row],[수량]]*2</calculatedColumnFormula><totalsRowFormula>SUM(Table4[수량])</totalsRowFormula></tableColumn></tableColumns><tableStyleInfo name=\"TableStyleMedium2\" showFirstColumn=\"0\" showLastColumn=\"0\" showRowStripes=\"1\" showColumnStripes=\"0\"/></table>"
+    );
+    let pivot = format!(
+        "<pivotTableDefinition xmlns=\"{SML}\" name=\"피벗1\" cacheId=\"3\" dataCaption=\"값\"><location ref=\"D1:E3\" firstHeaderRow=\"1\" firstDataRow=\"1\" firstDataCol=\"1\"/><pivotFields count=\"2\"><pivotField axis=\"axisRow\" showAll=\"0\"><items count=\"2\"><item x=\"0\"/><item t=\"default\"/></items></pivotField><pivotField dataField=\"1\" showAll=\"0\"/></pivotFields><rowFields count=\"1\"><field x=\"0\"/></rowFields><dataFields count=\"1\"><dataField name=\"합계 : 수량\" fld=\"1\" baseField=\"0\" baseItem=\"0\"/></dataFields></pivotTableDefinition>"
+    );
+    let cache = format!(
+        "<pivotCacheDefinition xmlns=\"{SML}\" xmlns:r=\"{R}\" r:id=\"rId1\" recordCount=\"1\"><cacheSource type=\"worksheet\"><worksheetSource ref=\"A1:B2\" sheet=\"표\"/></cacheSource><cacheFields count=\"2\"><cacheField name=\"이름\" numFmtId=\"0\"><sharedItems count=\"1\"><m/></sharedItems></cacheField><cacheField name=\"수량\" numFmtId=\"0\"><sharedItems containsNumber=\"1\" minValue=\"5\" maxValue=\"5\"/></cacheField></cacheFields></pivotCacheDefinition>"
+    );
+    let records = format!(
+        "<pivotCacheRecords xmlns=\"{SML}\" count=\"1\"><r><x v=\"0\"/><n v=\"5\"/></r></pivotCacheRecords>"
+    );
+    let connections = format!(
+        "<connections xmlns=\"{SML}\"><connection id=\"1\" name=\"q\" type=\"6\"/></connections>"
+    );
+    let query = format!("<queryTable xmlns=\"{SML}\" name=\"q\" connectionId=\"1\"/>");
+    let root_rels = rels(&[("rId1", &format!("{R}/officeDocument"), "xl/workbook.xml")]);
+    let base = common::build_zip(&[
+        ("[Content_Types].xml", &ct),
+        ("_rels/.rels", &root_rels),
+        ("xl/workbook.xml", &workbook),
+        ("xl/_rels/workbook.xml.rels", &wb_rels),
+        ("xl/worksheets/sheet1.xml", &sheet),
+        ("xl/worksheets/_rels/sheet1.xml.rels", &sheet_rels),
+        ("xl/tables/table1.xml", &table),
+        ("xl/pivotTables/pivotTable1.xml", &pivot),
+        ("xl/pivotTables/_rels/pivotTable1.xml.rels", &pt_rels),
+        ("xl/pivotCache/pivotCacheDefinition1.xml", &cache),
+        (
+            "xl/pivotCache/_rels/pivotCacheDefinition1.xml.rels",
+            &pc_rels,
+        ),
+        ("xl/pivotCache/pivotCacheRecords1.xml", &records),
+        ("xl/connections.xml", &connections),
+        ("xl/queryTables/queryTable1.xml", &query),
+        (
+            "customXml/item1.xml",
+            "<rc:data xmlns:rc=\"urn:rcell:test\"/>",
+        ),
+        ("customXml/_rels/item1.xml.rels", &cx_rels),
+        (
+            "customXml/itemProps1.xml",
+            "<ds:datastoreItem ds:itemID=\"{00000000-0000-0000-0000-000000000001}\" xmlns:ds=\"http://schemas.openxmlformats.org/officeDocument/2006/customXml\"/>",
+        ),
+    ]);
+    // 매크로 프로젝트 스트림: 머리 0x104 바이트 + 글자 수 u32 + UTF-16
+    let mut stream = vec![0u8; 0x104];
+    stream[..8].copy_from_slice(&[1, 1, 1, 0, 0, 1, 0x20, 2]);
+    let text: Vec<u16> = "Sub A()\nEnd Sub\n".encode_utf16().collect();
+    stream.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    for u in &text {
+        stream.extend_from_slice(&u.to_le_bytes());
+    }
+    let vbs = rcell::cfb_write::write_streams(&[("_VBS_PROJECT_W", &stream)]).unwrap();
+    let printer = vec![7u8; 220];
+    let bytes = rcell::container::replace_zip_parts(
+        &base,
+        &[
+            ("xl/vbsProject.bin".into(), vbs.clone()),
+            (
+                "xl/printerSettings/printerSettings1.bin".into(),
+                printer.clone(),
+            ),
+        ],
+    )
+    .unwrap();
+
+    // 이 패키지에는 styles.xml 이 없다 (rcell 은 기본 서식을 쓴다)
+    let no_styles = Options {
+        skip_styles: true,
+        ..Default::default()
+    };
+    let a = rcell::from_bytes(bytes).unwrap();
+    let sh = &a.sheets[0];
+    let t = &sh.tables[0];
+    assert_eq!(
+        (t.id, t.name.as_str(), t.range.as_str()),
+        (4, "Table4", "A1:B3")
+    );
+    assert_eq!((t.header_rows, t.totals_rows, t.dxfs[2]), (1, 1, Some(0)));
+    assert_eq!(t.auto_filter.as_ref().unwrap().columns[0].values, ["5"]);
+    assert_eq!(t.columns[0].totals_label.as_deref(), Some("합계"));
+    assert_eq!(t.columns[1].totals_function.as_deref(), Some("custom"));
+    assert_eq!(
+        t.columns[1].totals_formula.as_deref(),
+        Some("SUM(Table4[수량])")
+    );
+    assert_eq!(t.columns[1].dxfs[1], Some(0));
+    assert_eq!(
+        t.style.as_ref().unwrap().name.as_deref(),
+        Some("TableStyleMedium2")
+    );
+    let kinds = |l: &[rcell::model::PartLink]| {
+        l.iter()
+            .map(|l| l.rel_type.rsplit("/").next().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        kinds(&sh.part_links),
+        ["pivotTable", "queryTable", "printerSettings"]
+    );
+    assert_eq!(
+        kinds(&a.part_links),
+        [
+            "connections",
+            "customXml",
+            "pivotCacheDefinition",
+            "vbsProject"
+        ]
+    );
+    assert_eq!(a.part_links[2].cache_id, Some(3));
+    assert_eq!(a.hancom.vbs_project.as_deref(), Some(&stream[..]));
+
+    // XML 로 쓰면 파트·관계·참조 요소가 그대로 남는다
+    let out = write(&a, Flavor::Cell).unwrap();
+    let b = rcell::from_bytes(out.clone()).unwrap();
+    let diffs = compare(&a, &b, no_styles);
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    let part = |w: &rcell::Workbook, n: &str| {
+        w.raw_parts
+            .iter()
+            .find(|p| p.name == n)
+            .map(|p| p.data.clone())
+    };
+    assert_eq!(part(&b, "xl/vbsProject.bin"), Some(vbs.clone()));
+    assert_eq!(
+        part(&b, "xl/printerSettings/printerSettings1.bin"),
+        Some(printer)
+    );
+    assert_eq!(
+        part(&b, "xl/tables/table1.xml"),
+        Some(table.as_bytes().to_vec())
+    );
+    assert!(part(&b, "customXml/itemProps1.xml").is_some());
+    assert!(part(&b, "xl/pivotCache/pivotCacheRecords1.xml").is_some());
+    assert_eq!(b.part_links[2].cache_id, Some(3));
+    let mut pkg = rcell::open_package(out).unwrap();
+    let x = pkg
+        .read_string("xl/worksheets/sheet1.xml")
+        .unwrap()
+        .unwrap();
+    assert!(
+        x.contains("<x:tableParts count=\"1\"><x:tablePart r:id=\"rIdT1\"/></x:tableParts>"),
+        "{x}"
+    );
+    assert!(x.contains(" r:id=\"rIdP3\"/>"), "{x}");
+    let w = pkg.read_string("xl/workbook.xml").unwrap().unwrap();
+    assert!(
+        w.contains("<x:pivotCaches><x:pivotCache cacheId=\"3\" r:id=\"rIdX3\"/></x:pivotCaches>"),
+        "{w}"
+    );
+
+    // Excel 형식에는 매크로 프로젝트를 쓰지 않는다
+    let c = rcell::from_bytes(write(&a, Flavor::Xlsx).unwrap()).unwrap();
+    assert!(part(&c, "xl/vbsProject.bin").is_none());
+    assert!(c.hancom.vbs_project.is_none());
+    assert_eq!(c.part_links.len(), 3);
+
+    // 레거시처럼 파트 없이 스트림과 모델만 있으면: 매크로는 복합 문서로, 표는 모델로 쓴다
+    let mut d = a.clone();
+    d.raw_parts.clear();
+    d.part_links.clear();
+    d.sheets[0].part_links.clear();
+    d.sheets[0].tables[0].part = None;
+    let e = rcell::from_bytes(write(&d, Flavor::Cell).unwrap()).unwrap();
+    assert_eq!(e.hancom.vbs_project.as_deref(), Some(&stream[..]));
+    let mut expect = d.sheets[0].tables.clone();
+    expect[0].part = Some("xl/tables/table1.xml".into());
+    assert_eq!(e.sheets[0].tables, expect);
+    let diffs = compare(&d, &e, no_styles);
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+}
