@@ -7,12 +7,14 @@
 # TSV 로 저장한다. rcell 렌더러의 배치(render::sheet_geometry)를 이 결과와 대조한다
 # (tests/render_geometry.rs 가 RCELL_GEOMETRY_ORACLE 환경 변수로 받는다).
 #
+#   #dir<TAB>문서 폴더
 #   파일<TAB>시트이름<TAB>s<TAB>StandardWidth<TAB>StandardHeight
 #   파일<TAB>시트이름<TAB>c<TAB>열(1부터)<TAB>Left<TAB>Width
 #   파일<TAB>시트이름<TAB>r<TAB>행(1부터)<TAB>Top<TAB>Height
 #
 # 사용: powershell -File geometry-oracle.ps1 -InDir <폴더> -Out geometry.tsv
 #   -Filter  : 대상 파일 (기본 *.cell — 이름에 .bin./.legacy./.as./.rcell. 이 든 파일은 뺀다)
+#   -Legacy  : 레거시 판(X.legacy.cell)도 잰다 (한셀이 레거시를 읽은 화면이 XML 판과 같은지 대조)
 #   -MaxCols / -MaxRows : 시트마다 잴 최대 열·행 수 (사용 범위 + 여유분까지)
 # 주의: UTF-8(BOM) 으로 저장해야 Windows PowerShell 5.1 이 한글을 바르게 읽는다.
 #       한셀 인스턴스를 따로 띄우고 끝나면 닫는다 (다른 사람이 쓰는 한셀은 건드리지 않는다).
@@ -21,7 +23,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Out,
     [string]$Filter = "*.cell",
     [int]$MaxCols = 60,
-    [int]$MaxRows = 300
+    [int]$MaxRows = 300,
+    [switch]$Legacy
 )
 $ErrorActionPreference = "Stop"
 
@@ -37,7 +40,9 @@ function Retry([scriptblock]$action) {
 
 $lines = New-Object System.Collections.Generic.List[string]
 $files = Get-ChildItem $InDir -File -Filter $Filter |
-    Where-Object { $_.Name -notmatch '\.(bin|legacy|as|rcell)\.' } | Sort-Object Name
+    Where-Object { $_.Name -notmatch '\.(bin|legacy|as|rcell)\.' -or ($Legacy -and $_.Name -match '\.legacy\.cell$') } |
+    Sort-Object Name
+$lines.Add("#dir`t$((Resolve-Path $InDir).Path)")
 $app = New-Object -ComObject HCell.Application
 try {
     try { $app.Visible = $false } catch {}

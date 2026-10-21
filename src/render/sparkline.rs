@@ -175,12 +175,11 @@ fn range_values(wb: &Workbook, here: usize, f: &str) -> Vec<Option<f64>> {
     out
 }
 
+/// 칸 → (그룹 번호, 값)
+pub type Items = HashMap<(u32, u32), (usize, Vec<Option<f64>>)>;
+
 /// 시트 하나의 스파크라인: 칸 → (그룹 번호, 값)
-pub fn sheet_items(
-    wb: &Workbook,
-    sheet_index: usize,
-    groups: &[SparklineGroup],
-) -> HashMap<(u32, u32), (usize, Vec<Option<f64>>)> {
+pub fn sheet_items(wb: &Workbook, sheet_index: usize, groups: &[SparklineGroup]) -> Items {
     let mut out = HashMap::new();
     for (gi, g) in groups.iter().enumerate() {
         for (f, at) in &g.items {
@@ -191,7 +190,7 @@ pub fn sheet_items(
 }
 
 /// 그룹 단위 최소·최대 (minAxisType/maxAxisType = group)
-pub fn group_range(items: &HashMap<(u32, u32), (usize, Vec<Option<f64>>)>, gi: usize) -> (f64, f64) {
+pub fn group_range(items: &Items, gi: usize) -> (f64, f64) {
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;
     for (g, vals) in items.values() {

@@ -20,8 +20,10 @@ use crate::model::{BorderEdge, Color, Fill, GradientFill};
 use crate::theme::{self, Theme};
 
 /// 무늬 타일: (너비, 높이, 전경 픽셀 판정)
-fn pattern_tile(kind: &str) -> Option<(u32, u32, fn(u32, u32) -> bool)> {
-    let t: (u32, u32, fn(u32, u32) -> bool) = match kind {
+type Tile = (u32, u32, fn(u32, u32) -> bool);
+
+fn pattern_tile(kind: &str) -> Option<Tile> {
+    let t: Tile = match kind {
         "mediumGray" => (2, 2, |x, y| (x + y) % 2 == 1),
         "darkGray" => (4, 2, |x, y| !((y == 0 && x == 0) || (y == 1 && x == 2))),
         "lightGray" => (4, 2, |x, y| (y == 0 && x == 0) || (y == 1 && x == 2)),
