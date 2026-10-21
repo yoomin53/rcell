@@ -285,6 +285,170 @@ fn legacy_chart_parts_are_rewritten_exactly() {
     assert!(t.report.is_empty(), "{}", t.report.join("\n\n"));
 }
 
+/// 시트마다 차트 도형 (그리기 순서)
+fn charts_by_sheet(wb: &rcell::Workbook) -> Vec<Vec<&rcell::model::Shape>> {
+    wb.sheets
+        .iter()
+        .map(|s| {
+            s.shapes
+                .iter()
+                .filter(|x| x.kind == rcell::model::ShapeKind::Chart)
+                .collect()
+        })
+        .collect()
+}
+
+/// rcell 이 레거시 차트 레코드(0x7EF0)에서 만든 모델을 `chart_xml` 로 쓰면 한셀이 같은 레거시 파일을 읽어 쓴
+/// 차트 파트(`X.legacy.as.cell`)와 같다. 차트는 시트마다 그리기 순서로 짝짓는다 (한셀은 레코드 순서대로 쓴다).
+#[test]
+fn legacy_records_map_to_hancell_chart_parts() {
+    let Some(dir) = std::env::var_os("RCELL_CORPUS").map(PathBuf::from) else {
+        eprintln!("RCELL_CORPUS 미설정 — 건너뜀");
+        return;
+    };
+    let (mut charts, mut exact, mut bytes) = (0, 0, 0);
+    let mut report = Vec::new();
+    for d in ["craft-charts", "craft-charts2", "templates"] {
+        for legacy in files_with_suffix(&dir.join(d), ".legacy.cell") {
+            let name = legacy.file_name().unwrap().to_string_lossy().into_owned();
+            let truth = legacy.with_file_name(name.replace(".legacy.cell", ".legacy.as.cell"));
+            if !truth.exists() {
+                continue;
+            }
+            let a = rcell::open(&legacy).expect("레거시 읽기");
+            let b = rcell::open(&truth).expect("한셀 XML 읽기");
+            let mut pkg = rcell::Package::from_bytes(std::fs::read(&truth).unwrap()).unwrap();
+            let (ca, cb) = (charts_by_sheet(&a), charts_by_sheet(&b));
+            let count = |c: &[Vec<&rcell::model::Shape>]| c.iter().map(Vec::len).sum::<usize>();
+            if count(&ca) != count(&cb) {
+                report.push(format!(
+                    "{}: 차트 수 {} ≠ 한셀 {}",
+                    legacy.display(),
+                    count(&ca),
+                    count(&cb)
+                ));
+            }
+            for (sa, sb) in ca.iter().zip(&cb) {
+                for (x, y) in sa.iter().zip(sb) {
+                    charts += 1;
+                    let label = format!("{} {:?}", legacy.display(), y.target);
+                    let Some(chart) = &x.chart else {
+                        report.push(format!("{label}: rcell 차트 모델 없음"));
+                        continue;
+                    };
+                    let Some(xml) = y
+                        .target
+                        .as_ref()
+                        .and_then(|t| pkg.read_string(t).ok().flatten())
+                    else {
+                        report.push(format!("{label}: 한셀 차트 파트 없음"));
+                        continue;
+                    };
+                    let out = rcell::chart_xml::chart_xml(chart);
+                    let orig = rcell::xml::parse_raw(&xml, "chart").expect("한셀 차트 XML");
+                    let back = rcell::xml::parse_raw(&out, "rcell").expect("rcell 차트 XML");
+                    let mut diffs = Vec::new();
+                    tree_diffs(&back, &orig, "", &mut diffs);
+                    exact += diffs.is_empty() as usize;
+                    bytes += (out == xml) as usize;
+                    if !diffs.is_empty() {
+                        report.push(format!(
+                            "{label}: 차이 {}\n  {}",
+                            diffs.len(),
+                            diffs.join("\n  ")
+                        ));
+                    } else if out != xml {
+                        report.push(format!("{label}: 트리는 같고 바이트가 다르다"));
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "레거시 차트 → 모델 → chart_xml: 차트 {charts} — 트리 일치 {exact}, 바이트 일치 {bytes}"
+    );
+    for r in &report {
+        eprintln!("{r}");
+    }
+    if dir.join("craft-charts").is_dir() {
+        assert!(charts > 0, "차트가 없다");
+    }
+    assert!(report.is_empty(), "{}", report.join("\n\n"));
+}
+
+/// 한셀 판정: rcell 이 레거시를 읽어 쓴 파일을 한셀이 다시 저장한 것(`RCELL_ORACLE/<폴더>/X.legacy.rcell.as.cell`)의
+/// 차트 파트와 한셀의 레거시 읽기(`X.legacy.as.cell`)의 차트 파트를 그리기 순서로 짝지어 비교한다. 보고만 한다
+/// (한셀은 XML 을 읽을 때 꺾은선 계열의 데이터 레이블에 `dLblPos` 를 넣는다 — docs/format/cell-2024.md 11.2절).
+#[test]
+fn hancell_resave_of_mapped_charts_report() {
+    let (Some(dir), Some(oracle)) = (
+        std::env::var_os("RCELL_CORPUS").map(PathBuf::from),
+        std::env::var_os("RCELL_ORACLE").map(PathBuf::from),
+    ) else {
+        eprintln!("RCELL_CORPUS / RCELL_ORACLE 미설정 — 건너뜀");
+        return;
+    };
+    let (mut charts, mut exact, mut bytes) = (0, 0, 0);
+    let mut kinds: Vec<(String, Vec<String>)> = Vec::new();
+    for d in ["craft-charts", "craft-charts2", "templates"] {
+        for resaved in files_with_suffix(&oracle.join(d), ".legacy.rcell.as.cell") {
+            let name = resaved.file_name().unwrap().to_string_lossy().into_owned();
+            let truth = dir
+                .join(d)
+                .join(name.replace(".legacy.rcell.as.cell", ".legacy.as.cell"));
+            if !truth.exists() {
+                continue;
+            }
+            let parts = |p: &Path| -> Vec<String> {
+                let wb = rcell::open(p).expect("읽기");
+                let mut pkg = rcell::Package::from_bytes(std::fs::read(p).unwrap()).unwrap();
+                charts_by_sheet(&wb)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|s| {
+                        s.target
+                            .as_ref()
+                            .and_then(|t| pkg.read_string(t).ok().flatten())
+                    })
+                    .collect()
+            };
+            let (pa, pb) = (parts(&resaved), parts(&truth));
+            if pa.len() != pb.len() {
+                kinds.push((
+                    format!("차트 수 {} ≠ {}", pa.len(), pb.len()),
+                    vec![name.clone()],
+                ));
+            }
+            for (x, y) in pa.iter().zip(&pb) {
+                charts += 1;
+                bytes += (x == y) as usize;
+                let mut diffs = Vec::new();
+                tree_diffs(
+                    &rcell::xml::parse_raw(x, "a").unwrap(),
+                    &rcell::xml::parse_raw(y, "b").unwrap(),
+                    "",
+                    &mut diffs,
+                );
+                exact += diffs.is_empty() as usize;
+                for dd in diffs {
+                    // 같은 차이는 문서 이름과 함께 한 번만
+                    let key = dd.replace(char::is_numeric, "#");
+                    match kinds.iter_mut().find(|(k, _)| *k == key) {
+                        Some((_, v)) => v.push(name.clone()),
+                        None => kinds.push((key, vec![name.clone()])),
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "한셀(rcell(레거시)) 대 한셀(레거시) 차트 파트: {charts} — 트리 일치 {exact}, 바이트 일치 {bytes}"
+    );
+    for (k, v) in &kinds {
+        eprintln!("[{}] {k}\n    {}", v.len(), v.join(" "));
+    }
+}
+
 /// (경로, 값) 목록
 type Found<T> = Vec<(String, T)>;
 

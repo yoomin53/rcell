@@ -182,10 +182,15 @@ fn frt_header<'a>(r: &mut Rd<'a>) -> Option<(Option<String>, Vec<&'a [u8]>)> {
 
 /// x14 구역의 색 (BrtColor14 의 BrtColor). 한셀은 RGB 색의 색인 바이트에 빨강 값을 넣고, 색인 색은 RGB 종류에
 /// 색인 바이트만 채워(RGB 0) 쓴다 (x14 조건부 서식 실험: `indexed="10"` → `05 0a 00 00 00 00 00 ff`).
-/// 자동 색도 검정과 같은 바이트로 쓰므로 둘은 구별할 수 없다
+/// 자동 색도 검정과 같은 바이트로 쓰므로 둘은 구별할 수 없다. 흰색은 자동 종류에 RGB 유효(0x01)로 쓴다
+/// (`01 ff 00 00 ff ff ff ff` — 본 조건부 서식의 BrtColor 와 같다)
 fn x14_color(b: &[u8]) -> Option<Color> {
     let (kind, index, rgb) = (b[0] >> 1, b[1], &b[4..7]);
     Some(match kind {
+        0 if b[0] & 0x01 != 0 => Color {
+            rgb: Some(format!("ff{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])),
+            ..Default::default()
+        },
         0 => Color {
             auto: true,
             ..Default::default()
@@ -1139,6 +1144,15 @@ fn parse_styles(data: &[u8]) -> Styles {
             _ => {}
         }
     }
+    // 차등 서식의 표시 형식이 번호(0x29)만 있으면 BrtFmt 표에서 형식을 찾는다 (rcell 이 쓰는 꼴, docs/format/cell-binary.md 4절)
+    for d in &mut st.dxfs {
+        if let Some(n) = d.num_fmt.as_mut()
+            && let Some(f) = st.num_fmts.iter().find(|f| f.id == n.id)
+            && (n.code.is_empty() || n.id >= 164)
+        {
+            n.code = f.code.clone();
+        }
+    }
     st
 }
 
@@ -1348,6 +1362,9 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
     if let Some(sst) = rels.iter().find(|r| r.rel_type.ends_with("/sharedStrings")) {
         let data = read_part(pkg, &sst.target)?;
         for rec in biff12::records(&data) {
+            if rec.rtype == 159 {
+                wb.shared_strings_count = Rd::new(rec.data).u32();
+            }
             if rec.rtype == 19 {
                 let mut r = Rd::new(rec.data);
                 wb.shared_strings
@@ -1538,8 +1555,9 @@ fn read_sheet(
             })
             .map(|(_, t)| t.clone())
     };
-    // 조건부 서식 수식·값의 토큰열 → 글 (기준 셀 = 범위의 왼쪽 위)
-    let decode_at = |t: &[u8], base: CellRef| -> Option<String> {
+    // 토큰열 → 글. 조건부 서식의 수식·값은 상대 위치(3차원 참조도 기준 셀에서의 오프셋, 기준 셀 = 범위의
+    // 왼쪽 위), 배열 수식은 셀 수식 그대로
+    let decode_with = |t: &[u8], base: CellRef, relative: bool| -> Option<String> {
         let ctx = Context {
             xti_sheets,
             names,
@@ -1548,11 +1566,17 @@ fn read_sheet(
             xlsb: true,
             row_shift: 0,
         };
-        match formula::decode(t, &ctx) {
+        let d = if relative {
+            formula::decode_relative(t, &ctx)
+        } else {
+            formula::decode(t, &ctx)
+        };
+        match d {
             Ok(Decoded::Text(s)) => Some(s),
             _ => None,
         }
     };
+    let decode_at = |t: &[u8], base: CellRef| decode_with(t, base, true);
     // 앞 하이퍼링크의 관계 ID·위치 (한셀이 다음 레코드에 남기는 값을 가린다)
     let mut last_link: Option<(Option<String>, String)> = None;
     // 배열 수식의 범위, 데이터 표 (왼쪽 위 셀, 수식) — 표는 셀을 다 읽은 뒤 붙인다
@@ -1695,8 +1719,9 @@ fn read_sheet(
             }
             137 => {
                 // BrtBeginWsView (한셀 30바이트): flags u16, xlView u32, rwTop u32, colLeft u32,
-                // icvHdr u8, 예약 u8, ? u16, 현재 확대율 u16 (18), 기본 u16 (20), 페이지 나누기 미리 보기 u16 (22),
-                // 페이지 레이아웃 u16 (24), iWbkView u32 — [MS-XLSB] 순서. 한셀의 XML 과는 일관되지 않다 (문서 참고)
+                // icvHdr u8, 예약 u8, ? u16, 현재 확대율 u16 (18), 보조 확대율 u16 (20)·(22), 페이지 레이아웃 u16 (24),
+                // iWbkView u32. 한셀은 (22) 를 zoomScaleNormal, (20) 을 zoomScaleSheetLayoutView 로 읽는다
+                // (X.bin.as.cell 대조 — [MS-XLSB] 이름과 반대). 한셀이 쓰는 쪽은 일관되지 않다 (문서 참고)
                 let Some(flags) = r.u16() else { continue };
                 sheet.show_grid_lines = flags & 0x0004 != 0;
                 let v = &mut sheet.view;
@@ -1716,8 +1741,8 @@ fn read_sheet(
                 r.take(4);
                 let z = |x: Option<u16>| x.filter(|&z| z != 0).map(u32::from);
                 v.zoom_scale = z(r.u16());
-                v.zoom_scale_normal = z(r.u16());
                 v.zoom_scale_sheet_layout_view = z(r.u16());
+                v.zoom_scale_normal = z(r.u16());
             }
             151 => {
                 // BrtPane: xnumXSplit f64, xnumYSplit f64, rwTop u32, colLeft u32, pnnAct u32, flags u8
@@ -1810,7 +1835,7 @@ fn read_sheet(
                             xlsb: true,
                             row_shift: 0,
                         };
-                        formulas.push(match formula::decode(rgce, &ctx) {
+                        formulas.push(match formula::decode_relative(rgce, &ctx) {
                             Ok(Decoded::Text(t)) => t,
                             _ => String::new(),
                         });
@@ -1922,7 +1947,7 @@ fn read_sheet(
                         xlsb: true,
                         row_shift: 0,
                     };
-                    match formula::decode(rgce, &ctx) {
+                    match formula::decode_relative(rgce, &ctx) {
                         Ok(Decoded::Text(t)) => Some(t),
                         _ => None,
                     }
@@ -2248,7 +2273,7 @@ fn read_sheet(
                     Ok(Decoded::SharedRef(m)) if in_array(m) => None,
                     Ok(Decoded::SharedRef(m)) => Some(
                         find_shared(&shared, m.row, at)
-                            .and_then(|tok| match formula::decode(&tok, &ctx) {
+                            .and_then(|tok| match formula::decode_relative(&tok, &ctx) {
                                 Ok(Decoded::Text(t)) => Some(t),
                                 _ => None,
                             })
@@ -2281,7 +2306,7 @@ fn read_sheet(
                 if let Some(tokens) = parsed_formula(&mut r)
                     && let Some(cell) = sheet.cells.last_mut()
                     && cell.r == rg.start
-                    && let Some(t) = decode_at(tokens, rg.start)
+                    && let Some(t) = decode_with(tokens, rg.start, false)
                 {
                     cell.formula = Some(Formula {
                         text: t,
@@ -2345,7 +2370,7 @@ fn read_sheet(
                             xlsb: true,
                             row_shift: 0,
                         };
-                        if let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx) {
+                        if let Ok(Decoded::Text(t)) = formula::decode_relative(tokens, &ctx) {
                             f.text = t;
                         }
                     }

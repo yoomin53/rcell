@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # 웹 뷰어(web/)를 GitHub Pages 로 배포한다.
-# 저장소 Settings → Pages → Source 를 "GitHub Actions" 로 설정해야 한다.
+# 저장소 Settings → Pages → Source 가 "GitHub Actions" 여야 한다 (2026-10-22 설정함).
 
 name: Pages
 
@@ -24,12 +24,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - run: sh tools/build-web.sh
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: web
   deploy:
@@ -40,4 +40,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

@@ -22,9 +22,10 @@
 //! 표본 77개(만든 차트 69 + 한셀 서식 파일 차트 8) 모두 아카이브가 길이 필드가 가리키는 자리에서 끝나고
 //! 레코드가 꼬리까지 남김없이 소비된다. 형식: `docs/format/cell-legacy-chart.md`.
 //!
-//! 아직 읽기([`super::reader`])에 연결하지 않았다.
+//! 읽기([`super::reader`])는 모든 시트를 읽은 뒤 이 레코드를 [`super::vtchart_map`] 으로 차트 모델로 바꾼다.
 
-// 읽기에 연결하기 전까지 크레이트 안에서 쓰는 곳이 시험뿐이다
+// 아카이브를 살펴보는 API 의 일부(스키마 판·위치·정수 꼴·박힌 객체·머리 필드 …)는 차트 변환이 쓰지 않고
+// 시험과 진단만 쓴다
 #![allow(dead_code)]
 
 use std::fmt;
@@ -2582,6 +2583,86 @@ mod tests {
         assert_eq!(rec.len, p.len());
     }
 
+    /// 손으로 만든 레코드 → 차트 모델: 캐시의 글은 데이터 표, 형식·빈 칸은 시트의 셀, 값 수식이 없는 계열은 빠진다
+    #[test]
+    fn hand_built_chart_maps_to_model() {
+        use crate::legacy::vtchart_map::{Book, map};
+        use crate::model::{Cell, CellValue, ChartTx, Sheet, Styles, Xf};
+        let rec = parse(&sample(), &names()).unwrap();
+        let cell = |row, col, style, value| Cell {
+            r: CellRef { row, col },
+            style,
+            value,
+            formula: None,
+        };
+        let sheet = Sheet {
+            name: "Sheet1".into(),
+            cells: vec![
+                cell(0, 2, 0, CellValue::Text("가".into())),
+                cell(1, 0, 0, CellValue::Number(1.0)),
+                cell(1, 2, 1, CellValue::Number(1.5)),
+                cell(2, 0, 0, CellValue::Number(2.0)),
+            ],
+            ..Default::default()
+        };
+        let styles = Styles {
+            cell_xfs: vec![
+                Xf::default(),
+                Xf {
+                    num_fmt_id: 10,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let sheets = [sheet];
+        let ch = map(
+            &rec,
+            &Book {
+                sheets: &sheets,
+                styles: &styles,
+            },
+        );
+        // 종류 5 = 영역, 그림 영역이 없으면 축도 없다
+        assert_eq!((ch.kind.as_str(), ch.three_d), ("area", false));
+        assert_eq!(ch.grouping.as_deref(), Some("standard"));
+        assert!(ch.axes.is_empty() && ch.legend.is_none() && ch.title_full.is_none());
+        assert_eq!(ch.series.len(), 1, "값 수식이 없는 둘째 계열은 빠진다");
+        let s = &ch.series[0];
+        assert_eq!((s.idx, s.order), (Some(0), Some(0)));
+        // 이름: 데이터 표 0행
+        let Some(ChartTx::Ref(name)) = &s.tx else {
+            panic!("이름 {:?}", s.tx);
+        };
+        assert_eq!(name.formula.as_deref(), Some("Sheet1!$C$1"));
+        assert_eq!(s.name.as_deref(), Some("가"));
+        // 항목: 숫자 칸만 → numRef, 이름표 열이 없어 캐시 점은 없다
+        let cat = s.cat.as_ref().unwrap();
+        let cache = cat.cache.as_ref().unwrap();
+        assert_eq!(
+            (
+                cat.kind.as_str(),
+                cache.format_code.as_deref(),
+                cache.pt_count
+            ),
+            ("numRef", Some("G/표준"), Some(2))
+        );
+        // 값: C2 는 0.00% 형식, C3 은 빈 칸 (빈 값 + General), 묶음 형식은 섞여서 General
+        let val = s.val.as_ref().unwrap().cache.as_ref().unwrap();
+        let pts: Vec<_> = val
+            .points
+            .iter()
+            .map(|p| (p.idx, p.value.as_str(), p.format_code.as_deref()))
+            .collect();
+        assert_eq!(pts, [(0, "가", Some("0.00%")), (1, "", Some("General"))]);
+        assert_eq!(val.format_code.as_deref(), Some("General"));
+        // 한셀이 늘 채우는 값
+        assert_eq!(
+            (ch.c14_style, ch.style, ch.disp_blanks_as.as_deref()),
+            (Some(102), Some(2), Some("gap"))
+        );
+    }
+
     /// seriesList 자리에 VtAxis 하나를 담은 VtArray (묶음, 조건부 XYScale, 고정 배열)
     fn axis_list(w: &mut W, xy: u16) {
         w.object("VtArray");
@@ -2893,11 +2974,17 @@ mod tests {
             assert!(parse(&p[..k], &names()).is_err(), "앞 {k}바이트");
         }
         let mut seed = 0x2545_F491_4F6C_DD1D;
+        let styles = crate::model::Styles::default();
+        let empty = crate::legacy::vtchart_map::Book {
+            sheets: &[],
+            styles: &styles,
+        };
         for _ in 0..20_000 {
             let mut q = p.clone();
             mutate(&mut q, &mut seed);
             if let Ok(rec) = parse(&q, &names()) {
                 assert_eq!((rec.len, rec.archive.end), (q.len(), rec.envelope.blob.end));
+                let _ = crate::legacy::vtchart_map::map(&rec, &empty);
             }
         }
     }
@@ -3165,10 +3252,18 @@ mod tests {
                         }
                         Err(e) => failures.push(format!("{}#{k}: {e}", f.display())),
                     }
+                    // 고친 레코드가 읽히면 차트 모델로 바꾸는 것도 멈추지 않아야 한다
+                    let styles = crate::model::Styles::default();
+                    let empty = crate::legacy::vtchart_map::Book {
+                        sheets: &[],
+                        styles: &styles,
+                    };
                     for _ in 0..rounds {
                         let mut q = data.clone();
                         mutate(&mut q, &mut seed);
-                        let _ = parse(&q, &book.sheets);
+                        if let Ok(rec) = parse(&q, &book.sheets) {
+                            let _ = crate::legacy::vtchart_map::map(&rec, &empty);
+                        }
                     }
                 }
             }

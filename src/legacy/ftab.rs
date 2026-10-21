@@ -387,9 +387,139 @@ pub fn lookup(index: u16) -> Option<(&'static str, Option<u8>)> {
     Some((name, (argc >= 0).then_some(argc as u8)))
 }
 
+/// 함수 이름 → (번호, 고정 인자 수). [`lookup`] 의 역 (대소문자 무시).
+pub fn by_name(name: &str) -> Option<(u16, Option<u8>)> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static MAP: OnceLock<HashMap<&'static str, (u16, Option<u8>)>> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        (0..2048u16)
+            .filter_map(|i| lookup(i).map(|(n, a)| (n, (i, a))))
+            .collect()
+    });
+    map.get(name.to_ascii_uppercase().as_str()).copied()
+}
+
+/// 수식 토큰의 클래스 ([MS-XLSB] 2.5.97.88 Ptg 의 type 2비트): 참조, 값, 배열
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgClass {
+    Ref,
+    Value,
+    Array,
+}
+
+/// 함수의 반환 클래스와 인자 클래스. 인자 목록 밖의 인자는 `cycle` 번째부터 끝까지를 되풀이한다.
+#[derive(Debug, Clone, Copy)]
+pub struct Signature {
+    pub ret: ArgClass,
+    params: &'static [ArgClass],
+    cycle: usize,
+}
+
+impl Signature {
+    /// `i` 번째(0부터) 인자의 클래스
+    pub fn param(&self, i: usize) -> ArgClass {
+        let p = self.params;
+        if p.is_empty() {
+            return ArgClass::Value;
+        }
+        if i < p.len() {
+            return p[i];
+        }
+        let c = self.cycle.min(p.len() - 1);
+        p[c + (i - c) % (p.len() - c)]
+    }
+}
+
+/// 함수가 인자를 어떤 클래스로 받는지 (참조를 받는 함수 — 합계·찾기·조건 범위 등 — 는 참조, 배열 연산 함수는
+/// 배열, 나머지는 값). 한셀이 바이너리에 쓰는 토큰 클래스와 같다 (함수 대조 실험: `IF` 의 둘째·셋째 인자는 참조,
+/// `SUM`·`MATCH`·`VLOOKUP`·`SUMIF`·`COUNTIF`·`INDEX` 의 범위는 참조, `SUMPRODUCT` 는 배열)
+pub fn signature(index: u16) -> Signature {
+    use ArgClass::{Array as A, Ref as R, Value as V};
+    let s = |ret, params: &'static [ArgClass], cycle| Signature { ret, params, cycle };
+    match index {
+        // 참조 목록 (집계)
+        0
+        | 4..=7
+        | 12
+        | 36
+        | 37
+        | 46
+        | 169
+        | 183
+        | 193
+        | 194
+        | 227
+        | 269
+        | 318..=323
+        | 361..=367 => s(V, &[R], 0),
+        1 => s(R, &[V, R, R], 1),          // IF
+        8 | 9 | 75 | 105 => s(V, &[R], 0), // ROW, COLUMN, AREAS, ISREF
+        11 => s(V, &[V, R], 1),            // NPV
+        28 => s(V, &[V, R, R], 1),         // LOOKUP
+        29 => s(R, &[R, V, V, V], 1),      // INDEX
+        40..=45 | 47 | 189 | 195 | 196 | 199 | 235 => s(V, &[R, V, R], 2), // D 함수
+        49 | 51 => s(A, &[A, A, V, V], 2), // LINEST, LOGEST
+        50 | 52 => s(A, &[A, A, A, V], 3), // TREND, GROWTH
+        61 => s(V, &[R, V, V], 1),         // MIRR
+        62 => s(V, &[R, V], 1),            // IRR
+        64 => s(V, &[V, R, V], 2),         // MATCH
+        76 | 77 => s(V, &[A], 0),          // ROWS, COLUMNS
+        78 => s(R, &[R, V, V, V, V], 1),   // OFFSET
+        83 => s(A, &[A], 0),               // TRANSPOSE
+        100 => s(R, &[V, R], 1),           // CHOOSE
+        101 | 102 => s(V, &[V, R, V, V], 2), // HLOOKUP, VLOOKUP
+        125 => s(V, &[V, R], 1),           // CELL
+        130 | 131 => s(V, &[R], 0),        // T, N
+        148 => s(R, &[V, V], 1),           // INDIRECT
+        163 => s(V, &[A], 0),              // MDETERM
+        164 => s(A, &[A], 0),              // MINVERSE
+        165 => s(A, &[A, A], 1),           // MMULT
+        216 => s(V, &[V, R, V], 2),        // RANK
+        228 => s(V, &[A], 0),              // SUMPRODUCT
+        303..=308 | 310..=315 => s(V, &[A, A], 1),
+        309 => s(V, &[V, A, A], 2),          // FORECAST
+        316 | 317 => s(V, &[A, A, V, V], 2), // TTEST, PROB
+        324 => s(V, &[R, V, V], 1),          // ZTEST
+        325..=328 | 331 => s(V, &[R, V], 1), // LARGE, SMALL, QUARTILE, PERCENTILE, TRIMMEAN
+        329 => s(V, &[R, V, V], 1),          // PERCENTRANK
+        330 => s(V, &[A], 0),                // MODE
+        344 | 1904 => s(V, &[V, R], 1),      // SUBTOTAL, SUBTOTALA
+        345 | 483 => s(V, &[R, V, R], 2),    // SUMIF, AVERAGEIF
+        346 => s(V, &[R, V], 1),             // COUNTIF
+        347 => s(V, &[R], 0),                // COUNTBLANK
+        481 => s(V, &[R, V], 0),             // COUNTIFS (범위, 조건) 반복
+        482 | 484 => s(V, &[R, R, V], 1),    // SUMIFS, AVERAGEIFS: 합계 범위 + (범위, 조건) 반복
+        _ => s(V, &[], 0),
+    }
+}
+
+/// 다시 계산할 때마다 값이 바뀔 수 있는 함수 (수식 앞에 tAttrVolatile, 셀은 fAlwaysCalc)
+pub fn is_volatile(index: u16) -> bool {
+    // RAND, NOW, OFFSET, CELL, INDIRECT, TODAY, INFO, RANDBETWEEN
+    matches!(index, 63 | 74 | 78 | 125 | 148 | 221 | 244 | 464)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reverse_lookup_and_classes() {
+        assert_eq!(by_name("sum"), Some((4, None)));
+        assert_eq!(by_name("IFERROR"), Some((480, Some(2))));
+        assert_eq!(by_name("NOPE"), None);
+        let iff = signature(1);
+        assert_eq!(iff.ret, ArgClass::Ref);
+        assert_eq!(iff.param(0), ArgClass::Value);
+        assert_eq!(iff.param(2), ArgClass::Ref);
+        let sumifs = signature(482);
+        assert_eq!(sumifs.param(0), ArgClass::Ref);
+        assert_eq!(sumifs.param(3), ArgClass::Ref);
+        assert_eq!(sumifs.param(4), ArgClass::Value);
+        assert_eq!(signature(24).param(0), ArgClass::Value);
+        assert!(is_volatile(221) && !is_volatile(4));
+    }
 
     #[test]
     fn known_indices() {

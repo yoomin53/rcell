@@ -67,7 +67,8 @@ XML, 바이너리, 한셀 2010 이하의 레거시 — 을 모두 읽고, 한셀
 - 시트 보기·인쇄 설정, 메모, 도형·글상자·그림·차트, 레거시 OfficeArt 도형과 그림 저장소
 - 조건부 서식·데이터 유효성, 개요(그룹)·자동 필터·보호, 외부 연결 캐시, 테마, 문서 속성
 - 암호화 문서 열기(ECMA-376 표준 암호화)
-- 진행 중: 레거시 차트(한컴 VtChart 직렬화) 해석, 렌더러 다듬기
+- 레거시 차트(한컴 VtChart 직렬화) → 차트 모델 → XML 차트 파트: 한셀이 레거시를 읽은 차트와 바이트까지 같다
+- 진행 중: 렌더러 다듬기
 
 ## Features
 
@@ -99,6 +100,7 @@ XML, 바이너리, 한셀 2010 이하의 레거시 — 을 모두 읽고, 한셀
 ### Output (저장·변환)
 
 - XML `.cell` / `.xlsx` 저장 — 레거시·바이너리 문서를 최신 `.cell` 로 바꿉니다
+- 바이너리 `.cell`(`xlCellb`) 저장 — 한셀이 바이너리로 저장하는 꼴 그대로 (레코드 98.9% 가 바이트까지 같다)
 - CSV, 문서 모델 JSON
 
 ### Verification (한셀을 정답지로)
@@ -186,6 +188,7 @@ rcell html    문서.cell -o 문서.html     # 한셀 화면처럼 HTML 로
 rcell csv     문서.cell -s 0             # 첫 시트를 CSV 로
 rcell convert 옛문서.cell 새문서.cell    # 레거시/바이너리 → 최신 XML .cell
 rcell convert 문서.cell 문서.xlsx        # Excel 형식으로
+rcell convert 문서.cell 문서.bin.cell    # 바이너리 .cell 로 (--format bin, 한셀처럼 잃으려면 --exact)
 rcell dump    문서.cell --no-cells       # 문서 모델 JSON
 rcell info    잠긴문서.cell --password 암호   # 사용자 암호가 걸린 문서
 ```

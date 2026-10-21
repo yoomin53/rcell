@@ -1175,7 +1175,7 @@ fn comments_xml(sheet: &Sheet) -> String {
 
 /// 메모 도형 VML (`xl/drawings/vmlDrawingN.vml`). 한셀이 쓰는 꼴: 선·채우기는 `v:shape` 속성과 `v:stroke`, 그림자는
 /// `v:shadow`, 셀 고정은 `x:MoveWithCells`·`x:SizeWithCells` (있으면 고정). 모양이 없는 메모는 셀 오른쪽 위에 둔다
-fn comments_vml(sheet: &Sheet, n: usize) -> String {
+pub(crate) fn comments_vml(sheet: &Sheet, n: usize) -> String {
     let mut s = format!(
         "<xml xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:x=\"urn:schemas-microsoft-com:office:excel\"><o:shapelayout v:ext=\"edit\"><o:idmap v:ext=\"edit\" data=\"{n}\"/></o:shapelayout><v:shapetype id=\"_x0000_t202\" coordsize=\"21600,21600\" o:spt=\"202\" path=\"m,l,21600r21600,l21600,xe\"><v:stroke joinstyle=\"miter\"/><v:path gradientshapeok=\"t\" o:connecttype=\"rect\"/></v:shapetype>"
     );
@@ -1941,6 +1941,16 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
             }
         })
         .collect();
+    // 그리기 파트 내용과 관계, 그리고 모델로 쓰는 차트 파트 (레거시에서 읽은 차트) — 콘텐츠 형식에 넣어야 하므로 먼저
+    let mdw = crate::units::max_digit_width(wb);
+    let mut chart_parts: Vec<(String, String)> = Vec::new();
+    let mut drawings: Vec<Option<(String, Vec<Rel>)>> = Vec::new();
+    for (sh, name) in worksheets.iter().zip(&drawing_names) {
+        drawings.push(
+            name.as_ref()
+                .map(|_| drawing_xml(sh, mdw, &wb.raw_parts, &mut chart_parts)),
+        );
+    }
 
     // 원본 그대로 옮겨 쓰는 파트. Excel 형식에는 매크로 프로젝트를 쓰지 않는다
     let is_macro =
@@ -2039,6 +2049,12 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
         let _ = write!(
             ct,
             "<Override PartName=\"/{name}\" ContentType=\"application/vnd.openxmlformats-officedocument.drawing+xml\"/>"
+        );
+    }
+    for (name, _) in &chart_parts {
+        let _ = write!(
+            ct,
+            "<Override PartName=\"/{name}\" ContentType=\"application/vnd.openxmlformats-officedocument.drawingml.chart+xml\"/>"
         );
     }
     for (n, _) in table_names.iter().flatten().filter(|(_, raw)| !raw) {
@@ -2262,12 +2278,11 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
             let mut r = format!(
                 "{DECL}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
             );
-            if let Some(name) = &drawing_names[i] {
+            if let (Some(name), Some((xml, rels))) = (&drawing_names[i], drawings[i].take()) {
                 let _ = write!(
                     r,
                     "<Relationship Id=\"rIdDr\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing\" Target=\"/{name}\"/>"
                 );
-                let (xml, rels) = drawing_xml(worksheets[i]);
                 put(name, xml.as_bytes())?;
                 if !rels.is_empty() {
                     let mut dr = format!(
@@ -2404,6 +2419,10 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
             r.as_bytes(),
         )?;
     }
+    // 모델로 쓴 차트 파트
+    for (name, xml) in &chart_parts {
+        put(name, xml.as_bytes())?;
+    }
     // 원본 그대로의 파트 (차트·그림·표·피벗·매크로 프로젝트 …와 그 관계 파일)
     for p in &raw_parts {
         put(&p.name, &p.data)?;
@@ -2536,15 +2555,37 @@ const XDR: &str = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetD
 const DML: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const DML_CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 
-/// 그리기 파트와 그 관계 (ID, 종류, 대상, 외부). XML 원본의 앵커는 그대로, 나머지는 모델로 쓴다.
-fn drawing_xml(sheet: &Sheet) -> (String, Vec<(String, String, String, bool)>) {
+/// 그리기 관계: (ID, 종류, 대상, 외부)
+pub(crate) type Rel = (String, String, String, bool);
+
+const CHART_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
+
+/// 그리기 파트와 그 관계. XML 원본의 앵커는 그대로, 나머지는 모델로 쓴다. 모델의 차트(레거시에서 읽은 것)는
+/// 차트 파트를 새로 만들어 `chart_parts` 에 (파트 이름, XML) 로 더한다. 바이너리 쓰기도 쓴다.
+pub(crate) fn drawing_xml(
+    sheet: &Sheet,
+    mdw: u32,
+    raw_parts: &[crate::model::RawPart],
+    chart_parts: &mut Vec<(String, String)>,
+) -> (String, Vec<Rel>) {
+    use crate::model::ShapeKind;
     let mut s = format!(
         "{DECL}<xdr:wsDr xmlns:xdr=\"{XDR}\" xmlns:a=\"{DML}\" xmlns:r=\"{REL}\" xmlns:c=\"{DML_CHART}\">"
     );
-    let mut rels: Vec<(String, String, String, bool)> = Vec::new();
+    let mut rels: Vec<Rel> = Vec::new();
+    // 번호 없는 차트 도형의 cNvPr id: 한셀처럼 2 부터, 다른 도형의 번호와 겹치지 않게
+    fn ids(list: &[crate::model::Shape], out: &mut Vec<u32>) {
+        for x in list {
+            out.push(x.id);
+            ids(&x.children, out);
+        }
+    }
+    let mut used = Vec::new();
+    ids(&sheet.shapes, &mut used);
+    let mut next_id = 2;
     for sh in &sheet.shapes {
-        match &sh.raw {
-            Some(raw) => {
+        match (&sh.raw, &sh.chart) {
+            (Some(raw), _) => {
                 s.push_str(raw);
                 for r in &sh.raw_rels {
                     if !rels.iter().any(|x| x.0 == r.0) {
@@ -2552,15 +2593,139 @@ fn drawing_xml(sheet: &Sheet) -> (String, Vec<(String, String, String, bool)>) {
                     }
                 }
             }
-            None => s.push_str(&anchor_xml(sh, &mut rels)),
+            (None, Some(chart)) if sh.kind == ShapeKind::Chart => {
+                let id = if sh.id != 0 {
+                    sh.id
+                } else {
+                    while used.contains(&next_id) {
+                        next_id += 1;
+                    }
+                    used.push(next_id);
+                    next_id
+                };
+                let name = next_chart_name(raw_parts, chart_parts);
+                let rid = format!("rIdChart{}", rels.len() + 1);
+                rels.push((rid.clone(), CHART_REL.into(), name.clone(), false));
+                chart_parts.push((name, crate::chart_xml::chart_xml(chart)));
+                s.push_str(&chart_anchor_xml(sh, id, &rid, sheet, mdw));
+            }
+            (None, _) => s.push_str(&anchor_xml(sh, &mut rels)),
         }
     }
     s.push_str("</xdr:wsDr>");
     (s, rels)
 }
 
-/// 모델로 앵커를 쓴다 (레거시에서 읽은 도형·글상자·그림). 그림은 파트가 없으면, 차트는 아직 쓰지 않는다.
-fn anchor_xml(sh: &crate::model::Shape, rels: &mut Vec<(String, String, String, bool)>) -> String {
+/// 원본 그대로 옮기는 파트·이미 쓴 차트와 겹치지 않는 다음 차트 파트 이름
+fn next_chart_name(raw_parts: &[crate::model::RawPart], made: &[(String, String)]) -> String {
+    (made.len() + 1..)
+        .map(|n| format!("xl/charts/chart{n}.xml"))
+        .find(|n| !raw_parts.iter().any(|p| &p.name == n) && !made.iter().any(|m| &m.0 == n))
+        .unwrap_or_default()
+}
+
+/// 칸 기준 앵커의 시트 안 절대 위치와 크기 (EMU): 앞 열·행의 픽셀 합 + 칸 안 오프셋
+fn anchor_rect(sheet: &Sheet, mdw: u32, a: &crate::model::Anchor) -> (i64, i64, i64, i64) {
+    use crate::units::{EMU_PER_PX, row_height_px, sheet_col_px};
+    let col_x = |c: u32| {
+        (0..c)
+            .map(|i| i64::from(sheet_col_px(sheet, i, mdw)))
+            .sum::<i64>()
+            * EMU_PER_PX
+    };
+    let def_row = i64::from(row_height_px(sheet.default_row_height.unwrap_or(15.0)));
+    // 높이가 따로 있는 행만 기본 높이와의 차이를 더한다 (행 수가 많아도 빠르게)
+    let row_y = |r: u32| {
+        let extra: i64 = sheet
+            .rows
+            .iter()
+            .filter(|x| x.index >= 1 && x.index - 1 < r)
+            .map(|x| {
+                let px = if x.hidden {
+                    0
+                } else {
+                    x.height.map_or(def_row, |h| i64::from(row_height_px(h)))
+                };
+                px - def_row
+            })
+            .sum();
+        (i64::from(r) * def_row + extra) * EMU_PER_PX
+    };
+    let x = col_x(a.from.col) + a.from.col_off;
+    let y = row_y(a.from.row) + a.from.row_off;
+    let (x2, y2) = match &a.to {
+        Some(t) => (col_x(t.col) + t.col_off, row_y(t.row) + t.row_off),
+        None => {
+            let (cx, cy) = a.ext.unwrap_or((0, 0));
+            (x + cx, y + cy)
+        }
+    };
+    (x, y, (x2 - x).max(0), (y2 - y).max(0))
+}
+
+/// 모델 차트의 앵커: 한셀이 레거시 차트를 읽어 쓰는 꼴 (`*.legacy.as.cell` 의 그리기 파트) —
+/// `graphicFrame fPublished="0"`, `cNvPr id name`, 시트 안 절대 위치 `xdr:xfrm`, `c:chart r:id`,
+/// `clientData fLocksWithSheet="1" fPrintsWithSheet="1"`
+fn chart_anchor_xml(
+    sh: &crate::model::Shape,
+    id: u32,
+    rid: &str,
+    sheet: &Sheet,
+    mdw: u32,
+) -> String {
+    use crate::model::AnchorKind;
+    let a = &sh.anchor;
+    let marker = |tag: &str, m: &crate::model::Marker| {
+        format!(
+            "<xdr:{tag}><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:{tag}>",
+            m.col, m.col_off, m.row, m.row_off
+        )
+    };
+    let tag = match a.kind {
+        AnchorKind::TwoCell => "twoCellAnchor",
+        AnchorKind::OneCell => "oneCellAnchor",
+        AnchorKind::Absolute => "absoluteAnchor",
+    };
+    let mut s = format!("<xdr:{tag}");
+    if let Some(e) = &a.edit_as {
+        let _ = write!(s, " editAs=\"{}\"", esc(e));
+    }
+    s.push('>');
+    let (x, y, cx, cy) = match a.kind {
+        AnchorKind::Absolute => {
+            let (x, y) = a.pos.unwrap_or((0, 0));
+            let (cx, cy) = a.ext.unwrap_or((0, 0));
+            let _ = write!(s, "<xdr:pos x=\"{x}\" y=\"{y}\"/>");
+            (x, y, cx, cy)
+        }
+        _ => {
+            s.push_str(&marker("from", &a.from));
+            anchor_rect(sheet, mdw, a)
+        }
+    };
+    if let Some(t) = &a.to {
+        s.push_str(&marker("to", t));
+    }
+    if a.kind != AnchorKind::TwoCell {
+        let (ex, ey) = a.ext.unwrap_or((cx, cy));
+        let _ = write!(s, "<xdr:ext cx=\"{ex}\" cy=\"{ey}\"/>");
+    }
+    let _ = write!(
+        s,
+        "<xdr:graphicFrame fPublished=\"0\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{}\"{}{}/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></xdr:xfrm><a:graphic><a:graphicData uri=\"{DML_CHART}\"><c:chart r:id=\"{rid}\"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData fLocksWithSheet=\"1\" fPrintsWithSheet=\"1\"/></xdr:{tag}>",
+        esc(&sh.name),
+        sh.descr
+            .as_ref()
+            .map(|d| format!(" descr=\"{}\"", esc(d)))
+            .unwrap_or_default(),
+        if sh.hidden { " hidden=\"1\"" } else { "" }
+    );
+    s
+}
+
+/// 모델로 앵커를 쓴다 (레거시에서 읽은 도형·글상자·그림). 그림은 파트가 없으면, 차트는 내용이 없으면 쓰지 않는다
+/// (내용이 있는 차트는 [`chart_anchor_xml`]).
+fn anchor_xml(sh: &crate::model::Shape, rels: &mut Vec<Rel>) -> String {
     use crate::model::{AnchorKind, ShapeKind};
     let picture = sh.kind == ShapeKind::Picture && sh.target.is_some();
     if !picture
@@ -2619,7 +2784,7 @@ fn anchor_xml(sh: &crate::model::Shape, rels: &mut Vec<(String, String, String, 
     s
 }
 
-fn object_xml(sh: &crate::model::Shape, rels: &mut Vec<(String, String, String, bool)>) -> String {
+fn object_xml(sh: &crate::model::Shape, rels: &mut Vec<Rel>) -> String {
     use crate::model::ShapeKind;
     let mut s = String::new();
     let (el, nv, cnv) = match sh.kind {

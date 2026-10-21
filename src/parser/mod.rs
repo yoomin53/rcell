@@ -229,6 +229,7 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
         && let Some(e) = pkg.read_xml(&sst.target)?
     {
         wb.shared_strings = shared_strings::parse_shared_strings(&e);
+        wb.shared_strings_count = e.attr_u32("count");
     }
     if let Some(th) = wb_rels.iter().find(|r| rel_is(r, "/theme"))
         && let Some(e) = pkg.read_xml(&th.target)?

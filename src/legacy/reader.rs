@@ -1369,9 +1369,11 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         }
     }
 
-    // 시트. 다른 시트 범위의 이름은 시트 이름을 붙여 읽는다
+    // 시트. 다른 시트 범위의 이름은 시트 이름을 붙여 읽는다. 차트 레코드는 (시트 번호, 레코드들) — 시트의 앞
+    // 도형들이 차례로 그 차트다
     let name_scopes: Vec<Option<u32>> = pending_names.iter().map(|n| n.local).collect();
     let sheet_names: Vec<String> = sheets.iter().map(|s| s.name.clone()).collect();
+    let mut pending_charts: Vec<(usize, Vec<Vec<u8>>)> = Vec::new();
     for bs in sheets {
         let mut sheet = Sheet {
             name: bs.name.clone(),
@@ -1390,6 +1392,7 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
             let local_names =
                 formula::names_for_sheet(&name_list, &name_scopes, &sheet_names, wb.sheets.len());
             let ctx_sheets = (&xti_sheets, &local_names, &xti_names);
+            let mut charts = Vec::new();
             read_sheet(
                 &recs[start..],
                 &mut sheet,
@@ -1397,10 +1400,15 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 &cell_map,
                 ctx_sheets,
                 &mut dxf_extra,
+                &mut charts,
             )?;
+            if !charts.is_empty() {
+                pending_charts.push((wb.sheets.len(), charts));
+            }
         }
         wb.sheets.push(sheet);
     }
+    attach_charts(&mut wb, &pending_charts);
     // CF 의 DXFN 에만 남은 차등 서식 표시 형식·맞춤, 그리고 보호 (한셀은 0x088D 표에 표시 형식·맞춤을 쓰지 않고
     // 보호 값은 틀리게 쓴다 — 차등 서식 대조 실험)
     let mut next_id = wb
@@ -1446,6 +1454,37 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
     wb.raw_parts
         .retain(|p| !p.name.starts_with(MEDIA_PREFIX) || used.contains(&p.name));
     Ok(wb)
+}
+
+/// 한컴 차트 레코드(0x7EF0)를 차트 모델로 바꿔 그 차트 도형에 붙인다. 수식의 ixti 는 시트 순서 번호이고
+/// (표본 관측, docs/format/cell-legacy-chart.md 2절), 캐시의 표시 형식·빈 칸은 참조한 셀에서 온다. 읽을 수 없는
+/// 레코드의 도형은 앵커만 남는다.
+fn attach_charts(wb: &mut Workbook, pending: &[(usize, Vec<Vec<u8>>)]) {
+    if pending.is_empty() {
+        return;
+    }
+    let names: Vec<String> = wb.sheets.iter().map(|s| s.name.clone()).collect();
+    let mut mapped = Vec::new();
+    {
+        let book = super::vtchart_map::Book {
+            sheets: &wb.sheets,
+            styles: &wb.styles,
+        };
+        for (si, records) in pending {
+            for (k, data) in records.iter().enumerate() {
+                if let Ok(rec) = super::vtchart::parse(data, &names) {
+                    mapped.push((*si, k, super::vtchart_map::map(&rec, &book)));
+                }
+            }
+        }
+    }
+    for (si, k, chart) in mapped {
+        if let Some(s) = wb.sheets.get_mut(si).and_then(|s| s.shapes.get_mut(k))
+            && s.kind == ShapeKind::Chart
+        {
+            s.chart = Some(chart);
+        }
+    }
 }
 
 /// 한셀은 레거시 문서를 열 때 어떤 수식·이름도 쓰지 않는 외부 연결(SUPBOOK)을 버리고
@@ -1548,6 +1587,7 @@ fn rk_value(rk: u32) -> f64 {
     if rk & 0x01 != 0 { v / 100.0 } else { v }
 }
 
+/// 시트 하나. `charts` 에는 한컴 차트(0x7EF0) 레코드를 나온 순서대로 담는다 — 시트의 앞 도형들이 그 차트다
 fn read_sheet(
     recs: &[Logical],
     sheet: &mut Sheet,
@@ -1555,6 +1595,7 @@ fn read_sheet(
     cell_map: &HashMap<u16, u32>,
     (xti_sheets, names, xti_names): (&Vec<Option<String>>, &Vec<String>, &Vec<Vec<String>>),
     dxf_extra: &mut Vec<(u32, Dxfn)>,
+    charts: &mut Vec<Vec<u8>>,
 ) -> Result<()> {
     let style = |ixfe: u16| cell_map.get(&ixfe).copied().unwrap_or(0);
     let mut pending_string_cell: Option<usize> = None;
@@ -1572,7 +1613,7 @@ fn read_sheet(
     // 그리기: MSODRAWING 을 이어 붙인 OfficeArt 스트림, OBJ 목록(종류, 번호, TXO 내용)
     let mut art: Vec<u8> = Vec::new();
     let mut objs: Vec<ObjRec> = Vec::new();
-    // 한컴 차트(0x7EF0)의 앵커 — 차트 내용(VtChart)은 아직 해석하지 않는다
+    // 한컴 차트(0x7EF0)의 앵커. 레코드 내용은 모든 시트를 읽은 뒤 차트 모델로 바꾼다 (참조한 셀이 필요하다)
     let mut chart_anchors: Vec<(u16, [u32; 8])> = Vec::new();
     // 조건부 서식: CONDFMT 번호(nID) → 목록 위치, (nID, icf) → (서식, 규칙) 위치, 다음 CF12 가 붙을 서식
     let mut cf_by_id: HashMap<u16, usize> = HashMap::new();
@@ -2414,6 +2455,7 @@ fn read_sheet(
                         dy2 as u32,
                     ],
                 ));
+                charts.push(rec.data.clone());
             }
             0x005D => {
                 // OBJ: 첫 하위 레코드 ftCmo = ft u16 (0x15), cb u16, ot u16, id u16, …

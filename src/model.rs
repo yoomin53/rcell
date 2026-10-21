@@ -34,6 +34,9 @@ pub struct Workbook {
     pub code_name: Option<String>,
     pub sheets: Vec<Sheet>,
     pub shared_strings: Vec<RichText>,
+    /// 공유 문자열 참조 수 (`x:sst/@count`, 바이너리 BrtBeginSst 의 cstTotal). 한셀이 바이너리에 그대로 옮겨 쓴다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_strings_count: Option<u32>,
     pub styles: Styles,
     pub defined_names: Vec<DefinedName>,
     /// 원본 그대로 옮겨 쓰는 파트 (차트·그림·표·피벗·매크로 프로젝트 …와 그 관계 파일)
