@@ -919,7 +919,7 @@ fn shape_text_font(s: &Shape, wb: &Workbook) -> Option<usize> {
 }
 
 /// TXO (한컴): 머리 10바이트 (`0, 1, 1, 1, 문단 수`), `cch u16, flag u8, UTF-16`, 런 `(ich u16, ifnt u16, u32)` 과
-/// 문단마다 u32 (관측: 도형 3, 메모 0)
+/// 문단마다 u32 문단 모양 번호 (도형: 표 끝의 글 상자 문단 모양, 메모: 0 — 관측). 글이 없으면 런 없이 번호만
 fn txo(text: &str, font: u16, para: u32) -> Vec<u8> {
     let paragraphs = text.split('\n').count().max(1) as u16;
     // 글이 없으면 서식 런도 없다: 런 수 0, 문단 모양 번호만 (관측: 빈 글 상자 TXO `… 00 00 01 00 00 00 00 …`)

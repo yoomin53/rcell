@@ -421,6 +421,10 @@ XTI 가 외부 SUPBOOK 을 가리키면 XML 표기로 `[n]시트!A1` 이 된다.
 | 자동 필터의 빈 칸·백분율 | 파일에는 있지만 한셀이 다시 열 때 읽지 않는다 (6.4절) |
 | 사용자 정의 표 스타일 | 파일(0x088E–0x0890)에는 있지만 한셀이 다시 열 때 읽지 않는다 — 기본 스타일 이름만 남는다 |
 | 조건부 서식의 차등 서식 | 세로 맞춤을 읽지 않고 사용자 표시 형식을 깨뜨린다 (6.3절) |
+| 글자 회전 | 셀 서식의 회전(45·90·135·180·30·255)을 **늘 trot = 0 으로 쓴다** (회전 대조 실험: 한셀 COM 으로 회전을 준 문서를 -2005 로 저장). 레거시를 읽을 때는 trot 를 읽는다 — rcell 이 쓴 trot 90 은 한셀이 90 으로 읽는다 |
+| 여백 | HWPUNIT(1/7200 인치)로 잘라 f32 로 쓴다. 다시 읽을 때 또 자르므로 f32 가 정확한 값보다 작으면 한 칸 줄어든다 (10.7절) |
+| 도형의 글 상자 여백·줄 바꿈·세로 맞춤 | OPT 0x0081–0x0087 을 쓰지 않는다 (10.8절) |
+| 사용자 정의 모양 | 빈 경로만 경로 크기·글 사각형으로 남는다 (10.8절) |
 
 ## 9. 검증 방법
 
@@ -428,3 +432,152 @@ XTI 가 외부 SUPBOOK 을 가리키면 XML 표기로 `[n]시트!A1` 이 된다.
 2. `tools/probe/convert.ps1` — 한셀이 레거시 파일을 열어 XML 로 다시 저장 (정답).
 3. `rcell diff X.legacy.cell X.legacy.as.cell --ignore-font-scale` — rcell 의 해석과 비교.
 4. 값을 바꿔 가며 조작한 XML 을 한셀로 레거시 변환해 필드 오프셋을 확정 (`rcell patch`).
+
+쓰기(10절)의 검증:
+
+5. **왕복** — `tests/real_samples.rs::legacy_writer_round_trip`: rcell(X) → 레거시 → rcell 이 다시 읽은 것이
+   `legacy::lossy::legacy_view(rcell(X))` (8절·10절의 손실을 미리 적용한 것)와 같은지. 입력은 X.cell 과 X.legacy.cell.
+6. **레코드 비교** — `rcell rec-diff A B [--ignore-sst-order]`: BOF 구간마다 레코드 차례를 Myers 차분으로 맞추고
+   내용을 비교한다 (BOUNDSHEET 위치, FRT 예약 8바이트는 지운다). 기준은 세 가지다:
+   한셀이 메모리의 문서를 저장한 X.legacy.cell, 한셀이 X.cell 을 열어 저장한 것(**hx**, XML 입력의 정답 —
+   한셀은 XML 을 열 때 서식 표를 고쳐 만든다, 10.4절), 레거시 입력이면 X.legacy.cell 그 자체.
+7. **한셀 판정** — `tests/real_samples.rs::legacy_writer_output_is_read_identically_by_hancell`: rcell 이 쓴 레거시를
+   한셀이 열어 XML 로 저장한 것(`RCELL_LEGACY_ORACLE`)을 X.legacy.as.cell 과 레거시 비교 옵션으로 견준다.
+
+## 10. 쓰기 — 한셀이 저장하는 꼴 (`legacy::write`, `rcell convert … --format legacy`)
+
+rcell 의 레거시 쓰기는 한셀 2024 의 `SaveAs(…, -2005)` 를 따른다. 근거는 9절의 세 기준과 대조 실험이다.
+모델이 레거시에서 읽은 것이면(`Styles::from_legacy`) 서식 표를 읽은 그대로 쓰고, 아니면(XML 등) 한셀이 XML 을
+열 때 하는 일(10.4절)을 따라 쓴다.
+
+### 10.1 컨테이너
+
+OLE2 판 3 (512바이트 섹터). 섹터 배치는 ole32 가 만드는 꼴 그대로다 (관측, 말뭉치 117개):
+섹터 0 은 처음 만든 FAT 의 흔적(`FATSECT, ENDOFCHAIN, FREE…`, FAT 에서는 빈 섹터), 섹터 1 은 처음 만든 디렉터리의
+흔적(Root Entry 하나), 섹터 2 디렉터리, 3 첫 FAT, 4 미니 FAT, 5… 미니 스트림(4096바이트 미만), 그다음 나머지 FAT 와
+큰 스트림. 디렉터리는 [MS-CFB] 의 이름 순서로 레드·블랙 나무를 만들고 가장 깊은 잎을 빨강으로 둔다
+(두 스트림이면 `Workbook` 이 루트의 자식·검정, `\x05SummaryInformation` 이 그 오른쪽·빨강). FAT 섹터가 109개를 넘으면 DIFAT.
+`\x05SummaryInformation` 은 2절의 꼴 (코드 페이지 1200, VT_LPWSTR, FILETIME).
+
+### 10.2 레코드 차례와 고정 값
+
+전역: `BOF → 0xA030(1) → WRITEACCESS(사용자 이름, 112바이트를 0x20 으로 채움) → CODEPAGE(1200) → CODENAME →
+WINDOWPROTECT(늘 0)·PROTECT·PASSWORD → WINDOW1 → DATEMODE → 0x0900(1) → PRECISION → FONT* → FORMAT* →
+0xA020* → 0xA001* → 0xA011* → XF* → XFEXT* → STYLE* → 0x088D* → TABLESTYLES·TABLESTYLE·TABLESTYLEELEMENT →
+USESELFS → BOUNDSHEET* → 0xA101 → MSODRAWINGGROUP → SUPBOOK·EXTERNSHEET → NAME* → SST → EOF`.
+
+시트: `BOF → CALCMODE·CALCCOUNT(100)·REFMODE·ITERATION·DELTA·SAVERECALC → PRINTHEADERS·PRINTGRIDLINES →
+GUTS(늘 0) → DEFAULTROWHEIGHT → WSBOOL(0x04C1, 페이지에 맞춤이면 +0x0100) → 페이지 나누기 → HEADER·FOOTER →
+HCENTER·VCENTER → 여백 4개 → SETUP → 0x089C → 보호 → DEFCOLWIDTH → COLINFO·0xB00E → 자동 필터 →
+DIMENSIONS → 행·셀 → SHEETEXT → MERGECELLS → 그리기 → HLINK·HLINKTOOLTIP → NOTE → DVAL·DV →
+CONDFMT·CF·CONDFMT12·CF12·CFEX → WINDOW2 → SCL → PANE → SELECTION → CODENAME → FEATHDR → EOF` (관측, 시트 163개).
+
+FRT 머리의 예약 8바이트는 한셀이 초기화하지 않은 값을 쓴다 — rcell 은 0 을 쓰고 비교 도구는 지운다.
+
+### 10.3 셀
+
+| 레코드 | 한셀의 꼴 (관측) |
+|---|---|
+| DIMENSIONS | 셀 레코드가 차지하는 범위 (빈 서식 셀 포함) |
+| ROW | 속성이 있거나 셀이 있는 행만. **0xB002 행 반복**: 바로 다음 행들이 행 속성·셀 서식까지 같고 빈 칸(BLANK·MULBLANK)만 있거나 셀이 없으면 첫 행만 쓰고 `rw u32, 마지막 rw u32` 로 되풀이한다 (서식 파일 76곳) |
+| RK / MULRK | f64 의 아래 34비트가 0 인 값만 RK(실수 꼴)로 쓴다 (70 → 0x40518000). 이웃한 RK 는 MULRK, 빈 칸은 MULBLANK |
+| LABELSST | SST 번호. **SST 의 문자열 차례는 한셀이 문서를 읽어 온 내력(해시 표)에 따라 달라** 파일에서 정할 수 없다 — XML 의 sharedStrings 차례로 쓴다. `cstTotal` = LABELSST 수 + STRING 수 (서식 파일 30개), `cstUnique` 는 문자열 수 |
+| FORMULA | 값 8바이트(문자열이면 `00 … FF FF` + 뒤에 STRING), grbit 0x0008 공유 수식, 0x0001 휘발 함수. 공유 수식의 기준 셀은 PtgExp(자기 자신) + SHRFMLA(범위, 상대 토큰열), 종속 셀은 PtgExp |
+
+### 10.4 서식 표 — 한셀이 XML 을 열 때
+
+한셀은 XML 을 열 때 서식 표를 자기 꼴로 다시 만든다. hx(한셀이 X.cell 을 열어 저장한 것)를 정답으로 둔 대조에서 얻은 규칙:
+
+- **스타일 XF 배치**: 0 표준, 1–14 개요 상용구(used 0xF4), 15 셀 서식 0, 16–20 내장 스타일 상용구(백분율·쉼표·쉼표[0]·
+  통화·통화[0], 표시 형식 9·43·41·44·42, used 0xF8, STYLE `xf|0x8000, 번호, 0xFF`), 21 부터 그 밖의 스타일.
+- **XF 21 표준 사본**: 셀 서식 0(XF 15)의 부모로 이름 없는 표준 스타일 사본을 XF 21 에 둔다 (used 0, 선 없는 가장자리
+  색 포함). 다만 셀 서식 0 을 쓰는 셀이 없고 사용자 표 스타일이 있으면 사본을 쓰지 않고 **XF 15 의 부모를 XF 표 끝 다음
+  번호로 남긴다** (말뭉치 117개 중 13개, 117/117 이 이 규칙과 맞는다). 레거시에서 읽은 서식 표는 이 사본이 있을 때만 쓴다.
+- **적용 비트**: 셀 서식의 정렬이 부모 스타일과 다르면 `applyAlignment` 가 없어도 0x10 을 켠다
+  (한셀이 XML 을 열어 다시 XML 로 저장하면 `applyAlignment="1"` 이 생긴다).
+- **fMergeCell**: 병합 범위 안의 셀이 쓰는 셀 서식에 바이트 8 의 0x20 을 켠다 (병합 문서 19개, 켜진 XF 수가 모두 같다).
+  병합한 셀만 쓰는 서식은 **XF 표 끝으로 옮겨 병합을 적용하는 차례**(시트 차례, 병합 범위 차례, 범위 안 행 우선)로 놓는다.
+- **선 없는 가장자리 색**: XML 의 `<x:left><x:color rgb="ff000000"/></x:left>` 처럼 선 없이 색만 있는 가장자리도 그 색을
+  COLORREF 로 쓴다 (검정 0, 자동 0xDFFFFFFF). 표준·내장 스타일 자리(0–20)는 쓰지 않는다 (0xFFFFFFFF).
+- **글자 회전**은 늘 0 (8절).
+- **FONT**: 처음 다섯 레코드(BIFF 기본 글꼴 0–3·5)는 색 번호 0x7FFF 에 한컴 확장 없음, 4번은 비운다. 앞 여섯 모델 글꼴은
+  그대로, 그다음은 **XF 가 처음 쓰는 차례**(병합 서식이 옮겨 가면 그 글꼴도 따라간다), 그다음 서식 런·메모·도형 글자만 쓰는
+  글꼴(이름·크기·굵게·기울임·색이 같은 것, 테마 글꼴 `+mn-…` 은 테마의 한글 글꼴로), **아무도 쓰지 않는 글꼴은 버린다**
+  (Expense_Report·Buy_vs_Lease_Car 의 Haansoft Batang). 한컴 취소선·밑줄 종류만 있어도 grbit 0x08·uls 1 을 켠다.
+- **FORMAT**: 한국어 내장 12개(5–8, 23–26, 41–44)를 늘 쓰고, 사용자 형식은 **XF 가 쓰지 않는 것을 버리고 모델 차례로
+  164 부터 다시 매긴다** (서식 파일 13개의 `0_);[Red]\(0\)`).
+- **XFEXT**: 팔레트로 나타낼 수 없는 색만 FullColorExt(RGB)로 — 글자 색 0x0D(맨 앞), 채우기 4·5, 테두리 9 왼쪽·0x0A 오른쪽·
+  7 위·8 아래·0x0B 대각선 (이 차례). **선이 있는 오른쪽 테두리는 팔레트 색(검정·회색·흰색)도 늘 0x0A 로 쓴다**
+  (왼쪽·위·아래는 팔레트 밖의 색만 — XF 3258개 집계). 그라데이션은 종류 6. 팔레트 번호는 기본 팔레트(8–63)에서 RGB 거리로
+  가장 가까운 번호(같으면 앞 번호).
+- **문단 모양(0xA001)**: 0 번 기본, 그다음 XF 의 문단 모양(정렬 포함) 처음 나온 차례, 0xA011 은 XF 마다 하나. 번호 ID 는
+  종류 2·3 에만 붙인다(41바이트, 종류 1 은 37바이트). **글이 있는 도형이 있으면 표 끝에 글 상자 문단 모양 하나**
+  (줄 간격 100 퍼센트, 왼쪽, 단어 나눔 없음 — 서식 파일 25개, 늘 같은 37바이트), 도형 TXO 가 그 번호를 가리킨다.
+
+### 10.5 수식 부호화
+
+BIFF8 Ptg 에 한셀 폭(행 u32, 열 u16 의 14비트, PtgStr 길이 u16)을 쓴다 (`legacy::encode`). 피연산자 클래스는 BIFF8 규칙대로
+(뿌리 값, 이름은 참조, 함수 인자는 함수 표), `SUM` 하나는 tAttrSum, `IF` 는 tAttrIf+tAttrGoto, `CHOOSE` 는 tAttrChoose,
+휘발 함수는 맨 앞 tAttrVolatile. 0–65535 정수는 PtgInt. 공유 수식·이름 안의 상대 참조는 PtgRefN·PtgAreaN 에 행 오프셋
+20비트(음수는 2²⁰ 보수). 맨 위의 쉼표는 합집합(PtgMemFunc 로 감싼다). 정의되지 않은 이름은 수식 없는 NAME 을 만들고,
+`_xlfn.` 함수는 grbit 0x000B 의 NAME, 사용자 함수는 PtgName + FuncVar 255. SUPBOOK 은 외부 연결을 모델 차례로 먼저,
+EXTERNSHEET 의 XTI 는 쓰일 때 만든다.
+
+### 10.6 서식 파일 밖 시트 속성
+
+- **WINDOW1**: `x:workbookView` 의 xWindow·yWindow·windowWidth·windowHeight·activeTab·firstSheet, 선택한 탭 1, 탭 비율
+  (tabRatio 가 없으면 600 — ECMA 기본값, XML 117개). 모델에 창이 없으면 빈 문서 값 (0, 0, 0, 0, 500).
+- **WINDOW2 확대율**: 한셀이 XML 을 열 때 wScaleNormal = zoomScaleSheetLayoutView (없으면 75), wScaleSLV = 페이지 나누기
+  미리 보기면 zoomScaleNormal, 아니면 zoomScale (없으면 100). SCL 은 zoomScale 이 100 이 아닐 때 (시트 163개, 7가지 꼴 모두).
+- **COLINFO**: 257번째 열(0x0100)까지, 그 뒤는 0xB00E. 마지막 u16 은 늘 0x0046.
+- **FEATHDR**: 보호 항목의 '허용' 비트 (OOXML 과 반대), selectUnlockedCells 를 막으면 selectLockedCells 도 막힌다.
+
+### 10.7 인쇄
+
+- **여백**: XML 에서 온 값은 HWPUNIT 으로 잘라 f32 로 (`trunc(v·7200)/7200`). 레거시에서 읽은 값은 이미 한셀이 읽은
+  HWPUNIT N 이므로, 한셀이 다시 읽어 N 이 되는 가장 작은 K(N 또는 N+1)의 f32 를 쓴다 — 그대로 자르면 f32 가 정확한
+  값보다 작을 때 한 칸씩 준다 (레거시 입력 align_numfmt 등이 이것으로 레코드 100% 같다).
+- **머리글·바닥글**: 글꼴 코드가 없는 구역(`&L`·`&C`·`&R`)에 기본 글꼴 코드 `&"글꼴,Regular"` 를 넣고, HEADER·FOOTER 에는
+  모양 이름을 대문자 + 공백으로 (`&"맑은 고딕, REGULAR "`), 0x089C 에는 대문자로 바꾸지 않는다 (6.1절).
+- **SETUP**: 간단히 인쇄(0x10)는 쓰지 않는다.
+
+### 10.8 그리기·메모
+
+- 시트의 OfficeArt: `DgContainer → FDG + SpgrContainer → patriarch, 도형…`, 도형마다 SpContainer 가 MSODRAWING 하나,
+  그 뒤 OBJ, 글이 있으면 ClientTextbox 만 든 MSODRAWING 과 TXO. SpgrContainer·DgContainer 길이는 뒤따르는 레코드의
+  SpContainer 머리 8바이트까지 센다. 차례는 자동 필터 단추, 그리기 개체, 메모. spid = 그리기 번호 × 0x400 + n.
+  그림은 MSODRAWINGGROUP 의 BStore(FBSE + 그림, rgbUid = MD4).
+- **앵커**: 22바이트 한컴 ClientAnchor (6.2절), dx = 픽셀 × 32768 / (열 픽셀 − 1), dy = 픽셀 × 8192 / (행 픽셀 − 1).
+  EMU 오프셋은 **정수 픽셀로 올린다** (odd_anchor 의 1.30→2, 2.92→3, 3.50→4, 5.70→6 px), 칸 끝까지면 dx 32767·dy 8191.
+- **OPT** (한셀 레거시·hx 의 도형 207개 모두): 0x007F = 0x02000200 (그림 0x02840284, `a:spLocks noSelect="1"` 이면
+  +0x00200020), 모든 도형에 0x01CC = 0x00010000·0x01D6 = 2, 흰 채우기 색(0x0181)은 쓰지 않는다, `a:outerShdw` 는
+  0x0201 색·0x0205/0x0206 오프셋(dist·dir)·0x023F = 0x00020002, 글 상자 여백·줄 바꿈·세로 맞춤(0x0081–0x0087)은 쓰지
+  않는다. 빈 사용자 경로는 0x0142·0x0143 = 도형 크기(EMU), 0x0144 = 4, 빈 0xC155, 0xC157 = IMsoArray(1, 4, 16) + 글 사각형.
+  복합 속성(이름 0x0380·설명 0x0381 …)의 pid 는 0xC000 을 더한다 (fComplex + fBid). 선 두께는 9525 가 아니면 0x01CB.
+- **OBJ ftCmo**: 0x0011 (잠금 + 인쇄), `fPrintsWithSheet="0"` 이면 0x0001.
+- **TXO**: 머리 `u16 a, 1, 1, 런 수, 문단 수`, `cch u16, flag u8, UTF-16`, 런 `(ich u16, ifnt u16, u32 문단 모양 번호)` 과
+  문단마다 u32. 글이 없으면 런 수 0 에 문단 모양 번호만 (`txBox="1"` 글 상자는 글이 비어도 TXO 를 쓴다). 메모의 문단 모양
+  번호는 0. 첫 u16 a 는 한셀이 일부 글 상자·메모에 0x0200 을 쓴다 — XML 에서 같은 두 메모 중 하나만 그래서 규칙을 모른다.
+- **메모**: VML 도형 차례로, 이름은 VML `id`("메모 N"), 상자 자리는 `x:Anchor` 의 픽셀 오프셋을 dx·dy 로, 앵커 플래그 3.
+  OPT 는 0x007F, 0x0181 = 0xE1FFFF, 0x01BF, 0x01CC, 0x01FF, 이름, 숨김이면 0x03BF.
+
+### 10.9 조건부 서식·데이터 유효성·자동 필터
+
+- **조건부 서식**: 범위마다 규칙을 우선순위 차례로, CF 로 쓸 수 있는 규칙(값 비교·수식·틀)은 CONDFMT + CF, 색 눈금·데이터
+  막대·아이콘 집합은 CF12. 먼저 CF 가 있는 범위마다 CONDFMT + CF, 그다음 CF12 만 있는 범위마다 CONDFMT12 + CF12, 마지막으로
+  CONDFMT 범위마다 규칙 차례로 CFEX(또는 fIsCF12 CFEX + CF12). nID = 범위 차례(1부터), `(nID << 1) | 1`. 서식이 없으면 DXFN
+  `0x801FFFFF / 0x0300`. 0x088D 차등 서식은 채우기·글꼴·테두리·맞춤·보호 차례로 (표시 형식은 CF 의 DXFN 에만).
+- **자동 필터**: 값 목록이 두 값 이하면 같음 DOPER 를 OR 로 + 0x009F, 세 값 이상이면 빈 DOPER + 0x009F + AUTOFILTER12 +
+  CONTINUEFRT12 (DOPER `d[2] = cch, d[3] = 1`), 상위 10·동적 조건은 그 틀.
+
+### 10.10 아직 쓰지 않는 것과 남은 차이
+
+| 항목 | 상태 |
+|---|---|
+| 차트 (0x7EF0 Vt 아카이브, 0x7EF8, 차트 수식의 SUPBOOK·EXTERNSHEET) | 쓰지 않는다 — 레거시로 쓰면 차트가 사라진다 (`lossy::legacy_view`) |
+| SST 문자열 차례 | 한셀의 해시 표 차례 — 파일에서 정할 수 없다 (`rec-diff --ignore-sst-order` 로 견준다) |
+| TXO 첫 u16 0x0200 | 규칙을 모른다 (10.8절) |
+| 문단 머리 종류 1 | XML 에 남지 않아 XML 입력에서는 0 (한셀의 XML 저장도 같다, craft/dxfprobe) |
+| 조건부 서식 DXFN 의 글꼴·테두리·무늬 블록, 한컴 확장 | 쓰지 않는다 (한셀 판정에서는 조건부 서식을 빼고 본다) |
+| 레거시 입력의 도형 그림자·노선택 잠금 | 레거시 읽기가 모델에 남기지 않아 다시 쓰지 못한다 |
+| 사용자 정의 경로가 있는 모양 | 꼭짓점·세그먼트(0x0145·0x0146)를 쓰지 않는다 (말뭉치에 없다) |
