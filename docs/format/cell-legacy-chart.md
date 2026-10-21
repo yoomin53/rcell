@@ -9,7 +9,8 @@
 >
 > 한셀이 쓴 차트 레코드 77개(만든 차트 15, 대조 실험 54, 한셀 서식 파일 차트 8)만으로 얻은 **관찰 결과**다.
 > 근거 수준 표기는 [`cell-legacy.md`](cell-legacy.md) 와 같다. 구현: `src/legacy/vtchart.rs` (필드 배치 표 `CLASSES`),
-> 검증: 같은 파일의 시험 — `RCELL_CORPUS` 를 주면 말뭉치의 레거시 파일 117개를 모두 열어 0x7EF0 77개를 읽는다.
+> `src/legacy/vtchart_map.rs` (차트 모델로 옮기기, 9절). 검증: `vtchart.rs` 의 시험 — `RCELL_CORPUS` 를 주면 말뭉치의
+> 레거시 파일 117개를 모두 열어 0x7EF0 77개를 읽는다 — 과 `tests/chart_xml.rs`·`tests/real_samples.rs` (9.10절).
 
 | | |
 |---|---|
@@ -17,7 +18,7 @@
 | 클래스 | 39개, 클래스마다 스키마 판 하나 |
 | 객체 | 차트마다 365–608개 (계열 하나짜리 막대 404개), 모두 31,668개, 앞 객체 참조 2,450개, 객체 중첩 최대 13단계 |
 | 추측 | 없음: 찾기·건너뛰기·다시 맞추기 없이 배치 표를 순서대로 따른다 |
-| 읽기 연결 | 아직 하지 않았다 (`src/legacy/reader.rs` 는 앵커만 읽는다) |
+| 읽기 연결 | `src/legacy/reader.rs` 가 모든 시트를 읽은 뒤 레코드마다 차트 모델을 만들어 그 차트 도형(`Shape.chart`)에 붙인다. 77 / 77 이 한셀의 레거시 읽기(`X.legacy.as.cell`)와 차트 파트가 바이트까지 같다 (9절) |
 
 모든 정수는 리틀 엔디언, "twip" = 1/20 pt.
 
@@ -276,8 +277,138 @@ VtTextBlock{backdrop → VtBackdrop | 없음, font → VtFont{name → VtString}
   `VtBytes`, `VtValueBlock.ptr_a`, `VtDataSourceSsLink.ptr_a/ptr_b`, `VtCLineItem.ptr_a` 는 표본에서 늘 비었다. 이것들을
   채우는 파일은 표에 없는 클래스나 배치를 가질 수 있다 — 그때 rcell 은 추측하지 않고 "배치를 모르는 클래스" 나 클래스
   불일치 오류를 낸다.
-- **뜻을 모르는 것.** `u16_*`·`f32_*` 필드 대부분, Pen 의 `u16_a/u16_b/u16_c`, VtColor 플래그, `VtSeries.typeTable`
-  (27개, 늘 같음: 차트 종류별 계열 종류로 보인다), `VtFormatter` 내부와 서식 코드 부호화 (`Zlg표g준n` = G/표준,
-  백분율 서식 `B0Jn`, 사용자 서식 `B0EB1B1Jn`), 광원 벡터, `VtChartSection.u16_a/u16_b` (160/150), 앵커 `dx/dy` 단위,
-  차트 번호.
+- **뜻을 모르는 것.** `u16_*`·`f32_*` 필드 대부분, Pen 의 `u16_a/u16_b/u16_c`, VtColor 플래그 (0x20 은 표식 색 자동으로
+  읽힌다, 9.5절), `VtSeries.typeTable` (27개, 늘 같음: 차트 종류별 계열 종류로 보인다), `VtFormatter` 의 숫자 필드
+  (서식 코드의 부호는 9.6절), 광원 벡터, `VtChartSection.u16_a/u16_b` (160/150), 앵커 `dx/dy` 단위, 차트 번호.
 - **수식.** 상대 참조가 표본에 없어 상대 비트는 BIFF8 과 같다고 보았다. `ixti` 해석은 2절의 관측이다.
+
+## 9. 차트 모델로 옮기기 — 한셀의 레거시 읽기
+
+`src/legacy/vtchart_map.rs`. 목표는 한셀이 같은 레거시 파일을 열어 XML 로 저장한 차트 파트(`X.legacy.as.cell`)다: 옮긴
+모델을 `chart_xml` 로 쓰면 그 파트와 바이트까지 같다 (77 / 77). 그래서 아래 표는 "저장된 값이 OOXML 의 무엇이 되는가" 이자
+"한셀이 무엇을 버리고 무엇을 채우는가" 다. 한셀이 늘 같게 채우는 꼴(선의 끝 모양, 글 상자의 `a:bodyPr`, 차트 공간의 상수)은
+[`cell-2024.md`](cell-2024.md) 11.2절. 근거 = 표본 77개의 필드별 대조 (관측), 표본에 없는 값은 (추정).
+
+### 9.1 종류와 묶음
+
+| 저장 | OOXML | 근거 |
+|---|---|---|
+| `VtChart.chartType` | 0 `bar3DChart` col, 1 `barChart` col, 2 `line3DChart`, 3 `lineChart`, 4 `area3DChart`, 5 `areaChart`, 11 `barChart` bar, 13 `pie3DChart`, 14 `pieChart`, 15 `doughnutChart`, 18 `radarChart`. 분산형·거품형(3)은 `lineChart`, 주식형(1)은 `barChart` 로 읽힌다 | 관측 |
+| 표본에 없는 번호 | MSChart VtChChartType 이름에 가장 가까운 관측 종류: 단계형 6/7 → 꺾은선, 조합 8/9 → 막대, 10 → 3차원 가로 막대, 12 → 3차원 막대 (`clustered`), 16·19 → 꺾은선, 17 → 방사형, 20 → 막대, 21/22 → 가로 막대, 23/24 → 영역, 25/26 → 3차원 꺾은선, 그 밖 → 막대 | 추정 |
+| 누적 | 쓰는 계열(꼬리의 계열 수, 적어도 1) 중 하나라도 `VtSeries.u16s2[6]` ≠ 계열 순서 또는 `u16s2[7]` ≠ 0 | 관측 |
+| 100% | 값 축(`axesY[0]`)의 `u16_r` = 2 | 관측 |
+| `c:grouping` | 2차원 막대 `percentStacked`/`stacked`/`clustered`, 2차원 꺾은선·영역 `percentStacked`/`stacked`/`standard`, 3차원 막대·꺾은선·영역은 누적이 저장되어 있어도 `standard` (서식 파일 8개는 원본이 `stacked`) | 관측 |
+| `c:varyColors` | 원형·도넛만 1 (저장된 표시 없음 — 서식 파일 원본의 1 도 0 으로 읽힌다) | 관측 |
+| `c:gapWidth` | 막대: `round(VtChartPlot.gap × 100)` (1.5 → 150, 주식형 실험 0.5 → 50) | 관측 |
+| `c:overlap` | 2차원 막대만: `round(−overlap × 100)` (누적 −1 → 100) | 관측 |
+| `c:gapDepth` | 3차원 막대·꺾은선·영역: `round(gapDepth × 100)` (1.5 → 150) | 관측 |
+| `c:shape` | 3차원 막대 묶음에 `box` | 관측 |
+| 꺾은선 묶음 | 2차원만 `c:marker 1`, `c:smooth 0` | 관측 |
+| 원형 | 2차원 원형·도넛 `c:firstSliceAng 0`, 도넛 `c:holeSize` = `round(VtChartPlot.f32_k × 100)` (0.67 → 67) | 관측 |
+| 방사형 | `c:radarStyle marker` | 관측 |
+| `c:axId` | 원형이 아니면 0, 1 (3차원이면 2 도) | 관측 |
+
+### 9.2 계열 고르기와 순서
+
+꼬리(5절)의 계열 중 **값 수식이 있고** 계열 목록 항목의 `u16s2[3]` 이 0 인 것만 `c:ser` 가 된다 — 거품형의 둘째 꼬리
+항목(거품 크기 열)은 둘 다 아니어서 빠지고, `c:bubbleSize` 도 쓰지 않는다. `c:idx`·`c:order` 는 남은 계열의 순서다.
+계열 목록의 같은 자리 항목(`VtSeries`)이 서식을 준다. 계열이 없는 차트(서식 파일 `Marketing_Budget_1/2`)도 묶음·축은 쓴다.
+
+### 9.3 데이터: 참조와 캐시
+
+| OOXML | 값 | 근거 |
+|---|---|---|
+| `c:f` | 꼬리 수식 (2절, 시트 이름은 ixti = 시트 순서) | 관측 |
+| `c:tx` | 이름 수식이 참조면 `strRef` + 캐시 하나 = 데이터 표 0행의 그 계열 칸 (이름표 행이 없으면 계열 목록의 이름). 글자로 쓴 이름(ptgStr)은 **한셀이 읽지 않는다** — `c:tx` 없음 (`chart_litname`) | 관측 |
+| `c:cat` | 항목 수식. 참조한 칸 가운데 빈 칸이 아닌 것이 모두 숫자면 `numRef` + `formatCode` (칸 형식, 섞이면 `General`) — 점에는 형식을 쓰지 않는다. 아니면 `strRef`. `ptCount` = `VtDataGrid.rows`, 점 = 데이터 표 0열의 이름표 글 | 관측 |
+| `c:val` | `numRef`, 점 = 데이터 표의 계열 열 (`labelCols + 꼬리 번호`), 점마다 `formatCode` = 그 칸의 형식. 빈 칸은 `<c:v/>` + `General`, 오류 칸은 `<c:v/>` + 그 칸의 형식 (`c2_e10_blank_na`: 데이터 표에는 둘 다 0 이 있다). 묶음 `formatCode` = 점 형식이 하나면 그것, 아니면 `General` | 관측 |
+| 숫자 글 | 데이터 표의 f64 를 유효 숫자 15자리로 맞춘 최단 표기 (표본은 정수만) | 추정 |
+
+칸 형식은 한셀이 차트에 쓰는 꼴이다: 서식 번호 0 → `G/표준`, 그 밖은 서식 코드에서 글자 따옴표와 `\` 를 벗기고 `[Red]` →
+`[빨강]` (서식 파일: 번호 6 `"₩"#,##0;[Red]\-"₩"#,##0` → `₩#,##0;[빨강]-₩#,##0`, 번호 10 `0.00%`). 다른 색 이름은 표본에
+없다.
+
+### 9.4 계열 서식 (`c:spPr`)
+
+| 갈래 | 채우기 | 선 | 근거 |
+|---|---|---|---|
+| 막대·영역 | `brush.fill` (칠 style 0 이면 채우기 없음, 추정) | `edgePen`: style 0 → 9525 선 없음, 아니면 두께·색·점선 | 관측 (`c2_e5_ser_pen` 00ff00 20 twip → 12700) |
+| 꺾은선·방사형 (분산형·거품형 포함) | `brush.fill` | `linePen` 두께·색·점선 — style 과 `showLine` 은 보지 않는다 (거품형 style 0, 3차원 꺾은선 showLine 0 도 실선) | 관측 (40 twip → 28575) |
+| 원형·도넛 | 쓰지 않는다 | — | 관측 |
+
+두께: twip/20 pt 를 기본 두께 {0.25, 0.5, 0.75, 1, 1.5, 2.25, 3, 4.5, 6} pt 가운데 가장 가까운 것으로 (같으면 굵은 쪽), × 12700 EMU
+(관측 20 → 12700, 40 → 28575; 나머지는 추정). 점선: Pen.style 1 실선 (관측), 2 dash, 3 sysDot, 4 dashDot, 5 sysDashDotDot,
+7 lgDashDot, 8 lgDashDotDot (MSChart VtPenStyle 순서, 추정). 기본 팔레트는 6절.
+
+### 9.5 계열의 나머지
+
+| OOXML | 값 | 근거 |
+|---|---|---|
+| `c:invertIfNegative` | 막대 계열 0 | 관측 |
+| `c:marker` | 꺾은선·방사형: `VtSeries.u16_d` 1 (자동) → `none` 크기 7. 0 (지정) → 모양 `markerStyle` (5 square, 9 circle 관측; 나머지는 MSChart VtMarkerStyle 순서 0 dash, 1 plus, 2 x, 3 star, 4 circle, 6 diamond, 7·8 triangle, 10 square, 11 diamond, 12·13 triangle, 14 circle, 15 none — 추정), 크기 `round(markerSize / 20)` (180 → 9, 600 → 30), 표식 색 플래그에 0x20 이 없으면 `spPr` = 계열 채우기 (거품형 8c8c8c — 저장된 `markerColor` 9999ff 가 아니다) | 관측 (`c2_e5_line_marker`, `c2_e6_bubble`) |
+| `c:dLbls` | 위치 `u16s3[8]` ≠ 0 이 켬. 막대는 켰을 때만, 꺾은선·영역·방사형은 늘 (끄면 표시 0). `labelComponents` 비트 1 값, 2 백분율, 8 항목 (4 계열 이름, 추정). `delete 0`, 범례 표지·거품 크기·지시선 0, `dLblPos` 없음. 원형은 **한셀이 읽지 않는다** (`c2_e8_dl_pie_pct`: 위치 2 = outEnd, 백분율이 저장되어 있다) | 관측 |
+| `c:explosion` | 원형·도넛 0 | 관측 |
+| `c:smooth` | 꺾은선 계열 0 — 부드러운 선(`u16s3[5]` = 2)은 **한셀이 읽지 않는다** (`c2_e6_scatter_smooth`) | 관측 |
+
+### 9.6 축
+
+원형·도넛은 축이 없다. 나머지: X(`axisX`) → `catAx` 번호 0 (`axPos b`, 교차 1) — 분산형·거품형의 X 값 축도 항목 축으로 읽힌다,
+Y(`axesY[0]`) → `valAx` 번호 1 (`l`, 교차 0), 3차원이면 Z(`axisZ`) → `serAx` 번호 2 (`b`, 교차 1). 보조 축(`axesY2`)과 표면 축은
+쓰지 않는다.
+
+| OOXML | 값 | 근거 |
+|---|---|---|
+| `c:delete` | `VtAxis.hidden` | 관측 (`c2_e7_cat_del`, `c2_e7_val_del`) |
+| `c:spPr` | 숨긴 축에만 9525 선 없음 (보이는 축의 `axisPen` 808080 은 쓰지 않는다) | 관측 |
+| `c:majorGridlines` / `c:minorGridlines` | `majorGridPen` / `minorGridPen` 의 style ≠ 0 이면 빈 요소 (색은 쓰지 않는다) | 관측 |
+| `c:scaling` | `orientation minMax` 만 — 최소·최대·단위·거꾸로·로그 눈금은 저장되지 않는다 (6절) | 관측 |
+| `c:majorTickMark` / `c:minorTickMark` | 늘 `out` / `none` — 저장된 `tickStyle` (0 none, 1 cross, 2 in, 3 out — 원본과 같다) 은 **한셀이 읽지 않는다** | 관측 (`c2_e7_tick_none`, 서식 파일 cross) |
+| `c:tickLblPos` | `VtAxis.u16_p` 0 → `low`, 그 밖 `nextTo` (서식 파일 원본의 `none` 도 `low`) | 관측 |
+| `c:numFmt` | 이름표(`labels[0]` 의 `VtValueBlock.textFormat`)가 없으면 없음. `VtFormatGroup.u16_a` 0 = 셀에 연결: 첫 계열 값 범위 첫 칸의 형식 (9.3절의 꼴) + `sourceLinked 1`, 계열이 없으면 `General` + 0. 1 = 자기 형식: 쓰는 구역(`VtFormatter.u16_a` ≠ 10 이고 부호가 있는 것)을 `;` 로 이은 것 + 0 | 관측 |
+| 형식 특이점 | 100% 차트의 값 축과 항목 축, 누적 막대(종류 0·1·11 이고 겹치기 −1)의 항목 축은 저장된 형식과 상관없이 `0%` + 0 | 관측 (`chart_stacked`, `c2_e3_*`) |
+| `c:title` | `VtAxis.title` (VtTextBlock) 의 `u16_b` 1 이고 글이 있으면: 글꼴 (9.7절), 방향 `u16_e` 0 가로 (`rot="0"`), 2 `vert270` (1 wordArtVert, 3 vert 추정), 빈 `c:layout`, `overlay 0` | 관측 (`c2_e7_ax_titles`) |
+| `c:txPr` | 이름표 글 상자의 글꼴 (표본 모두 10pt `돋움` 000000) | 관측 |
+| 상수 | `crosses autoZero`; 항목 축 `auto 1`, `lblAlgn ctr`, `lblOffset 100`, `tickLblSkip 1`, `tickMarkSkip 1`, `noMultiLvlLbl 0`; 값 축 `crossBetween between`; 계열 축 `tickMarkSkip 1` | 관측 |
+
+서식 코드 부호 (`VtFormatter.code`, 글자마다 부호 하나, `n` 이 끝): `A` General, `B<d>` 0 (뒤 글자는 정수·소수 자리), `E` 점, `J` %,
+`O` m, `W` yy, `Z` g, `l` /, `g<c>` 글자 c. 표본의 부호는 이것이 전부다 (`Zlg표g준n` → `g/표준` — 값 축의 소문자 g 는 연호 부호에서
+온다, `B0Jn` → `0%`, `B0EB1B1Jn` → `0.00%`, `OlWn` → `m/yy`, `An` → `General`). 모르는 부호는 U+FFFD 로 둔다.
+
+### 9.7 제목·범례·글꼴
+
+| OOXML | 값 | 근거 |
+|---|---|---|
+| 글꼴 (`a:defRPr`·`a:rPr`) | `VtFont`: 크기 pt × 100, 스타일 비트 0 굵게, 비트 1 기울임 (표본은 0 과 3), 색, 이름 (빈 이름은 `함초롬돋움`). 밑줄은 저장되지 않는다 | 관측 |
+| `c:title` | `VtChartTitle` 구역이 보이면 (`visible` 1): 글 상자의 글을 줄마다 문단 하나로, 문단마다 같은 글꼴의 `defRPr`·조각; `c:layout/c:manualLayout` 에 `xMode edge`·`yMode edge` 만 (위치는 저장되지 않는다), `overlay 0`, `spPr noFill`. 한셀의 레거시 저장은 제목 글꼴을 늘 12pt 굵게·기울임으로 쓴다 (6절) | 관측 |
+| `c:autoTitleDeleted` | 늘 0 | 관측 |
+| `c:legend` | `VtChartLegend` 구역이 보이면: 위치 `location` 1 `t`, 3 `l`, 4 `r` (오른쪽 위도), 6 `b` (0·2 `tr`, 5·7 `b` 추정), 빈 `c:layout`, `overlay 0` (겹침은 저장되지 않는다), `spPr` = 9525 검은 선 (`prstClr black`, 채우기 없음 — 저장된 배경과 상관없이), `txPr` = 범례 글꼴 | 관측 (`c2_e1_*`, `c2_e11_legend_fill`) |
+
+### 9.8 3차원·영역
+
+| OOXML | 값 | 근거 |
+|---|---|---|
+| `c:view3D` | 3차원 차트: `rAngAx 1, rotX 15, rotY 20, perspective 30, depthPercent 100`, 3차원 원형 `rAngAx 0, rotX 30, rotY 0` — 저장된 `rotation`·`elevation` 은 **한셀이 읽지 않는다** (`c2_e4_bar3d_a/_b`). 바닥·벽은 쓰지 않는다 | 관측 |
+| 차트 공간 `c:spPr` | 채우기 = 뿌리 `backdrop` 의 VtFill (style 1 + 칠 style 1 이면 단색, 아니면 채우기 없음 — 추정), 선 = 테두리 (`u16_c` 1 이면 `frame` 색 + 두께 twip × 635 EMU, 아니면 9525 선 없음). 표본은 모두 ffffff + 12700 8c8c8c (채우기 없음 원본 `c2_e11_cs_nofill` 도) | 관측 |
+| 그림 영역 `c:spPr` | `noFill` + 그림 영역 구역 배경의 테두리 (위와 같은 규칙, 표본은 모두 9525 선 없음). 저장된 흰 채우기는 쓰지 않는다 (`c2_e11_plot_fill` 원본 ffff00) | 관측 |
+| 그 밖 | 그림 영역 빈 `c:layout`, `plotVisOnly 1`, `dispBlanksAs gap`, `date1904 0`, `roundedCorners 0`, 스타일 102/2, `hncChartStyle -1 0 0` | 관측 |
+
+### 9.9 그리기 앵커 (쓰기)
+
+모델의 차트는 한셀이 레거시 차트를 읽어 쓰는 꼴로 쓴다 (`src/writer.rs`, `*.legacy.as.cell` 의 그리기 파트와 같다):
+`xdr:twoCellAnchor` (편집 방식 없음 — 레거시에 저장되지 않는다), `xdr:graphicFrame fPublished="0"`, `cNvPr id` 는 그리기마다 2 부터
+(다른 도형 번호와 겹치지 않게), `name=""` (차트 개체 이름은 저장되지 않는다), `xdr:xfrm` = 시트 안 절대 위치 (앞 열·행 픽셀 합 +
+칸 안 오프셋, EMU — 한셀은 내부 좌표에서 계산해 1 EMU 안팎 다를 수 있다), `a:graphic` → `c:chart r:id`,
+`xdr:clientData fLocksWithSheet="1" fPrintsWithSheet="1"`. 차트 파트는 `xl/charts/chartN.xml` (N 은 1 부터, 원본 그대로 옮기는 파트와
+겹치지 않게), 콘텐츠 형식 `application/vnd.openxmlformats-officedocument.drawingml.chart+xml`.
+
+### 9.10 검증
+
+| 비교 | 결과 |
+|---|---|
+| `chart_xml(옮긴 모델)` 대 `X.legacy.as.cell` 의 차트 파트 (`craft-charts` 15, `craft-charts2` 54, `templates` 8) | 77 / 77 바이트까지 같다 (`tests/chart_xml.rs` 의 `legacy_records_map_to_hancell_chart_parts`) |
+| rcell 의 레거시 읽기 대 한셀의 레거시 읽기, 차트 내용까지 (`rcell diff`, 레거시 무시 옵션, 차트 무시 없음) | 차트 문서 96개 (위 세 폴더의 모든 레거시 파일) 모두 차이 0 (`legacy_reading_matches_hancell`, 말뭉치 117쌍) |
+| 한셀 판정: 한셀이 rcell 의 XML 을 다시 저장한 것 대 `X.legacy.as.cell` | 96개 모두 `rcell diff` 차이 0 (`writer_output_is_read_identically_by_hancell`, `RCELL_OUT`). 차트 파트로는 77개 중 69개가 바이트까지 같고, 8개(꺾은선 계열 10개)는 한셀이 XML 을 읽을 때 숨은 데이터 레이블에 넣는 `<c:dLblPos val="r"/>` 하나만 다르다 — 한셀이 자기 레거시 읽기 결과를 다시 저장할 때와 같은 변화다 ([`cell-2024.md`](cell-2024.md) 11.2절) |
+
+차트 비교(`src/compare.rs`, `chart_key::aspects`)는 묶음·계열·축·제목·범례·3차원·영역·기타를 항목마다 견주고, 표현만 다른 것(없는
+요소 = 기본값, 16진 대소문자, 캐시 숫자 표기, XML 원본의 축 번호, 위치 없는 `manualLayout`, 보이지 않는 데이터 레이블의 위치·형식)은
+같게 본다.

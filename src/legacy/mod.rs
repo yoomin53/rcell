@@ -16,6 +16,7 @@ pub mod ftab;
 pub mod props;
 pub mod reader;
 pub(crate) mod vtchart;
+pub(crate) mod vtchart_map;
 
 use crate::container;
 use crate::error::{Error, Result};

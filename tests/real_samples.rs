@@ -61,12 +61,11 @@ fn legacy_reading_matches_hancell() {
         eprintln!("RCELL_CORPUS 미설정 — 건너뜀");
         return;
     };
-    // 한셀은 레거시의 상대 크기·장평 등과 도형 안 글을 읽지 못한다 (docs/format/cell-legacy.md)
+    // 한셀은 레거시의 상대 크기·장평 등과 도형 안 글을 읽지 못한다 (docs/format/cell-legacy.md).
+    // 차트(0x7EF0)는 내용까지 비교한다 (docs/format/cell-legacy-chart.md 9절)
     let opts = rcell::compare::Options {
         ignore_font_scale: true,
         ignore_shape_detail: true,
-        // rcell 은 레거시 차트(VtChart) 내용을 아직 해석하지 못한다 (알려진 한계)
-        ignore_chart: true,
         // 한셀의 레거시 조건부 서식·자동 필터 읽기는 틀리거나 값을 잃는다
         // → 아래 legacy_cf_matches_xml_source 에서 원본과 비교
         ignore_cf: true,
@@ -77,8 +76,15 @@ fn legacy_reading_matches_hancell() {
     };
     let mut failures = Vec::new();
     let mut checked = 0;
-    // craft: 조작한 XML 을 한셀로 바꾼 것, templates: 한셀 서식 파일 (batch-formats.ps1)
-    for dir in [dir.clone(), dir.join("craft"), dir.join("templates")] {
+    // craft: 조작한 XML 을 한셀로 바꾼 것, templates: 한셀 서식 파일 (batch-formats.ps1),
+    // craft-charts*: 차트 대조 실험
+    for dir in [
+        dir.clone(),
+        dir.join("craft"),
+        dir.join("templates"),
+        dir.join("craft-charts"),
+        dir.join("craft-charts2"),
+    ] {
         if !dir.is_dir() {
             continue;
         }
@@ -208,10 +214,21 @@ fn writer_output_is_read_identically_by_hancell() {
         ignore_hancom_ext: true,
         ..Default::default()
     };
+    // RCELL_OUT 을 주면 `<폴더>/rcell-out` 대신 `RCELL_OUT/<폴더>` 의 결과를 쓴다 (말뭉치 밖에서 새로 만든 결과)
+    let out_root = std::env::var_os("RCELL_OUT").map(PathBuf::from);
     let mut failures = Vec::new();
-    let mut checked = 0;
-    for base in [dir.clone(), dir.join("craft"), dir.join("templates")] {
-        let out = base.join("rcell-out");
+    let (mut checked, mut stale) = (0, 0);
+    for (sub, base) in [
+        ("", dir.clone()),
+        ("craft", dir.join("craft")),
+        ("templates", dir.join("templates")),
+        ("craft-charts", dir.join("craft-charts")),
+        ("craft-charts2", dir.join("craft-charts2")),
+    ] {
+        let out = match &out_root {
+            Some(r) => r.join(sub),
+            None => base.join("rcell-out"),
+        };
         if !out.is_dir() {
             continue;
         }
@@ -244,8 +261,10 @@ fn writer_output_is_read_identically_by_hancell() {
             }
             let mut a = rcell::open(&truth).expect("한셀이 읽은 원본");
             let b = rcell::open(&resaved).expect("한셀 재저장본");
-            // 레거시 차트(한컴 0x7EF0, VtChart)는 내용을 아직 해석하지 못해 저장하지 않는다 (알려진 한계)
-            if stem.ends_with(".legacy") {
+            // 레거시 차트(0x7EF0)를 쓰기 전의 rcell 이 만든 결과(rcell 출력에 차트 파트가 없음)는 차트를 빼고 본다
+            let written = out.join(format!("{stem}.rcell.cell"));
+            if stem.ends_with(".legacy") && !has_chart_parts(&written) && has_charts(&a) {
+                stale += 1;
                 for s in &mut a.sheets {
                     s.shapes
                         .retain(|x| x.kind != rcell::model::ShapeKind::Chart);
@@ -262,6 +281,22 @@ fn writer_output_is_read_identically_by_hancell() {
             }
         }
     }
-    eprintln!("비교한 쌍: {checked}");
+    eprintln!("비교한 쌍: {checked} (차트를 쓰기 전의 레거시 결과 {stale}개는 차트를 빼고 비교)");
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+fn has_charts(wb: &rcell::Workbook) -> bool {
+    wb.sheets.iter().any(|s| {
+        s.shapes
+            .iter()
+            .any(|x| x.kind == rcell::model::ShapeKind::Chart)
+    })
+}
+
+/// 패키지에 차트 파트(`xl/charts/`)가 있는지
+fn has_chart_parts(path: &Path) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| rcell::Package::from_bytes(b).ok())
+        .is_some_and(|p| p.part_names().iter().any(|n| n.starts_with("xl/charts/")))
 }
