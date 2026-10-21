@@ -755,30 +755,7 @@ impl Art {
             .bytes(&[0; 12]);
         obj.u32(0);
         let txo = has_text.then(|| {
-            let run = s
-                .text
-                .as_ref()
-                .and_then(|t| t.paragraphs.iter().flat_map(|p| &p.runs).next());
-            let font = run.map_or(0, |r| {
-                let f = crate::model::Font {
-                    name: r.latin.clone(),
-                    size: r.size.map(|v| v as f64 / 100.0),
-                    bold: r.bold.unwrap_or(false),
-                    italic: r.italic.unwrap_or(false),
-                    ..Default::default()
-                };
-                ctx.wb
-                    .styles
-                    .fonts
-                    .iter()
-                    .position(|x| {
-                        x.name == f.name
-                            && x.size == f.size
-                            && x.bold == f.bold
-                            && x.italic == f.italic
-                    })
-                    .map_or(0, |i| ctx.font(i as u32))
-            });
+            let font = shape_text_font(s, &ctx.wb.styles.fonts).map_or(0, |i| ctx.font(i as u32));
             txo(&s.plain_text(), font, 3)
         });
         emit(sp, obj.take(), txo);
@@ -809,6 +786,21 @@ impl Art {
             }
         }
     }
+}
+
+/// 도형 글 상자의 TXO 가 가리키는 모델 글꼴: 첫 글 조각과 이름·크기·굵게·기울임이 같은 첫 글꼴
+pub(crate) fn shape_text_font(s: &Shape, fonts: &[crate::model::Font]) -> Option<usize> {
+    let r = s
+        .text
+        .as_ref()
+        .and_then(|t| t.paragraphs.iter().flat_map(|p| &p.runs).next())?;
+    let size = r.size.map(|v| v as f64 / 100.0);
+    fonts.iter().position(|x| {
+        x.name == r.latin
+            && x.size == size
+            && x.bold == r.bold.unwrap_or(false)
+            && x.italic == r.italic.unwrap_or(false)
+    })
 }
 
 /// TXO (한컴): 머리 10바이트 (`0, 1, 1, 1, 문단 수`), `cch u16, flag u8, UTF-16`, 런 `(ich u16, ifnt u16, u32)` 과

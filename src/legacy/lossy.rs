@@ -74,14 +74,20 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
             a.text_rotation = None;
         }
     }
-    // 외곽선 종류(한컴)가 있으면 ECMA 외곽선도 켜진 것으로 읽힌다 (실선이 아니어도)
+    // 외곽선 종류(한컴)가 있으면 ECMA 외곽선도 켜진 것으로 읽힌다 (실선이 아니어도).
+    // 한컴 취소선 종류만 있어도 BIFF 취소선으로 저장된다 (밑줄은 한컴 밑줄 종류를 따라 다시 읽힌다)
     for f in &mut w.styles.fonts {
-        if f.hancom
-            .as_ref()
-            .and_then(|h| h.outline_type.as_deref())
-            .is_some_and(|t| t != "none")
-        {
+        let set = |v: Option<&str>| v.is_some_and(|t| t != "none" && t != "0");
+        let h = f.hancom.as_ref();
+        let (outline, strike) = (
+            set(h.and_then(|h| h.outline_type.as_deref())),
+            set(h.and_then(|h| h.strikeout_type.as_deref())),
+        );
+        if outline {
             f.outline = true;
+        }
+        if strike {
+            f.strike = true;
         }
     }
     let font = wb

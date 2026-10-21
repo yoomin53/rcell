@@ -353,6 +353,54 @@ fn builtin_slot(id: u32) -> Option<u16> {
     })
 }
 
+/// 셀 서식(0 제외)을 쓸 차례. 레거시에서 읽은 서식 표면 모델 차례 그대로. 아니면 한셀이 XML 을 열 때처럼
+/// 병합한 셀만 쓰는 서식을 끝으로 옮기고, 병합을 적용하는 차례(시트 차례, 병합 범위 차례, 범위 안 행 우선)로
+/// 놓는다 (관측: 서식 파일을 한셀이 XML 로 열어 저장하면 병합 서식 XF 의 차례가 이렇게 바뀐다)
+fn cell_order(wb: &Workbook) -> Vec<usize> {
+    let st = &wb.styles;
+    let n = st.cell_xfs.len();
+    if st.from_legacy || n <= 1 {
+        return (1..n).collect();
+    }
+    let mut in_merge = vec![false; n];
+    let mut outside = vec![false; n];
+    for s in &wb.sheets {
+        for c in &s.cells {
+            let i = c.style as usize;
+            if i >= n {
+                continue;
+            }
+            if s.merges.iter().any(|m| m.contains(c.r)) {
+                in_merge[i] = true;
+            } else {
+                outside[i] = true;
+            }
+        }
+    }
+    let merged_only = |i: usize| in_merge[i] && !outside[i];
+    let mut v: Vec<usize> = (1..n).filter(|&i| !merged_only(i)).collect();
+    let mut placed = vec![false; n];
+    for s in &wb.sheets {
+        let mut cells: Vec<&crate::model::Cell> = s
+            .cells
+            .iter()
+            .filter(|c| s.merges.iter().any(|m| m.contains(c.r)))
+            .collect();
+        // 병합 범위 차례, 범위 안은 행 우선 (시트 전체 행 우선보다 한셀과 더 맞는다)
+        let pos = |c: &crate::model::Cell| s.merges.iter().position(|m| m.contains(c.r));
+        cells.sort_by_key(|c| (pos(c), c.r.row, c.r.col));
+        for c in cells {
+            let i = c.style as usize;
+            if i > 0 && i < n && merged_only(i) && !placed[i] {
+                placed[i] = true;
+                v.push(i);
+            }
+        }
+    }
+    v.extend((1..n).filter(|&i| merged_only(i) && !placed[i]));
+    v
+}
+
 fn layout_styles(wb: &Workbook) -> StyleLayout {
     let st = &wb.styles;
     let nstyle = st.cell_style_xfs.len();
@@ -435,8 +483,8 @@ fn layout_styles(wb: &Workbook) -> StyleLayout {
         }
     }
     let mut cell = vec![15u16; st.cell_xfs.len().max(1)];
-    for (i, slot) in cell.iter_mut().enumerate().skip(1) {
-        *slot = next;
+    for i in cell_order(wb) {
+        cell[i] = next;
         order.push(XfSlot::Cell(i));
         next += 1;
     }
@@ -464,24 +512,155 @@ fn same_font(a: &Font, b: &Font) -> bool {
     format!("{a:?}") == format!("{b:?}")
 }
 
-fn layout_fonts(wb: &Workbook) -> FontLayout {
+/// 레거시에 쓸 모델 글꼴의 차례. 레거시에서 읽은 서식 표면 모델 차례 그대로. 아니면 한셀이 XML 을 열 때처럼
+/// 앞 여섯(0–5, 기본 글꼴 자리)은 그대로 두고, 그다음은 XF 가 처음 쓰는 차례 (XF 를 쓰는 차례 그대로 — 병합 서식이
+/// 끝으로 옮겨 가면 그 글꼴도 따라간다), 그다음 서식 런·메모·도형 글자만 쓰는 글꼴, 아무도 쓰지 않는 글꼴은 버린다
+/// (관측: templates/Expense_Report·Buy_vs_Lease_Car 의 쓰이지 않는 Haansoft Batang, Closing_Costs·Basic_Invoice 의
+/// 병합 서식 글꼴 차례, 메모가 있는 서식 파일의 마지막 글꼴)
+fn font_order(wb: &Workbook, styles: &StyleLayout) -> Vec<usize> {
+    let st = &wb.styles;
+    let n = st.fonts.len();
+    if st.from_legacy {
+        return (0..n).collect();
+    }
+    let mut seen = vec![false; n];
+    let mut v: Vec<usize> = Vec::with_capacity(n);
+    let mut push = |i: usize, v: &mut Vec<usize>| {
+        if i < n && !seen[i] {
+            seen[i] = true;
+            v.push(i);
+        }
+    };
+    for i in 0..n.min(6) {
+        push(i, &mut v);
+    }
+    for slot in &styles.order {
+        let f = match *slot {
+            XfSlot::Style(i) | XfSlot::StyleCopy(i) => st.cell_style_xfs.get(i).map(|x| x.font_id),
+            XfSlot::Cell(i) => st.cell_xfs.get(i).map(|x| x.font_id),
+            XfSlot::Boiler { .. } => None,
+        };
+        if let Some(f) = f {
+            push(f as usize, &mut v);
+        }
+    }
+    // 서식 런(공유 문자열·메모·도형 글자)이 쓰는 글꼴: 이름·크기·굵게·기울임이 같은 첫 글꼴
+    let mut by_runs = vec![false; n];
+    // 이름이 없거나 테마 글꼴(`+mn-lt` …)이면 이름은 보지 않는다. 색(RGB)이 있으면 색도 같아야 한다
+    let like =
+        |name: Option<&str>, size: Option<f64>, bold: bool, italic: bool, rgb: Option<u32>| {
+            let any_name = name.is_none_or(|v| v.starts_with('+'));
+            st.fonts.iter().position(|x| {
+                (any_name || x.name.as_deref() == name)
+                    && x.size == size
+                    && x.bold == bold
+                    && x.italic == italic
+                    && rgb.is_none_or(|c| x.color.as_ref().and_then(|v| rgb_of(v, wb)) == Some(c))
+            })
+        };
+    let mark = |t: &RichText, by_runs: &mut [bool]| {
+        for r in &t.runs {
+            if let Some(f) = &r.font
+                && let Some(i) = st.fonts.iter().position(|x| same_font(x, f)).or_else(|| {
+                    let rgb = f.color.as_ref().and_then(|c| rgb_of(c, wb));
+                    like(f.name.as_deref(), f.size, f.bold, f.italic, rgb)
+                })
+            {
+                by_runs[i] = true;
+            }
+        }
+    };
+    for s in &wb.shared_strings {
+        mark(s, &mut by_runs);
+    }
+    for sh in &wb.sheets {
+        for c in &sh.comments {
+            mark(&c.text, &mut by_runs);
+        }
+    }
+    type Like<'a> =
+        dyn Fn(Option<&str>, Option<f64>, bool, bool, Option<u32>) -> Option<usize> + 'a;
+    fn shapes(v: &[crate::model::Shape], like: &Like, used: &mut [bool]) {
+        for s in v {
+            for r in s
+                .text
+                .iter()
+                .flat_map(|t| &t.paragraphs)
+                .flat_map(|p| &p.runs)
+            {
+                let size = r.size.map(|v| v as f64 / 100.0);
+                let (b, i) = (r.bold.unwrap_or(false), r.italic.unwrap_or(false));
+                let rgb = r
+                    .color
+                    .as_ref()
+                    .and_then(|c| c.value.strip_prefix("srgb:"))
+                    .and_then(|v| u32::from_str_radix(v, 16).ok());
+                if let Some(k) = like(r.latin.as_deref(), size, b, i, rgb)
+                    .or_else(|| like(r.ea.as_deref(), size, b, i, rgb))
+                {
+                    used[k] = true;
+                }
+            }
+            shapes(&s.children, like, used);
+        }
+    }
+    for sh in &wb.sheets {
+        shapes(&sh.shapes, &like, &mut by_runs);
+    }
+    for (i, used) in by_runs.iter().enumerate() {
+        if *used {
+            push(i, &mut v);
+        }
+    }
+    v
+}
+
+/// 사용자 표시 형식(164 이상)의 번호. 레거시에서 읽은 서식 표면 그대로. 아니면 한셀이 XML 을 열 때처럼
+/// XF 가 쓰지 않는 형식은 버리고 나머지를 모델 차례 그대로 164 부터 다시 매긴다 (관측: 서식 파일 13개의 쓰이지
+/// 않는 `0_);[Red]\(0\)` 이 사라지고 뒤 형식이 하나씩 당겨진다). 버린 형식은 `u32::MAX`
+fn layout_formats(wb: &Workbook) -> HashMap<u32, u32> {
+    let st = &wb.styles;
+    let mut map = HashMap::new();
+    if st.from_legacy {
+        return map;
+    }
+    let used: std::collections::HashSet<u32> = st
+        .cell_xfs
+        .iter()
+        .chain(&st.cell_style_xfs)
+        .map(|x| x.num_fmt_id)
+        .collect();
+    let mut next = 164u32;
+    for n in st.num_fmts.iter().filter(|n| n.id >= 164) {
+        if used.contains(&n.id) {
+            map.insert(n.id, next);
+            next += 1;
+        } else {
+            map.insert(n.id, u32::MAX);
+        }
+    }
+    map
+}
+
+fn layout_fonts(wb: &Workbook, styles: &StyleLayout) -> FontLayout {
     let fonts = &wb.styles.fonts;
     let n = fonts.len();
     let uses4 = wb.styles.cell_xfs.iter().any(|x| x.font_id == 4)
         || wb.styles.cell_style_xfs.iter().any(|x| x.font_id == 4);
     let phantom = n > 4 && same_font(&fonts[4], &fonts[0]) && !uses4;
-    let mut map = Vec::with_capacity(n);
+    // 쓰지 않는 글꼴은 0 번으로 (가리키는 것이 없다)
+    let mut map = vec![0u16; n];
     let mut records = Vec::new();
-    for i in 0..n {
-        if phantom {
-            map.push(i as u16);
-            if i != 4 {
-                records.push(i);
-            }
-        } else {
-            map.push(if i < 4 { i as u16 } else { i as u16 + 1 });
-            records.push(i);
+    let mut k = 0u16;
+    for i in font_order(wb, styles) {
+        if phantom && i == 4 {
+            map[4] = 4;
+            continue;
         }
+        let idx = if k < 4 { k } else { k + 1 };
+        map[i] = idx;
+        records.push(i);
+        k += 1;
     }
     FontLayout { map, records }
 }
@@ -498,7 +677,11 @@ fn font_record(f: &Font, wb: &Workbook, legacy_index: usize) -> Vec<u8> {
     if f.italic {
         grbit |= 0x02;
     }
-    if f.strike {
+    // 취소선: 한컴 취소선 종류가 있으면 `x:strike` 가 없어도 켠다 (관측: craft/fonts_crafted 의 strikeoutType 1)
+    let hancom_strike = h
+        .and_then(|h| h.strikeout_type.as_deref())
+        .is_some_and(|t| t != "0" && t != "none");
+    if f.strike || hancom_strike {
         grbit |= 0x08;
     }
     // 외곽선: ECMA 외곽선은 실선 종류일 때만 grbit 0x10 (글꼴 대조 실험)
@@ -530,7 +713,12 @@ fn font_record(f: &Font, wb: &Workbook, legacy_index: usize) -> Vec<u8> {
         Some("subscript") => 2,
         _ => 0,
     };
+    // 밑줄: 한컴 밑줄 종류만 있어도 한 줄 밑줄로 쓴다 (관측: craft/fonts_crafted 의 underlineType 3)
+    let hancom_ul = h
+        .and_then(|h| h.underline_type.as_deref())
+        .is_some_and(|t| t != "0" && t != "none");
     let uls: u8 = match f.underline.as_deref() {
+        None | Some("none") if hancom_ul => 1,
         None => 0,
         Some("double") => 2,
         Some("singleAccounting") => 0x21,
@@ -703,6 +891,8 @@ fn hangul_align(xf: &Xf) -> u8 {
 struct XfCtx<'a> {
     wb: &'a Workbook,
     fonts: &'a FontLayout,
+    /// 사용자 표시 형식 번호를 다시 매긴 것 ([`layout_formats`])
+    formats: &'a HashMap<u32, u32>,
 }
 
 fn edge_dg(e: Option<&BorderEdge>) -> u32 {
@@ -866,7 +1056,13 @@ fn xf_record(xf: &Xf, o: &XfOpts, ctx: &XfCtx) -> Vec<u8> {
         )
     };
     b.u16(font)
-        .u16(xf.num_fmt_id as u16)
+        .u16(
+            ctx.formats
+                .get(&xf.num_fmt_id)
+                .copied()
+                .filter(|&v| v != u32::MAX)
+                .unwrap_or(xf.num_fmt_id) as u16,
+        )
         .u16(p)
         .u8(alc | (wrap << 3) | (alcv << 4))
         .u8(0)
@@ -1395,8 +1591,9 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
             value: "시트가 없습니다".into(),
         });
     }
-    let fonts = layout_fonts(wb);
     let styles = layout_styles(wb);
+    let fonts = layout_fonts(wb, &styles);
+    let formats = layout_formats(wb);
     let mut sst = Sst::new(wb);
 
     // 이름 표: 모델 순서 그대로 (한셀 XML 의 definedName 순서 = 레거시 NAME 순서, 관측)
@@ -1535,6 +1732,7 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
         out.rec_buf(0x041E, &mut b);
     }
     let builtin_ids = [5u32, 6, 7, 8, 23, 24, 25, 26, 41, 42, 43, 44];
+    let mut user: Vec<(u32, &str)> = Vec::new();
     for n in &wb.styles.num_fmts {
         if builtin_ids.contains(&n.id) {
             continue;
@@ -1542,8 +1740,16 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
         if n.id < 164 && crate::numfmt::builtin(n.id) == Some(n.code.as_str()) {
             continue;
         }
+        match formats.get(&n.id) {
+            Some(&u32::MAX) => continue,
+            Some(&v) => user.push((v, n.code.as_str())),
+            None => user.push((n.id, n.code.as_str())),
+        }
+    }
+    user.sort_by_key(|u| u.0);
+    for (id, code) in user {
         let mut b = Buf::new();
-        b.u16(n.id as u16).str16(&n.code);
+        b.u16(id as u16).str16(code);
         out.rec_buf(0x041E, &mut b);
     }
     // 문단 번호 정의 (0xA020)
@@ -1558,7 +1764,11 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
         out.rec_buf(0xA020, &mut b);
     }
     // 문단 모양 표: 0번 기본, 그다음 XF 의 문단 모양 (정렬 포함) 처음 나온 순서. 0xA011 은 XF 마다 하나
-    let xf_ctx = XfCtx { wb, fonts: &fonts };
+    let xf_ctx = XfCtx {
+        wb,
+        fonts: &fonts,
+        formats: &formats,
+    };
     let mut para_records: Vec<Vec<u8>> = vec![parashape_record(&ParaShape::default(), 1)];
     let mut para_links: Vec<u32> = Vec::new();
     let mut xf_para: Vec<Option<u32>> = Vec::new();
@@ -1671,38 +1881,6 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
             plain_edges,
             merge_cell: matches!(slot, XfSlot::Cell(i) if merged_xfs.contains(&(i as u32))),
         };
-        if std::env::var_os("RCELL_XF_DEBUG").is_some() {
-            let b = wb.styles.borders.get(xf.border_id as usize);
-            let e = |x: Option<&BorderEdge>| {
-                x.map_or("-".to_string(), |e| {
-                    format!(
-                        "{}:{}",
-                        e.style.as_deref().unwrap_or("none"),
-                        e.color.as_ref().map_or("nocolor".into(), |c| format!(
-                            "{:?}/{:?}/{}",
-                            c.rgb, c.indexed, c.auto
-                        ))
-                    )
-                })
-            };
-            let fc = wb
-                .styles
-                .fonts
-                .get(xf.font_id as usize)
-                .and_then(|f| f.color.as_ref())
-                .map_or("-".into(), |c| {
-                    format!("{:?}/{:?}/{:?}", c.rgb, c.theme, c.indexed)
-                });
-            eprintln!(
-                "XF {k} font={} fc={fc} L={} R={} T={} B={} D={}",
-                xf.font_id,
-                e(b.and_then(|b| b.left.as_ref())),
-                e(b.and_then(|b| b.right.as_ref())),
-                e(b.and_then(|b| b.top.as_ref())),
-                e(b.and_then(|b| b.bottom.as_ref())),
-                e(b.and_then(|b| b.diagonal.as_ref())),
-            );
-        }
         out.rec(0x00E0, &xf_record(&xf, &opts, &xf_ctx));
     }
     for (ixfe, exts) in xfexts {
