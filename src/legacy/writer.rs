@@ -2139,6 +2139,48 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
     Ok(out.buf)
 }
 
+/// 조건부 서식 틀 규칙의 수식 — 한셀이 레거시 CF 에 쓰는 꼴 (관측: craft/cf_dv·cfdv_x, R = 첫 범위 절대 참조,
+/// C = 첫 셀 상대 참조): 고유 `AND(COUNTIF((R),C)=1,NOT(ISBLANK(C)))`, 중복은 `>1`, 평균 초과
+/// `C>AVERAGE(IF(ISERROR(R),"",IF(ISBLANK(R),"",R)))` (미만 `<`), 상위 N `LARGE((R),MIN(N,COUNT(R)))<=C`,
+/// 하위 N 퍼센트 `IF(INT(COUNT(R)*N%)>0,SMALL((R),INT(COUNT(R)*N%)),MIN(R))>=C` (상위·하위, 개수·퍼센트 짝)
+fn cf_template_formula(r: &crate::model::CfRule, range: &CellRange) -> Option<String> {
+    let abs = |c: CellRef| format!("${}${}", CellRef::col_name(c.col), c.row + 1);
+    let rr = if range.start == range.end {
+        abs(range.start)
+    } else {
+        format!("{}:{}", abs(range.start), abs(range.end))
+    };
+    let c = range.start.to_string();
+    Some(match r.kind.as_str() {
+        "uniqueValues" => format!("AND(COUNTIF(({rr}),{c})=1,NOT(ISBLANK({c})))"),
+        "duplicateValues" => format!("AND(COUNTIF(({rr}),{c})>1,NOT(ISBLANK({c})))"),
+        "aboveAverage" if !r.equal_average && r.std_dev.is_none() => {
+            let op = if r.above_average == Some(false) {
+                "<"
+            } else {
+                ">"
+            };
+            format!("{c}{op}AVERAGE(IF(ISERROR({rr}),\"\",IF(ISBLANK({rr}),\"\",{rr})))")
+        }
+        "top10" => {
+            let n = r.rank.unwrap_or(10);
+            let (pick, edge, cmp) = if r.bottom {
+                ("SMALL", "MIN", ">=")
+            } else {
+                ("LARGE", "MAX", "<=")
+            };
+            if r.percent {
+                format!(
+                    "IF(INT(COUNT({rr})*{n}%)>0,{pick}(({rr}),INT(COUNT({rr})*{n}%)),{edge}({rr})){cmp}{c}"
+                )
+            } else {
+                format!("{pick}(({rr}),MIN({n},COUNT({rr}))){cmp}{c}")
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// 시트의 수식을 미리 부호화한다 (셀, 조건부 서식, 데이터 유효성)
 fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Report) -> SheetEnc {
     let mut e = SheetEnc::default();
@@ -2218,22 +2260,27 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
         }
     }
     for cf in &sheet.conditional_formats {
-        let base = cf
+        let first = cf
             .sqref
             .split_whitespace()
             .next()
-            .and_then(CellRange::parse)
-            .map(|r| r.start)
-            .unwrap_or_default();
+            .and_then(CellRange::parse);
+        let base = first.map(|r| r.start).unwrap_or_default();
         let mut rules = Vec::new();
         for r in &cf.rules {
+            // 틀 규칙(고유·중복·평균·상위/하위)은 수식이 없어도 한셀이 만든 수식을 쓴다
+            let synthesized = first
+                .filter(|_| r.formulas.is_empty())
+                .and_then(|range| cf_template_formula(r, &range));
             let mut enc = |t: Option<&String>| -> Vec<u8> {
                 let Some(t) = t.filter(|t| !t.is_empty()) else {
                     return Vec::new();
                 };
+                // 상대 참조는 범위 첫 셀에서의 거리(PtgRefN·PtgAreaN, 관측: `MOD(E1,20)=0` → 4C … 02 C0)
                 let opts = encode::Options {
                     base,
                     sheet: Some(si),
+                    relative: true,
                     ..Default::default()
                 };
                 match encode::encode(t, opts, tables) {
@@ -2247,7 +2294,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                     }
                 }
             };
-            let f1 = enc(r.formulas.first());
+            let f1 = enc(synthesized.as_ref().or(r.formulas.first()));
             let f2 = enc(r.formulas.get(1));
             rules.push((f1, f2));
         }
@@ -2265,15 +2312,12 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
             let Some(t) = t.filter(|t| !t.is_empty()) else {
                 return Vec::new();
             };
-            let root = if dv.kind == "list" {
-                Class::Ref
-            } else {
-                Class::Val
-            };
+            // 목록의 범위도 값 클래스(PtgArea 0x45), 상대 참조는 범위 첫 셀에서의 거리 (관측: cfdv_x 의
+            // `$B$1:$B$5` → 45 …, `ISNUMBER(M1)` → 4C … 00 C0)
             let opts = encode::Options {
                 base,
                 sheet: Some(si),
-                root,
+                relative: true,
                 ..Default::default()
             };
             match encode::encode(t, opts, tables) {
