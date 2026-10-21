@@ -26,6 +26,7 @@ pub mod calc;
 pub mod cf_eval;
 pub mod cfb;
 pub mod chart_svg;
+pub mod chart_xml;
 pub mod compare;
 pub mod container;
 pub mod crypto;

@@ -262,15 +262,16 @@ fn drawings_and_chart_parts_roundtrip() {
     );
     assert!(b.raw_parts.iter().any(|p| p.name == "xl/charts/chart1.xml"));
 
-    // 원본 XML 이 없는 도형(레거시에서 온 것처럼)도 모델로 써서 같게 읽힌다
+    // 원본 XML 이 없는 도형·차트(레거시에서 온 것처럼)도 모델로 써서 같게 읽힌다 — 차트는 새 차트 파트로
     let mut c = a.clone();
     for s in &mut c.sheets[0].shapes {
         s.raw = None;
     }
-    c.sheets[0].shapes.truncate(1);
+    c.raw_parts.clear();
     let d = rcell::from_bytes(write(&c, Flavor::Cell).unwrap()).unwrap();
     let diffs = compare(&c, &d, Options::default());
     assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    assert_eq!(d.sheets[0].shapes[1].chart, c.sheets[0].shapes[1].chart);
 }
 
 #[test]
@@ -482,6 +483,144 @@ fn outline_auto_filter_and_protection_roundtrip() {
     assert_eq!(sb.protection, a.sheets[0].protection);
     assert_eq!(b.protection, a.protection);
     assert!(sb.summary_above && !sb.summary_left && sb.filter_mode);
+}
+
+/// 모델의 차트(레거시에서 읽은 것처럼 원본 XML 이 없는 것)는 한셀이 레거시 차트를 읽어 쓰는 꼴의 앵커 +
+/// 새 차트 파트로 쓰고, 다시 읽으면 같은 차트다.
+#[test]
+fn model_charts_are_written_in_hancell_form() {
+    use rcell::model::{
+        Anchor, AnchorKind, Chart, ChartAxis, ChartCache, ChartColor, ChartData, ChartFill,
+        ChartLine, ChartPoint, ChartSeries, ChartShapeProps, Marker, Shape, ShapeKind,
+    };
+    let data = |kind: &str, f: &str, vals: &[&str]| ChartData {
+        kind: kind.into(),
+        formula: Some(f.into()),
+        cache: Some(ChartCache {
+            format_code: (kind == "numRef").then(|| "G/표준".into()),
+            pt_count: Some(vals.len() as u32),
+            points: vals
+                .iter()
+                .enumerate()
+                .map(|(i, v)| ChartPoint {
+                    idx: i as u32,
+                    format_code: None,
+                    value: v.to_string(),
+                })
+                .collect(),
+        }),
+    };
+    let mut chart = Chart {
+        kind: "bar".into(),
+        bar_dir: Some("col".into()),
+        grouping: Some("clustered".into()),
+        series: vec![ChartSeries {
+            idx: Some(0),
+            order: Some(0),
+            sp_pr: Some(ChartShapeProps {
+                fill: Some(ChartFill::Solid(ChartColor::srgb("73B1D1"))),
+                line: Some(ChartLine::hcell(9525, ChartFill::None)),
+            }),
+            cat: Some(data("strRef", "Sheet1!$A$2:$A$3", &["가", "나"])),
+            val: Some(data("numRef", "Sheet1!$B$2:$B$3", &["10", "20"])),
+            ..Default::default()
+        }],
+        axes: vec![
+            ChartAxis {
+                kind: "catAx".into(),
+                id: 0,
+                cross_ax: Some(1),
+                ..Default::default()
+            },
+            ChartAxis {
+                kind: "valAx".into(),
+                id: 1,
+                cross_ax: Some(0),
+                ..Default::default()
+            },
+        ],
+        legend: Some("r".into()),
+        c14_style: Some(102),
+        style: Some(2),
+        ..Default::default()
+    };
+    chart.group.ax_ids = vec![0, 1];
+    chart.refresh_summary();
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    let anchor = Anchor {
+        kind: AnchorKind::TwoCell,
+        from: Marker {
+            col: 2,
+            row: 1,
+            ..Default::default()
+        },
+        to: Some(Marker {
+            col: 6,
+            row: 10,
+            col_off: 9525,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        a.sheets[0].shapes.push(Shape {
+            anchor: anchor.clone(),
+            kind: ShapeKind::Chart,
+            chart: Some(chart.clone()),
+            ..Default::default()
+        });
+    }
+    let out = write(&a, Flavor::Cell).unwrap();
+    let b = rcell::from_bytes(out.clone()).unwrap();
+    let diffs = compare(&a, &b, Options::default());
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    let charts: Vec<_> = b.sheets[0]
+        .shapes
+        .iter()
+        .filter(|s| s.kind == ShapeKind::Chart)
+        .collect();
+    assert_eq!(charts.len(), 2);
+    assert_eq!(charts[0].target.as_deref(), Some("xl/charts/chart1.xml"));
+    assert_eq!(charts[1].target.as_deref(), Some("xl/charts/chart2.xml"));
+    assert_eq!(charts[0].chart.as_ref(), Some(&chart));
+
+    // 한셀 꼴: graphicFrame fPublished="0", 번호 2·3, 시트 안 절대 위치, clientData 잠금·인쇄, 차트 콘텐츠 형식
+    let mut pkg = rcell::Package::from_bytes(out).unwrap();
+    let ct = pkg.read_string("[Content_Types].xml").unwrap().unwrap();
+    assert!(ct.contains(r#"<Override PartName="/xl/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#), "{ct}");
+    let drawing = pkg
+        .part_names()
+        .iter()
+        .find(|n| n.starts_with("xl/drawings/drawing"))
+        .cloned()
+        .unwrap();
+    let x = pkg.read_string(&drawing).unwrap().unwrap();
+    assert!(x.contains(r#"<xdr:graphicFrame fPublished="0"><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name=""/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x=""#), "{x}");
+    assert!(x.contains(r#"<xdr:cNvPr id="3" name=""/>"#), "{x}");
+    assert!(x.contains(r#"<c:chart r:id="rIdChart1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData fLocksWithSheet="1" fPrintsWithSheet="1"/></xdr:twoCellAnchor>"#), "{x}");
+    // 위치는 앞 열·행의 픽셀 합 (기본 열·행), 크기는 끝 칸 + 오프셋까지
+    let sheet = &a.sheets[0];
+    let mdw = rcell::units::max_digit_width(&a);
+    let col = |c: u32| {
+        (0..c)
+            .map(|i| i64::from(rcell::units::sheet_col_px(sheet, i, mdw)))
+            .sum::<i64>()
+            * 9525
+    };
+    let row = |r: u32| {
+        (0..r)
+            .map(|i| i64::from(rcell::units::sheet_row_px(sheet, i)))
+            .sum::<i64>()
+            * 9525
+    };
+    let xfrm = format!(
+        r#"<a:off x="{}" y="{}"/><a:ext cx="{}" cy="{}"/>"#,
+        col(2),
+        row(1),
+        col(6) + 9525 - col(2),
+        row(10) - row(1)
+    );
+    assert!(x.contains(&xfrm), "{xfrm}\n{x}");
 }
 
 #[test]

@@ -69,7 +69,8 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 - View and print settings, comments, shapes / text boxes / pictures / charts, legacy OfficeArt shapes and the picture store
 - Conditional formatting, data validation, outlines (grouping), AutoFilter, protection, external-link caches, theme, document properties
 - Opening encrypted documents (ECMA-376 standard encryption)
-- In progress: decoding legacy charts (Hancom's VtChart serialization), renderer polish
+- Legacy charts (Hancom's VtChart serialization) → chart model → XML chart parts, byte-identical to Hancom Cell's own reading of the legacy file
+- In progress: renderer polish
 
 ## Features
 
