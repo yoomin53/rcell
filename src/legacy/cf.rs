@@ -279,7 +279,8 @@ fn cfvo(b: &mut Buf, c: &Cfvo, tokens: Option<&[u8]>) {
 fn cf_color(b: &mut Buf, c: Option<&Color>, ctx: &SheetCtx) {
     match c {
         Some(c) if c.theme.is_some() && c.rgb.is_none() => {
-            b.u32(3).u8(c.theme.unwrap_or(0) as u8).bytes(&[0, 0, 0]);
+            // 테마 번호, 0, 0, 0xFF (x14 조건부 서식 실험: 테마 5 → `05 00 00 ff`)
+            b.u32(3).u8(c.theme.unwrap_or(0) as u8).bytes(&[0, 0, 0xFF]);
             b.f64(c.tint.unwrap_or(0.0));
         }
         Some(c) => {
@@ -330,7 +331,7 @@ fn cf12_content(r: &CfRule, ctx: &SheetCtx, key: (usize, usize)) -> Vec<u8> {
             .u8(d.min_length.unwrap_or(10) as u8)
             .u8(d.max_length.unwrap_or(90) as u8);
         cf_color(&mut b, d.color.as_ref(), ctx);
-        for (k, c) in d.cfvos.iter().take(2).enumerate() {
+        for (k, (c, _)) in super::writer::rule_cfvos(r).iter().enumerate() {
             cfvo(&mut b, c, tok(k));
         }
     } else if let Some(i) = &r.icon_set {
@@ -400,23 +401,55 @@ pub(crate) fn conditional_formats(out: &mut Out, ctx: &SheetCtx) {
         return;
     }
     let dxfs = &ctx.wb.styles.dxfs;
+    // 서식 범위 하나 (nID 차례). `model` 은 모델의 조건부 서식 번호 (수식 부호화 표의 번호), 없으면 규칙 없는
+    // CONDFMT12 만 쓴다
     struct Group<'a> {
         nid: u16,
+        model: Option<usize>,
         ranges: Vec<CellRange>,
         rules: Vec<(usize, &'a CfRule)>,
     }
     let mut groups: Vec<Group> = Vec::new();
-    for (k, cf) in cfs.iter().enumerate() {
-        let mut rules: Vec<(usize, &CfRule)> = cf.rules.iter().enumerate().collect();
+    // 한셀은 XML 의 x14 구역을 본 구역 뒤의 서식 범위로 저장한다: x14 확장이 붙은 데이터 막대마다 규칙 없는
+    // CONDFMT12 를 하나씩 (본 규칙에 합쳐졌으므로), 그다음 x14 구역에만 있는 규칙 (x14 조건부 서식 실험의 nID
+    // 1–4 본 구역, 5–7 데이터 막대 확장, 8– 아이콘 집합). 레거시에서 읽은 모델은 그 빈 범위가 모델에 그대로 있다
+    let first_x14 = cfs
+        .iter()
+        .position(|cf| !cf.rules.is_empty() && cf.rules.iter().all(|r| r.x14))
+        .unwrap_or(cfs.len());
+    let mut order: Vec<(Option<usize>, &str)> = Vec::new();
+    for (k, cf) in cfs.iter().enumerate().take(first_x14) {
+        order.push((Some(k), cf.sqref.as_str()));
+    }
+    if !ctx.wb.styles.from_legacy {
+        for cf in cfs.iter().take(first_x14) {
+            if cf
+                .rules
+                .iter()
+                .any(|r| r.data_bar.as_ref().is_some_and(|d| d.ext.is_some()))
+            {
+                order.push((None, cf.sqref.as_str()));
+            }
+        }
+    }
+    for (k, cf) in cfs.iter().enumerate().skip(first_x14) {
+        order.push((Some(k), cf.sqref.as_str()));
+    }
+    for (slot, (model, sqref)) in order.into_iter().enumerate() {
+        let mut rules: Vec<(usize, &CfRule)> = model
+            .map(|k| cfs[k].rules.iter().enumerate().collect())
+            .unwrap_or_default();
         rules.sort_by_key(|(_, r)| r.priority);
         groups.push(Group {
-            nid: k as u16 + 1,
-            ranges: parse_ranges(&cf.sqref),
+            nid: slot as u16 + 1,
+            model,
+            ranges: parse_ranges(sqref),
             rules,
         });
     }
     // CONDFMT + CF
-    for (gi, g) in groups.iter().enumerate() {
+    for g in &groups {
+        let Some(gi) = g.model else { continue };
         let normal: Vec<&(usize, &CfRule)> = g.rules.iter().filter(|(_, r)| !is_cf12(r)).collect();
         if normal.is_empty() {
             continue;
@@ -436,21 +469,23 @@ pub(crate) fn conditional_formats(out: &mut Out, ctx: &SheetCtx) {
             out.rec_buf(0x01B1, &mut b);
         }
     }
-    // CF12 만 있는 범위: CONDFMT12 + CF12
-    for (gi, g) in groups.iter().enumerate() {
-        if g.rules.iter().any(|(_, r)| !is_cf12(r)) || g.rules.is_empty() {
+    // CF12 만 있는 범위: CONDFMT12 + CF12, 규칙 없는 범위: CONDFMT12 만 (ccf 0)
+    for g in &groups {
+        if g.rules.iter().any(|(_, r)| !is_cf12(r)) {
             continue;
         }
         let bb = bounding(&g.ranges);
         let mut b = frt_ref(0x0879, &bb);
         condfmt_body(&mut b, g.rules.len(), g.nid, &g.ranges);
         out.rec_buf(0x0879, &mut b);
+        let Some(gi) = g.model else { continue };
         for (ri, r) in &g.rules {
             cf12_record(out, r, ctx, (gi, *ri));
         }
     }
     // CFEX
-    for (gi, g) in groups.iter().enumerate() {
+    for g in &groups {
+        let Some(gi) = g.model else { continue };
         if !g.rules.iter().any(|(_, r)| !is_cf12(r)) {
             continue;
         }

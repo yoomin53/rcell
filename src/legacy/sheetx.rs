@@ -380,7 +380,7 @@ pub(crate) fn after_cells(
     }
     ctx.art.sheet_drawing(out, ctx)?;
     for h in &sheet.hyperlinks {
-        hlink(out, h, ctx.sheet);
+        hlink(out, h, ctx.sheet, ctx.wb.styles.from_legacy);
     }
     ctx.art.notes(out, ctx);
     data_validations(out, ctx);
@@ -398,10 +398,16 @@ pub(crate) fn after_cells(
 
 /// HLINK: 범위 (행 u32) + CLSID_StdHlink + 하이퍼링크 객체 ([MS-OSHARED] 2.3.7.1).
 ///
-/// 한셀의 꼴 (관측: structure·view_print): 표시 이름이 없으면 범위 첫 셀의 글을 표시 이름으로 쓰고
-/// (`hlstmfSiteGaveDisplayName | hlstmfHasDisplayName`), URL 에 hlstmfIsAbsolute 를 켜지 않으며 (플래그 0x15),
-/// 화면 설명(HLINKTOOLTIP 0x0800)은 쓰지 않는다
-fn hlink(out: &mut Out, h: &crate::model::Hyperlink, sheet: &crate::model::Sheet) {
+/// 한셀의 꼴 (관측: structure·view_print, 하이퍼링크 실험 문서의 다섯 링크): XML 에서 온 링크는 **화면 설명이 있을 때만**
+/// 표시 이름을 쓰고 그 글은 범위 첫 셀의 글이다 (`display` 속성은 쓰지 않는다 — `hlstmfSiteGaveDisplayName |
+/// hlstmfHasDisplayName`), 레거시에서 읽은 링크는 읽은 표시 이름 그대로. URL 에 hlstmfIsAbsolute 를 켜지 않으며
+/// (플래그 0x15), 화면 설명(HLINKTOOLTIP 0x0800)은 쓰지 않는다
+fn hlink(
+    out: &mut Out,
+    h: &crate::model::Hyperlink,
+    sheet: &crate::model::Sheet,
+    from_legacy: bool,
+) {
     let Some(r) = CellRange::parse(&h.range) else {
         return;
     };
@@ -420,7 +426,13 @@ fn hlink(out: &mut Out, h: &crate::model::Hyperlink, sheet: &crate::model::Sheet
             crate::model::CellValue::Text(t) => Some(t.clone()),
             _ => None,
         });
-    let display = h.display.clone().or(cell_text);
+    let display = if from_legacy {
+        h.display.clone()
+    } else {
+        h.tooltip
+            .as_ref()
+            .and(cell_text.or_else(|| h.display.clone()))
+    };
     let mut flags = 0u32;
     if h.target.is_some() {
         flags |= 0x01;
@@ -439,17 +451,58 @@ fn hlink(out: &mut Out, h: &crate::model::Hyperlink, sheet: &crate::model::Sheet
         hstr(&mut b, d);
     }
     if let Some(t) = &h.target {
-        // URL 모니커 {79EAC9E0-BAF9-11CE-8C82-00AA004BA90B}
-        b.bytes(&[
-            0xE0, 0xC9, 0xEA, 0x79, 0xF9, 0xBA, 0xCE, 0x11, 0x8C, 0x82, 0x00, 0xAA, 0x00, 0x4B,
-            0xA9, 0x0B,
-        ]);
-        b.u32(((units(t) + 1) * 2) as u32).utf16(t).u16(0);
+        match file_target(t) {
+            Some((anti, path)) => {
+                // 파일 모니커 {00000303-0000-0000-C000-000000000046} (하이퍼링크 대조 실험: `file:///C:/docs/book.xlsx`
+                // 를 그 글 그대로 경로로): cAnti u16, ANSI 경로 (NUL 끝), endServer 0xFFFF, 판 0xDEAD, 예약 16 + 4,
+                // 유니코드 경로 (cb u32 = 6 + 바이트, 바이트 u32, usKeyValue 3, UTF-16)
+                b.bytes(&[
+                    0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x46,
+                ]);
+                let ansi: Vec<u8> = path
+                    .chars()
+                    .map(|c| if c.is_ascii() { c as u8 } else { b'?' })
+                    .collect();
+                b.u16(anti).u32(ansi.len() as u32 + 1).bytes(&ansi).u8(0);
+                b.u16(0xFFFF).u16(0xDEAD).bytes(&[0; 20]);
+                let bytes = units(&path) as u32 * 2;
+                b.u32(bytes + 6).u32(bytes).u16(3).utf16(&path);
+            }
+            None => {
+                // URL 모니커 {79EAC9E0-BAF9-11CE-8C82-00AA004BA90B}
+                b.bytes(&[
+                    0xE0, 0xC9, 0xEA, 0x79, 0xF9, 0xBA, 0xCE, 0x11, 0x8C, 0x82, 0x00, 0xAA, 0x00,
+                    0x4B, 0xA9, 0x0B,
+                ]);
+                b.u32(((units(t) + 1) * 2) as u32).utf16(t).u16(0);
+            }
+        }
     }
     if let Some(l) = &h.location {
         hstr(&mut b, l);
     }
     out.rec_buf(0x01B8, &mut b);
+}
+
+/// 파일 모니커로 쓰는 대상: `file:` 주소, 레거시 읽기의 상대 경로(`.\…`, `..\…`), 드라이브·UNC 경로 → (cAnti, 경로).
+/// 한셀은 `file:///…` 주소를 그 글 그대로 파일 모니커의 경로로 쓴다 (하이퍼링크 대조 실험)
+pub(crate) fn file_target(t: &str) -> Option<(u16, String)> {
+    let mut rest = t;
+    let mut anti = 0u16;
+    if let Some(r) = rest.strip_prefix(".\\") {
+        rest = r;
+    } else {
+        while let Some(r) = rest.strip_prefix("..\\") {
+            rest = r;
+            anti += 1;
+        }
+    }
+    let file = rest.starts_with("file:")
+        || rest.get(1..3) == Some(":\\")
+        || rest.starts_with("\\\\")
+        || rest.len() < t.len();
+    file.then(|| (anti, rest.to_string()))
 }
 
 /// DVAL + DV (6.3절)

@@ -318,15 +318,40 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
                 b.size_with_cells = false;
             }
         }
-        // 하이퍼링크의 화면 설명은 저장되지 않는다 (HLINKTOOLTIP 을 쓰지 않는다)
+        // 하이퍼링크의 화면 설명은 저장되지 않는다 (HLINKTOOLTIP 을 쓰지 않는다). `file:` 주소는 파일 모니커의
+        // 경로로 저장되어 상대 경로 `.\file:…` 로 읽힌다 (하이퍼링크 대조 실험)
         for h in &mut s.hyperlinks {
             h.tooltip = None;
+            if let Some(t) = h.target.as_mut().filter(|t| t.starts_with("file:")) {
+                *t = format!(".\\{t}");
+            }
+        }
+        // 데이터 표의 지운 입력 표시(del1·del2)는 저장되지 않는다 (수식 대조 실험: TABLE grbit 에 없다)
+        for c in &mut s.cells {
+            if let Some(d) = c.formula.as_mut().and_then(|f| f.data_table.as_mut()) {
+                d.del1 = false;
+                d.del2 = false;
+            }
         }
         // 조건부 서식의 x14 확장: 데이터 막대는 방향(오른쪽에서 왼쪽)만 CFDatabar 에 남고, 사용자 지정 아이콘은
         // 저장되지 않는다 (6.3절)
         for cf in &mut s.conditional_formats {
             for r in &mut cf.rules {
+                // 확장이 붙은 막대는 확장의 기준 값이 본 기준 값으로 저장된다 (writer::rule_cfvos)
+                let cfvos: Option<Vec<crate::model::Cfvo>> = r
+                    .data_bar
+                    .as_ref()
+                    .filter(|d| d.ext.as_ref().is_some_and(|e| e.cfvos.len() >= 2))
+                    .map(|_| {
+                        super::writer::rule_cfvos(r)
+                            .into_iter()
+                            .map(|(c, _)| c)
+                            .collect()
+                    });
                 if let Some(d) = &mut r.data_bar {
+                    if let Some(c) = cfvos {
+                        d.cfvos = c;
+                    }
                     let rtl = d
                         .ext
                         .as_ref()

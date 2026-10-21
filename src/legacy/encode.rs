@@ -69,6 +69,9 @@ pub struct Options {
     pub force_3d: bool,
     /// 뿌리 클래스: 셀 수식 값, 이름 참조
     pub root: Class,
+    /// 배열 수식 (ARRAY): 함수 인자 안의 값 자리는 배열 클래스. 맨 위는 셀 수식과 같다 (수식 대조 실험:
+    /// `{B1:B3*2}` → 0x45, `{SUM(B1:B3*2)}` → 0x65 + tAttrSum, `{TRANSPOSE(B1:B2)}` → 0x65 0x41 0x53 0x00)
+    pub array: bool,
 }
 
 impl Default for Options {
@@ -79,6 +82,7 @@ impl Default for Options {
             relative: false,
             force_3d: false,
             root: Class::Val,
+            array: false,
         }
     }
 }
@@ -1207,10 +1211,10 @@ impl Emitter<'_> {
         if is_volatile(info.index) {
             self.volatile = true;
         }
-        // 함수 토큰 자신의 클래스: 참조를 돌려주는 함수는 자리의 클래스, 값은 값(배열 자리면 배열)
+        // 함수 토큰 자신의 클래스: 참조를 돌려주는 함수는 자리의 클래스, 값·배열을 돌려주는 함수는 값(배열 자리면
+        // 배열) — 배열 수식 맨 위의 TRANSPOSE 도 0x41 (수식 대조 실험, 바이너리 BrtArrFmla 도 같다)
         let token_class = match info.ret {
             b'R' => operand_class(expected, forced),
-            b'A' => Class::Arr,
             _ => {
                 if expected == Class::Arr || forced {
                     Class::Arr
@@ -1219,6 +1223,7 @@ impl Emitter<'_> {
                 }
             }
         };
+        let in_array = self.opts.array;
         let param = |i: usize| -> (Class, bool) {
             let c = info
                 .params
@@ -1227,9 +1232,9 @@ impl Emitter<'_> {
                 .copied()
                 .unwrap_or(b'V');
             match c {
-                b'O' => (token_class, forced),
+                b'O' => (token_class, forced || in_array),
                 b'A' => (Class::Arr, true),
-                other => (class_of(other), forced),
+                other => (class_of(other), forced || in_array),
             }
         };
         // SUM 인자 하나 → tAttrSum

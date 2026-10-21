@@ -1360,6 +1360,8 @@ struct NameRec {
     local: Option<u32>,
     formula: String,
     rgce: Vec<u8>,
+    /// 설명 (`definedName/@comment`)
+    comment: Option<String>,
 }
 
 fn builtin_code(name: &str) -> Option<u8> {
@@ -1439,6 +1441,7 @@ impl Resolve for Tables<'_> {
                 local: None,
                 formula: String::new(),
                 rgce: Vec::new(),
+                comment: None,
             });
             self.names.len() - 1
         });
@@ -1463,6 +1466,7 @@ impl Resolve for Tables<'_> {
             local: None,
             formula: String::new(),
             rgce: Vec::new(),
+            comment: None,
         });
         self.names.len() as u32
     }
@@ -1587,6 +1591,49 @@ struct EncFormula {
     exp: Option<CellRef>,
     /// 상대 토큰(PtgRefN) 꼴 — 행 반복(0xB002)에서 두 행의 수식이 같은지 본다
     rel: Vec<u8>,
+    /// FORMULA 바로 뒤에 쓸 레코드 (배열 수식의 ARRAY, 데이터 표의 TABLE): (종류, 내용)
+    extra: Option<(u16, Vec<u8>)>,
+}
+
+/// PtgTbl: 데이터 표의 왼쪽 위 셀 (행 u32, 열 u16)
+fn tbl_token(m: CellRef) -> Vec<u8> {
+    let mut b = Buf::new();
+    b.u8(0x02).u32(m.row).u16(m.col as u16);
+    b.take()
+}
+
+/// 범위 → rwFirst u32, rwLast u32, colFirst u16, colLast u16
+fn range_u32(b: &mut Buf, r: &CellRange) {
+    b.u32(r.start.row)
+        .u32(r.end.row)
+        .u16(r.start.col as u16)
+        .u16(r.end.col as u16);
+}
+
+/// TABLE (한컴, 수식 대조 실험): 범위, grbit (0x04 행 입력, 0x08 2변수 — 2변수는 0x0C, 지운 입력 표시는 쓰지 않는다),
+/// 입력 1·2 (행 u32 + 열 u16, 없으면 FF)
+fn table_record(range: &CellRange, d: &crate::model::DataTableInput) -> Vec<u8> {
+    let mut b = Buf::new();
+    range_u32(&mut b, range);
+    let grbit: u16 = if d.two_d {
+        0x0C
+    } else if d.row_input {
+        0x04
+    } else {
+        0
+    };
+    b.u16(grbit);
+    for r in [&d.r1, &d.r2] {
+        match r.as_deref().and_then(CellRef::parse) {
+            Some(c) => {
+                b.u32(c.row).u16(c.col as u16);
+            }
+            None => {
+                b.u32(u32::MAX).u16(u16::MAX);
+            }
+        }
+    }
+    b.take()
 }
 
 /// 시트마다 미리 부호화한 것
@@ -1602,22 +1649,51 @@ struct SheetEnc {
     cfvo: HashMap<(usize, usize, usize), Vec<u8>>,
 }
 
-/// CF12 기준 값을 수식(토큰열)으로 쓰는가: 수식 기준 값, 그리고 x14 구역 규칙의 숫자 값 (한셀은 x14 구역에서 읽은
+/// CF12 기준 값을 수식(토큰열)으로 쓰는가: 수식 기준 값, 그리고 x14 구역에서 온 숫자 값 (한셀은 x14 구역에서 읽은
 /// `xm:f` 를 수식으로 쓴다 — x14 조건부 서식 실험: 3Stars 의 percent 33 → `1e 21 00`)
-fn cfvo_formula(r: &crate::model::CfRule, c: &crate::model::Cfvo) -> Option<String> {
+fn cfvo_formula(c: &crate::model::Cfvo, x14: bool) -> Option<String> {
     let v = c.val.as_ref().filter(|v| !v.is_empty())?;
-    (c.kind == "formula" || (r.x14 && matches!(c.kind.as_str(), "num" | "percent" | "percentile")))
+    (c.kind == "formula" || (x14 && matches!(c.kind.as_str(), "num" | "percent" | "percentile")))
         .then(|| v.clone())
 }
 
-/// 규칙의 기준 값들 (색조·데이터 막대(둘까지)·아이콘 집합)
-pub(crate) fn rule_cfvos(r: &crate::model::CfRule) -> Vec<&crate::model::Cfvo> {
+/// 규칙의 기준 값들 (색조·데이터 막대(둘)·아이콘 집합)과 x14 구역에서 왔는지. x14 확장이 붙은 데이터 막대는 확장의
+/// 기준 값이 본 규칙과 다르면 확장 것을 쓴다 — `autoMin`·`autoMax` 는 최소·최대 (x14 조건부 서식 실험: 본 규칙
+/// min/max 에 확장 percent 5 이면 `04 03 00 1e 05 00`, 둘이 같으면 본 규칙의 f64)
+pub(crate) fn rule_cfvos(r: &crate::model::CfRule) -> Vec<(crate::model::Cfvo, bool)> {
+    let own = |v: &[crate::model::Cfvo]| v.iter().map(|c| (c.clone(), r.x14)).collect();
     if let Some(cs) = &r.color_scale {
-        cs.cfvos.iter().collect()
+        own(&cs.cfvos)
     } else if let Some(d) = &r.data_bar {
-        d.cfvos.iter().take(2).collect()
+        match &d.ext {
+            Some(e) if e.cfvos.len() >= 2 && d.cfvos.len() >= 2 => e
+                .cfvos
+                .iter()
+                .zip(&d.cfvos)
+                .take(2)
+                .map(|(x, m)| {
+                    let kind = match x.kind.as_str() {
+                        "autoMin" => "min",
+                        "autoMax" => "max",
+                        k => k,
+                    };
+                    if kind == m.kind && x.val == m.val {
+                        (m.clone(), r.x14)
+                    } else {
+                        (
+                            crate::model::Cfvo {
+                                kind: kind.into(),
+                                ..x.clone()
+                            },
+                            true,
+                        )
+                    }
+                })
+                .collect(),
+            _ => own(&d.cfvos[..d.cfvos.len().min(2)]),
+        }
     } else if let Some(i) = &r.icon_set {
-        i.cfvos.iter().collect()
+        own(&i.cfvos)
     } else {
         Vec::new()
     }
@@ -1698,6 +1774,7 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
                 local: d.local_sheet_id,
                 formula: d.formula.clone(),
                 rgce: Vec::new(),
+                comment: d.comment.clone().filter(|c| !c.is_empty()),
             })
             .collect(),
     };
@@ -2192,19 +2269,39 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
             Some(c) => vec![c as u16],
             None => n.name.encode_utf16().collect(),
         };
+        // 설명은 cchDescription(넷 중 둘째) + 수식 뒤의 글, 그리고 바로 뒤 NAMECMT (수식 대조 실험)
+        let comment_units = n.comment.as_deref().map_or(0, units);
         b.u16(grbit)
             .u8(0)
             .u8(name_units.len() as u8)
             .u16(n.rgce.len() as u16)
             .u16(0)
             .u16(n.local.map_or(0, |l| l as u16 + 1))
-            .bytes(&[0; 4])
+            .u8(0)
+            .u8(comment_units.min(255) as u8)
+            .u8(0)
+            .u8(0)
             .u8(0);
-        for u in name_units {
+        for &u in &name_units {
             b.u16(u);
         }
         b.bytes(&n.rgce);
+        if let Some(c) = &n.comment {
+            b.u8(0).utf16(c);
+        }
         out.rec_buf(0x0018, &mut b);
+        if let Some(c) = &n.comment {
+            // NAMECMT: FRT 머리, 이름 글자 수 u16, 설명 글자 수 u16, 이름, 설명 (flag u8 + UTF-16)
+            let mut m = Buf::new();
+            m.u16(0x0894).u16(0).bytes(&[0; 8]);
+            m.u16(name_units.len() as u16).u16(comment_units as u16);
+            m.u8(0);
+            for &u in &name_units {
+                m.u16(u);
+            }
+            m.u8(0).utf16(c);
+            out.rec_buf(0x0894, &mut m);
+        }
     }
 
     // 시트를 먼저 써서 SST 사용 수를 센다
@@ -2305,17 +2402,96 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
             masters.insert(si, (c.r, range));
         }
     }
+    // 배열 수식·데이터 표: 왼쪽 위 셀은 자기 자신을 가리키는 PtgExp·PtgTbl + ARRAY·TABLE, 범위 안 다른 셀은
+    // 수식 없이 값만 있어도 그 셀을 가리키는 FORMULA (수식 대조 실험)
+    let mut followers: Vec<(CellRef, Vec<u8>)> = Vec::new();
     for c in &sheet.cells {
         let Some(f) = &c.formula else { continue };
+        let Some(range) = f.range.as_deref().and_then(CellRange::parse) else {
+            continue;
+        };
+        let token = match f.kind {
+            FormulaKind::Array => exp_token(c.r),
+            FormulaKind::DataTable if f.data_table.is_some() => tbl_token(c.r),
+            _ => continue,
+        };
+        for d in &sheet.cells {
+            if d.r != c.r && range.contains(d.r) && d.formula.is_none() {
+                followers.push((d.r, token.clone()));
+            }
+        }
+    }
+    for (r, token) in followers {
+        e.formulas.insert(
+            (r.row, r.col),
+            EncFormula {
+                rgce: token,
+                shared: None,
+                exp: None,
+                rel: Vec::new(),
+                extra: None,
+            },
+        );
+    }
+    for c in &sheet.cells {
+        let Some(f) = &c.formula else { continue };
+        let at = format!("{}!{}", sheet.name, c.r);
+        if let (FormulaKind::DataTable, Some(d), Some(range)) = (
+            f.kind,
+            &f.data_table,
+            f.range.as_deref().and_then(CellRange::parse),
+        ) {
+            e.formulas.insert(
+                (c.r.row, c.r.col),
+                EncFormula {
+                    rgce: tbl_token(c.r),
+                    shared: None,
+                    exp: None,
+                    rel: Vec::new(),
+                    extra: Some((0x0236, table_record(&range, d))),
+                },
+            );
+            continue;
+        }
         if f.text.is_empty() && f.kind != FormulaKind::Shared {
             continue;
         }
-        let at = format!("{}!{}", sheet.name, c.r);
         let opts = encode::Options {
             base: c.r,
             sheet: Some(si),
             ..Default::default()
         };
+        if let (FormulaKind::Array, Some(range)) =
+            (f.kind, f.range.as_deref().and_then(CellRange::parse))
+        {
+            // ARRAY: 범위, grbit 0, chn 0, cce + 토큰
+            match encode::encode(
+                &f.text,
+                encode::Options {
+                    array: true,
+                    ..opts
+                },
+                tables,
+            ) {
+                Ok(t) => {
+                    let mut b = Buf::new();
+                    range_u32(&mut b, &range);
+                    b.u16(0).u32(0).u16(t.len() as u16).bytes(&t);
+                    e.formulas.insert(
+                        (c.r.row, c.r.col),
+                        EncFormula {
+                            rgce: exp_token(c.r),
+                            shared: None,
+                            exp: None,
+                            rel: Vec::new(),
+                            extra: Some((0x0221, b.take())),
+                        },
+                    );
+                }
+                Err(err) => report.warnings.push(enc_err(&at, err)),
+            }
+            continue;
+        }
         let master = (f.kind == FormulaKind::Shared)
             .then(|| f.shared_index.and_then(|i| masters.get(&i).copied()))
             .flatten();
@@ -2333,6 +2509,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                             rel: t.clone(),
                             shared: Some((range, t)),
                             exp: Some(m),
+                            extra: None,
                         },
                     );
                 }
@@ -2347,6 +2524,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                         shared: None,
                         exp: Some(m),
                         rel,
+                        extra: None,
                     },
                 );
             }
@@ -2360,6 +2538,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                             shared: None,
                             exp: None,
                             rel,
+                            extra: None,
                         },
                     );
                 }
@@ -2405,8 +2584,8 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
             let f1 = enc(synthesized.as_ref().or(r.formulas.first()));
             let f2 = enc(r.formulas.get(1));
             rules.push((f1, f2));
-            for (k, c) in rule_cfvos(r).into_iter().enumerate() {
-                if let Some(t) = cfvo_formula(r, c) {
+            for (k, (c, x14)) in rule_cfvos(r).into_iter().enumerate() {
+                if let Some(t) = cfvo_formula(&c, x14) {
                     let v = enc(Some(&t));
                     if !v.is_empty() {
                         e.cfvo.insert((e.cf.len(), rules.len() - 1, k), v);
@@ -2608,8 +2787,11 @@ fn write_sheet(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
     if !sheet.page.row_breaks.is_empty() {
         let mut b = Buf::new();
         b.u16(sheet.page.row_breaks.len() as u16);
+        // 행 u32 뒤 4바이트는 `ff 3f 00 00` (관측: craft/view_print 의 한셀 레거시·hx, 기능 실험 문서).
+        // VERTICALPAGEBREAKS(열 u16, 시작 u16, 끝 u32)처럼 끝 열 16383 이 u32 라면 행은 u16 이다 — 65536 행
+        // 이상의 나누기는 관측하지 못했다
         for &r in &sheet.page.row_breaks {
-            b.u32(r).u16(0).u16(16383);
+            b.u32(r).u16(0x3FFF).u16(0);
         }
         out.rec_buf(0x001B, &mut b);
     }
@@ -2981,7 +3163,8 @@ fn write_cells(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
 
 fn cell_rec(c: &Cell, ci: usize, ctx: &SheetCtx, sst: &mut Sst) -> CellRec {
     let xf = ctx.xf(c.style);
-    if c.formula.is_some() && ctx.enc.formulas.contains_key(&(c.r.row, c.r.col)) {
+    // 수식 셀, 그리고 배열 수식·데이터 표 범위 안의 값 셀 (기준 셀을 가리키는 FORMULA)
+    if ctx.enc.formulas.contains_key(&(c.r.row, c.r.col)) {
         return CellRec::Formula(xf, ci);
     }
     match &c.value {
@@ -3046,6 +3229,9 @@ fn write_formula(out: &mut Out, ctx: &SheetCtx, c: &Cell, xf: u16, sst: &mut Sst
         range_ref8(&mut s, range);
         s.u16(0).u16(tokens.len() as u16).bytes(tokens);
         out.rec_buf(0x04BC, &mut s);
+    }
+    if let Some((rt, body)) = &enc.extra {
+        out.rec(*rt, body);
     }
     // 수식의 문자열 값(STRING)도 SST 의 전체 참조 수(cstTotal)에 든다 (관측: 서식 파일 30개, cstTotal = LABELSST 수 + STRING 수)
     if let Some(s) = string {
