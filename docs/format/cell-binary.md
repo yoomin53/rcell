@@ -225,6 +225,18 @@ XML 의 공유 문자열 순서를 지킨다 (서식 파일 28개 모두; 조작
   `BrtFRTBegin(02 0E 00 00)` `BrtCFRuleExt(1146: 0 + GUID)` `BrtFRTEnd` 로 x14 규칙과 GUID 로 잇는다. 시트 끝 묶음:
   35, 1135, (1046 범위·규칙 수, 1048 종류 4·틀 3·GUID·1, 1051, 1050×n, 1156, 1049, 1047)×막대, 1136, 36. XML 에 x14
   확장이 없으면 한셀이 새 GUID 와 기본값(1051 뒷부분 `01 00 06 00`)으로 만든다.
+- x14 데이터 막대 확장의 칸 (x14 대조 실험: 열마다 `x14:dataBar` 속성 하나씩 바꾼 조작 XML 13개 규칙 → 한셀 → 바이너리,
+  한셀은 자기 바이너리에서 모두 되읽는다). rcell 모델에는 아직 없다 (4.9절):
+  - `BrtBeginDatabar14`(1051): FRT 머리 4, `minLength` u8, `maxLength` u8 (x14 기본 10·90), `showValue` u8,
+    `direction` u8 (0 context, 1 leftToRight, 2 rightToLeft), `axisPosition` u8 (0 automatic, 1 middle, 2 none),
+    플래그 u16 (0x01 `border`, 0x02 `gradient`, 0x04 `negativeBarColorSameAsPositive="0"`, 0x08
+    `negativeBarBorderColorSameAsPositive="0"`) — 기본값은 0x06.
+  - `BrtCFVO14`(1050): FRT 머리 (0x04 = 수식 있음), 수식이 없으면 종류 u32 (2 min, 3 max, 8 autoMin, 9 autoMax) + 0 ×20.
+    수식이 있으면 `01 00 00 00 02 00 00 00`, cce u32, 0 u32, 토큰열, 종류 u32 (1 num, 4 percent, 5 percentile, 7 formula),
+    0 ×20, 끝에 cce u32 다시 (`num 2` → `1E 02 00`, `formula $A$1` → `44 00000000 0000`).
+  - `BrtColor14`(1055): FRT 머리 4 + BrtColor 8 (564 와 같은 꼴). 쓰인 색만 테두리 → 음수 막대 → 음수 테두리 → 축 순서로
+    쓴다 (`x14:fillColor` 는 쓰지 않는다 — 버린다). 테두리만이면 하나, cf_dv 의 음수·축이면 둘 — 한셀은 둘 다 바르게
+    되읽지만 어느 색인지 가리는 칸은 아직 찾지 못했다 (레코드 자체에는 없다).
 - 유효성: `BrtBeginDVals`(0, 0, 0, 0, 개수), 플래그 = 종류 | 오류 모양<<4 | 0x100 빈 칸 | 0x200 목록 숨김 |
   0x40000 입력 메시지 | 0x80000 오류 메시지 | 연산자<<20. 수식 기준은 첫 범위의 왼쪽 위 셀.
 - 자동 필터: 사용자 지정 문자열 조건은 `vts 6`, 값 칸 `00 00 cch 00 00 00 00 00` + 문자열. 상위/하위는 플래그에 0x04 를
@@ -248,7 +260,11 @@ XML 이 같은데 바이너리가 다른 칸 — rcell 은 가장 흔한 값을 
 순서, 몇몇 서식 파일의 XTI 순서와 쓰이지 않는 XTI, XF 의 순서가 바뀐 문서 하나, 쓰이지 않는 글꼴 하나, 차등 서식의
 이중 회계 밑줄(XML 은 단일 회계로 쓴다), 데이터 막대의 GUID 와 XML x14 확장의 세부(rcell 모델에 없다), 상위/하위·동적
 필터가 데이터로 계산한 값, `BrtAbsPath15` 의 폴더. rcell 모델에 없어 다른 것: 메모 VML 도형 (4.1절), 다시 부호화한
-그림과 조작한 XML 의 그림 앵커 정규화 (2.1절).
+그림과 조작한 XML 의 그림 앵커 정규화 (2.1절), 데이터 막대의 x14 확장 (`x14:dataBar` 의 `gradient`·`border`·`direction`·
+`axisPosition`·음수 막대 색 같음 여부, `x14:cfvo` 의 autoMin/autoMax, 막대·테두리·음수·축 색 — `BrtBeginDatabar14`(1051)
+뒷부분, `BrtCFVO14`(1050) 종류, `BrtColor14`(1055)). rcell 은 확장이 없는 문서에 한셀이 쓰는 기본값(1051 `01 01 00 06 00`,
+cfvo 2·3)을 쓰므로, 확장이 있는 문서(cf_dv: 단색 막대, autoMin/autoMax, 음수 빨강)를 한셀이 rcell 바이너리로 읽으면
+그라데이션 막대·cfvo min/max·음수 색 없음이 된다. `rcell diff` 는 x14 확장을 비교하지 않아 한셀 읽기 대조에 드러나지 않는다.
 
 ### 4.10 구조 잠금 문서의 암호화 컨테이너 (`src/binary/encrypt.rs`)
 
