@@ -1488,13 +1488,22 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
                     let range = crate::model::CellRange::parse(&h.range)
                         .map(|r| r.to_string())
                         .unwrap_or_else(|| h.range.clone());
+                    // 화면 설명: 주소를 되풀이한 것은 없는 것으로 본다 — 한셀은 레거시의 설명을 저장하지 않고,
+                    // 레거시를 읽을 때 주소(대상, 없으면 위치)를 설명으로 채운다 (하이퍼링크 대조 실험). 줄 바꿈은
+                    // 빈칸으로: 한셀은 XML 속성에 줄 바꿈을 그대로 써서 다시 읽으면 빈칸이 된다
+                    let tip = h
+                        .tooltip
+                        .as_deref()
+                        .filter(|t| Some(*t) != h.target.as_deref().or(h.location.as_deref()))
+                        .map(|t| t.replace(['\n', '\r', '\t'], " "));
                     format!(
-                        "{range}→{}{}",
+                        "{range}→{}{}{}",
                         h.target.as_deref().unwrap_or(""),
                         h.location
                             .as_deref()
                             .map(|l| format!("#{l}"))
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
+                        tip.map(|t| format!(" ({t:?})")).unwrap_or_default()
                     )
                 })
                 .collect::<Vec<_>>()

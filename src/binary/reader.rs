@@ -1532,6 +1532,8 @@ fn read_sheet(
             _ => None,
         }
     };
+    // 앞 하이퍼링크의 관계 ID·위치 (한셀이 다음 레코드에 남기는 값을 가린다)
+    let mut last_link: Option<(Option<String>, String)> = None;
     // 배열 수식의 범위, 데이터 표 (왼쪽 위 셀, 수식) — 표는 셀을 다 읽은 뒤 붙인다
     let mut arrays: Vec<CellRange> = Vec::new();
     let mut tables: Vec<(CellRef, Formula)> = Vec::new();
@@ -2346,27 +2348,43 @@ fn read_sheet(
                 }
             }
             494 => {
-                let h = (|| -> Option<Hyperlink> {
+                // BrtHLink: RfX, 관계 ID (XLNullableWideString), 위치, 화면 설명, 표시 글 (XLWideString).
+                // 한셀의 바이너리 쓰기는 관계 ID·위치가 없는 링크에 앞 레코드의 값을 그대로 남긴다 (하이퍼링크 대조
+                // 실험: 위치만 있는 링크에 앞 링크의 rId1, 주소만 있는 링크에 앞 링크의 위치). 앞 레코드와 한쪽만
+                // 같으면 그쪽은 남은 값으로 보고 버린다 — 주소와 위치가 함께 바뀌는 링크는 그대로 둔다
+                let h = (|| -> Option<(Hyperlink, Option<String>, String)> {
                     let (r1, r2, c1, c2) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
-                    let rel = r.nwstr()?;
+                    let rel = r.nwstr()?.filter(|s| !s.is_empty());
                     let location = r.wstr()?;
                     let tooltip = r.wstr()?;
                     let display = r.wstr()?;
-                    Some(Hyperlink {
+                    let (mut keep_rel, mut keep_loc) = (rel.clone(), location.clone());
+                    if let Some((prev_rel, prev_loc)) = &last_link {
+                        let same_rel = rel.is_some() && rel == *prev_rel;
+                        let same_loc = !location.is_empty() && location == *prev_loc;
+                        if same_rel && !same_loc {
+                            keep_rel = None;
+                        } else if same_loc && !same_rel {
+                            keep_loc = String::new();
+                        }
+                    }
+                    let h = Hyperlink {
                         range: CellRange {
                             start: CellRef { row: r1, col: c1 },
                             end: CellRef { row: r2, col: c2 },
                         }
                         .to_string(),
-                        location: (!location.is_empty()).then_some(location),
-                        target: rel
+                        location: (!keep_loc.is_empty()).then_some(keep_loc),
+                        target: keep_rel
                             .and_then(|id| rel_by_id.get(id.as_str()).map(|r| r.target.clone())),
                         tooltip: (!tooltip.is_empty()).then_some(tooltip),
                         display: (!display.is_empty()).then_some(display),
-                    })
+                    };
+                    Some((h, rel, location))
                 })();
-                if let Some(h) = h {
+                if let Some((h, rel, location)) = h {
                     sheet.hyperlinks.push(h);
+                    last_link = Some((rel, location));
                 }
             }
             _ => {}
@@ -2693,6 +2711,53 @@ mod tests {
         let d = t.data_table.unwrap();
         assert!(d.two_d && d.row_input);
         assert_eq!((d.r1.as_deref(), d.r2.as_deref()), (Some("D2"), Some("D1")));
+    }
+
+    /// 하이퍼링크 대조 실험: 한셀은 관계 ID·위치가 없는 링크에 앞 링크의 값을 남긴다
+    #[test]
+    fn hyperlink_fields_left_over_from_previous_record() {
+        let w = |s: &str| {
+            let mut b = le(&[s.encode_utf16().count() as u32]);
+            b.extend(s.encode_utf16().flat_map(u16::to_le_bytes));
+            b
+        };
+        let link = |row: u32, rel: &str, loc: &str, tip: &str| {
+            [le(&[row, row, 0, 0]), w(rel), w(loc), w(tip), w("")].concat()
+        };
+        let mut s = Vec::new();
+        s.extend(rec(494, &link(0, "rId1", "", "A")));
+        s.extend(rec(494, &link(1, "rId1", "'S'!B5", "B")));
+        s.extend(rec(494, &link(2, "rId2", "'S'!B5", "")));
+        s.extend(rec(494, &link(3, "rId3", "part2", "")));
+        let rels = [
+            ("rId1", "https://a/"),
+            ("rId2", "mailto:b"),
+            ("rId3", "file:///c"),
+        ]
+        .map(|(id, t)| Relationship {
+            id: id.into(),
+            rel_type: "hyperlink".into(),
+            target: t.into(),
+            external: true,
+        });
+        let mut sheet = Sheet::default();
+        let wb = Workbook::default();
+        read_sheet(&s, &mut sheet, &wb, &rels, (&Vec::new(), &Vec::new())).unwrap();
+        let v: Vec<_> = sheet
+            .hyperlinks
+            .iter()
+            .map(|h| (h.target.as_deref(), h.location.as_deref()))
+            .collect();
+        assert_eq!(
+            v,
+            [
+                (Some("https://a/"), None),
+                (None, Some("'S'!B5")),
+                (Some("mailto:b"), None),
+                (Some("file:///c"), Some("part2")),
+            ]
+        );
+        assert_eq!(sheet.hyperlinks[1].tooltip.as_deref(), Some("B"));
     }
 
     /// 색 조합 실험: 종류 없이 쓰인 색을 플래그로 자리에 놓는다

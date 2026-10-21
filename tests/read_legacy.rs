@@ -633,6 +633,22 @@ fn formula_stream() -> Vec<u8> {
         ],
     );
     b.rec(0x0006, &formula(3, 5, &[0x02, 2, 0, 0, 0, 5, 0]));
+    // A9: 파일 모니커 + 위치 (한셀이 쓰는 HLINK), 그리고 [MS-XLS] HLINKTOOLTIP (한셀은 쓰지 않는다)
+    let mut hl = vec![8, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0];
+    hl.extend_from_slice(&[
+        0xd0, 0xc9, 0xea, 0x79, 0xf9, 0xba, 0xce, 0x11, 0x8c, 0x82, 0x00, 0xaa, 0x00, 0x4b, 0xa9,
+        0x0b, 2, 0, 0, 0, 0x09, 0, 0, 0, 0x03, 0x03, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0,
+        0x46, 0, 0, 9, 0, 0, 0,
+    ]);
+    hl.extend_from_slice(b"book.xls\0");
+    hl.extend_from_slice(&[0xff, 0xff, 0xad, 0xde]);
+    hl.extend_from_slice(&[0; 24]);
+    hl.extend_from_slice(&6u32.to_le_bytes());
+    hl.extend(utf16("part2\0"));
+    b.rec(0x01B8, &hl);
+    let mut tip = vec![0x00, 0x08, 8, 0, 8, 0, 0, 0, 0, 0];
+    tip.extend(utf16("팁\0"));
+    b.rec(0x0800, &tip);
     b.rec(0x000A, &[]);
     // Sheet2: A1 = Sheet1 범위의 L (이름 1), B1 = 자기 시트의 L (이름 2)
     at.push(b.rec(0x0809, &bof(0x0010)) as u32);
@@ -671,6 +687,10 @@ fn array_formulas_data_tables_and_local_names() {
     let s2 = &wb.sheets[1];
     assert_eq!(f(s2, 0, 0).unwrap().text, "Sheet1!L");
     assert_eq!(f(s2, 0, 1).unwrap().text, "L");
+    let h = &s.hyperlinks[0];
+    assert_eq!(h.target.as_deref(), Some(r".\book.xls"));
+    assert_eq!(h.location.as_deref(), Some("part2"));
+    assert_eq!(h.tooltip.as_deref(), Some("팁"));
     let note = wb.defined_names.iter().find(|n| n.name == "Note").unwrap();
     assert_eq!(note.comment.as_deref(), Some("설명"));
     assert_eq!(wb.defined_names.iter().filter(|n| n.name == "L").count(), 2);

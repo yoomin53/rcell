@@ -2919,10 +2919,33 @@ fn read_sheet(
                 }
             }
             0x0800 => {
-                // HLINKTOOLTIP: frtRefHeaderNoGrbit(rt u16 + ref) + wzTooltip
-                if let Some(last) = sheet.hyperlinks.last_mut() {
-                    let body = d.get(4 + 12..).unwrap_or_default();
-                    last.tooltip = Some(crate::text::utf16le_nul(body));
+                // HLINKTOOLTIP ([MS-XLS]): frtRefHeaderNoGrbit = rt u16 + Ref8U (행·열 u16 × 4) 10바이트, 그 뒤
+                // wzTooltip (UTF-16, NUL 끝). 한셀은 이 레코드를 쓰지도 읽지도 않는다 (하이퍼링크 대조 실험) — 다른
+                // 프로그램이 쓴 것을 위해 범위가 같은 하이퍼링크(없으면 마지막)에 붙인다
+                let (Some(_rt), Some(r1), Some(r2), Some(c1), Some(c2)) =
+                    (r.u16(), r.u16(), r.u16(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                let range = CellRange {
+                    start: CellRef {
+                        row: r1 as u32,
+                        col: c1 as u32,
+                    },
+                    end: CellRef {
+                        row: r2 as u32,
+                        col: c2 as u32,
+                    },
+                }
+                .to_string();
+                let tip = crate::text::utf16le_nul(d.get(10..).unwrap_or_default());
+                let i = sheet
+                    .hyperlinks
+                    .iter()
+                    .rposition(|h| h.range == range)
+                    .or_else(|| sheet.hyperlinks.len().checked_sub(1));
+                if let Some(h) = i.and_then(|i| sheet.hyperlinks.get_mut(i)) {
+                    h.tooltip = Some(tip);
                 }
             }
             _ => {}
@@ -3615,10 +3638,16 @@ fn parse_hlink(d: &[u8]) -> Option<Hyperlink> {
             h.target = read_hstr(&mut r);
         } else {
             let clsid = r.take(16)?;
-            // URL 모니커 {79EAC9E0-BAF9-11CE-8C82-00AA004BA90B}
-            if clsid[0] == 0xE0 && clsid[1] == 0xC9 {
-                let len = r.u32()? as usize;
-                h.target = Some(crate::text::utf16le_nul(r.take(len)?));
+            match (clsid[0], clsid[1]) {
+                // URL 모니커 {79EAC9E0-BAF9-11CE-8C82-00AA004BA90B}
+                (0xE0, 0xC9) => {
+                    let len = r.u32()? as usize;
+                    h.target = Some(crate::text::utf16le_nul(r.take(len)?));
+                }
+                // 파일 모니커 {00000303-0000-0000-C000-000000000046}
+                (0x03, 0x03) => h.target = file_moniker(&mut r),
+                // 모르는 모니커: 뒤의 위치를 찾을 수 없다
+                _ => return Some(h),
             }
         }
     }
@@ -3628,6 +3657,34 @@ fn parse_hlink(d: &[u8]) -> Option<Hyperlink> {
         h.location = Some(loc);
     }
     Some(h)
+}
+
+/// 파일 모니커 ([MS-OSHARED] FileMoniker): cAnti u16, ansiLength u32, ansiPath (NUL 끝), endServer u16, 판 u16,
+/// 예약 16 + 4, cbUnicodePathSize u32 (0 이 아니면 cbUnicodePathBytes u32, usKeyValue u16, UTF-16 경로).
+/// 한셀은 드라이브나 UNC 로 시작하지 않는 경로를 `.\` 를 붙인 상대 경로로 읽는다 (하이퍼링크 대조 실험:
+/// `file:///C:/docs/book.xlsx` → `.\file:///C:/docs/book.xlsx`), `cAnti` 만큼 `..\` 를 붙인다
+fn file_moniker(r: &mut Rd) -> Option<String> {
+    let anti = r.u16()? as usize;
+    let n = r.u32()? as usize;
+    let ansi = r.take(n)?;
+    r.take(2 + 2 + 16 + 4)?;
+    let unicode = match r.u32()? {
+        0 => None,
+        _ => {
+            let bytes = r.u32()? as usize;
+            r.take(2)?;
+            Some(crate::text::utf16le(r.take(bytes)?))
+        }
+    };
+    let path = unicode.unwrap_or_else(|| {
+        let end = ansi.iter().position(|&b| b == 0).unwrap_or(ansi.len());
+        String::from_utf8_lossy(&ansi[..end]).into_owned()
+    });
+    let absolute = path.get(1..2) == Some(":") || path.starts_with("\\\\");
+    Some(match anti {
+        0 if !absolute => format!(".\\{path}"),
+        k => format!("{}{path}", "..\\".repeat(k)),
+    })
 }
 
 /// 0xA001 문단 모양 레코드 (37바이트, 문단 번호가 있으면 41바이트).
