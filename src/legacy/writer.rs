@@ -313,7 +313,10 @@ pub(crate) fn filetime(s: &str) -> Option<u64> {
 // ---------------------------------------------------------------------------
 
 /// 레거시 스타일 XF 배치: 0 표준, 1–14 개요 상용구, 15 셀 서식 0, 16–20 내장 스타일 상용구(백분율·쉼표·쉼표[0]·
-/// 통화·통화[0]), 21부터 그 밖의 스타일, 그다음 나머지 셀 서식
+/// 통화·통화[0]), 21부터 그 밖의 스타일, 그다음 나머지 셀 서식.
+///
+/// 레거시에서 읽은 서식 표가 아니면(XML 등) 한셀이 XML 을 열 때처럼 21번에 셀 서식 0 의 부모 스타일 사본(이름 없음)을
+/// 두고 셀 서식 0(XF 15)의 부모로 삼는다 (관측: 말뭉치 XML 117개를 한셀로 열어 레거시로 저장하면 모두 이렇다)
 struct StyleLayout {
     /// 모델 cell_style_xfs 번호 → 레거시 XF 번호
     style: Vec<Option<u16>>,
@@ -321,6 +324,8 @@ struct StyleLayout {
     cell: Vec<u16>,
     /// 레거시 XF 순서대로: (모델 스타일 XF 인가, 모델 번호) — None = 상용구
     order: Vec<XfSlot>,
+    /// 셀 서식 0 의 부모를 바꾼다 (스타일 사본의 XF 번호)
+    cell0_parent: Option<u16>,
 }
 
 #[derive(Clone, Copy)]
@@ -331,6 +336,8 @@ enum XfSlot {
         fmt: u16,
     },
     Style(usize),
+    /// 스타일의 이름 없는 사본 (한셀이 XML 을 열 때 만드는 XF 21)
+    StyleCopy(usize),
     Cell(usize),
 }
 
@@ -398,6 +405,15 @@ fn layout_styles(wb: &Workbook) -> StyleLayout {
         });
     }
     let mut next = 21u16;
+    let mut cell0_parent = None;
+    if !st.from_legacy {
+        let p = st.cell_xfs.first().and_then(|x| x.xf_id).unwrap_or(0) as usize;
+        if p < nstyle {
+            order.push(XfSlot::StyleCopy(p));
+            cell0_parent = Some(next);
+            next += 1;
+        }
+    }
     for (i, slot) in style.iter_mut().enumerate().take(nstyle) {
         if slot.is_none() && (named.contains(&i) || used.contains(&i)) {
             *slot = Some(next);
@@ -411,7 +427,12 @@ fn layout_styles(wb: &Workbook) -> StyleLayout {
         order.push(XfSlot::Cell(i));
         next += 1;
     }
-    StyleLayout { style, cell, order }
+    StyleLayout {
+        style,
+        cell,
+        order,
+        cell0_parent,
+    }
 }
 
 /// 글꼴 배치: 레거시 글꼴 번호 4 는 비워 둔다 (BIFF 규칙). 모델의 4번이 0번의 사본이고 아무도 쓰지 않으면
@@ -641,8 +662,8 @@ fn parashape_record(p: &ParaShape, align: u8) -> Vec<u8> {
         .u8(0)
         .u8(num)
         .u8(p.font_line_height.unwrap_or(false) as u8);
-    if num != 0 {
-        // 문단 번호 ID 는 0 으로 저장된다 (8절)
+    // 문단 번호 ID 는 번호(2)·글머리표(3)에만 있고 0 으로 저장된다 (8절). 종류 1 은 37바이트 그대로 (관측: craft/dxfprobe)
+    if num >= 2 {
         b.i32(0);
     }
     b.take()
@@ -674,15 +695,49 @@ fn edge_dg(e: Option<&BorderEdge>) -> u32 {
         .unwrap_or(0) as u32
 }
 
-/// XF 레코드. `parent` = 셀 서식의 부모 스타일 XF (스타일이면 None), `para_ref` = 0xA011 번호
-fn xf_record(
-    xf: &Xf,
+/// XF 레코드 하나를 쓰는 조건
+struct XfOpts {
+    /// 스타일 XF 인가
     style: bool,
+    /// 셀 서식의 부모 스타일 XF 번호
     parent: u16,
+    /// 0xA011 번호 (문단 모양이 있으면)
     para_ref: Option<u32>,
-    ctx: &XfCtx,
+    /// XFEXT 가 따로 있다 (fHasXFExt)
     has_ext: bool,
-) -> Vec<u8> {
+    /// 적용 비트에 더할 것 (한셀이 XML 을 열 때 켜는 비트, [`implied_used`])
+    extra_used: u8,
+    /// 선 없는 가장자리의 색을 쓰지 않는다 (한셀이 XML 을 열 때의 표준·내장 스타일 XF)
+    plain_edges: bool,
+}
+
+/// 정렬 비교용: XML 의 생략값을 채운다
+fn align_key(xf: &Xf) -> String {
+    let a = xf.alignment.clone().unwrap_or_default();
+    format!(
+        "{}/{}/{}/{}/{}/{}/{}",
+        a.horizontal.as_deref().unwrap_or("general"),
+        a.vertical.as_deref().unwrap_or("bottom"),
+        a.wrap_text,
+        a.text_rotation.unwrap_or(0),
+        a.indent.unwrap_or(0),
+        a.shrink_to_fit,
+        a.reading_order.unwrap_or(0)
+    )
+}
+
+/// 한셀이 XML 을 열 때 켜는 적용 비트: 셀 서식의 정렬이 부모 스타일과 다르면 `applyAlignment` 가 없어도
+/// 0x10 을 켠다 (관측: 서식 파일을 XML 로 열어 레거시·XML 로 저장하면 세로 정렬만 다른 셀 서식에 0x10 이 생긴다)
+fn implied_used(xf: &Xf, parent: Option<&Xf>) -> u8 {
+    match parent {
+        Some(p) if align_key(xf) != align_key(p) => 0x10,
+        _ => 0,
+    }
+}
+
+/// XF 레코드
+fn xf_record(xf: &Xf, o: &XfOpts, ctx: &XfCtx) -> Vec<u8> {
+    let (style, parent, para_ref, has_ext) = (o.style, o.parent, o.para_ref, o.has_ext);
     let wb = ctx.wb;
     let st = &wb.styles;
     let fill = st.fills.get(xf.fill_id as usize);
@@ -715,7 +770,8 @@ fn xf_record(
         .and_then(|v| V_ALIGN.iter().position(|x| *x == v))
         .unwrap_or(2) as u8;
     let wrap = a.is_some_and(|a| a.wrap_text) as u8;
-    let trot = a.and_then(|a| a.text_rotation).unwrap_or(0).clamp(0, 255) as u8;
+    // 글자 회전(trot)은 늘 0 이다: 한셀의 레거시 저장은 회전을 쓰지 않는다 (회전 대조 실험 45·90·135·180·30·255
+    // 모두 0, 레거시를 읽을 때는 trot 를 읽는다 — 10절)
     let shrink = a.is_some_and(|a| a.shrink_to_fit) as u8;
     // 한셀은 들여쓰기 칸을 쓰지 않는다 — 문단 모양의 여백으로 들여쓴다 (5.6절)
     let indent = if xf
@@ -729,7 +785,7 @@ fn xf_record(
         a.and_then(|a| a.indent).unwrap_or(0).min(15) as u8
     };
     let ro = a.and_then(|a| a.reading_order).unwrap_or(0).min(3) as u8;
-    let mut used = 0u8;
+    let mut used = o.extra_used;
     for (on, bit) in [
         (xf.apply_number_format, 0x04),
         (xf.apply_font, 0x08),
@@ -795,7 +851,7 @@ fn xf_record(
         .u16(xf.num_fmt_id as u16)
         .u16(p)
         .u8(alc | (wrap << 3) | (alcv << 4))
-        .u8(trot)
+        .u8(0)
         .u8(indent | (shrink << 4) | (ro << 6))
         .u8(used)
         .u32(border1)
@@ -810,17 +866,17 @@ fn xf_record(
             b.u16(2);
         }
     }
-    // 선이 있는 테두리의 자동 색은 0xDFFFFFFF (관측: 서식 파일 — COM 으로 만든 문서는 0xFFFFFFFF + XFEXT 자동)
+    // 선이 있는 테두리의 자동 색은 0xDFFFFFFF (관측: 서식 파일 — COM 으로 만든 문서는 0xFFFFFFFF + XFEXT 자동).
+    // 선이 없어도 색이 있으면 쓴다: XML 을 연 한셀은 `<x:left><x:color rgb="ff000000"/></x:left>` 를 0 으로,
+    // `<x:top><x:color auto="1"/></x:top>` 를 0xDFFFFFFF 로 쓴다 (10절)
     let edge_cref = |x: Option<&BorderEdge>| -> u32 {
-        if edge_dg(x) == 0 {
+        let color = x.and_then(|e| e.color.as_ref());
+        if edge_dg(x) != 0 {
+            cref_of(color, wb, 0xDFFF_FFFF, 0xDFFF_FFFF)
+        } else if o.plain_edges {
             0xFFFF_FFFF
         } else {
-            cref_of(
-                x.and_then(|e| e.color.as_ref()),
-                wb,
-                0xDFFF_FFFF,
-                0xDFFF_FFFF,
-            )
+            cref_of(color, wb, 0xFFFF_FFFF, 0xDFFF_FFFF)
         }
     };
     let (bgc, fgc) = if fls == 0 {
@@ -1479,7 +1535,7 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
     let mut xf_para: Vec<Option<u32>> = Vec::new();
     let slot_xf = |s: XfSlot| -> Option<&Xf> {
         match s {
-            XfSlot::Style(i) => wb.styles.cell_style_xfs.get(i),
+            XfSlot::Style(i) | XfSlot::StyleCopy(i) => wb.styles.cell_style_xfs.get(i),
             XfSlot::Cell(i) => wb.styles.cell_xfs.get(i),
             XfSlot::Boiler { .. } => None,
         }
@@ -1532,13 +1588,16 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
                 x.hancom = None;
                 (x, true)
             }
-            XfSlot::Style(i) => (wb.styles.cell_style_xfs[i].clone(), true),
+            XfSlot::Style(i) | XfSlot::StyleCopy(i) => (wb.styles.cell_style_xfs[i].clone(), true),
             XfSlot::Cell(i) => (wb.styles.cell_xfs[i].clone(), false),
         };
-        let parent = xf
-            .xf_id
-            .and_then(|p| styles.style.get(p as usize).copied().flatten())
-            .unwrap_or(0);
+        let parent = match (slot, styles.cell0_parent) {
+            (XfSlot::Cell(0), Some(p)) => p,
+            _ => xf
+                .xf_id
+                .and_then(|p| styles.style.get(p as usize).copied().flatten())
+                .unwrap_or(0),
+        };
         let exts = match slot {
             XfSlot::Boiler { .. } => Vec::new(),
             _ => xf_exts(&xf, wb),
@@ -1547,10 +1606,30 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
         if has_ext {
             xfexts.push((k as u16, exts));
         }
-        out.rec(
-            0x00E0,
-            &xf_record(&xf, style, parent, xf_para[k], &xf_ctx, has_ext),
-        );
+        let from_xml = !wb.styles.from_legacy;
+        let extra_used = match slot {
+            XfSlot::Cell(_) if from_xml => implied_used(
+                &xf,
+                wb.styles.cell_style_xfs.get(xf.xf_id.unwrap_or(0) as usize),
+            ),
+            _ => 0,
+        };
+        // 표준·내장 스타일 자리(0–20)는 한셀 자신의 것이라 선 없는 가장자리 색이 없다
+        let plain_edges = from_xml
+            && match slot {
+                XfSlot::Boiler { .. } => true,
+                XfSlot::Style(i) => styles.style[i].is_some_and(|x| x <= 20),
+                _ => false,
+            };
+        let opts = XfOpts {
+            style,
+            parent,
+            para_ref: xf_para[k],
+            has_ext,
+            extra_used,
+            plain_edges,
+        };
+        out.rec(0x00E0, &xf_record(&xf, &opts, &xf_ctx));
     }
     for (ixfe, exts) in xfexts {
         let mut b = frt(0x087D);

@@ -57,17 +57,21 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
     for l in &mut w.external_links {
         l.sheet_data.clear();
     }
-    // 줄 간격 atLeast 는 betweenLines 와 같은 값으로 저장된다
     for xf in w
         .styles
         .cell_xfs
         .iter_mut()
         .chain(w.styles.cell_style_xfs.iter_mut())
     {
+        // 줄 간격 atLeast 는 betweenLines 와 같은 값으로 저장된다
         if let Some(p) = xf.hancom.as_mut().and_then(|h| h.parashape.as_mut())
             && p.line_spacing_type.as_deref() == Some("atLeast")
         {
             p.line_spacing_type = Some("betweenLines".into());
+        }
+        // 글자 회전은 저장되지 않는다 (한셀의 레거시 저장은 XF 의 trot 를 늘 0 으로 쓴다)
+        if let Some(a) = &mut xf.alignment {
+            a.text_rotation = None;
         }
     }
     // 외곽선 종류(한컴)가 있으면 ECMA 외곽선도 켜진 것으로 읽힌다 (실선이 아니어도)
@@ -100,6 +104,16 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
         // 선의 두께·모양이 지정되지 않은 도형은 기본값(9525 EMU, 실선)으로 읽힌다
         fn lines(v: &mut [crate::model::Shape]) {
             for s in v {
+                // 앵커 오프셋은 정수 픽셀로 올려 저장된다
+                let snap = |off: &mut i64| {
+                    *off = super::art::anchor_px(*off) * crate::units::EMU_PER_PX;
+                };
+                snap(&mut s.anchor.from.col_off);
+                snap(&mut s.anchor.from.row_off);
+                if let Some(t) = &mut s.anchor.to {
+                    snap(&mut t.col_off);
+                    snap(&mut t.row_off);
+                }
                 // 그림의 채우기·선은 한셀처럼 '없음' 으로 쓴다
                 if s.kind == ShapeKind::Picture {
                     s.fill.get_or_insert(Paint::None);

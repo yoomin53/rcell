@@ -211,6 +211,11 @@ pub fn compare(a: &[u8], b: &[u8]) -> RecDiff {
                 used_a[pa] = true;
                 used_b[pb] = true;
                 let (x, y) = (&ra[ga[pa]], &rb[gb[pb]]);
+                // 차이가 너무 많아 1) 에서 못 맞춘 같은 레코드
+                if x.data == y.data {
+                    r.same += 1;
+                    continue;
+                }
                 r.changed += 1;
                 r.by_type.entry(x.rtype).or_default().0 += 1;
                 let at = x

@@ -172,14 +172,19 @@ fn draw_rgb(c: &DrawColor) -> Option<u32> {
     u32::from_str_radix(v, 16).ok()
 }
 
+/// 앵커 오프셋(EMU)을 한셀처럼 정수 픽셀로 올린다 (관측: craft/odd_anchor 의 1.30→2, 2.92→3, 3.50→4, 5.70→6 px)
+pub(crate) fn anchor_px(off: i64) -> i64 {
+    (off.max(0) + crate::units::EMU_PER_PX - 1) / crate::units::EMU_PER_PX
+}
+
 /// 모델 앵커 → 레거시 (col1, dx1, rw1, dy1, col2, dx2, rw2, dy2). dx 는 (열 픽셀 − 1)의 1/32768, dy 는 (행 픽셀 − 1)의
-/// 1/8192 (6.2절, 읽기의 반대)
+/// 1/8192 (6.2절, 읽기의 반대). 오프셋은 정수 픽셀로 올리고, 칸 끝까지면 dx 32767·dy 8191 로 자른다 (관측)
 fn legacy_anchor(a: &Anchor, ctx: &SheetCtx) -> [u32; 8] {
     let mdw = crate::units::max_digit_width(ctx.wb);
     let sheet = ctx.sheet;
     let col_d = |c: u32, off: i64| -> u32 {
         let eff = crate::units::sheet_col_px(sheet, c, mdw).saturating_sub(1) as f64;
-        let px = (off as f64 / crate::units::EMU_PER_PX as f64).round();
+        let px = anchor_px(off) as f64;
         if eff <= 0.0 {
             0
         } else {
@@ -188,11 +193,11 @@ fn legacy_anchor(a: &Anchor, ctx: &SheetCtx) -> [u32; 8] {
     };
     let row_d = |r: u32, off: i64| -> u32 {
         let eff = crate::units::sheet_row_px(sheet, r).saturating_sub(1) as f64;
-        let px = (off as f64 / crate::units::EMU_PER_PX as f64).round();
+        let px = anchor_px(off) as f64;
         if eff <= 0.0 {
             0
         } else {
-            ((px * 8192.0 / eff).round() as i64).clamp(0, 0x7FFF) as u32
+            ((px * 8192.0 / eff).round() as i64).clamp(0, 0x1FFF) as u32
         }
     };
     let from = a.from;

@@ -699,7 +699,13 @@ fn parse_xf(data: &[u8], palette: &[u32]) -> Option<XfParts> {
 
     let edge = |dg: u32, icv: u32, rgb: u32| -> Option<BorderEdge> {
         if dg == 0 {
-            return None;
+            // 선 없는 가장자리에도 한셀은 색을 남긴다 (XML 의 `<x:left><x:color …/></x:left>`, 10절)
+            return colorref(rgb)
+                .filter(|_| rgb != 0xFFFF_FFFF)
+                .map(|c| BorderEdge {
+                    style: None,
+                    color: Some(c),
+                });
         }
         Some(BorderEdge {
             style: BORDER_STYLES.get(dg as usize).map(|s| s.to_string()),
@@ -1168,6 +1174,7 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         dxfs,
         table_styles,
         abstract_nums,
+        from_legacy: true,
         ..Default::default()
     };
     let mut fill_index: Vec<(String, u32)> = Vec::new();

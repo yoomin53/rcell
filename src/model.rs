@@ -2061,6 +2061,11 @@ pub struct Styles {
     /// 문단 번호 정의 (`x:abstractNums`, 한컴 확장 — 문단 모양의 `abstractNumId` 가 가리킨다)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub abstract_nums: Vec<AbstractNum>,
+    /// 레거시 XF 표를 그대로 읽은 것 (레거시 읽기가 켠다): 스타일 XF 가 레거시의 상용구(0–20)를 담고 셀 서식의
+    /// 적용 비트·테두리 색이 저장된 그대로다. 꺼져 있으면(XML 등) 레거시 쓰기가 한셀이 XML 을 열 때처럼 서식 표를
+    /// 고쳐 쓴다 (`docs/format/cell-legacy.md` 10절)
+    #[serde(skip)]
+    pub from_legacy: bool,
 }
 
 /// `x:tableStyles`
