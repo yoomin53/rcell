@@ -113,7 +113,8 @@ pub fn erfc(x: f64) -> f64 {
     if x < 0.0 {
         return 2.0 - erfc(-x);
     }
-    if x <= 2.5 {
+    // 1.5 넘으면 1 − erf 가 자릿수를 잃는다 — 연분수 (ERFC(2.5), 대조 실험 engineering)
+    if x <= 1.5 {
         1.0 - erf_series(x)
     } else if x > 27.0 {
         0.0

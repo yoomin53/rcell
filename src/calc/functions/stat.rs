@@ -9,6 +9,7 @@ use crate::calc::fm::Fm;
 use std::rc::Rc;
 
 use super::math::{grid, ifs_mask, resized};
+use super::hcnum as hc;
 use super::special as sp;
 use super::{
     A, Agg, Arg, FnSpec, MANY, R, V, bool_or, collect_numbers, f, flatten, num_arg, num_or, opt, pairs,
@@ -195,8 +196,15 @@ pub const FNS: &[FnSpec] = &[
     }),
     f("GAMMALN", 1, 1, V, gammaln),
     f("GAMMALN.PRECISE", 1, 1, V, gammaln),
-    // GAUSS·PHI 는 소수 9자리로 반올림 (PHI(0) = 0.39894228000000004, 대조 실험 stat·normal)
-    f("GAUSS", 1, 1, V, |c, a| num(round9(sp::norm_s_cdf(try_v!(num_arg(c, a, 0))) - 0.5))),
+    // GAUSS·PHI 는 소수 9자리로 반올림 (PHI(0) = 0.39894228000000004, 대조 실험 stat·normal).
+    // GAUSS 는 체비쇼프 근사 erfc 로 (GAUSS(1E-9) = −1.5E-8), 0 만 따로 0 (대조 실험 norm4)
+    f("GAUSS", 1, 1, V, |c, a| {
+        let z = try_v!(num_arg(c, a, 0));
+        if z == 0.0 {
+            return Value::Number(0.0);
+        }
+        num(round9(0.5 - 0.5 * hc::erfcc(z / std::f64::consts::SQRT_2)))
+    }),
     f("PHI", 1, 1, V, |c, a| num(round9(sp::norm_s_pdf(try_v!(num_arg(c, a, 0)))))),
     // 정규 분포
     f("NORM.DIST", 4, 4, V, norm_dist),
@@ -204,8 +212,9 @@ pub const FNS: &[FnSpec] = &[
     f("NORM.S.DIST", 2, 2, V, |c, a| {
         let z = try_v!(num_arg(c, a, 0));
         let cum = try_v!(bool_or(c, a, 1, true));
-        num(if cum { sp::norm_s_cdf(z) } else { sp::norm_s_pdf(z) })
+        num(if cum { hc::norm_cdf(z) } else { sp::norm_s_pdf(z) })
     }),
+    // NORMSDIST 만은 정확하다 (대조 실험 norm4)
     f("NORMSDIST", 1, 1, V, |c, a| num(sp::norm_s_cdf(try_v!(num_arg(c, a, 0))))),
     f("NORM.INV", 3, 3, V, norm_inv),
     f("NORMINV", 3, 3, V, norm_inv),
@@ -254,7 +263,7 @@ pub const FNS: &[FnSpec] = &[
         if x < 0.0 || !(1.0..=1e10).contains(&df) || (x == 0.0 && !cum) {
             return Value::Error(ErrorKind::Num);
         }
-        num(round9(if cum { sp::chisq_cdf(x, df) } else { sp::chisq_pdf(x, df) }))
+        num(round9(if cum { hc::gammp(df / 2.0, x / 2.0) } else { sp::chisq_pdf(x, df) }))
     }),
     f("CHISQ.DIST.RT", 2, 2, V, chi_rt),
     f("CHIDIST", 2, 2, V, chi_rt),
@@ -282,7 +291,7 @@ pub const FNS: &[FnSpec] = &[
         if x == 0.0 && !cum {
             return Value::Number(0.0);
         }
-        num(round9(if cum { sp::f_cdf(x, d1, d2) } else { sp::f_pdf(x, d1, d2) }))
+        num(round9(if cum { hc::f_cdf(x, d1, d2) } else { sp::f_pdf(x, d1, d2) }))
     }),
     f("F.DIST.RT", 3, 3, V, f_rt),
     f("FDIST", 3, 3, V, f_rt),
@@ -306,15 +315,16 @@ pub const FNS: &[FnSpec] = &[
         if !(1.0..1e10).contains(&df) {
             return Value::Error(ErrorKind::Num);
         }
-        num(round9(if cum { sp::t_cdf(x, df) } else { sp::t_pdf(x, df) }))
+        num(round9(if cum { hc::t_cdf(x, df) } else { sp::t_pdf(x, df) }))
     }),
+    // T.DIST.2T·T.DIST.RT 는 밀도를 수치 적분한다 (hcnum, 대조 실험 dist4·tdist5)
     f("T.DIST.2T", 2, 2, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
         let df = try_v!(num_arg(c, a, 1)).trunc();
         if x < 0.0 || df < 1.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num(2.0 * sp::t_tail(x, df))
+        num(1.0 - 2.0 * hc::t_central(x, df))
     }),
     // T.DIST.RT 는 x < 0 이면 #NUM! (대조 실험 dist)
     f("T.DIST.RT", 2, 2, V, |c, a| {
@@ -323,7 +333,7 @@ pub const FNS: &[FnSpec] = &[
         if df < 1.0 || x < 0.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num(1.0 - sp::t_cdf(x, df))
+        num(0.5 - hc::t_central(x, df))
     }),
     // TDIST 는 자유도의 소수 부분을 버리지 않는다 (TDIST(10,2.9,2), 대조 실험 dist)
     f("TDIST", 3, 3, V, |c, a| {
@@ -1333,7 +1343,7 @@ fn norm_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let z = (x - m) / s;
-    num(if cum { sp::norm_s_cdf(z) } else { sp::norm_s_pdf(z) / s })
+    num(if cum { hc::norm_cdf(z) } else { sp::norm_s_pdf(z) / s })
 }
 
 fn norm_inv(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -1363,7 +1373,10 @@ fn lognorm_dist(ctx: &mut Ctx, a: &[Value], has_cum: bool) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let z = (x.mln() - m) / s;
-    num(if cum {
+    // LOGNORM.DIST 는 한셀 근사 정규 누적, 오래된 LOGNORMDIST 는 정확하다 (대조 실험 dist)
+    num(if cum && has_cum {
+        hc::norm_cdf(z)
+    } else if cum {
         sp::norm_s_cdf(z)
     } else {
         sp::norm_s_pdf(z) / (s * x)
@@ -1394,7 +1407,8 @@ fn confidence(ctx: &mut Ctx, a: &[Value], t: bool) -> Value {
     if t {
         return num(sp::t_inv(1.0 - alpha / 2.0, n - 1.0) * sd / n.sqrt());
     }
-    num(sp::norm_s_inv(1.0 - alpha / 2.0) * sd / n.sqrt())
+    // CONFIDENCE·CONFIDENCE.NORM 은 한셀 근사 정규 누적을 이분법으로 푼다 (결과가 k/2ⁿ, 대조 실험 norm4)
+    num(hc::norm_inv_bisect(1.0 - alpha / 2.0) * sd / n.sqrt())
 }
 
 /// ZTEST: 표준편차 0 은 #NUM! (대조 실험 dist)
@@ -1418,7 +1432,7 @@ fn ztest(ctx: &mut Ctx, a: &[Value]) -> Value {
     if sigma == 0.0 {
         return Value::Error(ErrorKind::Num);
     }
-    num(1.0 - sp::norm_s_cdf((m - x) / (sigma / n.sqrt())))
+    num(1.0 - hc::norm_cdf((m - x) / (sigma / n.sqrt())))
 }
 
 fn expon_dist(ctx: &mut Ctx, a: &[Value]) -> Value {

@@ -1,0 +1,414 @@
+// Copyright 2026 yoomin53 (https://github.com/yoomin53)
+// SPDX-License-Identifier: Apache-2.0
+//
+// rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
+
+//! 한셀이 정확한 식 대신 쓰는 근사 계산 (함수 대조 실험 dist4·norm4·norm5·tdist5·bessel4 에서 찾음).
+//!
+//! 엑셀 2010 에 새로 생긴 분포 함수 다수와 베셀 함수 일부는 오래된 교과서식 근사를 그대로 쓴다.
+//! 결과가 참값과 1E-10–1E-7 다르므로 한셀과 같은 값을 내려면 같은 근사를 따라야 한다.
+//!
+//! - 불완전 감마·베타 (CHISQ.DIST·T.DIST·F.DIST 누적): 급수와 연분수를 상대 변화 3E-7 에서 멈추고
+//!   (최대 100번), ln Γ 는 6항 란초시 근사. 오래된 CHIDIST·TDIST·FDIST 는 정확하다.
+//! - 정규 누적 (NORM.S.DIST·NORM.DIST·NORMDIST·LOGNORM.DIST 누적, Z.TEST, CONFIDENCE.NORM):
+//!   e^{-t²/2} 를 0..|z| 에서 8점 닫힌 뉴턴-코츠(무게는 소수 9자리로 반올림한 값)로 적분한다.
+//!   칸 수를 1부터 하나씩 늘려 앞 칸 수의 적분과 차이가 3E-7 보다 작아지면 멈추고, 1/2.506628275 를
+//!   곱한다. 그래서 큰 |z| 의 꼬리가 0 이 아니다 (NORM.S.DIST(−40,TRUE) = 8.87E-8). NORMSDIST 는 정확하다.
+//! - t 분포 양쪽·오른쪽 꼬리 (T.DIST.2T·T.DIST.RT): 같은 적분을 (1+u²/ν)^{-(ν+1)/2} 에 하고 상수
+//!   Γ((ν+1)/2)/(√(ν·3.141593)·Γ(ν/2)) 를 곱한다 (π 를 3.141593 으로).
+//! - GAUSS: 상대 오차 1.2E-7 의 체비쇼프 근사 erfc (GAUSS(1E-9) = −1.5E-8).
+//! - BESSELI: I_n(x) = (1/π')∫_0^{π'} 꼴의 적분 표현을 π' = 3.141592654 로 계산한 값.
+//! - BESSELK: A&S 9.8.1–9.8.8 다항식 근사와 올림 점화식 (BESSELK(2,0) = 0.11389388).
+
+// π·γ 를 일부러 짧게 쓴 상수가 한셀의 값이다
+#![allow(clippy::approx_constant)]
+
+use crate::calc::fm::Fm;
+
+/// 급수·연분수를 멈추는 상대 변화, 적분 칸 늘리기를 멈추는 차이
+const EPS: f64 = 3e-7;
+const ITMAX: usize = 100;
+const FPMIN: f64 = 1e-30;
+
+/// 6항 란초시 근사 ln Γ(x), x > 0
+pub fn gammln(x: f64) -> f64 {
+    const COF: [f64; 6] = [
+        76.180_091_729_471_46,
+        -86.505_320_329_416_77,
+        24.014_098_240_830_91,
+        -1.231_739_572_450_155,
+        0.120_865_097_386_617_9e-2,
+        -0.539_523_938_495_3e-5,
+    ];
+    let mut y = x;
+    let tmp = x + 5.5;
+    let tmp = tmp - (x + 0.5) * tmp.mln();
+    let mut ser = 1.000_000_000_190_015;
+    for c in COF {
+        y += 1.0;
+        ser += c / y;
+    }
+    -tmp + (2.506_628_274_631_000_5 * ser / x).mln()
+}
+
+/// 정규화한 하부 불완전 감마 P(a, x)
+pub fn gammp(a: f64, x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let gln = gammln(a);
+    if x < a + 1.0 {
+        let mut ap = a;
+        let mut del = 1.0 / a;
+        let mut sum = del;
+        for _ in 0..ITMAX {
+            ap += 1.0;
+            del *= x / ap;
+            sum += del;
+            if del.abs() < sum.abs() * EPS {
+                break;
+            }
+        }
+        sum * (-x + a * x.mln() - gln).mexp()
+    } else {
+        let mut b = x + 1.0 - a;
+        let mut c = 1.0 / FPMIN;
+        let mut d = 1.0 / b;
+        let mut h = d;
+        for i in 1..=ITMAX {
+            let an = -(i as f64) * (i as f64 - a);
+            b += 2.0;
+            d = an * d + b;
+            if d.abs() < FPMIN {
+                d = FPMIN;
+            }
+            c = b + an / c;
+            if c.abs() < FPMIN {
+                c = FPMIN;
+            }
+            d = 1.0 / d;
+            let del = d * c;
+            h *= del;
+            if (del - 1.0).abs() < EPS {
+                break;
+            }
+        }
+        1.0 - (-x + a * x.mln() - gln).mexp() * h
+    }
+}
+
+/// 불완전 베타의 연분수 (수정 Lentz)
+fn betacf(a: f64, b: f64, x: f64) -> f64 {
+    let (qab, qap, qam) = (a + b, a + 1.0, a - 1.0);
+    let mut c = 1.0;
+    let mut d = 1.0 - qab * x / qap;
+    if d.abs() < FPMIN {
+        d = FPMIN;
+    }
+    d = 1.0 / d;
+    let mut h = d;
+    for m in 1..=ITMAX {
+        let m = m as f64;
+        let m2 = 2.0 * m;
+        let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+        d = 1.0 + aa * d;
+        if d.abs() < FPMIN {
+            d = FPMIN;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < FPMIN {
+            c = FPMIN;
+        }
+        d = 1.0 / d;
+        h *= d * c;
+        let aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+        d = 1.0 + aa * d;
+        if d.abs() < FPMIN {
+            d = FPMIN;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < FPMIN {
+            c = FPMIN;
+        }
+        d = 1.0 / d;
+        let del = d * c;
+        h *= del;
+        if (del - 1.0).abs() < EPS {
+            break;
+        }
+    }
+    h
+}
+
+/// 정규화한 불완전 베타 I_x(a, b), 0 ≤ x ≤ 1
+pub fn betai(a: f64, b: f64, x: f64) -> f64 {
+    let bt = if x == 0.0 || x == 1.0 {
+        0.0
+    } else {
+        (gammln(a + b) - gammln(a) - gammln(b) + a * x.mln() + b * (1.0 - x).mln()).mexp()
+    };
+    if x < (a + 1.0) / (a + b + 2.0) {
+        bt * betacf(a, b, x) / a
+    } else {
+        1.0 - bt * betacf(b, a, 1.0 - x) / b
+    }
+}
+
+/// t 분포 누적 (T.DIST 누적, 소수 9자리 반올림 전)
+pub fn t_cdf(x: f64, df: f64) -> f64 {
+    let b = betai(df / 2.0, 0.5, df / (df + x * x));
+    if x > 0.0 { 1.0 - 0.5 * b } else { 0.5 * b }
+}
+
+/// F 분포 누적 (F.DIST 누적): 오른쪽 꼬리의 불완전 베타를 1 에서 뺀다
+/// (F.DIST(1,1,1,TRUE) = 0.499999982, 대조 실험 dist4)
+pub fn f_cdf(x: f64, d1: f64, d2: f64) -> f64 {
+    1.0 - betai(d2 / 2.0, d1 / 2.0, d2 / (d2 + d1 * x))
+}
+
+/// 체비쇼프 근사 erfc (상대 오차 1.2E-7)
+pub fn erfcc(x: f64) -> f64 {
+    let z = x.abs();
+    let t = 1.0 / (1.0 + 0.5 * z);
+    let ans = t
+        * (-z * z - 1.265_512_23
+            + t * (1.000_023_68
+                + t * (0.374_091_96
+                    + t * (0.096_784_18
+                        + t * (-0.186_288_06
+                            + t * (0.278_868_07
+                                + t * (-1.135_203_98 + t * (1.488_515_87 + t * (-0.822_152_23 + t * 0.170_872_77)))))))))
+            .mexp();
+    if x >= 0.0 { ans } else { 2.0 - ans }
+}
+
+/// 8점 닫힌 뉴턴-코츠 무게 (751, 3577, 1323, 2989)/17280 을 소수 9자리로 반올림한 값 — 이 반올림
+/// 때문에 작은 x 에서 정확한 무게보다 1E-12 쯤 다르다 (대조 실험 norm4·norm5 의 작은 x)
+const NC8: [f64; 4] = [0.043_460_648, 0.207_002_315, 0.076_562_5, 0.172_974_537];
+
+/// [0, x] 를 p 칸으로 나눈 8점 뉴턴-코츠 적분
+fn nc8(f: &impl Fn(f64) -> f64, x: f64, p: usize) -> f64 {
+    let hh = x / p as f64;
+    let h = hh / 7.0;
+    let mut s = 0.0;
+    for k in 0..p {
+        let a = k as f64 * hh;
+        let v = |i: f64| f(a + i * h);
+        s += (NC8[0] * (v(0.0) + v(7.0))
+            + NC8[1] * (v(1.0) + v(6.0))
+            + NC8[2] * (v(2.0) + v(5.0))
+            + NC8[3] * (v(3.0) + v(4.0)))
+            * hh;
+    }
+    s
+}
+
+/// 칸 수를 1부터 하나씩 늘려 앞 칸 수의 값과 차이가 3E-7 보다 작아지면 멈춘다
+/// (정규 누적의 칸 수가 바뀌는 x: 1.407, 3.035, 4.519, 6.029 …, 대조 실험 norm5)
+pub fn integrate(f: impl Fn(f64) -> f64, x: f64) -> f64 {
+    // 아주 큰 x 는 칸 수가 한없이 늘어난다 — 한셀의 끝은 아직 모른다, 여기서는 2만 칸에서 멈춘다
+    const LIMIT: usize = 20_000;
+    let mut prev = nc8(&f, x, 1);
+    for p in 2..=LIMIT {
+        let q = nc8(&f, x, p);
+        if (q - prev).abs() < EPS {
+            return q;
+        }
+        prev = q;
+    }
+    prev
+}
+
+/// 정규 누적 Φ(z) (한셀 근사)
+pub fn norm_cdf(z: f64) -> f64 {
+    if z == 0.0 {
+        return 0.5;
+    }
+    if z.is_nan() {
+        return z;
+    }
+    // 칸 수가 너무 커지는 곳: 참값과 다를 바 없는 끝 값 (한셀 미확인)
+    if z.abs() > 1e4 {
+        return if z > 0.0 { 1.0 } else { 0.0 };
+    }
+    let y = integrate(|t| (-t * t / 2.0).mexp(), z.abs()) / 2.506_628_275;
+    if z > 0.0 { 0.5 + y } else { 0.5 - y }
+}
+
+/// 정수·반정수 a 의 Γ(a): (a−1)! 또는 √π·½·(3/2)·…·(a−1) (한셀의 t 상수와 끝자리까지 같다)
+fn gamma_half(a: f64) -> f64 {
+    if a > 170.0 {
+        return f64::INFINITY;
+    }
+    if a == a.floor() {
+        let mut r = 1.0;
+        let mut i = 2.0;
+        while i < a {
+            r *= i;
+            i += 1.0;
+        }
+        r
+    } else {
+        let mut r = std::f64::consts::PI.sqrt();
+        let mut v = 0.5;
+        while v < a {
+            r *= v;
+            v += 1.0;
+        }
+        r
+    }
+}
+
+/// t 분포 상수 Γ((ν+1)/2)/(√(ν·3.141593)·Γ(ν/2)) 와 0..|x| 의 밀도 적분의 곱 (ν 는 정수)
+pub fn t_central(x: f64, df: f64) -> f64 {
+    let k = if df < 339.0 {
+        gamma_half((df + 1.0) / 2.0) / ((df * 3.141_593).sqrt() * gamma_half(df / 2.0))
+    } else {
+        (super::special::ln_gamma((df + 1.0) / 2.0) - super::special::ln_gamma(df / 2.0)).mexp() / (df * 3.141_593).sqrt()
+    };
+    if x == 0.0 {
+        return 0.0;
+    }
+    let e = -(df + 1.0) / 2.0;
+    k * integrate(|u| (1.0 + u * u / df).mpow(e), x.abs())
+}
+
+/// CONFIDENCE.NORM 의 z: [0, 8] 이분법, |Φ(z) − p| < 3E-7 에서 멈춘다 (결과가 k/2ⁿ, 대조 실험 norm4·tdist5)
+pub fn norm_inv_bisect(p: f64) -> f64 {
+    let (mut lo, mut hi) = (0.0f64, 8.0f64);
+    let mut mid = 4.0;
+    for _ in 0..200 {
+        mid = (lo + hi) / 2.0;
+        let fv = norm_cdf(mid) - p;
+        if fv.abs() < EPS {
+            break;
+        }
+        if fv < 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    mid
+}
+
+/// BESSELI: (π·I_n(x) + c·δ)/π', π' = 3.141592654, δ = π' − π, c = 짝수 n 이면 (−1)^{n/2} (홀수는 0).
+/// 적분 표현 (1/π')∫_0^{π'} 을 [0, π] 의 참값과 [π, π'] 의 끝 조각으로 나눈 것
+/// (BESSELI(0,2) = −1.3057E-10, BESSELI(1,1) = 0.5651591039186906, 대조 실험 bessel4)
+pub fn bessel_i(n: i32, x: f64) -> f64 {
+    const P2: f64 = 3.141_592_654;
+    let pi = std::f64::consts::PI;
+    let c = if n % 2 == 0 {
+        if (n / 2) % 2 == 0 { 1.0 } else { -1.0 }
+    } else {
+        0.0
+    };
+    (pi * super::engineering::bessel_i(n, x) + c * (P2 - pi)) / P2
+}
+
+/// A&S 9.8.1·9.8.2 I0
+fn as_i0(x: f64) -> f64 {
+    let ax = x.abs();
+    if ax < 3.75 {
+        let y = (x / 3.75) * (x / 3.75);
+        1.0 + y * (3.515_622_9 + y * (3.089_942_4 + y * (1.206_749_2 + y * (0.265_973_2 + y * (0.036_076_8 + y * 0.004_581_3)))))
+    } else {
+        let y = 3.75 / ax;
+        (ax.mexp() / ax.sqrt())
+            * (0.398_942_28
+                + y * (0.013_285_92
+                    + y * (0.002_253_19
+                        + y * (-0.001_575_65
+                            + y * (0.009_162_81
+                                + y * (-0.020_577_06 + y * (0.026_355_37 + y * (-0.016_476_33 + y * 0.003_923_77))))))))
+    }
+}
+
+/// A&S 9.8.3·9.8.4 I1
+fn as_i1(x: f64) -> f64 {
+    let ax = x.abs();
+    let ans = if ax < 3.75 {
+        let y = (x / 3.75) * (x / 3.75);
+        ax * (0.5 + y * (0.878_905_94 + y * (0.514_988_69 + y * (0.150_849_34 + y * (0.026_587_33 + y * (0.003_015_32 + y * 0.000_324_11))))))
+    } else {
+        let y = 3.75 / ax;
+        let a = 0.022_829_67 + y * (-0.028_953_12 + y * (0.017_876_54 - y * 0.004_200_59));
+        let a = 0.398_942_28 + y * (-0.039_880_24 + y * (-0.003_620_18 + y * (0.001_638_01 + y * (-0.010_315_55 + y * a))));
+        a * (ax.mexp() / ax.sqrt())
+    };
+    if x < 0.0 { -ans } else { ans }
+}
+
+/// A&S 9.8.5·9.8.6 K0 (x > 0)
+fn as_k0(x: f64) -> f64 {
+    if x <= 2.0 {
+        let y = x * x / 4.0;
+        (-(x / 2.0).mln() * as_i0(x))
+            + (-0.577_215_66
+                + y * (0.422_784_20
+                    + y * (0.230_697_56 + y * (0.034_885_90 + y * (0.002_626_98 + y * (0.000_107_50 + y * 0.000_007_4))))))
+    } else {
+        let y = 2.0 / x;
+        ((-x).mexp() / x.sqrt())
+            * (1.253_314_14
+                + y * (-0.078_323_58
+                    + y * (0.021_895_68 + y * (-0.010_624_46 + y * (0.005_878_72 + y * (-0.002_515_40 + y * 0.000_532_08))))))
+    }
+}
+
+/// A&S 9.8.7·9.8.8 K1 (x > 0)
+fn as_k1(x: f64) -> f64 {
+    if x <= 2.0 {
+        let y = x * x / 4.0;
+        ((x / 2.0).mln() * as_i1(x))
+            + (1.0 / x)
+                * (1.0
+                    + y * (0.154_431_44
+                        + y * (-0.672_785_79
+                            + y * (-0.181_568_97 + y * (-0.019_194_02 + y * (-0.001_104_04 + y * (-0.000_046_86)))))))
+    } else {
+        let y = 2.0 / x;
+        ((-x).mexp() / x.sqrt())
+            * (1.253_314_14
+                + y * (0.234_986_19
+                    + y * (-0.036_556_20 + y * (0.015_042_68 + y * (-0.007_803_53 + y * (0.003_256_14 + y * (-0.000_682_45)))))))
+    }
+}
+
+/// BESSELK: K0·K1 근사에서 올림 점화식 K_{j+1} = K_{j−1} + (2j/x)K_j
+pub fn bessel_k(n: i32, x: f64) -> f64 {
+    let k0 = as_k0(x);
+    if n == 0 {
+        return k0;
+    }
+    let tox = 2.0 / x;
+    let (mut bkm, mut bk) = (k0, as_k1(x));
+    for j in 1..n {
+        let bkp = bkm + j as f64 * tox * bk;
+        bkm = bk;
+        bk = bkp;
+    }
+    bk
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 대조 실험에서 한셀이 낸 값 (dist4·norm4·norm5·bessel4)
+    #[test]
+    fn hancell_values() {
+        let r9 = |x: f64| (x * 1e9).round() * 1e-9;
+        assert_eq!(r9(gammp(0.5, 0.5)), 0.682_689_491_000_000_1);
+        assert_eq!(r9(f_cdf(1.0, 1.0, 1.0)), 0.499_999_982);
+        assert_eq!(bessel_k(0, 2.0), 0.113_893_88);
+        assert!((bessel_k(1, 1.0) - 0.601_907_231_666_905_7).abs() < 1e-15);
+        assert!((bessel_i(1, 1.0) - 0.565_159_103_918_690_6).abs() < 1e-15);
+        assert!((bessel_i(2, 0.0) + 1.305_728_397_542_944e-10).abs() < 1e-15);
+        assert_eq!(r9(0.5 - 0.5 * erfcc(1e-9 / std::f64::consts::SQRT_2)), -1.500_000_000_000_000_2e-8);
+        assert!((norm_cdf(-40.0) - 8.873_505_064_066_478e-8).abs() < 1e-14);
+        assert!((norm_cdf(1.4) - 0.919_243_340_544_404_9).abs() < 1e-15);
+        assert!((norm_cdf(20.0) - 0.999_999_989_173_261_7).abs() < 1e-15);
+        assert_eq!(norm_inv_bisect(0.975), 1.959_960_937_5);
+    }
+}

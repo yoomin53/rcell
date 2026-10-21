@@ -203,6 +203,23 @@ CLI: `rcell calc 문서.cell [--diff]` — 다시 계산해 저장하거나, `--
 | DATEVALUE·TIMEVALUE | 3장의 날짜 글 문법 |
 | ISOWEEKNUM·WEEKNUM | 1월 1일 앞 주를 전해 마지막 주로 (`(연중 날 − ISO 요일 + 10)/7`) |
 
+### 근사 계산 (`functions/hcnum.rs`)
+
+엑셀 2010 에 새로 생긴 분포 함수와 베셀 함수 일부는 정확한 식 대신 교과서식 근사를 쓴다. 참값과 1E-10–1E-7
+다르므로 같은 근사를 따라야 같은 값이 나온다 (함수 대조 실험 dist4·norm4·norm5·tdist5·bessel4).
+
+| 함수 | 한셀의 계산 |
+|---|---|
+| CHISQ.DIST 누적 | P(k/2, x/2) 를 x < a+1 이면 급수, 아니면 연분수로 구하고 상대 변화가 3E-7 보다 작으면 멈춘다 (최대 100번). ln Γ 는 6항 란초시 근사. 그다음 소수 9자리 (`CHISQ.DIST(1,1,TRUE)` = 0.682689491, 참값 0.682689492) |
+| T.DIST·F.DIST 누적 | 같은 방식의 불완전 베타 (연분수, 3E-7). F.DIST 는 오른쪽 꼬리 I(d2/2, d1/2; d2/(d2+d1x)) 를 1 에서 뺀다 (`F.DIST(1,1,1,TRUE)` = 0.499999982) |
+| NORM.S.DIST·NORM.DIST·NORMDIST·LOGNORM.DIST 누적, Z.TEST | e^{−t²/2} 를 0..|z| 에서 8점 닫힌 뉴턴-코츠로 적분한다. 구간을 P 칸으로 나누고 P = 1, 2, 3, … 로 늘려 앞 값과 차이가 3E-7 보다 작아지면 멈춘다. 무게는 751/17280 … 을 소수 9자리로 반올림한 0.043460648·0.207002315·0.0765625·0.172974537 (작은 z 에서 1E-12 차이로 드러난다). 적분 ÷ 2.506628275 를 0.5 에 더하거나 뺀다. P 가 바뀌는 z: 1.407, 3.035, 4.519, 6.029, 7.543 … 큰 |z| 의 꼬리는 적분 오차가 그대로 남는다 (`NORM.S.DIST(−40,TRUE)` = 8.87E-8). NORMSDIST·LOGNORMDIST 는 정확하다 |
+| T.DIST.2T·T.DIST.RT | 같은 적분을 (1+u²/ν)^{−(ν+1)/2} 에 하고 Γ((ν+1)/2)/(√(3.141593·ν)·Γ(ν/2)) 를 곱한다 (π 를 3.141593 으로, 상대 오차 −5.5E-8) |
+| CONFIDENCE·CONFIDENCE.NORM | 위 정규 누적으로 [0, 8] 을 이분해 |Φ(z) − (1 − α/2)| < 3E-7 이 된 가운데 값 (`CONFIDENCE(0.05,1,1)` = 1.9599609375). n 은 소수 부분을 버린다 |
+| GAUSS | 상대 오차 1.2E-7 의 체비쇼프 근사 erfc 로 0.5 − erfc(z/√2)/2, 소수 9자리. 0 만 0 (`GAUSS(1E-9)` = −1.5E-8) |
+| BESSELI | (1/π')∫_0^{π'} 적분 표현을 π' = 3.141592654 로: (π·I_n(x) + c·(π' − π))/π', c 는 짝수 n 에서 (−1)^{n/2}, 홀수 0 (`BESSELI(0,2)` = −1.3E-10) |
+| BESSELK | I0·I1·K0·K1 의 A&S 9.8 다항식 근사와 올림 점화식 (`BESSELK(2,0)` = 0.11389388) |
+| ERF·ERFC(.PRECISE) | 값은 정확, 음수 인수는 #NUM! |
+
 ### 한셀이 모르는 함수
 
 다음은 #NAME? (엑셀 함수라도 한셀에 없다): AGGREGATE, ARRAYTOTEXT, BAHTTEXT, BETA.DIST, CHOOSEROWS,
@@ -213,15 +230,12 @@ VALUETOTEXT, VSTACK, WON, XMATCH. rcell 은 `CalcOptions::excel_functions` 를 �
 
 ## 6. 아직 맞추지 못한 것
 
-한셀이 정확한 식 대신 근사식을 쓰는 함수들이다. rcell 은 정확한 값을 내므로 1E-9 안팎에서 다르다.
-
 | 함수 | 관찰 |
 |---|---|
-| NORM.S.DIST·NORM.DIST·NORMDIST | 밀도는 exp(−x²/2)/2.506628275 (√(2π) 를 10자리로), 누적은 꼬리에서 크게 틀린다 (`NORM.S.DIST(−10,TRUE)` = 2.4E-9, `(−38)` = 6.9E-8). NORMSDIST 는 정확하다 |
-| GAUSS | 0 근처에서도 1.5E-8 틀린다 (GAUSS(1E-9) = −1.5E-8) |
-| CONFIDENCE(.NORM) | 역함수를 이분법으로 찾는다 (결과가 k/2^n: 1.9599609375) |
-| T.DIST.2T·T.DIST.RT·T.INV·CHISQ.INV·F.INV | 근사 (CHISQ.INV(0.5,100) 이 7E-4 틀린다) |
-| BESSELI·BESSELK·BESSELY | 작은 x·큰 x 에서 다른 값 (BESSELI(0,1) = −8E-20, BESSELY(50,0) = 113.3) |
+| T.INV·CHISQ.INV·F.INV·CONFIDENCE.T | 근사 누적을 푸는 방식을 아직 모른다 (`CHISQ.INV(0.5,100)` 이 7E-4 틀린다). rcell 은 정확한 역함수 |
+| 정규·t 꼬리의 아주 작은 값 | 위 적분의 합을 더하는 순서·반올림이 달라 0.5 − y 의 끝자리가 다르다 (`NORM.S.DIST(−30,TRUE)` 처럼 값이 1E-8 쯤이면 상대 1E-9 차이) |
+| BESSELI 의 아주 작은 값 | 한셀 적분의 반올림 오차 1E-17 쯤 (`BESSELI(0,1)` = −8E-20, rcell 0) |
+| BESSELY | x 가 15 쯤부터 거듭제곱 급수가 자릿수를 잃는다 (`BESSELY(50,0)` = 113.3) — 같은 식을 찾지 못했다 |
 | GAMMA(음수) | 7E-8 상대 오차 |
 | XIRR·YIELD·ODDF… 등 일부 재무 함수 | 반복 끝내는 조건·날짜 셈이 다르다 |
 | MINVERSE(특이 행렬) | #NUM! 이 아니라 숫자를 낸다 |

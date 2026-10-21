@@ -19,6 +19,7 @@ pub mod database;
 pub mod date;
 pub mod engineering;
 pub mod financial;
+pub mod hcnum;
 pub mod info;
 pub mod logical;
 pub mod lookup;

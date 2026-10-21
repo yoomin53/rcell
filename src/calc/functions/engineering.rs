@@ -39,19 +39,24 @@ pub const FNS: &[FnSpec] = &[
         let y = try_v!(num_or(c, a, 1, 0.0));
         Value::Number((x >= y) as u8 as f64)
     }),
+    // ERF·ERFC 는 음수 인수가 #NUM! (ERF(-1)·ERF(-0.5,0.5)·ERFC(-1), 대조 실험 engineering)
     f("ERF", 1, 2, V, |c, a| {
         let lo = try_v!(num_arg(c, a, 0));
-        match opt(a, 1) {
-            Some(u) => {
-                let hi = try_v!(c.num(u));
-                num(sp::erf(hi) - sp::erf(lo))
-            }
+        let hi = match opt(a, 1) {
+            Some(u) => Some(try_v!(c.num(u))),
+            None => None,
+        };
+        if lo < 0.0 || hi.is_some_and(|h| h < 0.0) {
+            return Value::Error(ErrorKind::Num);
+        }
+        match hi {
+            Some(h) => num(sp::erf(h) - sp::erf(lo)),
             None => num(sp::erf(lo)),
         }
     }),
-    f("ERF.PRECISE", 1, 1, V, |c, a| num(sp::erf(try_v!(num_arg(c, a, 0))))),
-    f("ERFC", 1, 1, V, |c, a| num(sp::erfc(try_v!(num_arg(c, a, 0))))),
-    f("ERFC.PRECISE", 1, 1, V, |c, a| num(sp::erfc(try_v!(num_arg(c, a, 0))))),
+    f("ERF.PRECISE", 1, 1, V, |c, a| erf_nonneg(try_v!(num_arg(c, a, 0)), sp::erf)),
+    f("ERFC", 1, 1, V, |c, a| erf_nonneg(try_v!(num_arg(c, a, 0)), sp::erfc)),
+    f("ERFC.PRECISE", 1, 1, V, |c, a| erf_nonneg(try_v!(num_arg(c, a, 0)), sp::erfc)),
     f("BESSELJ", 2, 2, V, |c, a| bessel(c, a, 'J')),
     f("BESSELY", 2, 2, V, |c, a| bessel(c, a, 'Y')),
     f("BESSELI", 2, 2, V, |c, a| bessel(c, a, 'I')),
@@ -464,6 +469,10 @@ fn ccosh(z: C) -> C {
 // 베셀 함수
 // ---------------------------------------------------------------------------
 
+fn erf_nonneg(x: f64, f: fn(f64) -> f64) -> Value {
+    if x < 0.0 { Value::Error(ErrorKind::Num) } else { num(f(x)) }
+}
+
 fn bessel(ctx: &mut Ctx, a: &[Value], kind: char) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
     let n = try_v!(num_arg(ctx, a, 1)).trunc();
@@ -473,7 +482,8 @@ fn bessel(ctx: &mut Ctx, a: &[Value], kind: char) -> Value {
     let n = n as i32;
     let r = match kind {
         'J' => bessel_j(n, x),
-        'I' => bessel_i(n, x),
+        // BESSELI·BESSELK 는 한셀의 근사 (hcnum)
+        'I' => super::hcnum::bessel_i(n, x),
         'Y' => {
             if x <= 0.0 {
                 return Value::Error(ErrorKind::Num);
@@ -484,7 +494,7 @@ fn bessel(ctx: &mut Ctx, a: &[Value], kind: char) -> Value {
             if x <= 0.0 {
                 return Value::Error(ErrorKind::Num);
             }
-            bessel_k(n, x)
+            super::hcnum::bessel_k(n, x)
         }
     };
     num(r)

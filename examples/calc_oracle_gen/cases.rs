@@ -1940,6 +1940,56 @@ fn bessel4() -> Vec<Case> {
     v
 }
 
+/// 정규 누적 분포의 칸 수가 바뀌는 곳 (근사식 찾기)
+fn norm5() -> Vec<Case> {
+    let mut v = Vec::new();
+    let bounds = [
+        1.45, 3.05, 4.55, 6.05, 7.55, 9.05, 10.55, 12.15, 13.65, 15.25, 16.75, 18.35, 19.95, 21.55, 23.15, 24.75,
+        26.35, 27.95, 29.65, 31.15, 32.85, 34.45,
+    ];
+    for b in bounds {
+        for i in -30..=30 {
+            let x = (b * 1000.0f64).round() as i64 + 2 * i;
+            v.push(c(format!("_xlfn.NORM.S.DIST({},TRUE)", x as f64 / 1000.0)));
+        }
+    }
+    for i in 690..=1200 {
+        v.push(c(format!("_xlfn.NORM.S.DIST({},TRUE)", i as f64 / 20.0)));
+    }
+    for i in 1..=100 {
+        v.push(c(format!("_xlfn.NORM.S.DIST({},TRUE)", i as f64 / 200.0)));
+    }
+    v
+}
+
+/// t 분포 양쪽 꼬리와 역함수들 (근사식 찾기)
+fn tdist5() -> Vec<Case> {
+    let mut v = Vec::new();
+    for df in [1, 2, 5] {
+        for i in 1..=200 {
+            v.push(c(format!("_xlfn.T.DIST.2T({},{df})", i as f64 / 50.0)));
+        }
+    }
+    for i in 1..=30 {
+        v.push(c(format!("_xlfn.T.DIST.RT({},1)", i as f64 / 10.0)));
+    }
+    for df in [1, 2, 5] {
+        for i in 0..50 {
+            let p = (505 + 10 * i) as f64 / 1000.0;
+            v.push(c(format!("_xlfn.T.INV({p},{df})")));
+            let q = (1 + 2 * i) as f64 / 100.0;
+            v.push(c(format!("_xlfn.CHISQ.INV({q},{df})")));
+        }
+    }
+    for i in 0..100 {
+        v.push(c(format!("_xlfn.CONFIDENCE.NORM({},1,1)", (5 + 10 * i) as f64 / 1000.0)));
+    }
+    for i in 0..50 {
+        v.push(c(format!("_xlfn.CONFIDENCE.T({},1,10)", (1 + 2 * i) as f64 / 100.0)));
+    }
+    v
+}
+
 /// (문서 이름, 경우, 1904 날짜 체계)
 pub fn catalog() -> Vec<(&'static str, Vec<Case>, bool)> {
     vec![
@@ -1970,5 +2020,7 @@ pub fn catalog() -> Vec<(&'static str, Vec<Case>, bool)> {
         ("norm4", norm4(), false),
         ("dist4", dist4(), false),
         ("bessel4", bessel4(), false),
+        ("norm5", norm5(), false),
+        ("tdist5", tdist5(), false),
     ]
 }
