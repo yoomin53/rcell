@@ -50,25 +50,30 @@ pub const FNS: &[FnSpec] = &[
         }
         num(y.matan2(x))
     }),
-    f("SINH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.msinh()))),
-    f("COSH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.mcosh()))),
-    f("TANH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.mtanh()))),
-    f("ASINH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.masinh()))),
-    f("ACOSH", 1, 1, V, |c, a| un(c, a, |x| if x < 1.0 { Err(ErrorKind::Num) } else { Ok(x.macosh()) })),
-    f("ATANH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() >= 1.0 { Err(ErrorKind::Num) } else { Ok(x.matanh()) })),
+    // 쌍곡 함수: 한셀은 e^x 를 pow(e, x) 로 구해 정의식 그대로 계산한다 (SINH(10) = 11013.232874703386,
+    // SINH(1E-10) = 1.000000082740371E-10, ASINH(-1) ≠ −ASINH(1), 대조 실험 math). 넘치면 #NUM!.
+    f("SINH", 1, 1, V, |c, a| un(c, a, |x| Ok((ex(x) - ex(-x)) / 2.0))),
+    f("COSH", 1, 1, V, |c, a| un(c, a, |x| Ok((ex(x) + ex(-x)) / 2.0))),
+    f("TANH", 1, 1, V, |c, a| un(c, a, |x| {
+        let (p, q) = (ex(x), ex(-x));
+        let r = (p - q) / (p + q);
+        Ok(if r.is_nan() { x.signum() } else { r })
+    })),
+    f("ASINH", 1, 1, V, |c, a| un(c, a, |x| Ok((x + (x * x + 1.0).sqrt()).mln()))),
+    f("ACOSH", 1, 1, V, |c, a| un(c, a, |x| if x < 1.0 { Err(ErrorKind::Num) } else { Ok((x + (x * x - 1.0).sqrt()).mln()) })),
+    f("ATANH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() >= 1.0 { Err(ErrorKind::Num) } else { Ok(0.5 * ((1.0 + x) / (1.0 - x)).mln()) })),
     f("COT", 1, 1, V, |c, a| un(c, a, |x| {
         let x = trig_arg(x)?;
         let t = x.mtan();
         if t == 0.0 { Err(ErrorKind::Div0) } else { Ok(1.0 / t) }
     })),
-    f("CSC", 1, 1, V, |c, a| un(c, a, |x| {
-        let s = trig_arg(x)?.msin();
-        if s == 0.0 { Err(ErrorKind::Div0) } else { Ok(1.0 / s) }
-    })),
+    // CSC(0)·CSCH(0) 은 #NUM! (1/0, 대조 실험 math)
+    f("CSC", 1, 1, V, |c, a| un(c, a, |x| Ok(1.0 / trig_arg(x)?.msin()))),
     f("SEC", 1, 1, V, |c, a| un(c, a, |x| Ok(1.0 / trig_arg(x)?.mcos()))),
-    f("COTH", 1, 1, V, |c, a| un(c, a, |x| if x == 0.0 { Err(ErrorKind::Div0) } else if x.abs() >= 134_217_728.0 { Err(ErrorKind::Num) } else { Ok(1.0 / x.mtanh()) })),
-    f("CSCH", 1, 1, V, |c, a| un(c, a, |x| if x == 0.0 { Err(ErrorKind::Div0) } else if x.abs() >= 134_217_728.0 { Err(ErrorKind::Num) } else { Ok(1.0 / x.msinh()) })),
-    f("SECH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() >= 134_217_728.0 { Err(ErrorKind::Num) } else { Ok(1.0 / x.mcosh()) })),
+    // COTH·CSCH·SECH 는 표준 tanh·sinh·cosh 의 역수 (COTH(1E+15) = 1, CSCH(1E+15) = 0)
+    f("COTH", 1, 1, V, |c, a| un(c, a, |x| if x == 0.0 { Err(ErrorKind::Div0) } else { Ok(1.0 / x.mtanh()) })),
+    f("CSCH", 1, 1, V, |c, a| un(c, a, |x| Ok(1.0 / x.msinh()))),
+    f("SECH", 1, 1, V, |c, a| un(c, a, |x| Ok(1.0 / x.mcosh()))),
     f("ACOT", 1, 1, V, |c, a| un(c, a, |x| Ok(std::f64::consts::FRAC_PI_2 - x.matan()))),
     f("ACOTH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() <= 1.0 { Err(ErrorKind::Num) } else { Ok(0.5 * ((x + 1.0) / (x - 1.0)).mln()) })),
     f("DEGREES", 1, 1, V, |c, a| un(c, a, |x| Ok(x.to_degrees()))),
@@ -99,8 +104,9 @@ pub const FNS: &[FnSpec] = &[
     }),
     f("FACT", 1, 1, V, |c, a| un(c, a, |x| fact(x))),
     f("FACTDOUBLE", 1, 1, V, |c, a| un(c, a, |x| {
+        // FACTDOUBLE(-1) 은 #NUM!, FACTDOUBLE(-0.5) 는 1 (버린 값이 음수인가, 대조 실험 math)
         let n = x.trunc();
-        if n < -1.0 { return Err(ErrorKind::Num); }
+        if n < 0.0 { return Err(ErrorKind::Num); }
         let mut r = 1.0f64;
         let mut k = n;
         // 300!! 이 f64 의 끝 근처 — 넘치면 #NUM!
@@ -122,11 +128,9 @@ pub const FNS: &[FnSpec] = &[
     f("COMBINA", 2, 2, V, |c, a| {
         let n = try_v!(num_arg(c, a, 0)).trunc();
         let k = try_v!(num_arg(c, a, 1)).trunc();
-        if n < 0.0 || k < 0.0 || (n == 0.0 && k > 0.0) {
+        // COMBINA(0,0) 은 #NUM! (대조 실험 math)
+        if n < 0.0 || k < 0.0 || n == 0.0 {
             return Value::Error(ErrorKind::Num);
-        }
-        if n == 0.0 && k == 0.0 {
-            return Value::Number(1.0);
         }
         num(super::special::binom_coef(n + k - 1.0, k))
     }),
@@ -147,7 +151,7 @@ pub const FNS: &[FnSpec] = &[
     f("SUMXMY2", 2, 2, A, |c, a| sum_xy(c, a, |x, y| (x - y) * (x - y))),
     f("SERIESSUM", 4, 4, VVA, seriessum),
     f("SUBTOTAL", 2, MANY, VR, |c, a| subtotal(c, a, false)),
-    f("SUBTOTALA", 2, MANY, VR, |c, a| subtotal(c, a, true)),
+    f("SUBTOTALA", 1, MANY, VR, |c, a| subtotal(c, a, true)),
     f("AGGREGATE", 3, MANY, &[Arg::V, Arg::V, Arg::R], aggregate),
     f("MMULT", 2, 2, A, mmult),
     f("MDETERM", 1, 1, A, mdeterm),
@@ -182,6 +186,11 @@ pub const FNS: &[FnSpec] = &[
 ];
 
 /// 숫자 하나 → 숫자 하나
+/// 쌍곡 함수의 e^x (pow(e, x))
+fn ex(x: f64) -> f64 {
+    std::f64::consts::E.mpow(x)
+}
+
 fn un(ctx: &mut Ctx, a: &[Value], f: impl Fn(f64) -> Result<f64, ErrorKind>) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
     value::num_r(f(x))
@@ -240,7 +249,8 @@ pub fn round_digits(x: f64, digits: f64, mode: Rounding) -> f64 {
     } else {
         let f = 10f64.mpowi(-d);
         if !f.is_finite() {
-            return 0.0;
+            // ROUND·ROUNDDOWN(1.5,-400) = 0, ROUNDUP(1.5,-400) = #NUM! (대조 실험 math)
+            return if matches!(mode, Rounding::Up) { f64::NAN } else { 0.0 };
         }
         let y = round15(x / f);
         apply(y) * f
@@ -313,7 +323,8 @@ fn math_round(ctx: &mut Ctx, a: &[Value], up: bool) -> Value {
     if s == 0.0 || x == 0.0 {
         return Value::Number(0.0);
     }
-    let q = round15(x / s);
+    // 몫은 반올림 보정 없이 (FLOOR.MATH(0.3,0.1) = 0.2, CEILING.MATH(0.3,0.1) = 0.30000000000000004)
+    let q = x / s;
     let r = if x < 0.0 && mode != 0.0 {
         // 음수: 0 에서 멀어지는 쪽(올림) / 0 쪽(내림)
         if up { q.floor() } else { q.ceil() }
@@ -348,24 +359,25 @@ fn even_odd(x: f64, even: bool) -> f64 {
     s * r
 }
 
+/// MOD: 정확한 나머지 fmod 에 부호가 다르면 나누는 수를 더한다 (MOD(10000000000,0.3) = 0.10000037007434154,
+/// MOD(1E+20,3) = 1, MOD(-1,1E-10) = 3.6E-17, 대조 실험 math)
 fn modulo(ctx: &mut Ctx, a: &[Value]) -> Value {
     let n = try_v!(num_arg(ctx, a, 0));
     let d = try_v!(num_arg(ctx, a, 1));
     if d == 0.0 {
         return Value::Error(ErrorKind::Div0);
     }
-    let q = (n / d).floor();
-    let r = n - d * q;
-    // 나머지가 나누는 수와 같아지는 반올림 오차
-    if (r - d).abs() < d.abs() * 1e-15 {
-        return Value::Number(0.0);
+    let r = n % d;
+    if r != 0.0 && (r < 0.0) != (d < 0.0) {
+        return num(r + d);
     }
     num(r)
 }
 
 pub fn fact(x: f64) -> Result<f64, ErrorKind> {
+    // FACT(-0.5) 도 #NUM! (버리기 전 값으로, 대조 실험 math)
     let n = x.trunc();
-    if n < 0.0 {
+    if x < 0.0 {
         return Err(ErrorKind::Num);
     }
     if n > 170.0 {
@@ -395,29 +407,43 @@ fn multinomial(ctx: &mut Ctx, a: &[Value]) -> Value {
     num(try_v!(fact(total)) / denom)
 }
 
+/// GCD·LCM: 글·논리 인수(범위 안의 것도)는 #VALUE! (GCD("12",18), 대조 실험 math). 최대공약수는 버린 정수로,
+/// 최소공배수는 원래 값의 곱 / 버린 값들의 최대공약수 (LCM(2.5,5) = 12.5).
 fn gcd_lcm(ctx: &mut Ctx, a: &[Value], gcd: bool) -> Value {
-    let v = try_v!(collect_numbers(ctx, a, Agg::Numbers));
-    let mut acc: Option<f64> = None;
+    let mut v = Vec::new();
+    for x in a {
+        for y in super::flatten(ctx, x) {
+            match y {
+                Value::Number(n) => v.push(n),
+                Value::Empty if matches!(x, Value::Ref(_)) => {}
+                Value::Empty => v.push(0.0),
+                Value::Error(e) => return Value::Error(e),
+                _ => return Value::Error(ErrorKind::Value),
+            }
+        }
+    }
+    let mut acc: Option<(f64, f64)> = None;
     for x in v {
         let n = x.trunc();
         if n < 0.0 || n >= 9.007_199_254_740_992e15 {
             return Value::Error(ErrorKind::Num);
         }
         acc = Some(match acc {
-            None => n,
-            Some(m) => {
+            None => (n, x),
+            Some((m, mx)) => {
                 let g = gcd2(m, n);
                 if gcd {
-                    g
+                    (g, g)
                 } else if m == 0.0 || n == 0.0 {
-                    0.0
+                    (0.0, 0.0)
                 } else {
-                    m / g * n
+                    let l = mx * x / g;
+                    (l.trunc(), l)
                 }
             }
         });
     }
-    num(acc.unwrap_or(0.0))
+    num(acc.map(|(m, mx)| if gcd { m } else { mx }).unwrap_or(0.0))
 }
 
 fn gcd2(mut a: f64, mut b: f64) -> f64 {
@@ -525,6 +551,7 @@ fn sumif(ctx: &mut Ctx, a: &[Value]) -> Value {
     };
     let (_, _, mask) = try_v!(ifs_mask(ctx, &[(&a[0], &a[1])]));
     let vals = try_v!(grid(ctx, &target));
+    // SUMIF 는 합 범위의 오류를 돌려주고, SUMIFS 는 건너뛴다 (대조 실험 math)
     let mut s = 0.0;
     for (m, v) in mask.iter().zip(&vals.data) {
         if *m {
@@ -550,12 +577,8 @@ fn sumifs(ctx: &mut Ctx, a: &[Value]) -> Value {
     }
     let mut s = 0.0;
     for (m, v) in mask.iter().zip(&vals.data) {
-        if *m {
-            match v {
-                Value::Number(n) => s += n,
-                Value::Error(e) => return Value::Error(*e),
-                _ => {}
-            }
+        if *m && let Value::Number(n) = v {
+            s += n;
         }
     }
     num(s)
@@ -564,6 +587,10 @@ fn sumifs(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn sumproduct(ctx: &mut Ctx, a: &[Value]) -> Value {
     let mut arrays = Vec::with_capacity(a.len());
     for v in a {
+        // 글·논리 스칼라 인수는 #VALUE! (SUMPRODUCT("3"), 대조 실험 math)
+        if matches!(v, Value::Text(_) | Value::Bool(_)) {
+            return Value::Error(ErrorKind::Value);
+        }
         arrays.push(try_v!(to_array(ctx, v)));
     }
     let (rows, cols) = (arrays[0].rows, arrays[0].cols);
@@ -593,13 +620,8 @@ fn sum_xy(ctx: &mut Ctx, a: &[Value], f: fn(f64, f64) -> f64) -> Value {
     }
     let mut s = 0.0;
     let mut any = false;
+    // 오류 값이 든 쌍은 건너뛴다 (SUMX2MY2(Data!H1:H10,Data!A1:A10) = 86, 대조 실험 math)
     for (p, q) in x.data.iter().zip(&y.data) {
-        if let Value::Error(e) = p {
-            return Value::Error(*e);
-        }
-        if let Value::Error(e) = q {
-            return Value::Error(*e);
-        }
         if let (Value::Number(p), Value::Number(q)) = (p, q) {
             s += f(*p, *q);
             any = true;
@@ -629,16 +651,23 @@ fn seriessum(ctx: &mut Ctx, a: &[Value]) -> Value {
 }
 
 /// SUBTOTAL / SUBTOTALA: 숨긴 행(101–111)과 다른 부분합 셀을 뺀 집계
-fn subtotal(ctx: &mut Ctx, a: &[Value], with_text: bool) -> Value {
+/// SUBTOTAL 과 한셀의 SUBTOTALA. SUBTOTALA 는 계산은 SUBTOTAL 과 같고(숫자만 센다) 숨긴 행 처리가 거꾸로다:
+/// 1–11 이 숨긴 행을 빼고 101–111 이 넣는다 (SUBTOTALA(9,Hid!A1:A10) = 46, (109,…) = 55, 대조 실험 newer).
+/// 참조가 아닌 인수·여러 시트·여러 영역은 #N/A (SUBTOTAL(9,1,2), 대조 실험 math).
+fn subtotal(ctx: &mut Ctx, a: &[Value], hancom_a: bool) -> Value {
     let code = try_v!(num_arg(ctx, a, 0)).trunc() as i64;
     let (kind, skip_hidden) = match code {
-        1..=11 => (code, false),
-        101..=111 => (code - 100, true),
+        1..=11 => (code, hancom_a),
+        101..=111 => (code - 100, !hancom_a),
         _ => return Value::Error(ErrorKind::Value),
     };
+    let with_text = false;
     let mut vals: Vec<Value> = Vec::new();
     for arg in &a[1..] {
         match arg {
+            Value::Ref(r) if r.len() > 1 || r.iter().any(|x| x.sheet != x.sheet_last) => {
+                return Value::Error(ErrorKind::NA);
+            }
             Value::Ref(r) => {
                 for area in r.iter() {
                     let mut cells: Vec<(u32, u32, u32, Value)> = Vec::new();
@@ -665,7 +694,7 @@ fn subtotal(ctx: &mut Ctx, a: &[Value], with_text: bool) -> Value {
                 }
             }
             Value::Error(e) => return Value::Error(*e),
-            _ => return Value::Error(ErrorKind::Value),
+            _ => return Value::Error(ErrorKind::NA),
         }
     }
     let mode = if with_text { Agg::NumbersA } else { Agg::Numbers };
@@ -943,8 +972,9 @@ pub fn to_roman(n: u32, mode: u32) -> String {
 }
 
 fn arabic(ctx: &mut Ctx, a: &[Value]) -> Value {
+    // 앞뒤 공백도 #VALUE! (ARABIC(" XIV "), 대조 실험 math)
     let t = try_v!(ctx.text(&a[0]));
-    let s = t.trim();
+    let s: &str = &t;
     if s.chars().count() > 255 {
         return Value::Error(ErrorKind::Value);
     }
@@ -1013,7 +1043,8 @@ fn decimal(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let mut v = 0.0f64;
-    for ch in t.trim().chars() {
+    // 공백은 숫자가 아니다 (DECIMAL(" FF ",16) = #NUM!, 대조 실험 math)
+    for ch in t.chars() {
         match ch.to_digit(radix as u32) {
             Some(d) => v = v * radix + d as f64,
             None => return Value::Error(ErrorKind::Num),
@@ -1028,7 +1059,7 @@ fn sequence(ctx: &mut Ctx, a: &[Value]) -> Value {
     let start = try_v!(num_or(ctx, a, 2, 1.0));
     let step = try_v!(num_or(ctx, a, 3, 1.0));
     if rows < 1.0 || cols < 1.0 {
-        return Value::Error(ErrorKind::Calc);
+        return Value::Error(ErrorKind::Value);
     }
     if rows * cols > 4_000_000.0 {
         return Value::Error(ErrorKind::Num);

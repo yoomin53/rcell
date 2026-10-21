@@ -229,7 +229,7 @@ pub const HANCOM_FUNCTIONS: &[&str] = &["SUBTOTALA", "CONVERTK"];
 /// RANKAVG·ERRORTYPE·DATESTRING 도 수식으로 쓰면 #NAME? 이다 (COM 으로 넣어도 같다). 기본 설정은 한셀처럼
 /// #NAME? 을 내고, [`crate::calc::CalcOptions::excel_functions`] 면 구현한 것은 계산한다.
 pub const HCELL_UNKNOWN: &[&str] = &[
-    "AGGREGATE", "ARRAYTOTEXT", "BAHTTEXT", "CHOOSEROWS", "CUBEMEMBER", "CUBESETCOUNT", "CUBEVALUE",
+    "AGGREGATE", "ARRAYTOTEXT", "BAHTTEXT", "BETA.DIST", "CHOOSEROWS", "CUBEMEMBER", "CUBESETCOUNT", "CUBEVALUE",
     "DATESTRING", "DROP", "ENCODEURL", "ERRORTYPE", "FILTERXML", "FORECAST.ETS", "FORECAST.LINEAR",
     "HSTACK", "IMAGE", "ISOMITTED", "ISTHAIDIGIT", "JUNJA", "PDURATION", "RANKAVG", "RANKEQ",
     "ROUNDBAHTDOWN", "ROUNDBAHTUP", "RRI", "RTD", "SINGLE", "SORTBY", "STOCKHISTORY", "TAKE",
@@ -320,6 +320,8 @@ pub fn collect_one(
         Value::Empty => out.push(0.0),
         Value::Number(n) => out.push(*n),
         Value::Bool(b) => out.push(*b as u8 as f64),
+        // AVERAGEA·MAXA·… 는 직접 준 글도 0 (AVERAGEA(1,2,3,"4",TRUE) = 1.4, 대조 실험 stat)
+        Value::Text(_) if mode == Agg::NumbersA => out.push(0.0),
         Value::Text(_) => out.push(ctx.num(a)?),
         Value::Error(e) => return Err(*e),
     }
@@ -397,12 +399,19 @@ pub fn trunc_arg(ctx: &Ctx, args: &[Value], i: usize) -> Result<f64, ErrorKind> 
     Ok(num_arg(ctx, args, i)?.trunc())
 }
 
-/// 같은 크기의 숫자 배열 두 개 (SUMXMY2, CORREL …): 둘 다 숫자인 쌍만
+/// 같은 크기의 숫자 배열 두 개 (SUMXMY2, CORREL …): 둘 다 숫자인 쌍만. 한셀은 오류 값이 든 쌍도 건너뛴다
+/// (CORREL(Data!H1:H10,…), SUMX2MY2(Data!H1:H10,…) 이 숫자, 대조 실험 stat·math).
 pub fn paired_numbers(
     ctx: &mut Ctx,
     a: &Value,
     b: &Value,
 ) -> Result<(Vec<f64>, Vec<f64>), ErrorKind> {
+    if let Value::Error(e) = a {
+        return Err(*e);
+    }
+    if let Value::Error(e) = b {
+        return Err(*e);
+    }
     let xa = flatten(ctx, a);
     let xb = flatten(ctx, b);
     if xa.len() != xb.len() {
@@ -411,12 +420,6 @@ pub fn paired_numbers(
     let mut va = Vec::new();
     let mut vb = Vec::new();
     for (x, y) in xa.iter().zip(&xb) {
-        if let Value::Error(e) = x {
-            return Err(*e);
-        }
-        if let Value::Error(e) = y {
-            return Err(*e);
-        }
         if let (Value::Number(x), Value::Number(y)) = (x, y) {
             va.push(*x);
             vb.push(*y);

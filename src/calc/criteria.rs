@@ -42,6 +42,9 @@ pub struct Criterion {
     wildcard: bool,
     /// 숫자 조건의 원래 글 ("5") — 숫자처럼 보이는 글 셀과 비교
     num_text: Option<String>,
+    /// D 함수 조건 표인가
+    database: bool,
+    date1904: bool,
 }
 
 impl Criterion {
@@ -63,6 +66,8 @@ impl Criterion {
             prefix: false,
             wildcard: false,
             num_text: None,
+            database,
+            date1904,
         };
         match v {
             Value::Number(n) => mk(CritOp::Eq, CritVal::Num(*n), false),
@@ -100,7 +105,11 @@ impl Criterion {
                 if rest.eq_ignore_ascii_case("FALSE") {
                     return mk(op, CritVal::Bool(false), explicit);
                 }
-                if let Some(e) = ErrorKind::parse(rest) {
+                // 연산자 없는 "#N/A" 는 글 조건이라 오류 칸에 맞지 않는다 ("<>#N/A" 는 오류 조건,
+                // COUNTIF(Data!H1:H10,"#N/A") = 0·"<>#N/A" = 9, 대조 실험 stat)
+                if let Some(e) = ErrorKind::parse(rest)
+                    && (explicit || database)
+                {
                     return mk(op, CritVal::Err(e), explicit);
                 }
                 let mut c = mk(op, CritVal::Text(value::fold(rest)), explicit);
@@ -136,6 +145,14 @@ impl Criterion {
             }
             CritVal::Num(n) => match cell {
                 Value::Number(x) => cmp_ok(value::cmp_num(*x, *n)),
+                Value::Text(t) if !self.database => {
+                    // 한셀은 숫자로 읽히는 글 칸을 숫자로 비교한다 (COUNTIF(…,5) 가 글 "5" 를 센다,
+                    // ">0" 도 마찬가지, 대조 실험 stat)
+                    match value::parse_number(t, self.date1904) {
+                        Some(x) => cmp_ok(value::cmp_num(x, *n)),
+                        None => self.op == CritOp::Ne,
+                    }
+                }
                 Value::Text(t) => {
                     // 숫자처럼 보이는 글: = 는 글이 같을 때만, <> 는 그 반대
                     let same = self
@@ -189,7 +206,8 @@ impl Criterion {
     }
 }
 
-/// 와일드카드 일치 (`*` 아무 글자열, `?` 한 글자, `~` 다음 글자를 그대로). 둘 다 접은 글.
+/// 와일드카드 일치 (`*` 아무 글자열, `?` 한 글자, `~` 다음의 `*`·`?`·`~` 를 그대로). 둘 다 접은 글.
+/// 한셀은 다른 글자 앞의 `~` 를 글자 그대로 둔다 (COUNTIF(…,"~a*") 는 "~a" 로 시작하는 글, 대조 실험 stat).
 pub fn wildcard_match(pattern: &str, text: &str) -> bool {
     #[derive(Clone, Copy, PartialEq)]
     enum P {
@@ -201,9 +219,12 @@ pub fn wildcard_match(pattern: &str, text: &str) -> bool {
     let mut it = pattern.chars();
     while let Some(c) = it.next() {
         match c {
-            '~' => match it.next() {
-                Some(n) => pat.push(P::Ch(n)),
-                None => pat.push(P::Ch('~')),
+            '~' => match it.clone().next() {
+                Some(n @ ('*' | '?' | '~')) => {
+                    it.next();
+                    pat.push(P::Ch(n))
+                }
+                _ => pat.push(P::Ch('~')),
             },
             '*' => {
                 if pat.last() != Some(&P::Any) {
@@ -274,7 +295,8 @@ mod tests {
         assert!(c(">=10").matches(&Value::Number(10.0)));
         assert!(c("<>5").matches(&Value::Empty));
         assert!(c("<>5").matches(&Value::from("x")));
-        assert!(!c(">10").matches(&Value::from("20")));
+        // 한셀은 숫자로 읽히는 글 칸을 숫자로 비교한다 (대조 실험 stat)
+        assert!(c(">10").matches(&Value::from("20")));
         assert!(c("5").matches(&Value::from("5")));
     }
 

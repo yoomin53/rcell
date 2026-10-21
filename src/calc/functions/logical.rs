@@ -32,9 +32,12 @@ fn not(ctx: &mut Ctx, a: &[Value]) -> Value {
     Value::Bool(!try_v!(ctx.boolean(&a[0])))
 }
 
-/// AND·OR·XOR 의 인수에서 논리 값을 모은다. 범위·배열의 글과 빈 칸은 건너뛴다.
-fn logicals(ctx: &mut Ctx, args: &[Value]) -> Result<Vec<bool>, ErrorKind> {
+/// AND·OR·XOR 의 인수에서 논리 값을 모은다. 빈 칸과 배열의 글은 건너뛰고, 참조한 칸의 글은 숫자로 읽히면
+/// 그 숫자로 (Data!C5 의 "5" 는 TRUE), 아니면 건너뛴다. 직접 준 글은 AND·OR 에서 "TRUE"·"FALSE" 만 되고,
+/// XOR 은 어떤 글이든 #VALUE! (대조 실험 logical·misc3).
+fn logicals(ctx: &mut Ctx, args: &[Value], xor: bool) -> Result<Vec<bool>, ErrorKind> {
     let mut out = Vec::new();
+    let date1904 = ctx.date1904();
     for a in args {
         match a {
             Value::Ref(r) => {
@@ -48,6 +51,11 @@ fn logicals(ctx: &mut Ctx, args: &[Value]) -> Result<Vec<bool>, ErrorKind> {
                             Value::Bool(b) => out.push(*b),
                             Value::Number(n) => out.push(*n != 0.0),
                             Value::Error(e) => err = Some(*e),
+                            Value::Text(t) => {
+                                if let Some(n) = value::parse_number(t, date1904) {
+                                    out.push(n != 0.0);
+                                }
+                            }
                             _ => {}
                         }
                     });
@@ -67,6 +75,7 @@ fn logicals(ctx: &mut Ctx, args: &[Value]) -> Result<Vec<bool>, ErrorKind> {
                 }
             }
             Value::Empty => out.push(false),
+            Value::Text(_) if xor => return Err(ErrorKind::Value),
             other => out.push(ctx.boolean(other)?),
         }
     }
@@ -77,15 +86,15 @@ fn logicals(ctx: &mut Ctx, args: &[Value]) -> Result<Vec<bool>, ErrorKind> {
 }
 
 fn and(ctx: &mut Ctx, a: &[Value]) -> Value {
-    Value::Bool(try_v!(logicals(ctx, a)).iter().all(|&b| b))
+    Value::Bool(try_v!(logicals(ctx, a, false)).iter().all(|&b| b))
 }
 
 fn or(ctx: &mut Ctx, a: &[Value]) -> Value {
-    Value::Bool(try_v!(logicals(ctx, a)).iter().any(|&b| b))
+    Value::Bool(try_v!(logicals(ctx, a, false)).iter().any(|&b| b))
 }
 
 fn xor(ctx: &mut Ctx, a: &[Value]) -> Value {
-    Value::Bool(try_v!(logicals(ctx, a)).iter().filter(|&&b| b).count() % 2 == 1)
+    Value::Bool(try_v!(logicals(ctx, a, true)).iter().filter(|&&b| b).count() % 2 == 1)
 }
 
 /// 생략한 인수는 0
@@ -181,9 +190,11 @@ fn catch(ctx: &mut Ctx, args: &[Expr], hit: fn(ErrorKind) -> bool) -> Value {
     }
 }
 
+/// IFS: 인수 개수가 홀수면 #VALUE!, 조건이 오류이거나 논리로 바꿀 수 없으면 #N/A (IFS("x",1),
+/// IFS(FALSE,1,1/0,2), 대조 실험 logical)
 fn ifs(ctx: &mut Ctx, args: &[Expr]) -> Value {
     if args.len() % 2 != 0 {
-        return Value::Error(ErrorKind::NA);
+        return Value::Error(ErrorKind::Value);
     }
     for pair in args.chunks(2) {
         let c = ctx.eval_value(&pair[0]);
@@ -191,7 +202,7 @@ fn ifs(ctx: &mut Ctx, args: &[Expr]) -> Value {
         match ctx.boolean(&c) {
             Ok(true) => return branch(ctx, &pair[1]),
             Ok(false) => {}
-            Err(e) => return Value::Error(e),
+            Err(_) => return Value::Error(ErrorKind::NA),
         }
     }
     Value::Error(ErrorKind::NA)
@@ -208,8 +219,10 @@ fn switch(ctx: &mut Ctx, args: &[Expr]) -> Value {
     while i + 1 < rest.len() {
         let v = ctx.eval_value(&rest[i]);
         let v = ctx.scalar(v);
-        if let Value::Error(e) = v {
-            return Value::Error(e);
+        // 오류인 경우 값은 건너뛴다 (SWITCH(1,#N/A,2,1,3) = 3, 대조 실험 logical)
+        if matches!(v, Value::Error(_)) {
+            i += 2;
+            continue;
         }
         if value::compare(&x, &v) == std::cmp::Ordering::Equal && same_kind(&x, &v) {
             return branch(ctx, &rest[i + 1]);

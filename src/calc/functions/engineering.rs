@@ -228,22 +228,31 @@ fn dec2(ctx: &mut Ctx, a: &[Value], radix: u32) -> Value {
     }
 }
 
-fn bit_arg(ctx: &mut Ctx, a: &[Value], i: usize) -> Result<u64, ErrorKind> {
+/// 비트 함수 인수: 소수점 아래는 버리되 BITAND·BITOR·BITXOR 은 소수 부분이 0.5 보다 크면 #NUM!
+/// (BITOR(1.5,1) = 1, BITAND(-0.5,1) = 0, BITAND(5.9,7) = #NUM!), 버린 값은 0 이상 2^48 이하
+/// (BITAND(2^48,1) = 0, BITAND(2^52,1) = #NUM!) — 대조 실험 engineering·misc3
+fn bit_arg(ctx: &mut Ctx, a: &[Value], i: usize, strict: bool) -> Result<u64, ErrorKind> {
     let x = num_arg(ctx, a, i)?;
-    if x < 0.0 || x.fract() != 0.0 || x >= 281_474_976_710_656.0 {
+    let n = x.trunc();
+    if (strict && x - n > 0.5) || n < 0.0 || n > 281_474_976_710_656.0 {
         return Err(ErrorKind::Num);
     }
-    Ok(x as u64)
+    Ok(n as u64)
 }
 
+/// 결과가 2^48 이상이면 #NUM! (BITOR(2^48,1))
 fn bit(ctx: &mut Ctx, a: &[Value], f: fn(u64, u64) -> u64) -> Value {
-    let x = try_v!(bit_arg(ctx, a, 0));
-    let y = try_v!(bit_arg(ctx, a, 1));
-    Value::Number(f(x, y) as f64)
+    let x = try_v!(bit_arg(ctx, a, 0, true));
+    let y = try_v!(bit_arg(ctx, a, 1, true));
+    let r = f(x, y);
+    if r >= 281_474_976_710_656 {
+        return Value::Error(ErrorKind::Num);
+    }
+    Value::Number(r as f64)
 }
 
 fn shift(ctx: &mut Ctx, a: &[Value], left: bool) -> Value {
-    let x = try_v!(bit_arg(ctx, a, 0));
+    let x = try_v!(bit_arg(ctx, a, 0, false));
     let s = try_v!(num_arg(ctx, a, 1)).trunc();
     if s.abs() > 53.0 {
         return Value::Error(ErrorKind::Num);

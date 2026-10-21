@@ -25,6 +25,8 @@ pub struct Ctx<'a> {
     pub col: u32,
     /// 배열 문맥 (배열 수식이거나 배열 인수 안)
     pub array_mode: bool,
+    /// 수식 자체가 배열 수식인가 (배열 인수 안이라도 바뀌지 않는다)
+    pub array_formula: bool,
     name_depth: u32,
 }
 
@@ -36,6 +38,7 @@ impl<'a> Ctx<'a> {
             row,
             col,
             array_mode,
+            array_formula: array_mode,
             name_depth: 0,
         }
     }

@@ -8,7 +8,7 @@
 use std::cmp::Ordering;
 use std::rc::Rc;
 
-use super::{A, Arg, FnSpec, MANY, R, V, bool_or, f, lazy, num_arg, num_or, opt, to_array};
+use super::{Arg, FnSpec, MANY, R, V, bool_or, f, lazy, num_arg, num_or, opt, to_array};
 use crate::calc::ast::{Expr, SheetSpec};
 use crate::calc::criteria::{has_wildcards, wildcard_match};
 use crate::calc::eval::Ctx;
@@ -41,9 +41,16 @@ pub const FNS: &[FnSpec] = &[
         _ => Value::Error(ErrorKind::Value),
     }),
     f("ADDRESS", 2, 5, V, address),
-    f("TRANSPOSE", 1, 1, A, |c, a| match to_array(c, &a[0]) {
-        Ok(arr) => Value::from(arr.transpose()),
-        Err(e) => Value::Error(e),
+    // 배열 수식이 아니면 인수를 암묵 교차한 값 하나 (INDEX(TRANSPOSE(A1:A3),1,2) = #VALUE!, 대조 실험 lookup)
+    f("TRANSPOSE", 1, 1, R, |c, a| {
+        let v = match &a[0] {
+            Value::Ref(r) if !c.array_formula => c.intersect_ref(r),
+            v => v.clone(),
+        };
+        match to_array(c, &v) {
+            Ok(arr) => Value::from(arr.transpose()),
+            Err(e) => Value::Error(e),
+        }
     }),
     f("HYPERLINK", 1, 2, V, |c, a| match opt(a, 1) {
         Some(v) => v.clone(),
@@ -53,7 +60,7 @@ pub const FNS: &[FnSpec] = &[
         },
     }),
     f("FORMULATEXT", 1, 1, R, formulatext),
-    f("GETPIVOTDATA", 2, MANY, R, |_, _| Value::Error(ErrorKind::Ref)),
+    f("GETPIVOTDATA", 2, MANY, R, |_, _| Value::Error(ErrorKind::Value)),
     f("RTD", 3, MANY, V, |_, _| Value::Error(ErrorKind::NA)),
     f("UNIQUE", 1, 3, &[Arg::A, Arg::V, Arg::V], unique),
     f("SORT", 1, 4, &[Arg::A, Arg::V, Arg::V, Arg::V], sort),
@@ -98,24 +105,42 @@ pub fn exact_index(vals: &[Value], x: &Value, wildcards: bool) -> Option<usize> 
     vals.iter().position(|v| value::lookup_eq(v, x))
 }
 
-/// 정렬된 칸에서 x 이하인 마지막 칸 (내림차순이면 x 이상인 마지막 칸). 같은 형만 본다.
-pub fn approx_index(vals: &[Value], x: &Value, descending: bool) -> Option<usize> {
-    let idx: Vec<usize> = (0..vals.len()).filter(|&i| same_type(&vals[i], x)).collect();
-    let (mut lo, mut hi) = (0isize, idx.len() as isize - 1);
-    let mut best = None;
+/// 한셀의 근사 찾기 (오름차순 가정: MATCH 1·VLOOKUP·HLOOKUP·LOOKUP·XLOOKUP 찾기 방향 ±2). 이분 찾기로,
+/// 가운데 칸이 찾는 값과 같으면 바로 그 칸 (같은 값이 여럿이어도 처음 닿은 칸). 가운데 칸의 형이 다르면
+/// (빈 칸 포함) 위쪽 끝까지 같은 형 칸을 찾아 비교하고, 없으면 그 아래 반을 버린다. 끝나면 마지막 hi 칸
+/// (정렬되지 않은 자료에서도 한셀과 같은 칸, 대조 실험 search).
+pub fn approx_index(vals: &[Value], x: &Value) -> Option<usize> {
+    let (mut lo, mut hi) = (0isize, vals.len() as isize - 1);
     while lo <= hi {
         let mid = (lo + hi) / 2;
-        let v = &vals[idx[mid as usize]];
-        let o = value::compare(v, x);
-        let ok = if descending { o != Ordering::Less } else { o != Ordering::Greater };
-        if ok {
-            best = Some(idx[mid as usize]);
-            lo = mid + 1;
-        } else {
+        let Some(j) = (mid..=hi).find(|&j| same_type(&vals[j as usize], x)) else {
             hi = mid - 1;
+            continue;
+        };
+        match value::compare(&vals[j as usize], x) {
+            Ordering::Equal => return Some(j as usize),
+            Ordering::Less => lo = j + 1,
+            Ordering::Greater => hi = mid - 1,
         }
     }
-    best
+    (hi >= 0).then_some(hi as usize)
+}
+
+/// MATCH -1 (내림차순 가정): 한셀은 처음부터 차례로 본다. 같은 값이면 그 칸, 찾는 값보다 작은 칸을
+/// 만나면 바로 앞 칸 (첫 칸이면 #N/A), 끝까지 크면 마지막 칸. 형이 다른 칸은 건너뛴다 (대조 실험 search).
+pub fn approx_desc_index(vals: &[Value], x: &Value) -> Option<usize> {
+    let mut last = None;
+    for (i, v) in vals.iter().enumerate() {
+        if !same_type(v, x) {
+            continue;
+        }
+        match value::compare(v, x) {
+            Ordering::Equal => return Some(i),
+            Ordering::Greater => last = Some(i),
+            Ordering::Less => return last,
+        }
+    }
+    last
 }
 
 fn scalar_key(ctx: &mut Ctx, v: &Value) -> Result<Value, ErrorKind> {
@@ -214,8 +239,10 @@ fn match_fn(ctx: &mut Ctx, a: &[Value]) -> Value {
     let mt = try_v!(num_or(ctx, a, 2, 1.0));
     let found = if mt == 0.0 {
         exact_index(&vals, &x, true)
+    } else if mt < 0.0 {
+        approx_desc_index(&vals, &x)
     } else {
-        approx_index(&vals, &x, mt < 0.0)
+        approx_index(&vals, &x)
     };
     match found {
         Some(i) => Value::Number(i as f64 + 1.0),
@@ -235,17 +262,24 @@ fn xmatch(ctx: &mut Ctx, a: &[Value]) -> Value {
     }
 }
 
-/// XLOOKUP·XMATCH 찾기 (일치 방식 0/−1/1/2, 찾기 방향 1/−1/2/−2)
+/// XLOOKUP 찾기. 한셀은 일치 방식(0/−1/1/2)과 찾기 방향 ±1 을 무시하고 처음부터 정확히 같은 칸을 찾으며,
+/// 찾기 방향 ±2 는 근사 이분 찾기([`approx_index`], x 이하)다 (대조 실험 search).
+fn xlookup_find(vals: &[Value], x: &Value, sm: f64) -> Option<usize> {
+    if sm.abs() == 2.0 {
+        return approx_index(vals, x);
+    }
+    vals.iter().position(|v| value::lookup_eq(v, x))
+}
+
+/// XMATCH 찾기 (일치 방식 0/−1/1/2, 찾기 방향 1/−1/2/−2)
 fn x_find(vals: &[Value], x: &Value, mm: f64, sm: f64) -> Option<usize> {
     let order: Vec<usize> = if sm < 0.0 {
         (0..vals.len()).rev().collect()
     } else {
         (0..vals.len()).collect()
     };
-    if sm.abs() == 2.0 && mm != 2.0 {
-        if mm == 0.0 {
-            return approx_index(vals, x, sm < 0.0).filter(|&i| value::lookup_eq(&vals[i], x));
-        }
+    if sm.abs() == 2.0 && mm == 0.0 {
+        return approx_index(vals, x).filter(|&i| value::lookup_eq(&vals[i], x));
     }
     let wild = mm == 2.0;
     let mut best: Option<usize> = None;
@@ -302,7 +336,7 @@ fn vh_lookup(ctx: &mut Ctx, a: &[Value], vertical: bool) -> Value {
         .map(|i| if vertical { arr.get(i, 0) } else { arr.get(0, i) }.clone())
         .collect();
     let found = if approx {
-        approx_index(&keys, &x, false)
+        approx_index(&keys, &x)
     } else {
         exact_index(&keys, &x, true)
     };
@@ -335,12 +369,22 @@ fn lookup(ctx: &mut Ctx, a: &[Value]) -> Value {
         Some(rv) => {
             let keys = try_v!(vector(&arr));
             let res = try_v!(lookup_array(ctx, rv));
-            let rv = try_v!(vector(&res));
+            // 결과 범위는 찾는 범위와 같은 방향으로 읽는다: 세로 찾기에 가로 한 줄 결과면 둘째 칸부터 #REF!
+            // (LOOKUP(35,Data!F1:F10,Data!A12:E12), 대조 실험 lookup)
+            let vertical = arr.cols == 1 && arr.rows > 1;
+            let horizontal = arr.rows == 1 && arr.cols > 1;
+            let rv: Vec<Value> = if vertical && res.rows == 1 && res.cols > 1 {
+                vec![res.get(0, 0).clone()]
+            } else if horizontal && res.cols == 1 && res.rows > 1 {
+                vec![res.get(0, 0).clone()]
+            } else {
+                try_v!(vector(&res))
+            };
             (keys, rv)
         }
     };
-    match approx_index(&keys, &x, false) {
-        Some(i) => results.get(i).cloned().unwrap_or(Value::Error(ErrorKind::NA)),
+    match approx_index(&keys, &x) {
+        Some(i) => results.get(i).cloned().unwrap_or(Value::Error(ErrorKind::Ref)),
         None => Value::Error(ErrorKind::NA),
     }
 }
@@ -349,12 +393,16 @@ fn xlookup(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(scalar_key(ctx, &a[0]));
     let la = try_v!(lookup_array(ctx, &a[1]));
     let vals = try_v!(vector(&la));
-    let mm = try_v!(num_or(ctx, a, 4, 0.0));
+    // 넷째 인수를 비워 두면 언제나 #VALUE!, 아예 없으면 못 찾았을 때 0 (대조 실험 search·lookup)
+    if matches!(a.get(3), Some(Value::Empty)) {
+        return Value::Error(ErrorKind::Value);
+    }
+    let _ = try_v!(num_or(ctx, a, 4, 0.0));
     let sm = try_v!(num_or(ctx, a, 5, 1.0));
-    let Some(i) = x_find(&vals, &x, mm, sm) else {
+    let Some(i) = xlookup_find(&vals, &x, sm) else {
         return match a.get(3) {
-            Some(v) if !matches!(v, Value::Empty) => v.clone(),
-            _ => Value::Error(ErrorKind::NA),
+            Some(v) => v.clone(),
+            None => Value::Number(0.0),
         };
     };
     let vertical = la.cols == 1;
@@ -396,30 +444,44 @@ fn xlookup(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn choose(ctx: &mut Ctx, args: &[Expr]) -> Value {
     let idx = ctx.eval_value(&args[0]);
     if let Value::Array(ia) = idx {
+        // 배열 번호: 번호 배열과 고른 값(배열)을 서로 늘려 맞춘다 (CHOOSE({1,2},A1:A2,B1:B2) 은 2×2)
         let opts: Vec<Value> = args[1..].iter().map(|e| ctx.eval_value(e)).collect();
-        let data = ia
-            .data
-            .iter()
-            .map(|v| match value::to_number(v, ctx.date1904()) {
-                Ok(n) => {
-                    let k = n.trunc();
-                    if k < 1.0 || k as usize > opts.len() {
-                        Value::Error(ErrorKind::Value)
-                    } else {
-                        match &opts[k as usize - 1] {
-                            Value::Array(o) => o.data.first().cloned().unwrap_or(Value::Empty),
-                            o => o.clone(),
+        let dims = |v: &Value| match v {
+            Value::Array(a) => (a.rows, a.cols),
+            _ => (1, 1),
+        };
+        let (mut rows, mut cols) = (ia.rows, ia.cols);
+        for o in &opts {
+            let (r, c) = dims(o);
+            rows = crate::calc::eval::broadcast_dim(rows, r);
+            cols = crate::calc::eval::broadcast_dim(cols, c);
+        }
+        let mut data = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                let v = ia.get_broadcast(r, c);
+                data.push(match value::to_number(&v, ctx.date1904()) {
+                    Ok(n) => {
+                        let k = n.trunc();
+                        if k < 1.0 || k as usize > opts.len() {
+                            Value::Error(ErrorKind::Value)
+                        } else {
+                            match &opts[k as usize - 1] {
+                                Value::Array(o) => o.get_broadcast(r, c),
+                                o => o.clone(),
+                            }
                         }
                     }
-                }
-                Err(e) => Value::Error(e),
-            })
-            .collect();
-        return Value::from(Array::new(ia.rows, ia.cols, data));
+                    Err(_) => Value::Error(ErrorKind::Value),
+                });
+            }
+        }
+        return Value::from(Array::new(rows, cols, data));
     }
+    // 번호가 오류면 #VALUE! (CHOOSE(#N/A,1,2), 대조 실험 lookup)
     let k = match ctx.num(&idx) {
         Ok(n) => n.trunc(),
-        Err(e) => return Value::Error(e),
+        Err(_) => return Value::Error(ErrorKind::Value),
     };
     if k < 1.0 || k as usize >= args.len() {
         return Value::Error(ErrorKind::Value);
@@ -562,9 +624,11 @@ fn row_col(ctx: &mut Ctx, a: &[Value], row: bool) -> Value {
 
 fn dims(_ctx: &mut Ctx, a: &[Value], rows: bool) -> Value {
     match &a[0] {
+        // 여러 영역·빈 교차는 #VALUE! (ROWS((A1:A3,B1:B5)), ROWS(A1:A3 B1:B3), 대조 실험 lookup·ops)
+        Value::Error(ErrorKind::Null) => Value::Error(ErrorKind::Value),
         Value::Ref(r) => {
             if r.len() != 1 {
-                return Value::Error(ErrorKind::Ref);
+                return Value::Error(ErrorKind::Value);
             }
             Value::Number(if rows { r[0].rows() } else { r[0].cols() } as f64)
         }
@@ -623,7 +687,10 @@ fn address(ctx: &mut Ctx, a: &[Value]) -> Value {
             if s.is_empty() {
                 Value::from(format!("!{body}"))
             } else {
-                Value::from(format!("{}!{body}", quote_sheet(&s)))
+                // 따옴표 안의 작은따옴표를 겹치지 않는다 ('it's'!$C$2, 대조 실험 lookup)
+                let q = quote_sheet(&s);
+                let q = if q.starts_with('\'') { format!("'{s}'") } else { q };
+                Value::from(format!("{q}!{body}"))
             }
         }
         None => Value::from(body),

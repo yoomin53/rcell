@@ -28,6 +28,7 @@ macro_rules! try_v {
 
 pub mod ast;
 pub mod collate;
+pub mod cp949;
 pub mod criteria;
 pub mod date;
 pub mod engine;

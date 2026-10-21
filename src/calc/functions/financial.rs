@@ -262,8 +262,12 @@ pub const FNS: &[FnSpec] = &[
         let r = try_v!(num_arg(c, a, 2));
         let par = try_v!(num_or(c, a, 3, 1000.0));
         let b = try_v!(basis(c, a, 4));
-        if r <= 0.0 || par <= 0.0 || iss >= set {
+        // 발행일과 만기일이 같으면 0 (ACCRINTM(1,1,1,1), 대조 실험 financial)
+        if r <= 0.0 || par <= 0.0 || iss > set {
             return Value::Error(ErrorKind::Num);
+        }
+        if iss == set {
+            return Value::Number(0.0);
         }
         let yf = try_v!(year_frac(iss, set, b, c.date1904()));
         num(par * r * yf)

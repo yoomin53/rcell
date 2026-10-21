@@ -106,8 +106,9 @@ fn date(ctx: &mut Ctx, a: &[Value]) -> Value {
     if y < 1900.0 {
         y += 1900.0;
     }
-    // 한셀은 일 인수가 크면(DATE(2024,1,1000000)) #NUM! — 32767 을 넘는 일은 받지 않는다고 본다
-    if m.abs() > 1e9 || d.abs() > 32_767.0 {
+    // 한셀은 월·일 인수를 16비트 정수(−32768..32767)로 받는다 (DATE(2024,1,-32768) = 12523,
+    // DATE(2024,1,32768)·DATE(2024,32768,1) = #NUM!, 대조 실험 misc3)
+    if !(-32_768.0..=32_767.0).contains(&m) || !(-32_768.0..=32_767.0).contains(&d) {
         return Value::Error(ErrorKind::Num);
     }
     match serial_from_ymd(y as i64, m as i64, d as i64, ctx.date1904()) {
@@ -240,8 +241,14 @@ fn add_months(ctx: &mut Ctx, a: &[Value], eom: bool) -> Value {
     let total = y * 12 + (mo as i64 - 1) + m as i64;
     let ny = total.div_euclid(12);
     let nm = (total.rem_euclid(12) + 1) as u32;
-    let dim = days_in_month(ny, nm);
+    // EOMONTH 은 실제 달력(1900년 2월은 28일: EOMONTH(60,0) = 59), EDATE 는 2월 29일이 있는 1900년
+    // 달력으로 날을 줄인다 (EDATE(31,1) = 60) — 대조 실험 date·misc3
+    let dim = if eom && ny == 1900 && nm == 2 { 28 } else { days_in_month(ny, nm) };
     let nd = if eom { dim } else { d.min(dim).max(1) };
+    // 1899-12-31 은 0 (EOMONTH(0,0) = EDATE(0,0) = 0)
+    if !d1904 && (ny, nm, nd) == (1899, 12, 31) {
+        return Value::Number(0.0);
+    }
     match serial_from_ymd(ny, nm as i64, nd as i64, d1904) {
         Some(v) if v >= 0.0 => num(v),
         _ => Value::Error(ErrorKind::Num),
@@ -393,13 +400,18 @@ pub fn year_frac(s: f64, e: f64, basis: u8, date1904: bool) -> Result<f64, Error
 }
 
 /// 주말 지정 (번호 1–7, 11–17 또는 "0000011" 글) → 요일(0 일요일)별 쉬는 날. 한셀은 모든 날이 주말인
-/// "1111111" 도 받는다 (WORKDAY.INTL 은 그때 끝나지 않는다). 없는 번호는 `bad` 오류.
-fn weekend_mask(ctx: &mut Ctx, v: Option<&Value>, bad: ErrorKind) -> Result<[bool; 7], ErrorKind> {
+/// "1111111" 도 받는다 (WORKDAY.INTL 은 그때 끝나지 않는다). 번호 8–10 은 #VALUE!, 그 밖의 없는 번호는
+/// #NUM!, 일곱 글자가 아닌 글은 한 글자 숫자("1")만 번호로 읽는다 (대조 실험 date·misc3).
+fn weekend_mask(ctx: &mut Ctx, v: Option<&Value>, _bad: ErrorKind) -> Result<[bool; 7], ErrorKind> {
     let mut m = [false; 7];
     match v {
         None => {
             m[0] = true;
             m[6] = true;
+        }
+        Some(Value::Text(t)) if t.chars().count() == 1 && t.chars().all(|c| c.is_ascii_digit()) => {
+            let n = t.parse::<f64>().unwrap_or(0.0);
+            return weekend_mask(ctx, Some(&Value::Number(n)), _bad);
         }
         Some(Value::Text(t)) => {
             let b: Vec<char> = t.chars().collect();
@@ -422,11 +434,20 @@ fn weekend_mask(ctx: &mut Ctx, v: Option<&Value>, bad: ErrorKind) -> Result<[boo
                 }
                 // 11 일요일만, 12 월요일만 … 17 토요일만
                 11..=17 => m[(n - 11) as usize] = true,
-                _ => return Err(bad),
+                8..=10 => return Err(ErrorKind::Value),
+                _ => return Err(ErrorKind::Num),
             }
         }
     }
     Ok(m)
+}
+
+/// 여러 칸 참조인가
+fn multi_cell(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Ref(r)) => r.len() > 1 || r.iter().any(|a| !a.is_cell()),
+        _ => false,
+    }
 }
 
 fn holidays(ctx: &mut Ctx, v: Option<&Value>) -> Result<Vec<f64>, ErrorKind> {
@@ -448,8 +469,9 @@ fn networkdays(ctx: &mut Ctx, a: &[Value], intl: bool) -> Value {
     let s = try_v!(serial_arg(ctx, a, 0)).floor();
     let e = try_v!(serial_arg(ctx, a, 1)).floor();
     let (wk, hol_i) = if intl { (given(a, 2), 3) } else { (None, 2) };
-    // 한셀의 NETWORKDAYS.INTL·WORKDAY.INTL 은 휴일 인수가 있으면 #NUM! (함수 대조 실험)
-    if intl && given(a, hol_i).is_some() {
+    // 한셀의 NETWORKDAYS.INTL·WORKDAY.INTL 은 휴일이 여러 칸 범위면 #NUM! (한 칸·값·배열은 된다,
+    // 대조 실험 misc3)
+    if intl && multi_cell(given(a, hol_i)) {
         return Value::Error(ErrorKind::Num);
     }
     let mask = try_v!(weekend_mask(ctx, wk, ErrorKind::Value));
@@ -472,7 +494,7 @@ fn workday(ctx: &mut Ctx, a: &[Value], intl: bool) -> Value {
     let s = try_v!(serial_arg(ctx, a, 0)).floor();
     let days = try_v!(num_arg(ctx, a, 1)).trunc();
     let (wk, hol_i) = if intl { (given(a, 2), 3) } else { (None, 2) };
-    if intl && given(a, hol_i).is_some() {
+    if intl && multi_cell(given(a, hol_i)) {
         return Value::Error(ErrorKind::Num);
     }
     let mask = try_v!(weekend_mask(ctx, wk, ErrorKind::Num));

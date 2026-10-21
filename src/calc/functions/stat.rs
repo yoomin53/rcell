@@ -71,7 +71,12 @@ pub const FNS: &[FnSpec] = &[
         if v.is_empty() || v.iter().any(|&x| x <= 0.0) {
             return Value::Error(ErrorKind::Num);
         }
-        num((v.iter().map(|x| x.mln()).sum::<f64>() / v.len() as f64).mexp())
+        // 곱의 n제곱근 (곱이 넘치면 #NUM!, 대조 실험 stat·variance)
+        let p: f64 = v.iter().product();
+        if !p.is_finite() || p <= 0.0 {
+            return Value::Error(ErrorKind::Num);
+        }
+        num(p.mpow(1.0 / v.len() as f64))
     }),
     f("HARMEAN", 1, MANY, R, |c, a| {
         let v = try_v!(collect_numbers(c, a, Agg::Numbers));
@@ -83,12 +88,12 @@ pub const FNS: &[FnSpec] = &[
     f("KURT", 1, MANY, R, kurt),
     f("SKEW", 1, MANY, R, |c, a| skew(c, a, false)),
     f("SKEW.P", 1, MANY, R, |c, a| skew(c, a, true)),
-    f("LARGE", 2, 2, AV, |c, a| {
+    f("LARGE", 2, 2, RV, |c, a| {
         let v = try_v!(array_numbers(c, &a[0]));
         let k = try_v!(num_arg(c, a, 1));
         large_small(&v, k, true)
     }),
-    f("SMALL", 2, 2, AV, |c, a| {
+    f("SMALL", 2, 2, RV, |c, a| {
         let v = try_v!(array_numbers(c, &a[0]));
         let k = try_v!(num_arg(c, a, 1));
         large_small(&v, k, false)
@@ -174,19 +179,25 @@ pub const FNS: &[FnSpec] = &[
         if n < 0.0 || k < 0.0 {
             return Value::Error(ErrorKind::Num);
         }
+        // PERMUTATIONA(0,0) = 0 (대조 실험 stat)
+        if n == 0.0 {
+            return Value::Number(0.0);
+        }
         num(n.mpow(k))
     }),
+    // GAMMA: 171 이상은 #NUM!, 결과는 소수 9자리 반올림 (GAMMA(2.5) = 1.329340388, 대조 실험 stat)
     f("GAMMA", 1, 1, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
-        if x <= 0.0 && x == x.floor() {
+        if (x <= 0.0 && x == x.floor()) || x >= 171.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num(sp::gamma(x))
+        num(round9(sp::gamma(x)))
     }),
     f("GAMMALN", 1, 1, V, gammaln),
     f("GAMMALN.PRECISE", 1, 1, V, gammaln),
-    f("GAUSS", 1, 1, V, |c, a| num(sp::norm_s_cdf(try_v!(num_arg(c, a, 0))) - 0.5)),
-    f("PHI", 1, 1, V, |c, a| num(sp::norm_s_pdf(try_v!(num_arg(c, a, 0))))),
+    // GAUSS·PHI 는 소수 9자리로 반올림 (PHI(0) = 0.39894228000000004, 대조 실험 stat·normal)
+    f("GAUSS", 1, 1, V, |c, a| num(round9(sp::norm_s_cdf(try_v!(num_arg(c, a, 0))) - 0.5))),
+    f("PHI", 1, 1, V, |c, a| num(round9(sp::norm_s_pdf(try_v!(num_arg(c, a, 0)))))),
     // 정규 분포
     f("NORM.DIST", 4, 4, V, norm_dist),
     f("NORMDIST", 4, 4, V, norm_dist),
@@ -225,8 +236,8 @@ pub const FNS: &[FnSpec] = &[
     // 이산 분포
     f("BINOM.DIST", 4, 4, V, binom_dist),
     f("BINOMDIST", 4, 4, V, binom_dist),
-    f("BINOM.INV", 3, 3, V, binom_inv),
-    f("CRITBINOM", 3, 3, V, binom_inv),
+    f("BINOM.INV", 3, 3, V, |c, a| binom_inv(c, a, false)),
+    f("CRITBINOM", 3, 3, V, |c, a| binom_inv(c, a, true)),
     f("BINOM.DIST.RANGE", 3, 4, V, binom_range),
     f("NEGBINOM.DIST", 4, 4, V, |c, a| negbinom(c, a, true)),
     f("NEGBINOMDIST", 3, 3, V, |c, a| negbinom(c, a, false)),
@@ -235,14 +246,15 @@ pub const FNS: &[FnSpec] = &[
     f("POISSON.DIST", 3, 3, V, poisson),
     f("POISSON", 3, 3, V, poisson),
     // 카이제곱·F·t
+    // 엑셀 2010 분포 함수는 소수 9자리 반올림. 확률 밀도의 x = 0 은 #NUM! (대조 실험 dist)
     f("CHISQ.DIST", 3, 3, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
         let df = try_v!(num_arg(c, a, 1)).trunc();
         let cum = try_v!(bool_or(c, a, 2, true));
-        if x < 0.0 || !(1.0..=1e10).contains(&df) {
+        if x < 0.0 || !(1.0..=1e10).contains(&df) || (x == 0.0 && !cum) {
             return Value::Error(ErrorKind::Num);
         }
-        num(if cum { sp::chisq_cdf(x, df) } else { sp::chisq_pdf(x, df) })
+        num(round9(if cum { sp::chisq_cdf(x, df) } else { sp::chisq_pdf(x, df) }))
     }),
     f("CHISQ.DIST.RT", 2, 2, V, chi_rt),
     f("CHIDIST", 2, 2, V, chi_rt),
@@ -256,17 +268,21 @@ pub const FNS: &[FnSpec] = &[
     }),
     f("CHISQ.INV.RT", 2, 2, V, chi_inv_rt),
     f("CHIINV", 2, 2, V, chi_inv_rt),
-    f("CHISQ.TEST", 2, 2, A, chitest),
-    f("CHITEST", 2, 2, A, chitest),
+    f("CHISQ.TEST", 2, 2, R, |c, a| chitest(c, a, true)),
+    f("CHITEST", 2, 2, A, |c, a| chitest(c, a, false)),
+    // F.DIST: 밀도의 x = 0 은 0, 자유도는 1E+10 미만, 소수 9자리 반올림 (대조 실험 dist)
     f("F.DIST", 4, 4, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
         let d1 = try_v!(num_arg(c, a, 1)).trunc();
         let d2 = try_v!(num_arg(c, a, 2)).trunc();
         let cum = try_v!(bool_or(c, a, 3, true));
-        if x < 0.0 || d1 < 1.0 || d2 < 1.0 {
+        if x < 0.0 || d1 < 1.0 || d2 < 1.0 || d1 >= 1e10 || d2 >= 1e10 {
             return Value::Error(ErrorKind::Num);
         }
-        num(if cum { sp::f_cdf(x, d1, d2) } else { sp::f_pdf(x, d1, d2) })
+        if x == 0.0 && !cum {
+            return Value::Number(0.0);
+        }
+        num(round9(if cum { sp::f_cdf(x, d1, d2) } else { sp::f_pdf(x, d1, d2) }))
     }),
     f("F.DIST.RT", 3, 3, V, f_rt),
     f("FDIST", 3, 3, V, f_rt),
@@ -287,10 +303,10 @@ pub const FNS: &[FnSpec] = &[
         let x = try_v!(num_arg(c, a, 0));
         let df = try_v!(num_arg(c, a, 1)).trunc();
         let cum = try_v!(bool_or(c, a, 2, true));
-        if df < 1.0 {
-            return Value::Error(ErrorKind::Div0);
+        if !(1.0..1e10).contains(&df) {
+            return Value::Error(ErrorKind::Num);
         }
-        num(if cum { sp::t_cdf(x, df) } else { sp::t_pdf(x, df) })
+        num(round9(if cum { sp::t_cdf(x, df) } else { sp::t_pdf(x, df) }))
     }),
     f("T.DIST.2T", 2, 2, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
@@ -300,17 +316,19 @@ pub const FNS: &[FnSpec] = &[
         }
         num(2.0 * sp::t_tail(x, df))
     }),
+    // T.DIST.RT 는 x < 0 이면 #NUM! (대조 실험 dist)
     f("T.DIST.RT", 2, 2, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
         let df = try_v!(num_arg(c, a, 1)).trunc();
-        if df < 1.0 {
+        if df < 1.0 || x < 0.0 {
             return Value::Error(ErrorKind::Num);
         }
         num(1.0 - sp::t_cdf(x, df))
     }),
+    // TDIST 는 자유도의 소수 부분을 버리지 않는다 (TDIST(10,2.9,2), 대조 실험 dist)
     f("TDIST", 3, 3, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
-        let df = try_v!(num_arg(c, a, 1)).trunc();
+        let df = try_v!(num_arg(c, a, 1));
         let tails = try_v!(num_arg(c, a, 2)).trunc();
         if x < 0.0 || df < 1.0 || !(tails == 1.0 || tails == 2.0) {
             return Value::Error(ErrorKind::Num);
@@ -359,20 +377,7 @@ pub fn basic_aggregate(kind: u8, v: &[f64]) -> Value {
         4 => num(v.iter().copied().fold(f64::NEG_INFINITY, f64::max).max(if v.is_empty() { 0.0 } else { f64::NEG_INFINITY })),
         5 => num(if v.is_empty() { 0.0 } else { v.iter().copied().fold(f64::INFINITY, f64::min) }),
         6 => num(if v.is_empty() { 0.0 } else { v.iter().product() }),
-        7 | 10 => {
-            if v.len() < 2 {
-                return Value::Error(ErrorKind::Div0);
-            }
-            let var = devsq(v) / (n - 1.0);
-            num(if kind == 7 { var.sqrt() } else { var })
-        }
-        8 | 11 => {
-            if v.is_empty() {
-                return Value::Error(ErrorKind::Div0);
-            }
-            let var = devsq(v) / n;
-            num(if kind == 8 { var.sqrt() } else { var })
-        }
+        7 | 8 | 10 | 11 => variance(kind, v, true),
         9 => num(v.iter().sum()),
         _ => Value::Error(ErrorKind::Value),
     }
@@ -380,7 +385,45 @@ pub fn basic_aggregate(kind: u8, v: &[f64]) -> Value {
 
 fn agg(ctx: &mut Ctx, a: &[Value], mode: Agg, kind: u8) -> Value {
     let v = try_v!(collect_numbers(ctx, a, mode));
+    if mode == Agg::NumbersA && matches!(kind, 7 | 8 | 10 | 11) {
+        return variance(kind, &v, false);
+    }
     basic_aggregate(kind, &v)
+}
+
+/// 한셀의 분산: 표본 (nΣx² − (Σx)²) / (n(n−1)), 모집단 (nΣx² − (Σx)²) / n². 두 번 훑는 식이 아니라
+/// 큰 수에서 자릿수를 잃는다: VAR(100000001,100000002) = 0, VAR(100000001,100000002,100000004) = 2.666…
+/// (대조 실험 variance). VAR·VARP·STDEV·STDEVP(`clamp`)는 음수를 0 으로, VARA·VARPA 는 음수 그대로
+/// (VARA(1000000000.1,1000000000.2,1000000000.3) = −341.33…), 그 제곱근 STDEVA 는 #NUM!.
+/// `kind`: 7 표본 표준편차, 8 모집단 표준편차, 10 표본 분산, 11 모집단 분산.
+pub fn variance(kind: u8, v: &[f64], clamp: bool) -> Value {
+    let sample = matches!(kind, 7 | 10);
+    if v.len() < if sample { 2 } else { 1 } {
+        return Value::Error(ErrorKind::Div0);
+    }
+    let var = naive_var(v, sample, clamp);
+    if matches!(kind, 7 | 8) {
+        if var < 0.0 {
+            return Value::Error(ErrorKind::Num);
+        }
+        num(var.sqrt())
+    } else {
+        num(var)
+    }
+}
+
+/// [`variance`] 의 식 (n ≥ 2 표본, n ≥ 1 모집단)
+pub fn naive_var(v: &[f64], sample: bool, clamp: bool) -> f64 {
+    let n = v.len() as f64;
+    let (mut s, mut q) = (0.0, 0.0);
+    for x in v {
+        s += x;
+        q += x * x;
+    }
+    let d = n * q - s * s;
+    let var = if sample { d / (n * (n - 1.0)) } else { d / (n * n) };
+    // 넘쳐서 NaN 이 되면 0 (VAR(1E+300,1E+300) = 0, 대조 실험 stat)
+    if var.is_nan() || (clamp && var < 0.0) { 0.0 } else { var }
 }
 
 fn count(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -483,27 +526,21 @@ pub fn mode_sngl(v: &[f64]) -> Value {
     }
 }
 
+/// 한셀의 MODE.MULT 는 배열이 아니라 값 하나: 가장 많이 나온 값들 가운데 차례상 마지막 칸의 값
+/// (MODE.MULT(1,2,2,3,3) = 3, 배열 수식이어도 {3;3;3}, 대조 실험 arrays·newer).
 fn mode_mult(ctx: &mut Ctx, a: &[Value]) -> Value {
     let v = try_v!(collect_numbers(ctx, a, Agg::Numbers));
-    let mut counts: Vec<(f64, usize)> = Vec::new();
+    let mut best: Option<(f64, usize)> = None;
     for x in &v {
-        if let Some(e) = counts.iter_mut().find(|(y, _)| y == x) {
-            e.1 += 1;
-        } else {
-            counts.push((*x, 1));
+        let c = v.iter().filter(|y| *y == x).count();
+        if c > 1 && best.is_none_or(|(_, bc)| c >= bc) {
+            best = Some((*x, c));
         }
     }
-    let max = counts.iter().map(|c| c.1).max().unwrap_or(0);
-    if max < 2 {
-        return Value::Error(ErrorKind::NA);
+    match best {
+        Some((x, _)) => Value::Number(x),
+        None => Value::Error(ErrorKind::NA),
     }
-    let out: Vec<Value> = counts
-        .iter()
-        .filter(|c| c.1 == max)
-        .map(|c| Value::Number(c.0))
-        .collect();
-    let n = out.len();
-    Value::from(Array::new(n, 1, out))
 }
 
 fn kurt(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -512,37 +549,57 @@ fn kurt(ctx: &mut Ctx, a: &[Value]) -> Value {
     if v.len() < 4 {
         return Value::Error(ErrorKind::Div0);
     }
+    // 표준편차는 [`naive_var`] (대조 실험 variance)
     let m = mean(&v);
-    let s = (devsq(&v) / (n - 1.0)).sqrt();
+    let s = naive_var(&v, true, true).sqrt();
     if s == 0.0 {
         return Value::Error(ErrorKind::Div0);
     }
-    let sum4: f64 = v.iter().map(|x| ((x - m) / s).mpowi(4)).sum();
-    num(n * (n + 1.0) / ((n - 1.0) * (n - 2.0) * (n - 3.0)) * sum4
-        - 3.0 * (n - 1.0) * (n - 1.0) / ((n - 2.0) * (n - 3.0)))
+    let mut sum4 = 0.0;
+    for x in &v {
+        let z = (x - m) / s;
+        sum4 += z * z * z * z;
+    }
+    num((n * (n + 1.0) * sum4) / ((n - 1.0) * (n - 2.0) * (n - 3.0))
+        - (3.0 * (n - 1.0) * (n - 1.0)) / ((n - 2.0) * (n - 3.0)))
 }
 
+/// SKEW 는 [`naive_var`] 의 표준편차로 나눈다. SKEW.P 는 두 번 훑는 모멘트 m3 / m2^1.5 를 소수 9자리로
+/// 반올림한다 (엑셀 2010 함수의 한셀 구현이 대개 그렇다). n < 3 이면 #DIV/0!, m2 = 0 이면 #NUM!
+/// (대조 실험 variance·stat).
 fn skew(ctx: &mut Ctx, a: &[Value], population: bool) -> Value {
     let v = try_v!(collect_numbers(ctx, a, Agg::Numbers));
     let n = v.len() as f64;
-    if v.len() < if population { 1 } else { 3 } {
+    if v.len() < 3 {
         return Value::Error(ErrorKind::Div0);
     }
     let m = mean(&v);
-    let s = if population {
-        (devsq(&v) / n).sqrt()
-    } else {
-        (devsq(&v) / (n - 1.0)).sqrt()
-    };
+    if population {
+        let (mut m2, mut m3) = (0.0, 0.0);
+        for x in &v {
+            let d = x - m;
+            m2 += d * d;
+            m3 += d * d * d;
+        }
+        m2 /= n;
+        m3 /= n;
+        if m2 == 0.0 {
+            return Value::Error(ErrorKind::Num);
+        }
+        return num(round9(m3 / m2.mpow(1.5)));
+    }
+    let s = naive_var(&v, true, true).sqrt();
     if s == 0.0 {
         return Value::Error(ErrorKind::Div0);
     }
     let sum3: f64 = v.iter().map(|x| ((x - m) / s).mpowi(3)).sum();
-    if population {
-        num(sum3 / n)
-    } else {
-        num(n / ((n - 1.0) * (n - 2.0)) * sum3)
-    }
+    num(n / ((n - 1.0) * (n - 2.0)) * sum3)
+}
+
+/// 소수 9자리 반올림: round(x × 10⁹) × 10⁻⁹. 한셀이 엑셀 2010 새 통계 함수(SKEW.P, COVARIANCE.S,
+/// GAMMA, PHI …)의 결과에 쓴다 (0.381801786 → 0.38180178600000003, 대조 실험).
+pub fn round9(x: f64) -> f64 {
+    (x * 1e9).round() * 1e-9
 }
 
 /// 배열 인수(참조 포함)의 숫자
@@ -565,7 +622,8 @@ fn array_numbers(ctx: &mut Ctx, v: &Value) -> Result<Vec<f64>, ErrorKind> {
 }
 
 pub fn large_small(v: &[f64], k: f64, large: bool) -> Value {
-    let k = k.ceil();
+    // 한셀은 k 의 소수점 아래를 버린다 (LARGE(…,2.5) = 두 번째, 대조 실험 stat)
+    let k = k.trunc();
     if v.is_empty() || k < 1.0 || k > v.len() as f64 {
         return Value::Error(ErrorKind::Num);
     }
@@ -597,6 +655,8 @@ pub fn percentile_inc(v: &[f64], k: f64) -> Value {
     }
 }
 
+/// 한셀의 PERCENTILE.EXC: 순위 k(n+1) 이 1 보다 작거나 n 보다 커도 오류가 아니다. 범위 밖 칸을 0 으로 보고
+/// 보간한다 (PERCENTILE.EXC({1,1,2,…,9},0.05) = 0.55, 0.95 → 9 + 0.45 × (0 − 9) = 4.95, 대조 실험 stat).
 pub fn percentile_exc(v: &[f64], k: f64) -> Value {
     if v.is_empty() || k <= 0.0 || k >= 1.0 {
         return Value::Error(ErrorKind::Num);
@@ -604,17 +664,16 @@ pub fn percentile_exc(v: &[f64], k: f64) -> Value {
     let mut s = v.to_vec();
     s.sort_by(f64::total_cmp);
     let n = s.len() as f64;
-    let h = (n + 1.0) * k - 1.0;
-    if h < 0.0 || h > n - 1.0 {
-        return Value::Error(ErrorKind::Num);
+    let r = (n + 1.0) * k;
+    let i = r.floor();
+    let frac = r - i;
+    // 1부터 센 i 번째와 i+1 번째 (범위 밖은 0)
+    let at = |j: f64| if j >= 1.0 && j <= n { s[j as usize - 1] } else { 0.0 };
+    let (a, b) = (at(i), at(i + 1.0));
+    if frac == 0.0 {
+        return num(a);
     }
-    let lo = h.floor() as usize;
-    let frac = h - lo as f64;
-    if lo + 1 < s.len() {
-        num(s[lo] + frac * (s[lo + 1] - s[lo]))
-    } else {
-        num(s[lo])
-    }
+    num(a + frac * (b - a))
 }
 
 pub fn quartile(v: &[f64], q: f64, inclusive: bool) -> Value {
@@ -667,8 +726,11 @@ fn percentrank(ctx: &mut Ctx, a: &[Value], inclusive: bool) -> Value {
             (less as f64 + frac) / (n + 1.0)
         }
     };
+    // PERCENTRANK·PERCENTRANK.INC 는 반올림, .EXC 는 버림. 결과는 정수 × 10^-자릿수
+    // (PERCENTRANK(…,4) = 5/9 → 0.556, PERCENTRANK.EXC(…,2.7,4) = 0.33630000000000004, 대조 실험 stat)
     let p = 10f64.mpowi(sig as i32);
-    num((value::round15(r * p)).floor() / p)
+    let k = if inclusive { (r * p).round() } else { (r * p).floor() };
+    num(k * 10f64.mpowi(-(sig as i32)))
 }
 
 fn rank(ctx: &mut Ctx, a: &[Value], average: bool) -> Value {
@@ -749,6 +811,8 @@ fn countif(ctx: &mut Ctx, a: &[Value]) -> Value {
     };
     let c = crate::calc::criteria::Criterion::parse(&crit, ctx.date1904());
     match &a[0] {
+        // 여러 영역 참조는 #VALUE! (대조 실험 stat)
+        Value::Ref(r) if r.len() > 1 => Value::Error(ErrorKind::Value),
         Value::Ref(r) => {
             let mut n = 0f64;
             let mut total = 0f64;
@@ -786,20 +850,21 @@ fn countifs(ctx: &mut Ctx, a: &[Value]) -> Value {
 }
 
 fn averageif(ctx: &mut Ctx, a: &[Value]) -> Value {
+    // 범위가 참조가 아니면 #VALUE! (AVERAGEIF(1,1), 말뭉치 probe3)
+    if !matches!(a[0], Value::Ref(_)) {
+        return Value::Error(ErrorKind::Value);
+    }
     let target = match opt(a, 2) {
         Some(t) => resized(&a[0], t),
         None => a[0].clone(),
     };
     let (_, _, mask) = try_v!(ifs_mask(ctx, &[(&a[0], &a[1])]));
     let vals = try_v!(grid(ctx, &target));
+    // 평균 범위의 오류 칸은 건너뛴다 (AVERAGEIF(Data!A1:A10,">3",Data!H1:H10) = 5.67, 대조 실험 stat)
     let mut nums = Vec::new();
     for (m, v) in mask.iter().zip(&vals.data) {
-        if *m {
-            match v {
-                Value::Number(n) => nums.push(*n),
-                Value::Error(e) => return Value::Error(*e),
-                _ => {}
-            }
+        if *m && let Value::Number(n) = v {
+            nums.push(*n);
         }
     }
     basic_aggregate(1, &nums)
@@ -807,7 +872,7 @@ fn averageif(ctx: &mut Ctx, a: &[Value]) -> Value {
 
 /// AVERAGEIFS·MAXIFS·MINIFS (대상 범위, (조건 범위, 조건)…)
 fn target_ifs(ctx: &mut Ctx, a: &[Value], kind: u8) -> Value {
-    if a.len() % 2 != 1 {
+    if a.len() % 2 != 1 || a.iter().step_by(2).any(|v| !matches!(v, Value::Ref(_))) {
         return Value::Error(ErrorKind::Value);
     }
     let pairs: Vec<(&Value, &Value)> = a[1..].chunks(2).map(|p| (&p[0], &p[1])).collect();
@@ -818,12 +883,8 @@ fn target_ifs(ctx: &mut Ctx, a: &[Value], kind: u8) -> Value {
     }
     let mut nums = Vec::new();
     for (m, v) in mask.iter().zip(&vals.data) {
-        if *m {
-            match v {
-                Value::Number(n) => nums.push(*n),
-                Value::Error(e) => return Value::Error(*e),
-                _ => {}
-            }
+        if *m && let Value::Number(n) = v {
+            nums.push(*n);
         }
     }
     basic_aggregate(kind, &nums)
@@ -833,66 +894,90 @@ fn target_ifs(ctx: &mut Ctx, a: &[Value], kind: u8) -> Value {
 // 상관·회귀
 // ---------------------------------------------------------------------------
 
+/// 합 n, Σx, Σy, Σxy, Σx², Σy²
+fn sums2(x: &[f64], y: &[f64]) -> [f64; 6] {
+    let mut s = [x.len() as f64, 0.0, 0.0, 0.0, 0.0, 0.0];
+    for (p, q) in x.iter().zip(y) {
+        s[1] += p;
+        s[2] += q;
+        s[3] += p * q;
+        s[4] += p * p;
+        s[5] += q * q;
+    }
+    s
+}
+
+/// CORREL·PEARSON·RSQ: (nΣxy − ΣxΣy) / √((nΣx² − (Σx)²)(nΣy² − (Σy)²)) — 분산처럼 한 번에 모은 합으로
+/// (대조 실험 stat·variance)
 fn correl(ctx: &mut Ctx, a: &[Value], square: bool) -> Value {
     let (x, y) = try_v!(paired_numbers(ctx, &a[0], &a[1]));
-    if x.len() < 2 {
+    if x.is_empty() {
         return Value::Error(ErrorKind::Div0);
     }
-    let mx = mean(&x);
-    let my = mean(&y);
-    let mut sxy = 0.0;
-    let mut sxx = 0.0;
-    let mut syy = 0.0;
-    for (p, q) in x.iter().zip(&y) {
-        sxy += (p - mx) * (q - my);
-        sxx += (p - mx) * (p - mx);
-        syy += (q - my) * (q - my);
-    }
-    if sxx == 0.0 || syy == 0.0 {
+    let [n, sx, sy, sxy, sxx, syy] = sums2(&x, &y);
+    let d = ((n * sxx - sx * sx) * (n * syy - sy * sy)).sqrt();
+    if d == 0.0 || d.is_nan() {
         return Value::Error(ErrorKind::Div0);
     }
-    let r = sxy / (sxx * syy).sqrt();
+    let r = (n * sxy - sx * sy) / d;
     num(if square { r * r } else { r })
 }
 
+/// COVAR·COVARIANCE.P: (Σxy − ΣxΣy/n) / n. COVARIANCE.S 는 두 번 훑어 (n−1) 로 나누고 소수 9자리로
+/// 반올림하며, 오류 값이 있으면 #VALUE!, 두 범위의 숫자 개수가 다르면 #N/A (대조 실험 stat).
 fn covar(ctx: &mut Ctx, a: &[Value], sample: bool) -> Value {
+    if sample {
+        let mut cols = [Vec::new(), Vec::new()];
+        for (k, v) in a.iter().take(2).enumerate() {
+            for x in flatten(ctx, v) {
+                match x {
+                    Value::Number(n) => cols[k].push(n),
+                    Value::Error(_) => return Value::Error(ErrorKind::Value),
+                    _ => {}
+                }
+            }
+        }
+        let [x, y] = cols;
+        if flatten(ctx, &a[0]).len() != flatten(ctx, &a[1]).len() || x.len() != y.len() {
+            return Value::Error(ErrorKind::NA);
+        }
+        if x.len() < 2 {
+            return Value::Error(ErrorKind::Div0);
+        }
+        let (mx, my) = (mean(&x), mean(&y));
+        let s: f64 = x.iter().zip(&y).map(|(p, q)| (p - mx) * (q - my)).sum();
+        return num(round9(s / (x.len() as f64 - 1.0)));
+    }
     let (x, y) = try_v!(paired_numbers(ctx, &a[0], &a[1]));
-    let n = x.len() as f64;
-    if x.is_empty() || (sample && x.len() < 2) {
+    if x.is_empty() {
         return Value::Error(ErrorKind::Div0);
     }
-    let mx = mean(&x);
-    let my = mean(&y);
-    let s: f64 = x.iter().zip(&y).map(|(p, q)| (p - mx) * (q - my)).sum();
-    num(s / if sample { n - 1.0 } else { n })
+    let [n, sx, sy, sxy, ..] = sums2(&x, &y);
+    num((sxy - sx * sy / n) / n)
 }
 
-/// 단순 회귀: 0 기울기, 1 절편, 2 STEYX, 3 예측값 (y, x 순서)
+/// 단순 회귀: 0 기울기, 1 절편, 2 STEYX, 3 예측값 (y, x 순서). 기울기 (nΣxy − ΣxΣy)/(nΣx² − (Σx)²),
+/// 분모가 0 이하면 #DIV/0!, 절편 ȳ − b x̄, STEYX √((nΣy² − (Σy)² − B²/C) / (n(n−2))) (대조 실험 stat).
 fn regression(ctx: &mut Ctx, ys: &Value, xs: &Value, what: u8, at: f64) -> Value {
     let (y, x) = try_v!(paired_numbers(ctx, ys, xs));
-    let n = x.len() as f64;
     if x.is_empty() || (what == 2 && x.len() < 3) {
         return Value::Error(ErrorKind::Div0);
     }
-    let mx = mean(&x);
-    let my = mean(&y);
-    let mut sxy = 0.0;
-    let mut sxx = 0.0;
-    let mut syy = 0.0;
-    for (p, q) in x.iter().zip(&y) {
-        sxy += (p - mx) * (q - my);
-        sxx += (p - mx) * (p - mx);
-        syy += (q - my) * (q - my);
-    }
-    if sxx == 0.0 {
+    let [n, sx, sy, sxy, sxx, syy] = sums2(&x, &y);
+    let b = n * sxy - sx * sy;
+    let c = n * sxx - sx * sx;
+    if c <= 0.0 {
         return Value::Error(ErrorKind::Div0);
     }
-    let slope = sxy / sxx;
+    let slope = b / c;
     match what {
         0 => num(slope),
-        1 => num(my - slope * mx),
-        2 => num(((syy - sxy * sxy / sxx) / (n - 2.0)).max(0.0).sqrt()),
-        _ => num(my - slope * mx + slope * at),
+        1 => num(mean(&y) - slope * mean(&x)),
+        2 => {
+            let v = (n * syy - sy * sy - b * b / c) / (n * (n - 2.0));
+            num(v.max(0.0).sqrt())
+        }
+        _ => num(mean(&y) - slope * mean(&x) + slope * at),
     }
 }
 
@@ -1029,11 +1114,9 @@ fn linest(ctx: &mut Ctx, a: &[Value], log: bool) -> Value {
         .collect();
     let ssresid: f64 = y.iter().zip(&pred).map(|(a, b)| (a - b) * (a - b)).sum();
     let my = mean(&y);
-    let sstot: f64 = if with_const {
-        y.iter().map(|v| (v - my) * (v - my)).sum()
-    } else {
-        y.iter().map(|v| v * v).sum()
-    };
+    // 한셀은 상수항이 없을 때도 평균을 뺀 전체 제곱합을 쓴다 (R² 가 음수가 될 수 있다:
+    // LINEST(K,A,FALSE,TRUE) 의 R² = −0.704, 대조 실험 arrays)
+    let sstot: f64 = y.iter().map(|v| (v - my) * (v - my)).sum();
     let ssreg = sstot - ssresid;
     let df = n - k as f64 - with_const as usize as f64;
     let r2 = if sstot == 0.0 { 1.0 } else { ssreg / sstot };
@@ -1045,26 +1128,21 @@ fn linest(ctx: &mut Ctx, a: &[Value], log: bool) -> Value {
     };
     let cols = k + 1;
     let mut data = row1;
-    // 표준 오차 행: 단순화를 위해 단순 회귀만 정확히, 다중 회귀는 #N/A
-    if k == 1 {
-        let x = &xs[0];
-        let mx = mean(x);
-        let sxx: f64 = if with_const {
-            x.iter().map(|v| (v - mx) * (v - mx)).sum()
-        } else {
-            x.iter().map(|v| v * v).sum()
-        };
-        data.push(num(sey / sxx.sqrt()));
-        if with_const {
-            let sumx2: f64 = x.iter().map(|v| v * v).sum();
-            data.push(num(sey * (sumx2 / (n * sxx)).sqrt()));
-        } else {
-            data.push(Value::Error(ErrorKind::NA));
-        }
+    // 표준 오차 행: sey × √((XᵀX)⁻¹ 의 대각), 계수와 같은 차례 (m_k … m_1, b)
+    let inv = xtx_inverse(&xs, with_const);
+    for j in (0..k).rev() {
+        data.push(match &inv {
+            Some(m) => num(sey * m[j * (k + with_const as usize) + j].sqrt()),
+            None => Value::Error(ErrorKind::NA),
+        });
+    }
+    if with_const {
+        data.push(match &inv {
+            Some(m) => num(sey * m[k * (k + 1) + k].sqrt()),
+            None => Value::Error(ErrorKind::NA),
+        });
     } else {
-        for _ in 0..cols {
-            data.push(Value::Error(ErrorKind::NA));
-        }
+        data.push(Value::Error(ErrorKind::NA));
     }
     data.push(num(r2));
     data.push(num(sey));
@@ -1082,6 +1160,57 @@ fn linest(ctx: &mut Ctx, a: &[Value], log: bool) -> Value {
         data.push(Value::Error(ErrorKind::NA));
     }
     Value::from(Array::new(5, cols, data))
+}
+
+/// (XᵀX)⁻¹ (X 의 열: x_1 … x_k, 상수항이면 1). 가우스–요르단, 특이하면 None
+fn xtx_inverse(xs: &[Vec<f64>], with_const: bool) -> Option<Vec<f64>> {
+    let k = xs.len() + with_const as usize;
+    let n = xs.first().map_or(0, |x| x.len());
+    let col = |j: usize, i: usize| if j < xs.len() { xs[j][i] } else { 1.0 };
+    let mut m = vec![0.0; k * k];
+    for p in 0..k {
+        for q in 0..k {
+            m[p * k + q] = (0..n).map(|i| col(p, i) * col(q, i)).sum();
+        }
+    }
+    let mut inv = vec![0.0; k * k];
+    for i in 0..k {
+        inv[i * k + i] = 1.0;
+    }
+    for c in 0..k {
+        let mut piv = c;
+        for r in c + 1..k {
+            if m[r * k + c].abs() > m[piv * k + c].abs() {
+                piv = r;
+            }
+        }
+        if m[piv * k + c].abs() < 1e-300 {
+            return None;
+        }
+        if piv != c {
+            for q in 0..k {
+                m.swap(piv * k + q, c * k + q);
+                inv.swap(piv * k + q, c * k + q);
+            }
+        }
+        let d = m[c * k + c];
+        for q in 0..k {
+            m[c * k + q] /= d;
+            inv[c * k + q] /= d;
+        }
+        for r in 0..k {
+            if r != c {
+                let f = m[r * k + c];
+                if f != 0.0 {
+                    for q in 0..k {
+                        m[r * k + q] -= f * m[c * k + q];
+                        inv[r * k + q] -= f * inv[c * k + q];
+                    }
+                }
+            }
+        }
+    }
+    Some(inv)
 }
 
 fn trend(ctx: &mut Ctx, a: &[Value], log: bool) -> Value {
@@ -1247,18 +1376,20 @@ fn confidence(ctx: &mut Ctx, a: &[Value], t: bool) -> Value {
     let alpha = try_v!(num_arg(ctx, a, 0));
     let sd = try_v!(num_arg(ctx, a, 1));
     let n = try_v!(num_arg(ctx, a, 2)).trunc();
+    // CONFIDENCE.T 는 n = 1 을 먼저 본다 (CONFIDENCE.T(1,1,1) = #DIV/0!)
+    if t && n == 1.0 {
+        return Value::Error(ErrorKind::Div0);
+    }
     if alpha <= 0.0 || alpha >= 1.0 || sd <= 0.0 || n < 1.0 {
         return Value::Error(ErrorKind::Num);
     }
     if t {
-        if n == 1.0 {
-            return Value::Error(ErrorKind::Div0);
-        }
         return num(sp::t_inv(1.0 - alpha / 2.0, n - 1.0) * sd / n.sqrt());
     }
     num(sp::norm_s_inv(1.0 - alpha / 2.0) * sd / n.sqrt())
 }
 
+/// ZTEST: 표준편차 0 은 #NUM! (대조 실험 dist)
 fn ztest(ctx: &mut Ctx, a: &[Value]) -> Value {
     let v = try_v!(array_numbers(ctx, &a[0]));
     let x = try_v!(num_arg(ctx, a, 1));
@@ -1277,7 +1408,7 @@ fn ztest(ctx: &mut Ctx, a: &[Value]) -> Value {
         }
     };
     if sigma == 0.0 {
-        return Value::Error(ErrorKind::Div0);
+        return Value::Error(ErrorKind::Num);
     }
     num(1.0 - sp::norm_s_cdf((m - x) / (sigma / n.sqrt())))
 }
@@ -1300,6 +1431,10 @@ fn weibull(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x < 0.0 || al <= 0.0 || be <= 0.0 {
         return Value::Error(ErrorKind::Num);
     }
+    // 밀도의 x = 0 은 #NUM! (WEIBULL(0,1,1,FALSE), 대조 실험 dist)
+    if x == 0.0 && !cum {
+        return Value::Error(ErrorKind::Num);
+    }
     let t = (x / be).mpow(al);
     num(if cum {
         1.0 - (-t).mexp()
@@ -1315,6 +1450,10 @@ fn gamma_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
     let cum = try_v!(bool_or(ctx, a, 3, true));
     if x < 0.0 || al <= 0.0 || be <= 0.0 {
         return Value::Error(ErrorKind::Num);
+    }
+    // 밀도의 x = 0 은 0 (GAMMADIST(0,1,1,FALSE) = 0, 대조 실험 dist)
+    if x == 0.0 && !cum {
+        return Value::Number(0.0);
     }
     num(if cum {
         sp::gamma_p(al, x / be)
@@ -1363,7 +1502,8 @@ fn beta_inv(ctx: &mut Ctx, a: &[Value]) -> Value {
     let be = try_v!(num_arg(ctx, a, 2));
     let lo = try_v!(num_or(ctx, a, 3, 0.0));
     let hi = try_v!(num_or(ctx, a, 4, 1.0));
-    if !(0.0..=1.0).contains(&p) || al <= 0.0 || be <= 0.0 || lo >= hi {
+    // 확률 0·1 은 #NUM! (BETAINV(0,2,3), 대조 실험 dist)
+    if p <= 0.0 || p >= 1.0 || al <= 0.0 || be <= 0.0 || lo >= hi {
         return Value::Error(ErrorKind::Num);
     }
     num(lo + (hi - lo) * sp::beta_i_inv(p, al, be))
@@ -1390,18 +1530,20 @@ fn binom_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
     }
 }
 
-fn binom_inv(ctx: &mut Ctx, a: &[Value]) -> Value {
+/// BINOM.INV·CRITBINOM: 확률과 기준은 0 과 1 을 뺀 사이. 누적 확률이 기준 이상(BINOM.INV)·초과
+/// (CRITBINOM)인 가장 작은 수 (CRITBINOM(10,0.5,2^-10) = 1, BINOM.INV 는 0, 대조 실험 dist)
+fn binom_inv(ctx: &mut Ctx, a: &[Value], strict: bool) -> Value {
     let n = try_v!(num_arg(ctx, a, 0)).trunc();
     let p = try_v!(num_arg(ctx, a, 1));
     let alpha = try_v!(num_arg(ctx, a, 2));
-    if n < 0.0 || !(0.0..=1.0).contains(&p) || !(0.0..=1.0).contains(&alpha) {
+    if n < 0.0 || p <= 0.0 || p >= 1.0 || alpha <= 0.0 || alpha >= 1.0 {
         return Value::Error(ErrorKind::Num);
     }
     let mut s = 0.0;
     let mut k = 0.0;
     while k <= n {
         s += sp::binom_pmf(k, n, p);
-        if s >= alpha * (1.0 - 1e-15) {
+        if if strict { s > alpha } else { s >= alpha * (1.0 - 1e-15) } {
             return num(k);
         }
         k += 1.0;
@@ -1426,7 +1568,7 @@ fn binom_range(ctx: &mut Ctx, a: &[Value]) -> Value {
         s += sp::binom_pmf(k, n, p);
         k += 1.0;
     }
-    num(s)
+    num(round9(s))
 }
 
 fn negbinom(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
@@ -1434,7 +1576,8 @@ fn negbinom(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
     let s = try_v!(num_arg(ctx, a, 1)).trunc();
     let p = try_v!(num_arg(ctx, a, 2));
     let cum = if new { try_v!(bool_or(ctx, a, 3, true)) } else { false };
-    if fl < 0.0 || s < 1.0 || p <= 0.0 || p >= 1.0 {
+    // 확률 1 도 받는다 (NEGBINOM.DIST(10,5,1,TRUE) = 1, 대조 실험 dist)
+    if fl < 0.0 || s < 1.0 || p <= 0.0 || p > 1.0 {
         return Value::Error(ErrorKind::Num);
     }
     let pmf = |f: f64| sp::binom_coef(f + s - 1.0, s - 1.0) * p.mpow(s) * (1.0 - p).mpow(f);
@@ -1488,9 +1631,10 @@ fn poisson(ctx: &mut Ctx, a: &[Value]) -> Value {
     }
 }
 
+/// CHIDIST·CHISQ.DIST.RT: 자유도의 소수 부분을 버리지 않는다 (CHIDIST(0.5,1.5), 대조 실험 dist)
 fn chi_rt(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
-    let df = try_v!(num_arg(ctx, a, 1)).trunc();
+    let df = try_v!(num_arg(ctx, a, 1));
     if x < 0.0 || !(1.0..=1e10).contains(&df) {
         return Value::Error(ErrorKind::Num);
     }
@@ -1506,10 +1650,12 @@ fn chi_inv_rt(ctx: &mut Ctx, a: &[Value]) -> Value {
     num(2.0 * sp::gamma_p_inv(1.0 - p, df / 2.0))
 }
 
-fn chitest(ctx: &mut Ctx, a: &[Value]) -> Value {
+/// CHITEST·CHISQ.TEST: 크기만 같으면 모양은 달라도 된다 ({1;2} 와 {1,2}). CHISQ.TEST 는 자유도를 늘
+/// 칸 수 − 1 로 하고 소수 9자리로 반올림한다 (2차원 표에서도, 대조 실험 dist).
+fn chitest(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
     let act = try_v!(to_array(ctx, &a[0]));
     let exp = try_v!(to_array(ctx, &a[1]));
-    if act.rows != exp.rows || act.cols != exp.cols {
+    if act.data.len() != exp.data.len() {
         return Value::Error(ErrorKind::NA);
     }
     let mut chi = 0.0;
@@ -1521,7 +1667,7 @@ fn chitest(ctx: &mut Ctx, a: &[Value]) -> Value {
             chi += (x - e) * (x - e) / e;
         }
     }
-    let df = if act.rows == 1 || act.cols == 1 {
+    let df = if new || act.rows == 1 || act.cols == 1 {
         (act.rows * act.cols) as f64 - 1.0
     } else {
         (act.rows as f64 - 1.0) * (act.cols as f64 - 1.0)
@@ -1529,13 +1675,15 @@ fn chitest(ctx: &mut Ctx, a: &[Value]) -> Value {
     if df < 1.0 {
         return Value::Error(ErrorKind::NA);
     }
-    num(sp::gamma_q(df / 2.0, chi / 2.0))
+    let p = sp::gamma_q(df / 2.0, chi / 2.0);
+    num(if new { round9(p) } else { p })
 }
 
+/// FDIST·F.DIST.RT: 자유도의 소수 부분을 버리지 않는다 (FDIST(3.5,2.5,4.9), 대조 실험 dist)
 fn f_rt(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
-    let d1 = try_v!(num_arg(ctx, a, 1)).trunc();
-    let d2 = try_v!(num_arg(ctx, a, 2)).trunc();
+    let d1 = try_v!(num_arg(ctx, a, 1));
+    let d2 = try_v!(num_arg(ctx, a, 2));
     if x < 0.0 || d1 < 1.0 || d2 < 1.0 {
         return Value::Error(ErrorKind::Num);
     }
@@ -1620,6 +1768,8 @@ fn ttest(ctx: &mut Ctx, a: &[Value]) -> Value {
             (diff / se2.sqrt(), df)
         }
     };
+    // 한셀의 형식 3(이분산)은 꼬리 수와 관계없이 한쪽 값 (TTEST(…,2,3) 이 (…,1,3) 과 같다, 대조 실험 dist)
+    let tails = if kind == 3.0 { 1.0 } else { tails };
     num(tails * sp::t_tail(t.abs(), df))
 }
 

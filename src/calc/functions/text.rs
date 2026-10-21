@@ -5,8 +5,9 @@
 
 //! 글 함수.
 //!
-//! 글자 위치는 유니코드 글자 단위로 센다. 바이트 함수(LENB …)는 한국어 환경처럼 ASCII 밖의 글자를
-//! 2바이트로 센다.
+//! 글자 위치는 유니코드 글자 단위로 센다. 바이트 함수(LENB …)는 코드 페이지 949 로 센다
+//! ([`crate::calc::cp949`]): 한글·한자·전각은 2바이트, 949 에 없는 글자와 U+0080–U+00FF 는 1바이트,
+//! 바이트 경계에 걸린 글자 반쪽은 공백 하나.
 
 use crate::calc::fm::Fm;
 use super::math::{Rounding, round_digits};
@@ -16,7 +17,7 @@ use crate::calc::eval::Ctx;
 use crate::calc::value::{self, ErrorKind, Value};
 use crate::model::CellValue;
 
-const VR: &[Arg] = &[Arg::V, Arg::V, Arg::R];
+const VR: &[Arg] = &[Arg::R, Arg::V, Arg::R];
 
 pub const FNS: &[FnSpec] = &[
     f("LEN", 1, 1, V, |c, a| Value::Number(try_v!(text_arg(c, a, 0)).chars().count() as f64)),
@@ -27,8 +28,9 @@ pub const FNS: &[FnSpec] = &[
     f("RIGHTB", 1, 2, V, |c, a| left_right(c, a, false, true)),
     f("MID", 3, 3, V, |c, a| mid(c, a, false)),
     f("MIDB", 3, 3, V, |c, a| mid(c, a, true)),
-    f("LOWER", 1, 1, V, |c, a| Value::from(try_v!(text_arg(c, a, 0)).to_lowercase())),
-    f("UPPER", 1, 1, V, |c, a| Value::from(try_v!(text_arg(c, a, 0)).to_uppercase())),
+    // 글자마다 한 글자로 바뀔 때만 (UPPER("ß") = "ß", 대조 실험 text)
+    f("LOWER", 1, 1, V, |c, a| Value::from(map_case(&try_v!(text_arg(c, a, 0)), false))),
+    f("UPPER", 1, 1, V, |c, a| Value::from(map_case(&try_v!(text_arg(c, a, 0)), true))),
     f("PROPER", 1, 1, V, proper),
     f("TRIM", 1, 1, V, |c, a| {
         let t = try_v!(text_arg(c, a, 0));
@@ -98,20 +100,24 @@ pub const FNS: &[FnSpec] = &[
     f("DOLLAR", 1, 2, V, |c, a| currency(c, a, "₩")),
     f("USDOLLAR", 1, 2, V, |c, a| currency(c, a, "$")),
     f("WON", 1, 2, V, |c, a| currency(c, a, "₩")),
+    // CHAR 는 949 의 한 바이트: 128 은 U+0080, 129–255 (두 바이트 글자의 첫 바이트 등)는 U+FFFD
+    // (대조 실험 text)
     f("CHAR", 1, 1, V, |c, a| {
         let n = try_v!(num_arg(c, a, 0)).trunc();
         if !(1.0..=255.0).contains(&n) {
             return Value::Error(ErrorKind::Value);
         }
-        match char::from_u32(n as u32) {
-            Some(ch) => Value::from(ch.to_string()),
-            None => Value::Error(ErrorKind::Value),
-        }
+        let ch = match n as u32 {
+            k @ 1..=128 => char::from_u32(k).unwrap_or('\u{FFFD}'),
+            _ => '\u{FFFD}',
+        };
+        Value::from(ch.to_string())
     }),
+    // CODE 는 첫 글자의 949 코드 (CODE("한") = 51153, 949 에 없으면 63, 대조 실험 text)
     f("CODE", 1, 1, V, |c, a| {
         let t = try_v!(text_arg(c, a, 0));
         match t.chars().next() {
-            Some(ch) => Value::Number(ch as u32 as f64),
+            Some(ch) => Value::Number(crate::calc::cp949::code(ch) as f64),
             None => Value::Error(ErrorKind::Value),
         }
     }),
@@ -120,9 +126,10 @@ pub const FNS: &[FnSpec] = &[
         if n < 1.0 || n > 0x10FFFF as f64 {
             return Value::Error(ErrorKind::Value);
         }
+        // 대리 쌍 반쪽은 U+FFFD (UNICHAR(55296), 대조 실험 text)
         match char::from_u32(n as u32) {
             Some(ch) => Value::from(ch.to_string()),
-            None => Value::Error(ErrorKind::NA),
+            None => Value::from("\u{FFFD}"),
         }
     }),
     f("UNICODE", 1, 1, V, |c, a| {
@@ -135,21 +142,57 @@ pub const FNS: &[FnSpec] = &[
     f("ASC", 1, 1, V, |c, a| Value::from(to_halfwidth(&try_v!(text_arg(c, a, 0))))),
     f("DBCS", 1, 1, V, |c, a| Value::from(to_fullwidth(&try_v!(text_arg(c, a, 0))))),
     f("JUNJA", 1, 1, V, |c, a| Value::from(to_fullwidth(&try_v!(text_arg(c, a, 0))))),
+    // PHONETIC: 범위 안 글 칸을 이어 붙인다 (숫자 칸은 빼고), 참조가 아니면 #NAME? (대조 실험 text)
     f("PHONETIC", 1, 1, R, |c, a| match &a[0] {
-        Value::Ref(r) => {
-            let v = c.intersect_ref(r);
-            value::to_text(&v).map(Value::Text).unwrap_or(Value::from(""))
+        Value::Ref(_) => {
+            let mut s = String::new();
+            for v in flatten(c, &a[0]) {
+                if let Value::Text(t) = v {
+                    s.push_str(&t);
+                }
+            }
+            Value::from(s)
         }
-        v => value::to_text(v).map(Value::Text).unwrap_or_else(Value::Error),
+        Value::Error(e) => Value::Error(*e),
+        _ => Value::Error(ErrorKind::Name),
     }),
     f("NUMBERSTRING", 2, 2, V, numberstring),
     f("DATESTRING", 1, 1, V, datestring),
     f("BAHTTEXT", 1, 1, V, bahttext),
 ];
 
-/// 한국어 환경의 바이트 수 (ASCII 1, 그 밖 2)
+/// 코드 페이지 949 의 바이트 수
 pub fn byte_len(ch: char) -> usize {
-    if (ch as u32) < 0x80 { 1 } else { 2 }
+    crate::calc::cp949::byte_len(ch)
+}
+
+/// 바이트 자리 [from, to) (0부터)의 글. 걸친 글자 반쪽은 공백 하나 (LEFTB("한글나라",3) = "한 ")
+fn byte_slice(chars: &[char], from: usize, to: usize) -> String {
+    let mut out = String::new();
+    let mut pos = 0usize;
+    for &ch in chars {
+        let (s, e) = (pos, pos + byte_len(ch));
+        pos = e;
+        if e <= from || s >= to {
+            continue;
+        }
+        out.push(if s >= from && e <= to { ch } else { ' ' });
+    }
+    out
+}
+
+/// 글자마다 대·소문자 (한 글자로 바뀔 때만)
+fn map_case(s: &str, upper: bool) -> String {
+    s.chars()
+        .map(|c| {
+            let mut it: Box<dyn Iterator<Item = char>> =
+                if upper { Box::new(c.to_uppercase()) } else { Box::new(c.to_lowercase()) };
+            match (it.next(), it.next()) {
+                (Some(x), None) => x,
+                _ => c,
+            }
+        })
+        .collect()
 }
 
 fn left_right(ctx: &mut Ctx, a: &[Value], left: bool, bytes: bool) -> Value {
@@ -159,27 +202,12 @@ fn left_right(ctx: &mut Ctx, a: &[Value], left: bool, bytes: bool) -> Value {
         return Value::Error(ErrorKind::Value);
     }
     let chars: Vec<char> = t.chars().collect();
-    let take = if bytes {
-        // 바이트 수 안에 드는 글자 수
-        let mut used = 0usize;
-        let mut k = 0usize;
-        let it: Box<dyn Iterator<Item = &char>> = if left {
-            Box::new(chars.iter())
-        } else {
-            Box::new(chars.iter().rev())
-        };
-        for ch in it {
-            let b = byte_len(*ch);
-            if (used + b) as f64 > n {
-                break;
-            }
-            used += b;
-            k += 1;
-        }
-        k
-    } else {
-        (n as usize).min(chars.len())
-    };
+    if bytes {
+        let total: usize = chars.iter().map(|c| byte_len(*c)).sum();
+        let n = (n as usize).min(total);
+        return Value::from(if left { byte_slice(&chars, 0, n) } else { byte_slice(&chars, total - n, total) });
+    }
+    let take = (n as usize).min(chars.len());
     let s: String = if left {
         chars[..take].iter().collect()
     } else {
@@ -197,18 +225,8 @@ fn mid(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
     }
     let chars: Vec<char> = t.chars().collect();
     if bytes {
-        // 바이트 위치로
-        let mut out = String::new();
-        let mut pos = 1usize;
-        let end = start as usize + n as usize;
-        for ch in &chars {
-            let b = byte_len(*ch);
-            if pos >= start as usize && pos + b <= end {
-                out.push(*ch);
-            }
-            pos += b;
-        }
-        return Value::from(out);
+        let from = start as usize - 1;
+        return Value::from(byte_slice(&chars, from, from.saturating_add(n as usize)));
     }
     let s = start as usize - 1;
     if s >= chars.len() {
@@ -218,12 +236,14 @@ fn mid(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
     Value::from(chars[s..e].iter().collect::<String>())
 }
 
+/// PROPER: U+0080–U+00FF 의 글자(À, ñ …)는 글자로 보지 않아 그대로 둔다 (PROPER("ÀÉÎ ñ ß") 그대로,
+/// 전각 글자는 바뀐다: "ＡＢＣ" → "Ａｂｃ", 대조 실험 text)
 fn proper(ctx: &mut Ctx, a: &[Value]) -> Value {
     let t = try_v!(text_arg(ctx, a, 0));
     let mut out = String::with_capacity(t.len());
     let mut prev_letter = false;
     for ch in t.chars() {
-        if ch.is_alphabetic() {
+        if ch.is_alphabetic() && !(0x80..0x100).contains(&(ch as u32)) {
             if prev_letter {
                 out.extend(ch.to_lowercase());
             } else {
@@ -238,12 +258,30 @@ fn proper(ctx: &mut Ctx, a: &[Value]) -> Value {
     Value::from(out)
 }
 
+/// TEXTJOIN: 구분자는 범위면 차례로 돌려 쓰고, 빈 칸은 늘 빼며 (빈 글 "" 은 무시 인수가 거짓이면 넣는다),
+/// 오류 칸을 만나면 거기까지 이은 글을 돌려준다 (TEXTJOIN(",",TRUE,{1,#N/A,3}) = "1", 대조 실험 text)
 fn textjoin(ctx: &mut Ctx, a: &[Value]) -> Value {
-    let delim = try_v!(text_arg(ctx, a, 0));
-    let ignore = try_v!(ctx.boolean(&a[1]));
+    let delims: Vec<String> = match &a[0] {
+        Value::Ref(_) | Value::Array(_) => {
+            let mut d = Vec::new();
+            for x in flatten(ctx, &a[0]) {
+                d.push(try_v!(ctx.text(&x)).to_string());
+            }
+            d
+        }
+        v => vec![try_v!(ctx.text(v)).to_string()],
+    };
+    let ignore = ctx.boolean(&a[1]).unwrap_or(false);
     let mut parts: Vec<String> = Vec::new();
-    for v in &a[2..] {
+    'outer: for v in &a[2..] {
+        let from_ref = matches!(v, Value::Ref(_));
         for x in flatten(ctx, v) {
+            if from_ref && matches!(x, Value::Empty) {
+                continue;
+            }
+            if matches!(x, Value::Error(_)) {
+                break 'outer;
+            }
             let s = try_v!(ctx.text(&x));
             if ignore && s.is_empty() {
                 continue;
@@ -251,7 +289,13 @@ fn textjoin(ctx: &mut Ctx, a: &[Value]) -> Value {
             parts.push(s.to_string());
         }
     }
-    let s = parts.join(&delim);
+    let mut s = String::new();
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 && !delims.is_empty() {
+            s.push_str(&delims[(i - 1) % delims.len()]);
+        }
+        s.push_str(p);
+    }
     if s.chars().count() > 32_767 {
         return Value::Error(ErrorKind::Value);
     }
@@ -300,23 +344,16 @@ fn replace(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
         return Value::Error(ErrorKind::Value);
     }
     let chars: Vec<char> = t.chars().collect();
-    let (s, e) = if bytes {
-        // 바이트 위치 → 글자 위치
-        let mut pos = 1usize;
-        let mut si = chars.len();
-        let mut ei = chars.len();
-        for (i, ch) in chars.iter().enumerate() {
-            if pos >= start as usize && si == chars.len() {
-                si = i;
-            }
-            if pos >= start as usize + n as usize && ei == chars.len() {
-                ei = i;
-                break;
-            }
-            pos += byte_len(*ch);
-        }
-        (si, ei.max(si))
-    } else {
+    if bytes {
+        // 앞쪽·뒤쪽 바이트 조각 사이에 새 글 (걸친 반쪽은 공백: REPLACEB("한글나라",2,2,"X") = " X 나라")
+        let total: usize = chars.iter().map(|c| byte_len(*c)).sum();
+        let from = start as usize - 1;
+        let mut out = byte_slice(&chars, 0, from.min(total));
+        out.push_str(&new);
+        out.push_str(&byte_slice(&chars, from.saturating_add(n as usize).min(total), total));
+        return Value::from(out);
+    }
+    let (s, e) = {
         let s = (start as usize - 1).min(chars.len());
         (s, (s + n as usize).min(chars.len()))
     };
@@ -348,11 +385,16 @@ fn find(ctx: &mut Ctx, a: &[Value], search: bool, bytes: bool) -> Value {
             _ => return Value::Error(ErrorKind::Value),
         }
     } else {
-        if start < 1.0 || start as usize > hc.len() + 1 {
+        // SEARCH 는 시작이 글 길이를 넘으면 빈 글을 찾아도 #VALUE! (FIND 는 길이 + 1 까지, 대조 실험 text)
+        let limit = if search { hc.len() } else { hc.len() + 1 };
+        if start < 1.0 || start as usize > limit {
             return Value::Error(ErrorKind::Value);
         }
         start as usize - 1
     };
+    if bytes && search && start as usize > hc.iter().map(|c| byte_len(*c)).sum::<usize>() {
+        return Value::Error(ErrorKind::Value);
+    }
     if s > hc.len() {
         return Value::Error(ErrorKind::Value);
     }
@@ -401,7 +443,13 @@ fn find(ctx: &mut Ctx, a: &[Value], search: bool, bytes: bool) -> Value {
     }
 }
 
+/// NUMBERVALUE: 자리 구분자(소수점과 같으면 무시)를 지우고 소수점을 "." 로 바꾼 뒤 공백을 빼고, 끝의 %
+/// 마다 100 으로 나누며 나머지는 VALUE 문법으로 읽는다 ("(5)" = −5, "$5" = 5). 논리 값은 그대로
+/// (NUMBERVALUE(TRUE) = TRUE, 대조 실험 text).
 fn numbervalue(ctx: &mut Ctx, a: &[Value]) -> Value {
+    if let Value::Bool(b) = a[0] {
+        return Value::Bool(b);
+    }
     let t = try_v!(text_arg(ctx, a, 0));
     let dec = match opt(a, 1) {
         Some(v) => try_v!(ctx.text(v)).chars().next().unwrap_or('.'),
@@ -411,43 +459,31 @@ fn numbervalue(ctx: &mut Ctx, a: &[Value]) -> Value {
         Some(v) => try_v!(ctx.text(v)).chars().next().unwrap_or(','),
         None => ',',
     };
-    if dec == grp {
-        return Value::Error(ErrorKind::Value);
+    let mut s: String = if dec == grp { t.to_string() } else { t.chars().filter(|&c| c != grp).collect() };
+    if dec != '.' {
+        s = s.chars().map(|c| if c == dec { '.' } else { c }).collect();
     }
-    let s: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     if s.is_empty() {
         return Value::Number(0.0);
     }
-    let mut out = String::new();
-    let mut seen_dec = false;
-    for ch in s.chars() {
-        if ch == dec {
-            if seen_dec {
-                return Value::Error(ErrorKind::Value);
-            }
-            seen_dec = true;
-            out.push('.');
-        } else if ch == grp {
-            if seen_dec {
-                return Value::Error(ErrorKind::Value);
-            }
-        } else {
-            out.push(ch);
-        }
-    }
     let mut pct = 0;
-    while out.ends_with('%') {
-        out.pop();
+    while s.ends_with('%') {
+        s.pop();
         pct += 1;
     }
-    match out.parse::<f64>() {
-        Ok(v) if out.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E')) => {
-            Value::Number(v / 100f64.mpowi(pct))
-        }
-        _ => Value::Error(ErrorKind::Value),
+    match value::parse_plain_number(&s) {
+        Some(v) => value::num_r(Ok(v / 100f64.mpowi(pct))),
+        None => Value::Error(ErrorKind::Value),
     }
 }
 
+/// TEXT. 한셀의 TEXT 는 셀 표시와 몇 가지가 다르다 (대조 실험 text·misc3):
+/// - 빈 칸은 어떤 서식이든 "", 색 지정(`[Blue]`)은 #VALUE!
+/// - `\\` 는 이스케이프가 아니라 글자 그대로 (`TEXT(5,"\\$0")` = "\\$5"), 그래서 숫자 자리와 날짜 기호가
+///   섞이면 #VALUE! (`"#,##0,,\\M"`)
+/// - `_x` 는 공백 하나가 되어 글 앞으로 간다 (`TEXT(1234.567,"0.00_)")` = " 1234.57")
+/// - `오전/오후` 는 AM/PM 으로, `@` 는 처음 하나만 값으로 바뀐다
 fn text(ctx: &mut Ctx, a: &[Value]) -> Value {
     let code = try_v!(text_arg(ctx, a, 1));
     let v = match &a[0] {
@@ -457,15 +493,101 @@ fn text(ctx: &mut Ctx, a: &[Value]) -> Value {
             Some(n) => CellValue::Number(n),
             None => CellValue::Text(s.to_string()),
         },
-        Value::Empty => CellValue::Number(0.0),
+        Value::Empty => return Value::from(""),
         Value::Number(n) => CellValue::Number(*n),
         _ => return Value::Error(ErrorKind::Value),
     };
     if code.is_empty() {
         return Value::from("");
     }
+    let Some((code, pads)) = text_code(&code) else {
+        return Value::Error(ErrorKind::Value);
+    };
+    // 공백 맞춤은 쓰인 구역의 것만 (음수 구역이 따로 있으면 그 구역)
+    let sec = match &v {
+        CellValue::Number(n) if *n < 0.0 && pads.len() > 1 => 1,
+        CellValue::Number(n) if *n == 0.0 && pads.len() > 2 => 2,
+        CellValue::Text(_) if pads.len() > 3 => 3,
+        _ => 0,
+    };
     let out = crate::numfmt::format(&v, &code, ctx.date1904());
-    Value::from(out.text)
+    Value::from(format!("{}{}", " ".repeat(pads.get(sec).copied().unwrap_or(0)), out.text))
+}
+
+/// TEXT 의 서식 코드를 표시 엔진의 코드로 (위 규칙). (코드, 구역마다 앞에 붙일 공백 수) 또는 None (#VALUE!)
+fn text_code(code: &str) -> Option<(String, Vec<usize>)> {
+    const COLORS: [&str; 9] = ["black", "blue", "cyan", "green", "magenta", "red", "white", "yellow", "color"];
+    let mut out = String::with_capacity(code.len() + 8);
+    let mut pad = 0usize;
+    let mut pads = vec![0usize];
+    let mut at_seen = false;
+    let (mut digits, mut dates) = (false, false);
+    let chars: Vec<char> = code.replace("오전/오후", "AM/PM").chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '"' => {
+                let j = chars[i + 1..].iter().position(|&x| x == '"').map_or(chars.len(), |k| i + 1 + k);
+                out.extend(&chars[i..(j + 1).min(chars.len())]);
+                i = j + 1;
+                continue;
+            }
+            '[' => {
+                let j = chars[i..].iter().position(|&x| x == ']').map_or(chars.len(), |k| i + k);
+                let inner: String = chars[i + 1..j.min(chars.len())].iter().collect::<String>().to_ascii_lowercase();
+                if COLORS.iter().any(|k| inner.starts_with(k)) {
+                    return None;
+                }
+                if matches!(inner.chars().next(), Some('h' | 'm' | 's')) {
+                    dates = true;
+                }
+                out.extend(&chars[i..(j + 1).min(chars.len())]);
+                i = j + 1;
+                continue;
+            }
+            '\\' => out.push_str("\"\\\""),
+            '_' => {
+                *pads.last_mut().unwrap_or(&mut pad) += 1;
+                i += 2;
+                continue;
+            }
+            '@' => {
+                if !at_seen {
+                    out.push('@');
+                }
+                at_seen = true;
+            }
+            ';' => {
+                (digits, dates) = (false, false);
+                pads.push(0);
+                out.push(c);
+            }
+            '0' | '#' | '?' => {
+                digits = true;
+                out.push(c);
+            }
+            'y' | 'Y' | 'd' | 'D' | 'h' | 'H' | 's' | 'S' => {
+                dates = true;
+                out.push(c);
+            }
+            'm' | 'M' => {
+                // AM/PM 의 M 은 날짜 기호가 아니다
+                let ampm = i >= 1 && matches!(chars[i - 1], 'A' | 'a' | 'P' | 'p');
+                if !ampm {
+                    dates = true;
+                }
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+        if digits && dates {
+            return None;
+        }
+        i += 1;
+    }
+    let _ = pad;
+    Some((out, pads))
 }
 
 /// 천 단위 쉼표
@@ -481,11 +603,11 @@ pub fn group(int: &str) -> String {
     out
 }
 
-/// 반올림한 수를 소수 d 자리(음수면 0) 글로
+/// 반올림한 수를 소수 d 자리(음수면 0) 글로. 유효숫자 15자리 뒤는 0 (FIXED(1234.567,127), 대조 실험 text)
 pub fn format_fixed(x: f64, d: i32, commas: bool) -> String {
     let r = round_digits(x, d as f64, Rounding::HalfAway);
     let dd = d.max(0) as usize;
-    let s = format!("{:.*}", dd, r.abs());
+    let s = digits15_fixed(r.abs(), dd);
     let (int, frac) = match s.split_once('.') {
         Some((i, f)) => (i.to_string(), Some(f.to_string())),
         None => (s, None),
@@ -500,6 +622,25 @@ pub fn format_fixed(x: f64, d: i32, commas: bool) -> String {
         out.push_str(&f);
     }
     out
+}
+
+/// 소수 dd 자리 글, 15자리 넘는 유효숫자는 0
+fn digits15_fixed(a: f64, dd: usize) -> String {
+    let s = format!("{:.*}", dd, a);
+    let mut sig = 0;
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_digit() {
+                if sig > 0 || c != '0' {
+                    sig += 1;
+                }
+                if sig > 15 {
+                    return '0';
+                }
+            }
+            c
+        })
+        .collect()
 }
 
 fn fixed(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -557,9 +698,10 @@ pub fn number_string(n: u64, kind: u8) -> String {
             &["", "십", "백", "천"],
             &["", "만", "억", "조", "경"],
         ),
+        // 한셀은 參·拾 을 호환 한자(U+F96B, U+F973)로 쓴다 (KS X 1001 의 그 칸, 대조 실험 text)
         2 => (
-            &["", "壹", "貳", "參", "四", "伍", "六", "七", "八", "九"],
-            &["", "拾", "百", "阡"],
+            &["", "壹", "貳", "\u{F96B}", "四", "伍", "六", "七", "八", "九"],
+            &["", "\u{F973}", "百", "阡"],
             &["", "萬", "億", "兆", "京"],
         ),
         _ => (
@@ -597,15 +739,22 @@ pub fn number_string(n: u64, kind: u8) -> String {
     out
 }
 
+/// NUMBERSTRING: 형식 1 한글 읽기, 2 갖은자, 3 은 숫자 하나씩 한글로 ("일이삼사"). 음수·없는 형식은 #NUM!
+/// (대조 실험 text)
 fn numberstring(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
     let kind = try_v!(num_arg(ctx, a, 1)).trunc();
     if !(1.0..=3.0).contains(&kind) || x < 0.0 {
-        return Value::Error(ErrorKind::Value);
+        return Value::Error(ErrorKind::Num);
     }
     let n = x.round();
     if n >= 1e19 {
-        return Value::Error(ErrorKind::Value);
+        return Value::Error(ErrorKind::Num);
+    }
+    if kind == 3.0 {
+        const D: [&str; 10] = ["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"];
+        let s: String = (n as u64).to_string().chars().map(|c| D[c.to_digit(10).unwrap_or(0) as usize]).collect();
+        return Value::from(s);
     }
     Value::from(number_string(n as u64, kind as u8))
 }
