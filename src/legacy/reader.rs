@@ -2422,9 +2422,11 @@ fn read_sheet(
                 else {
                     continue;
                 };
+                let grbit = r.u16().unwrap_or(0x0011);
                 last_note_obj = (ft == 0x15 && ot == 0x19).then_some(id);
                 objs.push(ObjRec {
                     ot,
+                    grbit,
                     id,
                     text: None,
                     align: (1, 0),
@@ -3335,6 +3337,8 @@ fn legacy_icon_set(r: &mut Rd, dec: &CfvoDecoder) -> Option<IconSet> {
 /// OBJ 레코드 요약: 종류(ot)와 뒤따른 TXO 의 내용·런
 struct ObjRec {
     ot: u16,
+    /// ftCmo 플래그 (0x0001 잠금, 0x0010 인쇄)
+    grbit: u16,
     /// ftCmo 의 개체 번호 (NOTE 의 idObj 가 가리킨다)
     id: u16,
     /// TXO 의 가로·세로 맞춤 (메모 상자의 x:TextHAlign·x:TextVAlign)
@@ -3402,6 +3406,30 @@ fn legacy_shape(
         Some(b) if b & 0x0008_0000 != 0 => b & 0x08 != 0,
         _ => true,
     };
+    // 선: 점선 0x01CE (MSOLINEDASHING), 겹선 0x01CD, 이음 0x01D6 (없으면 한셀은 miter 로 읽는다), 끝 0x01D7 (없으면
+    // flat), 화살표 0x01D0·0x01D1 (종류) + 0x01D2–0x01D5 (너비·길이) — 도형 대조 실험
+    let arrow = |kind: u16, w: u16, len: u16| {
+        let size = |v: Option<u32>| {
+            match v.unwrap_or(1) {
+                0 => "sm",
+                2 => "lg",
+                _ => "med",
+            }
+            .to_string()
+        };
+        Some(crate::model::LineEnd {
+            kind: match prop(kind).unwrap_or(0) {
+                1 => Some("triangle".into()),
+                2 => Some("stealth".into()),
+                3 => Some("diamond".into()),
+                4 => Some("oval".into()),
+                5 => Some("arrow".into()),
+                _ => None,
+            },
+            w: Some(size(prop(w))),
+            len: Some(size(prop(len))),
+        })
+    };
     let line = (kind != ShapeKind::Group && kind != ShapeKind::Chart).then(|| Outline {
         width: Some(prop(0x01CB).unwrap_or(9525) as i64),
         fill: Some(if lined {
@@ -3411,16 +3439,122 @@ fn legacy_shape(
         }),
         dash: Some(
             match prop(0x01CE).unwrap_or(0) {
-                1 => "dash",
+                1 => "sysDash",
                 2 => "sysDot",
-                3 => "dashDot",
-                4 => "lgDashDotDot",
-                6 => "lgDash",
+                3 => "sysDashDot",
+                4 => "sysDashDotDot",
+                5 => "dot",
+                6 => "dash",
+                7 => "lgDash",
+                8 => "dashDot",
+                9 => "lgDashDot",
+                10 => "lgDashDotDot",
                 _ => "solid",
             }
             .into(),
         ),
+        cap: Some(
+            match prop(0x01D7).unwrap_or(2) {
+                0 => "rnd",
+                1 => "sq",
+                _ => "flat",
+            }
+            .into(),
+        ),
+        compound: Some(
+            match prop(0x01CD).unwrap_or(0) {
+                1 => "dbl",
+                2 => "thickThin",
+                3 => "thinThick",
+                4 => "tri",
+                _ => "sng",
+            }
+            .into(),
+        ),
+        join: Some(
+            match prop(0x01D6).unwrap_or(1) {
+                0 => "bevel",
+                2 => "round",
+                _ => "miter",
+            }
+            .into(),
+        ),
+        head: arrow(0x01D0, 0x01D2, 0x01D3),
+        tail: arrow(0x01D1, 0x01D4, 0x01D5),
     });
+    // 그림자: 0x023F (0x02 + 사용 0x20000), 색 0x0201 (없으면 회색), 불투명도 0x0204 (16.16), 거리 0x0205·0x0206 (EMU,
+    // 없으면 25400), 기준점 0x0210·0x0211 (16.16, ±0.5 = 왼쪽·위/오른쪽·아래 → algn). 흐림은 저장되지 않는다
+    let fixed = |pid: u16| prop(pid).map(|v| v as i32 as f64 / 65536.0);
+    let shadow =
+        matches!(prop(0x023F), Some(b) if b & 0x0002_0000 != 0 && b & 0x02 != 0).then(|| {
+            let (ox, oy) = (
+                prop(0x0205).map_or(25400, |v| v as i32) as f64,
+                prop(0x0206).map_or(25400, |v| v as i32) as f64,
+            );
+            let mut color = art_color(prop(0x0201).unwrap_or(0x0080_8080));
+            if let Some(a) = fixed(0x0204).filter(|&a| a < 1.0) {
+                color
+                    .mods
+                    .push(("alpha".into(), (a * 100_000.0).round() as i64));
+            }
+            let side = |v: Option<f64>, lo: &'static str, hi: &'static str| match v {
+                Some(x) if x < -0.25 => lo,
+                Some(x) if x > 0.25 => hi,
+                _ => "",
+            };
+            let (h, v) = (side(fixed(0x0210), "l", "r"), side(fixed(0x0211), "t", "b"));
+            let dir = (oy.atan2(ox).to_degrees().rem_euclid(360.0) * 60000.0).round() as i64;
+            crate::model::ShapeShadow {
+                dist: ox.hypot(oy).round() as i64,
+                dir: dir % 21_600_000,
+                blur: 0,
+                align: Some(if h.is_empty() && v.is_empty() {
+                    "ctr".to_string()
+                } else {
+                    format!("{v}{h}")
+                }),
+                rot_with_shape: false,
+                color,
+            }
+        });
+    // 잠금: 0x007F 비트 0–8 (묶기, 조절점, 글, 꼭짓점, 자르기, 선택, 위치, 비율, 회전), 0x033F 비트 3 (모양 종류).
+    // 한셀은 글상자를 늘 회전 잠금으로 읽는다 (도형 대조 실험)
+    let mut locks: Vec<String> = Vec::new();
+    if let Some(v) = prop(0x007F) {
+        const NAMES: [&str; 9] = [
+            "noGrp",
+            "noAdjustHandles",
+            "noTextEdit",
+            "noEditPoints",
+            "noCrop",
+            "noSelect",
+            "noMove",
+            "noChangeAspect",
+            "noRot",
+        ];
+        for (i, n) in NAMES.iter().enumerate() {
+            if v & (1 << i) != 0 && v & (1 << (i + 16)) != 0 {
+                locks.push(n.to_string());
+            }
+        }
+    }
+    if matches!(prop(0x033F), Some(v) if v & 0x08 != 0 && v & 0x80000 != 0) {
+        locks.push("noChangeShapeType".into());
+    }
+    if e.has_textbox && kind == ShapeKind::Shape && !locks.iter().any(|l| l == "noRot") {
+        locks.push("noRot".into());
+    }
+    // 종류마다 XML 에 있는 잠금만 (a:picLocks·a:cxnSpLocks 에는 noTextEdit 가 없고, noCrop 은 그림만, 그룹은 다섯 가지)
+    locks.retain(|l| match kind {
+        ShapeKind::Picture => l != "noTextEdit",
+        ShapeKind::Connector => l != "noTextEdit" && l != "noCrop",
+        ShapeKind::Group => matches!(
+            l.as_str(),
+            "noGrp" | "noSelect" | "noRot" | "noChangeAspect" | "noMove"
+        ),
+        _ => l != "noCrop",
+    });
+    locks.sort();
     let text = obj.and_then(|o| o.text.as_ref()).map(|(t, runs)| {
         let font = runs
             .first()
@@ -3436,6 +3570,9 @@ fn legacy_shape(
             }),
             wrap: prop(0x0085).map(|w| if w == 2 { "none" } else { "square" }.into()),
             vert: None,
+            // 레거시에는 글 넘침이 없다 — 한셀은 늘 자름으로 읽는다
+            vert_overflow: Some("clip".into()),
+            horz_overflow: Some("clip".into()),
             insets: [
                 prop(0x0081).map(i64::from),
                 prop(0x0082).map(i64::from),
@@ -3504,12 +3641,18 @@ fn legacy_shape(
                 12 => "star5",
                 13 => "rightArrow",
                 20 => "line",
+                32 => "straightConnector1",
                 _ => "rect",
             }
             .into()
         }),
         fill,
         line,
+        shadow,
+        locks,
+        // OBJ ftCmo: fLocked 0x0001, fPrint 0x0010
+        locks_with_sheet: obj.map(|o| o.grbit & 0x0001 != 0),
+        prints_with_sheet: obj.map(|o| o.grbit & 0x0010 != 0),
         text,
         children,
         // 그림: pib(0x0104) = 그림 저장소 번호 (1부터) → 전역에서 꺼내 둔 xl/media 파트

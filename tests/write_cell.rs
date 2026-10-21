@@ -801,3 +801,145 @@ fn array_formulas_data_tables_and_names_roundtrip() {
     assert!(n.hidden);
     assert_eq!(n.comment.as_deref(), Some("설명 글"));
 }
+
+#[test]
+fn model_shape_details_roundtrip() {
+    use rcell::model::{
+        Anchor, DrawColor, LineEnd, Marker, Outline, Paint, Shape, ShapeKind, ShapeShadow,
+    };
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    let rgb = |v: &str| DrawColor {
+        value: format!("srgb:{v}"),
+        mods: Vec::new(),
+    };
+    // 레거시에서 읽은 것처럼 원문(raw) 없이 모델만 있는 도형: 그림자·잠금·clientData·선 끝/겹선/이음/화살표
+    a.sheets[0].shapes.push(Shape {
+        anchor: Anchor {
+            from: Marker {
+                col: 1,
+                row: 1,
+                ..Default::default()
+            },
+            to: Some(Marker {
+                col: 4,
+                row: 3,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        kind: ShapeKind::Shape,
+        id: 2,
+        name: "도형 1".into(),
+        geometry: Some("rect".into()),
+        fill: Some(Paint::Solid(rgb("FFF2CC"))),
+        line: Some(Outline {
+            width: Some(38100),
+            fill: Some(Paint::Solid(rgb("FF0000"))),
+            dash: Some("dash".into()),
+            cap: Some("rnd".into()),
+            compound: Some("dbl".into()),
+            join: Some("bevel".into()),
+            head: Some(LineEnd {
+                kind: Some("triangle".into()),
+                w: Some("lg".into()),
+                len: Some("sm".into()),
+            }),
+            tail: None,
+        }),
+        shadow: Some(ShapeShadow {
+            dist: 25399,
+            dir: 13_500_000,
+            blur: 0,
+            align: Some("t".into()),
+            rot_with_shape: false,
+            color: DrawColor {
+                value: "srgb:808080".into(),
+                mods: vec![("alpha".into(), 50000)],
+            },
+        }),
+        locks: vec!["noMove".into(), "noRot".into()],
+        locks_with_sheet: Some(true),
+        prints_with_sheet: Some(false),
+        ..Default::default()
+    });
+    let out = write(&a, Flavor::Cell).unwrap();
+    let mut pkg = rcell::open_package(out.clone()).unwrap();
+    let d = pkg
+        .read_string("xl/drawings/drawing1.xml")
+        .unwrap()
+        .unwrap();
+    assert!(d.contains("<a:spLocks noMove=\"1\" noRot=\"1\"/>"));
+    assert!(d.contains("<a:ln w=\"38100\" cap=\"rnd\" cmpd=\"dbl\">"));
+    assert!(d.contains(
+        "<a:effectLst><a:outerShdw dist=\"25399\" dir=\"13500000\" algn=\"t\" rotWithShape=\"0\">"
+    ));
+    assert!(d.contains("<xdr:clientData fLocksWithSheet=\"1\" fPrintsWithSheet=\"0\"/>"));
+    let b = rcell::from_bytes(out).unwrap();
+    let diffs = compare(&a, &b, Options::default());
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+}
+
+#[test]
+fn unknown_drawing_anchors_are_kept() {
+    // mc:AlternateContent 로 감싼 앵커와 모르는 개체(contentPart)를 담은 앵커는 원문 그대로 다시 쓴다
+    let anchor = |inner: &str| {
+        format!(
+            "<xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>{inner}<xdr:clientData/></xdr:twoCellAnchor>"
+        )
+    };
+    let sp = |name: &str| {
+        format!(
+            "<xdr:sp><xdr:nvSpPr><xdr:cNvPr id=\"2\" name=\"{name}\"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:sp>"
+        )
+    };
+    let drawing = format!(
+        "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><mc:Choice xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\" Requires=\"a14\">{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent>{}</xdr:wsDr>",
+        anchor(&sp("선택")),
+        anchor(&sp("대체")),
+        anchor(
+            "<xdr:contentPart xmlns:p14=\"http://schemas.microsoft.com/office/powerpoint/2010/main\" r:id=\"rId9\"/>"
+        )
+    );
+    let bytes = common::build_zip(&[
+        (
+            "[Content_Types].xml",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/></Types>"#,
+        ),
+        (
+            "_rels/.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="/xl/workbook.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/workbook.xml",
+            r#"<x:workbook xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><x:sheets><x:sheet name="그림" sheetId="1" r:id="rId1"/></x:sheets></x:workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            r#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><x:sheetData/><x:drawing r:id="rId1"/></x:worksheet>"#,
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#,
+        ),
+        ("xl/drawings/drawing1.xml", &drawing),
+    ]);
+    let a = rcell::from_bytes(bytes).unwrap();
+    let shapes = &a.sheets[0].shapes;
+    assert_eq!(shapes.len(), 2);
+    assert_eq!(shapes[0].name, "선택");
+    assert_eq!(shapes[1].kind, rcell::model::ShapeKind::Other);
+    let out = write(&a, Flavor::Cell).unwrap();
+    let mut pkg = rcell::open_package(out.clone()).unwrap();
+    let d = pkg
+        .read_string("xl/drawings/drawing1.xml")
+        .unwrap()
+        .unwrap();
+    assert!(d.contains("<mc:AlternateContent"));
+    assert!(d.contains("xdr:contentPart"));
+    let b = rcell::from_bytes(out).unwrap();
+    assert_eq!(b.sheets[0].shapes.len(), 2);
+}

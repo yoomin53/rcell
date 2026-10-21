@@ -2327,7 +2327,17 @@ fn anchor_xml(sh: &crate::model::Shape, rels: &mut Vec<(String, String, String, 
         let _ = write!(s, "<xdr:ext cx=\"{cx}\" cy=\"{cy}\"/>");
     }
     s.push_str(&object_xml(sh, rels));
-    s.push_str("<xdr:clientData/>");
+    // xdr:clientData: 시트 보호와 함께 잠금·인쇄 (없으면 참)
+    s.push_str("<xdr:clientData");
+    for (name, v) in [
+        ("fLocksWithSheet", sh.locks_with_sheet),
+        ("fPrintsWithSheet", sh.prints_with_sheet),
+    ] {
+        if let Some(v) = v {
+            let _ = write!(s, " {name}=\"{}\"", v as u8);
+        }
+    }
+    s.push_str("/>");
     let _ = write!(s, "</xdr:{tag}>");
     s
 }
@@ -2343,14 +2353,31 @@ fn object_xml(sh: &crate::model::Shape, rels: &mut Vec<(String, String, String, 
     };
     let _ = write!(
         s,
-        "<xdr:{el}><xdr:{nv}><xdr:cNvPr id=\"{}\" name=\"{}\"{}{}/><xdr:{cnv}/></xdr:{nv}>",
+        "<xdr:{el}><xdr:{nv}><xdr:cNvPr id=\"{}\" name=\"{}\"{}{}/>{}</xdr:{nv}>",
         sh.id,
         esc(&sh.name),
         sh.descr
             .as_ref()
             .map(|d| format!(" descr=\"{}\"", esc(d)))
             .unwrap_or_default(),
-        if sh.hidden { " hidden=\"1\"" } else { "" }
+        if sh.hidden { " hidden=\"1\"" } else { "" },
+        if sh.locks.is_empty() {
+            format!("<xdr:{cnv}/>")
+        } else {
+            // 잠금: 도형 a:spLocks, 연결선 a:cxnSpLocks, 그림 a:picLocks, 그룹 a:grpSpLocks
+            let tag = match sh.kind {
+                ShapeKind::Connector => "cxnSpLocks",
+                ShapeKind::Picture => "picLocks",
+                ShapeKind::Group => "grpSpLocks",
+                _ => "spLocks",
+            };
+            let attrs: String = sh
+                .locks
+                .iter()
+                .map(|l| format!(" {}=\"1\"", esc(l)))
+                .collect();
+            format!("<xdr:{cnv}><a:{tag}{attrs}/></xdr:{cnv}>")
+        }
     );
     if let (ShapeKind::Picture, Some(t)) = (sh.kind, &sh.target) {
         const IMAGE: &str =
@@ -2415,12 +2442,47 @@ fn object_xml(sh: &crate::model::Shape, rels: &mut Vec<(String, String, String, 
             if let Some(w) = l.width {
                 let _ = write!(s, " w=\"{w}\"");
             }
+            for (name, v) in [("cap", &l.cap), ("cmpd", &l.compound)] {
+                if let Some(v) = v {
+                    let _ = write!(s, " {name}=\"{}\"", esc(v));
+                }
+            }
             s.push('>');
             s.push_str(&paint_xml(l.fill.as_ref()));
             if let Some(d) = &l.dash {
                 let _ = write!(s, "<a:prstDash val=\"{}\"/>", esc(d));
             }
+            if let Some(j) = &l.join {
+                let _ = write!(s, "<a:{}/>", esc(j));
+            }
+            for (tag, end) in [("headEnd", &l.head), ("tailEnd", &l.tail)] {
+                if let Some(e) = end {
+                    let _ = write!(s, "<a:{tag}");
+                    for (name, v) in [("type", &e.kind), ("w", &e.w), ("len", &e.len)] {
+                        if let Some(v) = v {
+                            let _ = write!(s, " {name}=\"{}\"", esc(v));
+                        }
+                    }
+                    s.push_str("/>");
+                }
+            }
             s.push_str("</a:ln>");
+        }
+        if let Some(sd) = &sh.shadow {
+            let _ = write!(s, "<a:effectLst><a:outerShdw");
+            if sd.blur != 0 {
+                let _ = write!(s, " blurRad=\"{}\"", sd.blur);
+            }
+            let _ = write!(s, " dist=\"{}\" dir=\"{}\"", sd.dist, sd.dir);
+            if let Some(a) = &sd.align {
+                let _ = write!(s, " algn=\"{}\"", esc(a));
+            }
+            let _ = write!(
+                s,
+                " rotWithShape=\"{}\">{}</a:outerShdw></a:effectLst>",
+                sd.rot_with_shape as u8,
+                draw_color_xml(&sd.color)
+            );
         }
     }
     let _ = write!(s, "</xdr:{pr}>");
@@ -2430,7 +2492,13 @@ fn object_xml(sh: &crate::model::Shape, rels: &mut Vec<(String, String, String, 
         }
     } else if let Some(t) = &sh.text {
         s.push_str("<xdr:txBody><a:bodyPr");
-        for (name, v) in [("anchor", &t.anchor), ("wrap", &t.wrap), ("vert", &t.vert)] {
+        for (name, v) in [
+            ("vertOverflow", &t.vert_overflow),
+            ("horzOverflow", &t.horz_overflow),
+            ("anchor", &t.anchor),
+            ("wrap", &t.wrap),
+            ("vert", &t.vert),
+        ] {
             if let Some(v) = v {
                 let _ = write!(s, " {name}=\"{}\"", esc(v));
             }

@@ -455,6 +455,18 @@ pub struct Shape {
     pub fill: Option<Paint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<Outline>,
+    /// 바깥 그림자 (`a:effectLst/a:outerShdw`, 레거시 OPT 0x023F·0x0201·0x0205·0x0206)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<ShapeShadow>,
+    /// 켜진 잠금 (`a:spLocks`·`a:cxnSpLocks`·`a:picLocks`·`a:grpSpLocks` 의 속성 이름: `noRot`, `noChangeAspect` …,
+    /// 레거시 OPT 0x007F)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub locks: Vec<String>,
+    /// `xdr:clientData` 의 시트 보호와 함께 잠금·인쇄 (없으면 참, 레거시 OBJ ftCmo 의 fLocked 0x0001·fPrint 0x0010)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locks_with_sheet: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prints_with_sheet: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<TextBody>,
     /// 그룹의 자식
@@ -560,6 +572,44 @@ pub struct Outline {
     pub fill: Option<Paint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dash: Option<String>,
+    /// 선 끝 `cap` (`rnd`/`sq`/`flat`), 겹선 `cmpd` (`sng`/`dbl`/`thickThin`/`thinThick`/`tri`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compound: Option<String>,
+    /// 이음 (`round`/`bevel`/`miter`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join: Option<String>,
+    /// 화살표 `a:headEnd`·`a:tailEnd`: (종류, 너비, 길이)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<LineEnd>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail: Option<LineEnd>,
+}
+
+/// 선 끝 화살표 (`a:headEnd`/`a:tailEnd`): 종류 `none`/`triangle`/`stealth`/`diamond`/`oval`/`arrow`, 너비·길이
+/// `sm`/`med`/`lg`
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct LineEnd {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub w: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub len: Option<String>,
+}
+
+/// 바깥 그림자 (`a:outerShdw`): 거리·흐림 EMU, 방향 1/60000 도
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ShapeShadow {
+    pub dist: i64,
+    pub dir: i64,
+    pub blur: i64,
+    /// `algn` (`ctr`, `t`, `b` …)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
+    pub rot_with_shape: bool,
+    pub color: DrawColor,
 }
 
 /// 도형 안 글 (`xdr:txBody`)
@@ -574,6 +624,11 @@ pub struct TextBody {
     pub vert: Option<String>,
     /// 안쪽 여백 왼·위·오른·아래 (EMU)
     pub insets: [Option<i64>; 4],
+    /// 글 넘침 `vertOverflow`·`horzOverflow` (`overflow`/`ellipsis`/`clip`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vert_overflow: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub horz_overflow: Option<String>,
     pub paragraphs: Vec<DrawingPara>,
 }
 

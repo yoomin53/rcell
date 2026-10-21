@@ -31,7 +31,8 @@ pub struct Options {
     /// 바이너리 OOXML(xlCellb)은 한컴 확장을 저장하지 않는다 (docs/format/cell-binary.md).
     pub ignore_hancom_ext: bool,
     /// 도형의 글·사용자 정의 모양 비교 생략. 한셀은 레거시 도형(OfficeArt + TXO)에서 이 둘을
-    /// 읽지 못한다 (docs/format/cell-legacy.md).
+    /// 읽지 못한다 (docs/format/cell-legacy.md). 레거시에서 한셀이 버리는 묶기 잠금(noGrp) 도형과
+    /// 메모 상자의 선 색도 뺀다.
     pub ignore_shape_detail: bool,
     /// 차트 내용 비교 생략. rcell 은 레거시 차트(한컴 VtChart)의 내용을 아직 해석하지 못한다.
     pub ignore_chart: bool,
@@ -419,12 +420,57 @@ fn shape_key(
         }
         Some(crate::model::Paint::Other(n)) => n.clone(),
     };
+    // 화살표가 없는 끝은 없음과 같다 (한셀은 레거시에서 읽은 선에 늘 `w="med" len="med"` 를 쓴다)
+    let end = |e: &Option<crate::model::LineEnd>| match e {
+        Some(e) if e.kind.as_deref().is_some_and(|k| k != "none") => format!(
+            "{}:{}:{}",
+            e.kind.as_deref().unwrap_or("-"),
+            e.w.as_deref().unwrap_or("med"),
+            e.len.as_deref().unwrap_or("med")
+        ),
+        _ => "-".into(),
+    };
     let line = s.line.as_ref().map_or("-".to_string(), |l| {
         format!(
-            "{}/{}/{}",
+            "{}/{}/{}/{}/{}/{} {}>{}",
             l.width.map_or("-".into(), |w| w.to_string()),
             paint(&l.fill),
-            l.dash.as_deref().unwrap_or("-")
+            l.dash.as_deref().unwrap_or("-"),
+            l.cap.as_deref().unwrap_or("-"),
+            l.compound.as_deref().unwrap_or("-"),
+            l.join.as_deref().unwrap_or("-"),
+            end(&l.head),
+            end(&l.tail)
+        )
+    });
+    // 그림자: 거리는 100 EMU 단위로 (한셀은 레거시의 X·Y 거리에서 다시 계산해 1 EMU 씩 다르다), 기준점이 없으면 b
+    let shadow = s.shadow.as_ref().map_or("-".to_string(), |d| {
+        format!(
+            "{}/{}/{}/{}",
+            (d.dist as f64 / 100.0).round() as i64,
+            d.dir,
+            d.align.as_deref().unwrap_or("b"),
+            paint(&Some(crate::model::Paint::Solid(d.color.clone())))
+        )
+    });
+    let client = format!(
+        "{}{}",
+        if s.locks_with_sheet.unwrap_or(true) {
+            "L"
+        } else {
+            "-"
+        },
+        if s.prints_with_sheet.unwrap_or(true) {
+            "P"
+        } else {
+            "-"
+        }
+    );
+    let overflow = s.text.as_ref().map_or(String::new(), |t| {
+        format!(
+            " overflow={}/{}",
+            t.vert_overflow.as_deref().unwrap_or("overflow"),
+            t.horz_overflow.as_deref().unwrap_or("overflow")
         )
     });
     let children = if s.children.is_empty() {
@@ -440,7 +486,7 @@ fn shape_key(
         )
     };
     format!(
-        "{:?} {:?} [{}] {}→{} {} fill={} line={} text={:?}{}",
+        "{:?} {:?} [{}] {}→{} {} fill={} line={} shadow={} locks={:?} client={} text={:?}{}{}",
         s.kind,
         s.name,
         a.edit_as.as_deref().unwrap_or("twoCell"),
@@ -452,11 +498,15 @@ fn shape_key(
             .unwrap_or("-"),
         paint(&s.fill),
         line,
+        shadow,
+        s.locks,
+        client,
         if no_text {
             String::new()
         } else {
             s.plain_text()
         },
+        if no_text { "" } else { &overflow },
         children
     ) + &match (&s.chart, no_chart) {
         (Some(c), false) => format!(" chart={}", chart_key(c)),
@@ -1380,9 +1430,11 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             v.join("\n      ")
         };
         diff(format!("{s} 메모 상자"), note_boxes(sa), note_boxes(sb));
+        // 도형 세부를 뺄 때는 묶기 잠금(noGrp) 도형도 뺀다: 한셀은 레거시를 읽을 때 이 도형을 버린다 (도형 대조 실험)
         let shapes = |w: &Workbook, sh: &Sheet| {
             sh.shapes
                 .iter()
+                .filter(|s| !(opts.ignore_shape_detail && s.locks.iter().any(|l| l == "noGrp")))
                 .map(|s| shape_key(s, &w.raw_parts, opts.ignore_shape_detail, opts.ignore_chart))
                 .collect::<Vec<_>>()
                 .join("\n      ")

@@ -222,12 +222,23 @@ fn drawing_records(b: &mut Biff) {
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect();
-    let mut opt = Vec::new();
-    for (pid, v) in [
-        (0x0181u16, 0x00E1FFFFu32),
+    // 채우기, 선 없음, 가운데 맞춤 + (도형 대조 실험에서 한셀이 쓴 값) 회전 잠금, 그림자 (빨강, X·Y -17960 = 225°
+    // 25399), 선 끝 sq·겹선 dbl·이음 bevel·점선 dash
+    let props: [(u16, u32); 11] = [
+        (0x0181, 0x00E1FFFF),
         (0x01FF, 0x0008_0000),
         (0x0087, 1),
-    ] {
+        (0x007F, 0x0300_0300),
+        (0x0201, 0x0000_00FF),
+        (0x0205, (-17960i32) as u32),
+        (0x0206, (-17960i32) as u32),
+        (0x023F, 0x0002_0002),
+        (0x01D7, 1),
+        (0x01CD, 1),
+        (0x01D6, 0),
+    ];
+    let mut opt = Vec::new();
+    for (pid, v) in props {
         opt.extend_from_slice(&pid.to_le_bytes());
         opt.extend_from_slice(&v.to_le_bytes());
     }
@@ -242,7 +253,7 @@ fn drawing_records(b: &mut Biff) {
     anchor.extend_from_slice(&[0, 0]);
     let shape_head = [
         art(0x2, 1, 0xF00A, &[0x01, 0x04, 0, 0, 0x00, 0x0A, 0, 0]),
-        art(0x3, 4, 0xF00B, &opt),
+        art(0x3, props.len() as u16 + 1, 0xF00B, &opt),
         art(0x0, 0, 0xF010, &anchor),
         art(0x0, 0, 0xF011, &[]),
     ]
@@ -269,7 +280,8 @@ fn drawing_records(b: &mut Biff) {
     first.extend(shape_head);
     // MSODRAWING(도형) → OBJ(ot 0x1E) → MSODRAWING(ClientTextbox) → TXO
     b.rec(0x00EC, &first);
-    let mut obj = vec![0x15, 0, 0x12, 0, 0x1E, 0, 1, 0, 0x11, 0x60];
+    // ftCmo 플래그 0x6001: 잠금, 인쇄 안 함
+    let mut obj = vec![0x15, 0, 0x12, 0, 0x1E, 0, 1, 0, 0x01, 0x60];
     obj.extend_from_slice(&[0; 16]);
     b.rec(0x005D, &obj);
     b.rec(0x00EC, &textbox);
@@ -297,7 +309,20 @@ fn office_art_text_box_becomes_a_shape() {
         Some(Paint::Solid(c)) => assert_eq!(c.value, "srgb:FFFFE1"),
         other => panic!("{other:?}"),
     }
-    assert_eq!(t.line.as_ref().unwrap().fill, Some(Paint::None));
+    let l = t.line.as_ref().unwrap();
+    assert_eq!(l.fill, Some(Paint::None));
+    assert_eq!(
+        (l.cap.as_deref(), l.compound.as_deref(), l.join.as_deref()),
+        (Some("sq"), Some("dbl"), Some("bevel"))
+    );
+    let sd = t.shadow.as_ref().unwrap();
+    assert_eq!((sd.dist, sd.dir), (25399, 13_500_000));
+    assert_eq!(sd.color.value, "srgb:FF0000");
+    assert_eq!(t.locks, ["noRot"]);
+    assert_eq!(
+        (t.locks_with_sheet, t.prints_with_sheet),
+        (Some(true), Some(false))
+    );
     // 글꼴이 없으면 11pt → MDW 8. B 열 9 글자 → 72px, 실효 71px 의 ½ = 35.5 → 36px
     let a = &t.anchor;
     assert_eq!((a.from.col, a.from.row), (1, 1));

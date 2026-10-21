@@ -278,6 +278,21 @@ FSP 플래그 0x0005)이고, 나머지 도형마다 SpContainer 하나 뒤에 OB
 `0x01CE` 점선, `0x01FF` 선 켬(0x08, 사용 0x80000), `0x0380` 이름(UTF-16), `0x0381` 설명(UTF-16),
 `0x03BF` 숨김(0x2, 사용 0x20000), `0x0104` 그림 번호(pib, 그림 저장소의 1부터 번호).
 
+**그림자·잠금·선** (도형 대조 실험: 조작한 XML 도형 25개 → 한셀 → 레거시 → 한셀):
+
+| 속성 | 뜻 |
+|---|---|
+| `0x023F` | 그림자 켬 (0x02, 사용 0x20000). 색 `0x0201` (없으면 `808080`), 불투명도 `0x0204` (16.16, `a:alpha`), 거리 `0x0205`·`0x0206` (X·Y EMU, 부호 있음, 없으면 25400) → `dist` = √(X²+Y²), `dir` = atan2(Y, X). 기준점 `0x0210`·`0x0211` (16.16, −0.5 왼쪽·위, 0.5 오른쪽·아래 → `algn`, 없으면 `ctr`). 흐림(`blurRad`)은 저장되지 않는다. 한셀은 늘 `rotWithShape="0"` 으로 읽는다 |
+| `0x007F` | 잠금 비트 0–8 (사용 비트 16–24): `noGrp`, `noAdjustHandles`, `noTextEdit`, `noEditPoints`, `noCrop`, `noSelect`, `noMove`, `noChangeAspect`, `noRot`. 비트 9 는 한셀이 늘 켠다. `0x033F` 0x08 (사용 0x80000) = `noChangeShapeType`. `noResize`·`noChangeArrowheads` 는 저장되지 않는다. 한셀은 글상자를 늘 `noRot` 으로, 그림·연결선의 글 잠금은 버리고 읽는다 |
+| `0x01CE` | 점선 (MSOLINEDASHING): 0 solid, 1 sysDash, 2 sysDot, 3 sysDashDot, 4 sysDashDotDot, 5 dot, 6 dash, 7 lgDash, 8 dashDot, 9 lgDashDot, 10 lgDashDotDot |
+| `0x01CD` / `0x01D6` / `0x01D7` | 겹선 (0 sng, 1 dbl, 2 thickThin, 3 thinThick, 4 tri) / 이음 (0 bevel, 1 miter, 2 round — 없으면 한셀은 miter) / 끝 (0 rnd, 1 sq, 2 flat — 없으면 flat) |
+| `0x01D0`·`0x01D1`, `0x01D2`–`0x01D5` | 시작·끝 화살표 (0 없음, 1 triangle, 2 stealth, 3 diamond, 4 oval, 5 arrow), 너비·길이 (0 sm, 1 med, 2 lg). 한셀은 화살표 없는 끝도 `w="med" len="med"` 로 쓴다 |
+| OBJ ftCmo 플래그 | 0x0001 `fLocksWithSheet`, 0x0010 `fPrintsWithSheet`. 한셀은 레거시에 쓸 때 0x0001 을 늘 켠다 (시트와 함께 잠그지 않음을 잃는다) |
+| 모양 32 | `straightConnector1` (연결선, `ot` 0x01) |
+
+글 넘침(`vertOverflow`·`horzOverflow`)은 레거시에 없다 — 한셀은 늘 `clip` 으로 읽는다. **한셀은 묶기 잠금(`noGrp`) 도형을 레거시에서
+읽지 않는다** (파일에는 있다). `rcell diff --ignore-shape-detail` 은 이 도형과 글·사용자 정의 모양을 뺀다.
+
 **그림** (`ot` 0x08, 모양 75 = 그림 틀): 그림 파일은 전역의 MSODRAWINGGROUP(0x00EB) 에 있다 —
 `DggContainer(F000) → FDGG(F006) + BStoreContainer(F001, inst = 개수) → FBSE(F007)…`.
 FBSE: `btWin32 u8, btMacOS u8, rgbUid[16], tag u16, size u32, cRef u32 (0 = 빈 자리), foDelay u32, 예약 u8, cbName u8, 예약 u8 ×2`,
@@ -435,6 +450,7 @@ XTI 가 외부 SUPBOOK 을 가리키면 XML 표기로 `[n]시트!A1` 이 된다.
 | 문단 번호 ID | 0 으로 저장된다 |
 | 도형 안 글 | 파일(TXO)에는 있지만 **한셀이 다시 열 때 읽지 않는다** (rcell 은 읽는다) |
 | 사용자 정의 모양 | 꼭짓점(0x0145)이 저장되지 않아 모양이 사라진다 (`custGeom` 없음) |
+| 도형의 그림자·잠금·글 넘침 | 그림자 흐림, `noResize`·`noChangeArrowheads` 잠금, 시트와 함께 잠그지 않음(`fLocksWithSheet="0"`), 글 넘침은 저장되지 않는다. 묶기 잠금(`noGrp`) 도형은 파일에 있지만 다시 열 때 사라진다 (6.2절) |
 | 개요 요약 위치·창 잠금 | WSBOOL·WINDOWPROTECT 를 고정값으로 써서 잃는다 (6.4절) |
 | 테마 | 레거시에는 테마가 없다 (THEME 0x0896 을 쓰지 않는다). 한셀은 다시 열 때 자기 기본 테마를 붙인다 |
 | 외부 값 캐시 | XCT/CRN 을 쓰지 않는다. 다시 열면 시트마다 `refreshError="0"` 인 빈 캐시 |

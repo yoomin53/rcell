@@ -19,36 +19,44 @@ pub const XDR: &str = "http://schemas.openxmlformats.org/drawingml/2006/spreadsh
 pub const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 pub const C: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 
-/// `xdr:wsDr` → 그리기 개체 목록
+/// `xdr:wsDr` → 그리기 개체 목록. 모르는 개체(`xdr:contentPart` 등)를 담은 앵커와 `mc:AlternateContent` 로 감싼
+/// 앵커도 버리지 않고 원문 그대로 보관한다 (모델은 분기 안의 첫 앵커로 채운다)
 pub fn parse_drawing(root: &Element, rels: &[Relationship]) -> Vec<Shape> {
     root.elements()
         .filter_map(|e| {
-            let kind = match e.name.as_str() {
-                "twoCellAnchor" => AnchorKind::TwoCell,
-                "oneCellAnchor" => AnchorKind::OneCell,
-                "absoluteAnchor" => AnchorKind::Absolute,
-                _ => return None,
+            // mc:AlternateContent: 분기 안의 첫 앵커로 모델을, 원문은 감싼 요소째로
+            let a = if e.is(crate::ns::MC, "AlternateContent") {
+                e.elements()
+                    .flat_map(|b| b.elements())
+                    .find(|x| anchor_kind(x).is_some())?
+            } else {
+                e
             };
-            if e.ns.as_deref() != Some(XDR) {
-                return None;
-            }
+            let kind = anchor_kind(a)?;
             let anchor = Anchor {
                 kind,
-                edit_as: e.attr("editAs").map(str::to_string),
-                from: e.child_ns(XDR, "from").map(marker).unwrap_or_default(),
-                to: e.child_ns(XDR, "to").map(marker),
-                ext: e.child_ns(XDR, "ext").map(|x| (num(x, "cx"), num(x, "cy"))),
-                pos: e.child_ns(XDR, "pos").map(|x| (num(x, "x"), num(x, "y"))),
+                edit_as: a.attr("editAs").map(str::to_string),
+                from: a.child_ns(XDR, "from").map(marker).unwrap_or_default(),
+                to: a.child_ns(XDR, "to").map(marker),
+                ext: a.child_ns(XDR, "ext").map(|x| (num(x, "cx"), num(x, "cy"))),
+                pos: a.child_ns(XDR, "pos").map(|x| (num(x, "x"), num(x, "y"))),
             };
-            let obj = e.elements().find(|c| {
+            let obj = a.elements().find(|c| {
                 c.ns.as_deref() == Some(XDR)
                     && matches!(
                         c.name.as_str(),
                         "sp" | "cxnSp" | "pic" | "graphicFrame" | "grpSp"
                     )
-            })?;
-            let mut shape = object(obj, rels);
+            });
+            let mut shape = obj.map(|o| object(o, rels)).unwrap_or_else(|| Shape {
+                kind: ShapeKind::Other,
+                ..Default::default()
+            });
             shape.anchor = anchor;
+            if let Some(cd) = a.child_ns(XDR, "clientData") {
+                shape.locks_with_sheet = cd.attr_bool("fLocksWithSheet");
+                shape.prints_with_sheet = cd.attr_bool("fPrintsWithSheet");
+            }
             shape.raw = Some(e.to_xml());
             for id in rel_ids(e) {
                 if let Some(r) = rels.iter().find(|r| r.id == id)
@@ -62,6 +70,18 @@ pub fn parse_drawing(root: &Element, rels: &[Relationship]) -> Vec<Shape> {
             Some(shape)
         })
         .collect()
+}
+
+fn anchor_kind(e: &Element) -> Option<AnchorKind> {
+    if e.ns.as_deref() != Some(XDR) {
+        return None;
+    }
+    Some(match e.name.as_str() {
+        "twoCellAnchor" => AnchorKind::TwoCell,
+        "oneCellAnchor" => AnchorKind::OneCell,
+        "absoluteAnchor" => AnchorKind::Absolute,
+        _ => return None,
+    })
 }
 
 fn num(e: &Element, name: &str) -> i64 {
@@ -123,6 +143,29 @@ fn object(e: &Element, rels: &[Relationship]) -> Shape {
         s.descr = c.attr("descr").map(str::to_string);
         s.hidden = c.attr_bool("hidden").unwrap_or(false);
     }
+    // 잠금: cNvSpPr/a:spLocks, cNvCxnSpPr/a:cxnSpLocks, cNvPicPr/a:picLocks, cNvGrpSpPr/a:grpSpLocks
+    if let Some(nv) = e
+        .elements()
+        .find(|c| c.ns.as_deref() == Some(XDR) && c.name.starts_with("nv"))
+    {
+        for c in nv
+            .elements()
+            .filter(|c| c.name.starts_with("cNv") && c.name != "cNvPr")
+        {
+            for l in c
+                .elements()
+                .filter(|l| l.ns.as_deref() == Some(A) && l.name.ends_with("Locks"))
+            {
+                s.locks.extend(
+                    l.attrs
+                        .iter()
+                        .filter(|a| a.ns.is_none() && crate::xml::parse_bool(&a.value))
+                        .map(|a| a.name.clone()),
+                );
+            }
+        }
+        s.locks.sort();
+    }
     let sp_pr = e
         .child_ns(XDR, "spPr")
         .or_else(|| e.child_ns(XDR, "grpSpPr"));
@@ -139,14 +182,18 @@ fn object(e: &Element, rels: &[Relationship]) -> Shape {
             s.geometry = has_path.then(|| "custom".into());
         }
         s.fill = paint(p);
-        s.line = p.child_ns(A, "ln").map(|ln| Outline {
-            width: ln.attr("w").and_then(|v| v.parse().ok()),
-            fill: paint(ln),
-            dash: ln
-                .child_ns(A, "prstDash")
-                .and_then(|d| d.attr("val"))
-                .map(str::to_string),
-        });
+        s.line = p.child_ns(A, "ln").map(outline);
+        s.shadow = p
+            .child_ns(A, "effectLst")
+            .and_then(|l| l.child_ns(A, "outerShdw"))
+            .map(|o| crate::model::ShapeShadow {
+                dist: num(o, "dist"),
+                dir: num(o, "dir"),
+                blur: num(o, "blurRad"),
+                align: o.attr("algn").map(str::to_string),
+                rot_with_shape: o.attr_bool("rotWithShape").unwrap_or(true),
+                color: o.elements().next().map(color).unwrap_or_default(),
+            });
     }
     if s.kind == ShapeKind::Other {
         // graphicFrame: xdr:xfrm + a:graphic/a:graphicData (차트면 c:chart r:id)
@@ -190,6 +237,35 @@ fn object(e: &Element, rels: &[Relationship]) -> Shape {
             .collect();
     }
     s
+}
+
+/// `a:ln`: 두께, 채우기, 점선, 끝 모양·겹선·이음, 화살표
+fn outline(ln: &Element) -> Outline {
+    let end = |n: &str| {
+        ln.child_ns(A, n).map(|e| crate::model::LineEnd {
+            kind: e.attr("type").map(str::to_string),
+            w: e.attr("w").map(str::to_string),
+            len: e.attr("len").map(str::to_string),
+        })
+    };
+    Outline {
+        width: ln.attr("w").and_then(|v| v.parse().ok()),
+        fill: paint(ln),
+        dash: ln
+            .child_ns(A, "prstDash")
+            .and_then(|d| d.attr("val"))
+            .map(str::to_string),
+        cap: ln.attr("cap").map(str::to_string),
+        compound: ln.attr("cmpd").map(str::to_string),
+        join: ln
+            .elements()
+            .find(|c| {
+                c.ns.as_deref() == Some(A) && matches!(c.name.as_str(), "round" | "bevel" | "miter")
+            })
+            .map(|c| c.name.clone()),
+        head: end("headEnd"),
+        tail: end("tailEnd"),
+    }
 }
 
 fn xfrm(x: &Element) -> Xfrm {
@@ -255,6 +331,8 @@ fn text_body(t: &Element) -> TextBody {
         body.anchor = b.attr("anchor").map(str::to_string);
         body.wrap = b.attr("wrap").map(str::to_string);
         body.vert = b.attr("vert").map(str::to_string);
+        body.vert_overflow = b.attr("vertOverflow").map(str::to_string);
+        body.horz_overflow = b.attr("horzOverflow").map(str::to_string);
         for (i, n) in ["lIns", "tIns", "rIns", "bIns"].iter().enumerate() {
             body.insets[i] = b.attr(n).and_then(|v| v.parse().ok());
         }
