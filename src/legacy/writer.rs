@@ -546,66 +546,37 @@ fn font_order(wb: &Workbook, styles: &StyleLayout) -> Vec<usize> {
     }
     // 서식 런(공유 문자열·메모·도형 글자)이 쓰는 글꼴: 이름·크기·굵게·기울임이 같은 첫 글꼴
     let mut by_runs = vec![false; n];
-    // 이름이 없거나 테마 글꼴(`+mn-lt` …)이면 이름은 보지 않는다. 색(RGB)이 있으면 색도 같아야 한다
-    let like =
-        |name: Option<&str>, size: Option<f64>, bold: bool, italic: bool, rgb: Option<u32>| {
-            let any_name = name.is_none_or(|v| v.starts_with('+'));
-            st.fonts.iter().position(|x| {
-                (any_name || x.name.as_deref() == name)
-                    && x.size == size
-                    && x.bold == bold
-                    && x.italic == italic
-                    && rgb.is_none_or(|c| x.color.as_ref().and_then(|v| rgb_of(v, wb)) == Some(c))
-            })
-        };
-    let mark = |t: &RichText, by_runs: &mut [bool]| {
-        for r in &t.runs {
-            if let Some(f) = &r.font
-                && let Some(i) = st.fonts.iter().position(|x| same_font(x, f)).or_else(|| {
-                    let rgb = f.color.as_ref().and_then(|c| rgb_of(c, wb));
-                    like(f.name.as_deref(), f.size, f.bold, f.italic, rgb)
-                })
-            {
+    for s in &wb.shared_strings {
+        for r in &s.runs {
+            if let Some(i) = r.font.as_ref().and_then(|f| run_font(wb, f)) {
                 by_runs[i] = true;
             }
         }
-    };
-    for s in &wb.shared_strings {
-        mark(s, &mut by_runs);
     }
     for sh in &wb.sheets {
         for c in &sh.comments {
-            mark(&c.text, &mut by_runs);
-        }
-    }
-    type Like<'a> =
-        dyn Fn(Option<&str>, Option<f64>, bool, bool, Option<u32>) -> Option<usize> + 'a;
-    fn shapes(v: &[crate::model::Shape], like: &Like, used: &mut [bool]) {
-        for s in v {
-            for r in s
-                .text
-                .iter()
-                .flat_map(|t| &t.paragraphs)
-                .flat_map(|p| &p.runs)
-            {
-                let size = r.size.map(|v| v as f64 / 100.0);
-                let (b, i) = (r.bold.unwrap_or(false), r.italic.unwrap_or(false));
-                let rgb = r
-                    .color
-                    .as_ref()
-                    .and_then(|c| c.value.strip_prefix("srgb:"))
-                    .and_then(|v| u32::from_str_radix(v, 16).ok());
-                if let Some(k) = like(r.latin.as_deref(), size, b, i, rgb)
-                    .or_else(|| like(r.ea.as_deref(), size, b, i, rgb))
-                {
-                    used[k] = true;
+            for r in &c.text.runs {
+                if let Some(i) = r.font.as_ref().and_then(|f| run_font(wb, f)) {
+                    by_runs[i] = true;
                 }
             }
-            shapes(&s.children, like, used);
         }
-    }
-    for sh in &wb.sheets {
-        shapes(&sh.shapes, &like, &mut by_runs);
+        fn shapes(wb: &Workbook, v: &[crate::model::Shape], used: &mut [bool]) {
+            for s in v {
+                for r in s
+                    .text
+                    .iter()
+                    .flat_map(|t| &t.paragraphs)
+                    .flat_map(|p| &p.runs)
+                {
+                    if let Some(k) = drawing_run_font(wb, r) {
+                        used[k] = true;
+                    }
+                }
+                shapes(wb, &s.children, used);
+            }
+        }
+        shapes(wb, &sh.shapes, &mut by_runs);
     }
     for (i, used) in by_runs.iter().enumerate() {
         if *used {
@@ -613,6 +584,51 @@ fn font_order(wb: &Workbook, styles: &StyleLayout) -> Vec<usize> {
         }
     }
     v
+}
+
+/// 글자 조각의 글꼴과 같은 모델 글꼴: 이름·크기·굵게·기울임이 같은 첫 글꼴. 이름이 없거나 테마 글꼴(`+mn-lt` …)이면
+/// 이름은 보지 않고, 색(RGB)이 있으면 색도 같아야 한다
+fn like_font(
+    wb: &Workbook,
+    name: Option<&str>,
+    size: Option<f64>,
+    bold: bool,
+    italic: bool,
+    rgb: Option<u32>,
+) -> Option<usize> {
+    let any_name = name.is_none_or(|v| v.starts_with('+'));
+    wb.styles.fonts.iter().position(|x| {
+        (any_name || x.name.as_deref() == name)
+            && x.size == size
+            && x.bold == bold
+            && x.italic == italic
+            && rgb.is_none_or(|c| x.color.as_ref().and_then(|v| rgb_of(v, wb)) == Some(c))
+    })
+}
+
+/// 서식 런(공유 문자열·메모)의 글꼴 → 모델 글꼴 번호 (똑같은 글꼴이 먼저, 없으면 [`like_font`])
+pub(crate) fn run_font(wb: &Workbook, f: &Font) -> Option<usize> {
+    wb.styles
+        .fonts
+        .iter()
+        .position(|x| same_font(x, f))
+        .or_else(|| {
+            let rgb = f.color.as_ref().and_then(|c| rgb_of(c, wb));
+            like_font(wb, f.name.as_deref(), f.size, f.bold, f.italic, rgb)
+        })
+}
+
+/// 도형 글 조각 → 모델 글꼴 번호 (라틴 글꼴 이름, 없으면 동아시아 글꼴 이름으로)
+pub(crate) fn drawing_run_font(wb: &Workbook, r: &crate::model::DrawingRun) -> Option<usize> {
+    let size = r.size.map(|v| v as f64 / 100.0);
+    let (b, i) = (r.bold.unwrap_or(false), r.italic.unwrap_or(false));
+    let rgb = r
+        .color
+        .as_ref()
+        .and_then(|c| c.value.strip_prefix("srgb:"))
+        .and_then(|v| u32::from_str_radix(v, 16).ok());
+    like_font(wb, r.latin.as_deref(), size, b, i, rgb)
+        .or_else(|| like_font(wb, r.ea.as_deref(), size, b, i, rgb))
 }
 
 /// 사용자 표시 형식(164 이상)의 번호. 레거시에서 읽은 서식 표면 그대로. 아니면 한셀이 XML 을 열 때처럼
@@ -1688,22 +1704,29 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
             .to_le_bytes(),
     );
     {
-        // WINDOW1: 창 위치·크기는 모델에 없다 — 한셀의 빈 문서 값 (관측)
-        let active = wb
+        // WINDOW1: workbookView 의 위치·크기(트윕)·활성 탭·첫 탭·탭 비율 (tabRatio 가 없으면 600 — ECMA 기본값,
+        // 관측: 말뭉치 XML 117개). 모델에 창이 없으면 한셀의 빈 문서 값 (0, 0, 0, 0, 탭 비율 500)
+        let selected = wb
             .sheets
             .iter()
             .position(|s| s.view.tab_selected)
-            .unwrap_or(0) as u16;
+            .unwrap_or(0) as u32;
+        let last = wb.sheets.len().saturating_sub(1) as u32;
+        let v = wb.book_view.clone().unwrap_or(crate::model::BookView {
+            tab_ratio: Some(500),
+            active_tab: selected,
+            ..Default::default()
+        });
         let mut b = Buf::new();
-        b.u16(0)
-            .u16(0)
-            .u16(0)
-            .u16(0)
+        b.u16(v.x_window as i16 as u16)
+            .u16(v.y_window as i16 as u16)
+            .u16(v.window_width.min(0xFFFF) as u16)
+            .u16(v.window_height.min(0xFFFF) as u16)
             .u16(0x0038)
-            .u16(active)
-            .u16(0)
+            .u16(v.active_tab.min(last) as u16)
+            .u16(v.first_sheet.min(last) as u16)
             .u16(1)
-            .u16(500);
+            .u16(v.tab_ratio.unwrap_or(600).min(1000) as u16);
         out.rec_buf(0x003D, &mut b);
     }
     out.rec(0x0022, &(wb.date1904 as u16).to_le_bytes());
@@ -1802,6 +1825,19 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
             None => xf_para.push(None),
         }
     }
+    // 글 상자 문단 모양: 글이 있는 도형이 있으면 표 끝에 하나 (줄 간격 100 퍼센트, 왼쪽 정렬, 단어 나눔 없음).
+    // 도형·메모의 TXO 문단이 이 번호를 가리킨다 (관측: 글 상자가 있는 서식 파일 25개, 늘 같은 37바이트)
+    let text_para = super::art::has_text_shapes(wb).then(|| {
+        let p = ParaShape {
+            line_spacing: Some(100),
+            line_spacing_type: Some("percent".into()),
+            break_latin_word: Some("keepWord".into()),
+            break_non_latin_word: Some("keepWord".into()),
+            ..Default::default()
+        };
+        para_records.push(parashape_record(&p, 1));
+        (para_records.len() - 1) as u32
+    });
     for r in &para_records {
         out.rec(0xA001, r);
     }
@@ -1990,7 +2026,8 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
     }
     out.rec(0xA101, &wb.hancom.calc_id.unwrap_or(1).to_le_bytes());
     // 그림 저장소
-    let art = super::art::Art::new(wb);
+    let mut art = super::art::Art::new(wb);
+    art.text_para = text_para;
     if let Some(dgg) = art.drawing_group() {
         out.rec(0x00EB, &dgg);
     }
@@ -2272,14 +2309,9 @@ impl SheetCtx<'_> {
     pub fn font(&self, i: u32) -> u16 {
         self.fonts.map.get(i as usize).copied().unwrap_or(0)
     }
-    /// 모델 글꼴과 같은 글꼴의 레거시 번호
+    /// 서식 런 글꼴과 같은 글꼴의 레거시 번호 ([`run_font`])
     pub fn font_like(&self, f: &Font) -> u16 {
-        self.wb
-            .styles
-            .fonts
-            .iter()
-            .position(|x| same_font(x, f))
-            .map_or(0, |i| self.fonts.map[i])
+        run_font(self.wb, f).map_or(0, |i| self.fonts.map[i])
     }
     /// 데이터 유효성 i 의 부호화된 수식 1·2
     pub fn enc_dv(&self, i: usize) -> (&[u8], &[u8]) {

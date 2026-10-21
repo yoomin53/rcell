@@ -39,6 +39,23 @@ pub struct Workbook {
     /// 테마 (xl/theme/theme1.xml). 없으면 렌더링 때 Office 기본 테마를 쓴다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<crate::theme::Theme>,
+    /// 통합 문서 창 (`x:bookViews/x:workbookView`, 레거시 WINDOW1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub book_view: Option<BookView>,
+}
+
+/// 통합 문서 창 (`x:workbookView`, 레거시 WINDOW1 0x003D). 위치·크기는 트윕
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct BookView {
+    pub x_window: i32,
+    pub y_window: i32,
+    pub window_width: u32,
+    pub window_height: u32,
+    /// 시트 탭 영역 비율 (1/1000). 없으면 600 (ECMA 기본값)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tab_ratio: Option<u32>,
+    pub active_tab: u32,
+    pub first_sheet: u32,
 }
 
 /// 외부 통합 문서 연결 (`xl/externalLinks/externalLinkN.xml`, 레거시 SUPBOOK).

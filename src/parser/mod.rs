@@ -364,6 +364,21 @@ fn copy_part_tree(
 }
 
 fn finish_selection(root: &crate::xml::Element, wb: &mut Workbook) {
+    if let Some(v) = root
+        .sml_child("bookViews")
+        .and_then(|b| b.sml_child("workbookView"))
+    {
+        let int = |n: &str| v.attr(n).and_then(|s| s.parse::<i64>().ok());
+        wb.book_view = Some(crate::model::BookView {
+            x_window: int("xWindow").unwrap_or(0) as i32,
+            y_window: int("yWindow").unwrap_or(0) as i32,
+            window_width: int("windowWidth").unwrap_or(0).max(0) as u32,
+            window_height: int("windowHeight").unwrap_or(0).max(0) as u32,
+            tab_ratio: int("tabRatio").map(|t| t.max(0) as u32),
+            active_tab: int("activeTab").unwrap_or(0).max(0) as u32,
+            first_sheet: int("firstSheet").unwrap_or(0).max(0) as u32,
+        });
+    }
     // 선택된 시트가 없으면 활성 탭(workbookView/@activeTab, 기본 0)이 선택된 것이다
     if !wb.sheets.iter().any(|s| s.view.tab_selected) {
         let active = root

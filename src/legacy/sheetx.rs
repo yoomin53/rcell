@@ -547,14 +547,33 @@ fn window(out: &mut Out, ctx: &SheetCtx) {
         .as_deref()
         .and_then(CellRef::parse)
         .unwrap_or_default();
+    // 확대율: 레거시에서 읽은 보기는 그대로. XML 에서 온 보기는 한셀이 XML 을 열 때처럼 wScaleNormal =
+    // zoomScaleSheetLayoutView (없으면 75), wScaleSLV = 페이지 나누기 미리 보기면 zoomScaleNormal, 아니면 zoomScale
+    // (없으면 100) — 관측: 말뭉치 XML 시트 163개, 7가지 꼴 모두 맞는다
+    let (normal, slv) = if ctx.wb.styles.from_legacy {
+        (
+            v.zoom_scale_normal.unwrap_or(0),
+            v.zoom_scale_sheet_layout_view.unwrap_or(0),
+        )
+    } else if v.view.as_deref() == Some("pageBreakPreview") {
+        (
+            v.zoom_scale_sheet_layout_view.unwrap_or(75),
+            v.zoom_scale_normal.unwrap_or(100),
+        )
+    } else {
+        (
+            v.zoom_scale_sheet_layout_view.unwrap_or(75),
+            v.zoom_scale.unwrap_or(100),
+        )
+    };
     let mut b = Buf::new();
     b.u16(g)
         .u32(tl.row)
         .u16(tl.col as u16)
         .u32(0)
         .u16(0)
-        .u16(v.zoom_scale_normal.unwrap_or(0) as u16)
-        .u16(v.zoom_scale_sheet_layout_view.unwrap_or(0) as u16)
+        .u16(normal as u16)
+        .u16(slv as u16)
         .bytes(&[0, 0, 0, 0x80]);
     out.rec_buf(0x023E, &mut b);
     if let Some(z) = v.zoom_scale.filter(|&z| z != 100) {

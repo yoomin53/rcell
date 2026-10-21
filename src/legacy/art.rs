@@ -237,6 +237,22 @@ pub(crate) struct Art {
     dgid: Vec<Option<u32>>,
     /// 시트마다 OfficeArt 도형 수 (patriarch 포함)
     csp: Vec<u32>,
+    /// 글 상자 문단 모양의 0xA001 번호 ([`has_text_shapes`] 일 때 표 끝에 하나 더 쓴다). TXO 의 문단이 가리킨다
+    pub text_para: Option<u32>,
+}
+
+/// 글이 있는 도형 (글 상자 TXO 를 쓰는 도형)
+pub(crate) fn shape_has_text(s: &Shape) -> bool {
+    s.text.as_ref().is_some_and(|t| !t.paragraphs.is_empty()) && !s.plain_text().is_empty()
+}
+
+/// 통합 문서에 글이 있는 도형이 있나 (그룹 안까지)
+pub(crate) fn has_text_shapes(wb: &Workbook) -> bool {
+    fn any(v: &[Shape]) -> bool {
+        v.iter()
+            .any(|s| (s.kind != ShapeKind::Chart && shape_has_text(s)) || any(&s.children))
+    }
+    wb.sheets.iter().any(|s| any(&s.shapes))
 }
 
 fn sheet_objects(sheet: &crate::model::Sheet) -> Vec<Obj<'_>> {
@@ -273,6 +289,7 @@ impl Art {
             pib: HashMap::new(),
             dgid: Vec::new(),
             csp: Vec::new(),
+            text_para: None,
         };
         fn pictures<'a>(s: &'a Shape, out: &mut Vec<&'a str>) {
             if s.kind == ShapeKind::Picture
@@ -538,7 +555,7 @@ impl Art {
                         .first()
                         .and_then(|r| r.font.as_ref())
                         .map_or(0, |f| ctx.font_like(f));
-                    let txo = txo(&c.text.text, font, 0);
+                    let txo = txo(&c.text.text, font, self.text_para.unwrap_or(0));
                     parts.push(Part {
                         sp,
                         obj: obj.take(),
@@ -646,8 +663,7 @@ impl Art {
         }
         sp.extend(rec(2, shape_type, 0xF00A, &fsp.0));
         let mut p = Props(Vec::new());
-        let has_text =
-            s.text.as_ref().is_some_and(|t| !t.paragraphs.is_empty()) && !s.plain_text().is_empty();
+        let has_text = shape_has_text(s);
         p.set(
             0x007F,
             if s.kind == ShapeKind::Picture {
@@ -755,8 +771,8 @@ impl Art {
             .bytes(&[0; 12]);
         obj.u32(0);
         let txo = has_text.then(|| {
-            let font = shape_text_font(s, &ctx.wb.styles.fonts).map_or(0, |i| ctx.font(i as u32));
-            txo(&s.plain_text(), font, 3)
+            let font = shape_text_font(s, ctx.wb).map_or(0, |i| ctx.font(i as u32));
+            txo(&s.plain_text(), font, self.text_para.unwrap_or(0))
         });
         emit(sp, obj.take(), txo);
         if s.kind == ShapeKind::Group {
@@ -788,19 +804,13 @@ impl Art {
     }
 }
 
-/// 도형 글 상자의 TXO 가 가리키는 모델 글꼴: 첫 글 조각과 이름·크기·굵게·기울임이 같은 첫 글꼴
-pub(crate) fn shape_text_font(s: &Shape, fonts: &[crate::model::Font]) -> Option<usize> {
+/// 도형 글 상자의 TXO 가 가리키는 모델 글꼴: 첫 글 조각의 글꼴 ([`super::writer::drawing_run_font`])
+fn shape_text_font(s: &Shape, wb: &Workbook) -> Option<usize> {
     let r = s
         .text
         .as_ref()
         .and_then(|t| t.paragraphs.iter().flat_map(|p| &p.runs).next())?;
-    let size = r.size.map(|v| v as f64 / 100.0);
-    fonts.iter().position(|x| {
-        x.name == r.latin
-            && x.size == size
-            && x.bold == r.bold.unwrap_or(false)
-            && x.italic == r.italic.unwrap_or(false)
-    })
+    super::writer::drawing_run_font(wb, r)
 }
 
 /// TXO (한컴): 머리 10바이트 (`0, 1, 1, 1, 문단 수`), `cch u16, flag u8, UTF-16`, 런 `(ich u16, ifnt u16, u32)` 과

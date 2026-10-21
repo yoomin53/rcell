@@ -900,6 +900,19 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
             0x000A => break,
             0x0022 => wb.date1904 = r.u16() == Some(1),
             0x00EB => dgg.extend_from_slice(d),
+            // WINDOW1: 창 위치·크기 (트윕), grbit, 활성 탭, 첫 탭, 선택한 탭 수, 탭 비율
+            0x003D if d.len() >= 18 => {
+                let v = |i: usize| u16::from_le_bytes([d[i], d[i + 1]]);
+                wb.book_view = Some(crate::model::BookView {
+                    x_window: v(0) as i16 as i32,
+                    y_window: v(2) as i16 as i32,
+                    window_width: v(4) as u32,
+                    window_height: v(6) as u32,
+                    tab_ratio: Some(v(16) as u32),
+                    active_tab: v(10) as u32,
+                    first_sheet: v(12) as u32,
+                });
+            }
             // 통합 문서 보호: PROTECT (구조), WINDOWPROTECT (창), PASSWORD
             0x0012 | 0x0019 | 0x0013 => {
                 let v = r.u16().unwrap_or(0);
