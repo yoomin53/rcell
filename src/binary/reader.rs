@@ -996,6 +996,7 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
         };
         wb.application = field("Application");
         wb.app_version = field("AppVersion");
+        wb.total_time = field("TotalTime");
     }
     wb.properties = crate::parser::read_core_properties(pkg, &root_rels)?;
 
@@ -1431,7 +1432,7 @@ fn read_sheet(
                             xlsb: true,
                             row_shift: 0,
                         };
-                        formulas.push(match formula::decode(rgce, &ctx) {
+                        formulas.push(match formula::decode_relative(rgce, &ctx) {
                             Ok(Decoded::Text(t)) => t,
                             _ => String::new(),
                         });
@@ -1568,7 +1569,7 @@ fn read_sheet(
                         xlsb: true,
                         row_shift: 0,
                     };
-                    match formula::decode(rgce, &ctx) {
+                    match formula::decode_relative(rgce, &ctx) {
                         Ok(Decoded::Text(t)) => Some(t),
                         _ => None,
                     }
@@ -1881,7 +1882,7 @@ fn read_sheet(
                 let text = match formula::decode(rgce, &ctx) {
                     Ok(Decoded::Text(t)) => t,
                     Ok(Decoded::SharedRef(m)) => find_shared(&shared, m.row, at)
-                        .and_then(|tok| match formula::decode(&tok, &ctx) {
+                        .and_then(|tok| match formula::decode_relative(&tok, &ctx) {
                             Ok(Decoded::Text(t)) => Some(t),
                             _ => None,
                         })
@@ -1950,7 +1951,7 @@ fn read_sheet(
                             xlsb: true,
                             row_shift: 0,
                         };
-                        if let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx) {
+                        if let Ok(Decoded::Text(t)) = formula::decode_relative(tokens, &ctx) {
                             f.text = t;
                         }
                     }

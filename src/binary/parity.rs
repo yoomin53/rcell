@@ -260,6 +260,16 @@ fn align(a: &[Record], b: &[Record]) -> Vec<Step> {
     out
 }
 
+/// docProps/core.xml 의 `cp:revision`·`dcterms:modified`·`cp:lastModifiedBy`
+fn is_save_stamp(e: &crate::xml::Element) -> bool {
+    const CP: &str = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties";
+    match e.ns.as_deref() {
+        Some(CP) => matches!(e.name.as_str(), "revision" | "lastModifiedBy"),
+        Some("http://purl.org/dc/terms/") => e.name == "modified",
+        _ => false,
+    }
+}
+
 /// XML 정규형: 요소 이름(네임스페이스 URI), 정렬한 속성, 공백 아닌 글. 파트 이름 속성의 숫자는 지운다
 fn canonical(data: &[u8]) -> String {
     let text = String::from_utf8_lossy(data);
@@ -297,6 +307,8 @@ fn canonical(data: &[u8]) -> String {
         let mut kids: Vec<String> = Vec::new();
         for c in &e.children {
             match c {
+                // 저장할 때마다 한셀이 고치는 문서 속성 (수정 번호 +1, 수정 날짜, 수정한 사람 — rcell diff 처럼 뺀다)
+                crate::xml::Node::Element(x) if is_save_stamp(x) => {}
                 crate::xml::Node::Element(x) => {
                     let mut s = String::new();
                     walk(x, &mut s);

@@ -2701,12 +2701,16 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
         "xl/styles.bin".into(),
         false,
     ));
-    wbrels.push((
-        format!("rId{}", wbrels.len() + 1),
-        format!("{REL_BASE}/sharedStrings"),
-        "xl/sharedStrings.bin".into(),
-        false,
-    ));
+    // 문자열이 하나도 없으면 한셀은 공유 문자열 파트를 쓰지 않는다 (관측: 수식·숫자만 있는 문서)
+    let has_sst = !sst.items.is_empty();
+    if has_sst {
+        wbrels.push((
+            format!("rId{}", wbrels.len() + 1),
+            format!("{REL_BASE}/sharedStrings"),
+            "xl/sharedStrings.bin".into(),
+            false,
+        ));
+    }
     let mut sheet_ids = Vec::new();
     for i in 0..worksheets.len() {
         let id = format!("rId{}", wbrels.len() + 1);
@@ -2909,7 +2913,10 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
         "docProps/core.xml".into(),
         "application/vnd.openxmlformats-package.core-properties+xml".into(),
     ));
-    parts.push(("docProps/app.xml".into(), app_xml(&worksheets).into_bytes()));
+    parts.push((
+        "docProps/app.xml".into(),
+        app_xml(&worksheets, wb.total_time.as_deref()).into_bytes(),
+    ));
     overrides.push((
         "docProps/app.xml".into(),
         "application/vnd.openxmlformats-officedocument.extended-properties+xml".into(),
@@ -2935,11 +2942,13 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
         "xl/styles.bin".into(),
         "application/vnd.ms-excel.styles".into(),
     ));
-    parts.push(("xl/sharedStrings.bin".into(), sst_bin));
-    overrides.push((
-        "xl/sharedStrings.bin".into(),
-        "application/vnd.ms-excel.sharedStrings".into(),
-    ));
+    if has_sst {
+        parts.push(("xl/sharedStrings.bin".into(), sst_bin));
+        overrides.push((
+            "xl/sharedStrings.bin".into(),
+            "application/vnd.ms-excel.sharedStrings".into(),
+        ));
+    }
     // 차트 모델이 있는 차트 파트는 모델로 다시 쓴다 (chart_xml), 나머지 원본 파트는 그대로
     let mut charts: HashMap<String, &crate::model::Chart> = HashMap::new();
     fn collect<'a>(
@@ -3097,14 +3106,17 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
         z.start_file(name.as_str(), zopts)?;
         z.write_all(data)?;
     }
-    Ok(Output {
-        bytes: z.finish()?.into_inner(),
-        warnings,
-    })
+    let mut bytes = z.finish()?.into_inner();
+    // 구조 잠금이 걸린 문서는 한셀처럼 기본 암호로 감싼다 (super::encrypt)
+    if wb.protection.as_ref().is_some_and(|p| p.lock_structure) {
+        bytes = super::encrypt::wrap(&bytes);
+    }
+    Ok(Output { bytes, warnings })
 }
 
-/// docProps/app.xml — 한셀이 쓰는 꼴 (프로그램 이름, 시트 이름 목록, 편집 시간, 버전)
-fn app_xml(sheets: &[&Sheet]) -> String {
+/// docProps/app.xml — 한셀이 쓰는 꼴 (프로그램 이름, 시트 이름 목록, 편집 시간, 버전).
+/// 편집 시간(분)은 원본 값을 옮긴다 (한셀 관측: 서식 파일의 `TotalTime` 51 이 바이너리에도 51)
+fn app_xml(sheets: &[&Sheet], total_time: Option<&str>) -> String {
     let mut s = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?><ep:Properties xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:ep=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\"><ep:Application>Cell</ep:Application><ep:TitlesOfParts>",
     );
@@ -3116,7 +3128,13 @@ fn app_xml(sheets: &[&Sheet]) -> String {
     for sh in sheets {
         let _ = write!(s, "<vt:lpstr>{}</vt:lpstr>", esc(&sh.name));
     }
-    s.push_str("</vt:vector></ep:TitlesOfParts><ep:TotalTime>0</ep:TotalTime><ep:AppVersion>12.0300</ep:AppVersion></ep:Properties>");
+    let minutes = total_time
+        .and_then(|t| t.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let _ = write!(
+        s,
+        "</vt:vector></ep:TitlesOfParts><ep:TotalTime>{minutes}</ep:TotalTime><ep:AppVersion>12.0300</ep:AppVersion></ep:Properties>"
+    );
     s
 }
 
@@ -3149,7 +3167,8 @@ fn core_xml(p: &crate::model::DocProperties) -> String {
             let _ = write!(s, "<{tag} xsi:type=\"dcterms:W3CDTF\">{}</{tag}>", esc(v));
         }
     }
-    s.push_str("</cp:coreProperties>");
+    // 한셀 2024 는 문서와 상관없이 늘 자기 버전을 끝에 쓴다 (관측: 코퍼스의 바이너리 114개 모두)
+    s.push_str("<cp:version>1300.0100.01</cp:version></cp:coreProperties>");
     s
 }
 

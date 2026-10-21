@@ -89,6 +89,7 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
         };
         wb.application = field("Application");
         wb.app_version = field("AppVersion");
+        wb.total_time = field("TotalTime");
     }
     wb.properties = read_core_properties(pkg, &root_rels)?;
 

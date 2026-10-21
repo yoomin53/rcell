@@ -1032,7 +1032,9 @@ impl Gen<'_> {
             }
         };
         let any_rel = !(r1.abs && r2.abs && c1.abs && c2.abs);
-        let rel = self.base.filter(|_| any_rel && ixti.is_none());
+        // 상대 위치 수식이면 상대 축은 기준 셀에서의 오프셋. 3차원 참조도 PtgRef3d/PtgArea3d 그대로
+        // 오프셋을 쓴다 (RgceLocRel — 한셀 바이너리 대조 실험, legacy::formula::decode_relative)
+        let rel = self.base.filter(|_| any_rel);
         let row_v = |r: Axis| -> u32 {
             match rel {
                 Some(b) if !r.abs => (r.n as i64 - b.row as i64).rem_euclid(1 << 20) as u32,
@@ -1432,6 +1434,62 @@ mod tests {
                 "2d f9 ff 0f 00 ff ff 0f 00 00 c0 00 c0 19 10 00 00 19 02 15 00 2d f9 ff 0f 00 ff ff 0f 00 00 c0 00 c0 19 10 00 00 19 08 0a 00 17 00 00 19 08 03 00 42 03 01 00"
             )
         );
+    }
+
+    // 3차원 참조도 상대 위치 수식에서는 오프셋 (한셀 관측: 공유 수식을 넣어 만든 XML 을 한셀이 바이너리로 저장)
+    #[test]
+    fn relative_3d_references_use_offsets_like_hancell() {
+        use crate::legacy::formula::{Context, Decoded, decode_relative};
+        let cases = [
+            // (기준 셀, 원문, 한셀 토큰열)
+            (
+                CellRef { row: 0, col: 3 },
+                "Sheet2!C1+1",
+                "5a 00 00 00 00 00 00 ff ff 1e 01 00 03",
+            ),
+            (
+                CellRef { row: 1, col: 4 },
+                "SUM(Sheet2!B1:C2)",
+                "3b 00 00 ff ff 0f 00 00 00 00 00 fd ff fe ff 19 10 00 00",
+            ),
+            (
+                CellRef { row: 1, col: 5 },
+                "Sheet2!$B1+Sheet2!B$1+B1",
+                "5a 00 00 ff ff 0f 00 01 80 5a 00 00 00 00 00 00 fc 7f 03 4c ff ff 0f 00 fc ff 03",
+            ),
+            (
+                CellRef { row: 2, col: 7 },
+                "Sheet2!B3",
+                "5a 00 00 00 00 00 00 fa ff",
+            ),
+            (
+                CellRef { row: 0, col: 0 },
+                "Sheet2!B1*2",
+                "5a 00 00 00 00 00 00 01 c0 1e 02 00 05",
+            ),
+        ];
+        let sheets = [Some("Sheet2".to_string())];
+        for (base, f, h) in cases {
+            let mut r = R {
+                names: Vec::new(),
+                xtis: Vec::new(),
+            };
+            let e = encode(f, Place::Relative(base), &mut r).unwrap();
+            assert_eq!(e.rgce, hex(h), "{f}");
+            let ctx = Context {
+                xti_sheets: &sheets,
+                names: &[],
+                xti_names: &[],
+                base,
+                xlsb: true,
+                row_shift: 0,
+            };
+            assert_eq!(
+                decode_relative(&e.rgce, &ctx),
+                Ok(Decoded::Text(f.to_string())),
+                "{f}"
+            );
+        }
     }
 
     #[test]
