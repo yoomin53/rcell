@@ -100,15 +100,15 @@ pub const FNS: &[FnSpec] = &[
     f("DOLLAR", 1, 2, V, |c, a| currency(c, a, "₩")),
     f("USDOLLAR", 1, 2, V, |c, a| currency(c, a, "$")),
     f("WON", 1, 2, V, |c, a| currency(c, a, "₩")),
-    // CHAR 는 949 의 한 바이트: 128 은 U+0080, 129–255 (두 바이트 글자의 첫 바이트 등)는 U+FFFD
-    // (대조 실험 text)
+    // CHAR 는 949 의 한 바이트: 1–159 는 그 코드의 글자, 160–255 (두 바이트 글자의 첫 바이트 등)는 U+FFFD
+    // (대조 실험 text·misc4)
     f("CHAR", 1, 1, V, |c, a| {
         let n = try_v!(num_arg(c, a, 0)).trunc();
         if !(1.0..=255.0).contains(&n) {
             return Value::Error(ErrorKind::Value);
         }
         let ch = match n as u32 {
-            k @ 1..=128 => char::from_u32(k).unwrap_or('\u{FFFD}'),
+            k @ 1..=159 => char::from_u32(k).unwrap_or('\u{FFFD}'),
             _ => '\u{FFFD}',
         };
         Value::from(ch.to_string())
@@ -236,14 +236,20 @@ fn mid(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
     Value::from(chars[s..e].iter().collect::<String>())
 }
 
-/// PROPER: U+0080–U+00FF 의 글자(À, ñ …)는 글자로 보지 않아 그대로 둔다 (PROPER("ÀÉÎ ñ ß") 그대로,
-/// 전각 글자는 바뀐다: "ＡＢＣ" → "Ａｂｃ", 대조 실험 text)
+/// PROPER: U+0080–U+00FF 의 글자(À, ñ, é …)는 글자로 세지만 대·소문자는 그대로 둔다
+/// (PROPER("ÀÉÎ ñ ß") 그대로, PROPER("élan vital") = "élan Vital"), 전각·그리스·키릴 글자는 바뀐다
+/// (대조 실험 text·misc4)
 fn proper(ctx: &mut Ctx, a: &[Value]) -> Value {
     let t = try_v!(text_arg(ctx, a, 0));
     let mut out = String::with_capacity(t.len());
     let mut prev_letter = false;
     for ch in t.chars() {
-        if ch.is_alphabetic() && !(0x80..0x100).contains(&(ch as u32)) {
+        if ch.is_alphabetic() && (0x80..0x100).contains(&(ch as u32)) {
+            out.push(ch);
+            prev_letter = true;
+            continue;
+        }
+        if ch.is_alphabetic() {
             if prev_letter {
                 out.extend(ch.to_lowercase());
             } else {
@@ -510,8 +516,41 @@ fn text(ctx: &mut Ctx, a: &[Value]) -> Value {
         CellValue::Text(_) if pads.len() > 3 => 3,
         _ => 0,
     };
-    let out = crate::numfmt::format(&v, &code, ctx.date1904());
-    Value::from(format!("{}{}", " ".repeat(pads.get(sec).copied().unwrap_or(0)), out.text))
+    let out = crate::numfmt::format_padded(&v, &code, ctx.date1904());
+    let marks = out.text.chars().filter(|&c| c == crate::numfmt::PAD_CHAR).count();
+    let body: String = out.text.chars().filter(|&c| c != crate::numfmt::PAD_CHAR).collect();
+    Value::from(format!("{}{}", " ".repeat(pads.get(sec).copied().unwrap_or(0) + marks), body))
+}
+
+/// 따옴표 밖의 "General"(대소문자 무시)을 날짜 기호로: G·g 는 지우고, e·E 는 연도 e, 다른 글자는 따옴표 글자
+fn replace_general(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    let chars: Vec<char> = code.chars().collect();
+    let mut i = 0;
+    let mut quoted = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            quoted = !quoted;
+        }
+        let word: String = chars[i..(i + 7).min(chars.len())].iter().collect();
+        if !quoted && word.eq_ignore_ascii_case("general") {
+            for &w in &chars[i + 1..i + 7] {
+                if w == 'e' || w == 'E' {
+                    out.push('e');
+                } else {
+                    out.push('"');
+                    out.push(w);
+                    out.push('"');
+                }
+            }
+            i += 7;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 /// TEXT 의 서식 코드를 표시 엔진의 코드로 (위 규칙). (코드, 구역마다 앞에 붙일 공백 수) 또는 None (#VALUE!)
@@ -522,7 +561,10 @@ fn text_code(code: &str) -> Option<(String, Vec<usize>)> {
     let mut pads = vec![0usize];
     let mut at_seen = false;
     let (mut digits, mut dates) = (false, false);
-    let chars: Vec<char> = code.replace("오전/오후", "AM/PM").chars().collect();
+    // "General" 은 TEXT 에서 일반 서식이 아니다: G 는 연호(빈 글), e 는 연도, 나머지 글자는 그대로
+    // (TEXT(5,"General") = "1900n1900ral", 대조 실험 misc3·misc4)
+    let code = replace_general(&code.replace("오전/오후", "AM/PM"));
+    let chars: Vec<char> = code.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -567,7 +609,12 @@ fn text_code(code: &str) -> Option<(String, Vec<usize>)> {
                 digits = true;
                 out.push(c);
             }
-            'y' | 'Y' | 'd' | 'D' | 'h' | 'H' | 's' | 'S' => {
+            // 지수 E+ E- 가 아닌 e 는 연도, G 는 연호
+            'e' | 'E' if !matches!(chars.get(i + 1), Some('+' | '-')) => {
+                dates = true;
+                out.push(c);
+            }
+            'y' | 'Y' | 'd' | 'D' | 'h' | 'H' | 's' | 'S' | 'g' | 'G' => {
                 dates = true;
                 out.push(c);
             }
@@ -696,13 +743,14 @@ pub fn number_string(n: u64, kind: u8) -> String {
         1 => (
             &["", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"],
             &["", "십", "백", "천"],
-            &["", "만", "억", "조", "경"],
+            // 한셀은 경 이상이 없다 (1E+16 → "일조", 대조 실험 misc4)
+            &["", "만", "억", "조"],
         ),
         // 한셀은 參·拾 을 호환 한자(U+F96B, U+F973)로 쓴다 (KS X 1001 의 그 칸, 대조 실험 text)
         2 => (
-            &["", "壹", "貳", "\u{F96B}", "四", "伍", "六", "七", "八", "九"],
+            &["", "壹", "貳", "\u{F96B}", "四", "伍", "\u{F9D1}", "七", "八", "九"],
             &["", "\u{F973}", "百", "阡"],
-            &["", "萬", "億", "兆", "京"],
+            &["", "萬", "億", "兆"],
         ),
         _ => (
             &["", "一", "二", "三", "四", "五", "六", "七", "八", "九"],
@@ -710,9 +758,11 @@ pub fn number_string(n: u64, kind: u8) -> String {
             &["", "萬", "億", "兆", "京"],
         ),
     };
+    // 한셀은 零·六 도 호환 한자 (U+F9B2, U+F9D1, 대조 실험 misc4)
     if n == 0 {
         return match kind {
             1 => "영".into(),
+            2 => "\u{F9B2}".into(),
             _ => "零".into(),
         };
     }

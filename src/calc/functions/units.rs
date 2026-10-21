@@ -198,8 +198,9 @@ pub fn convert(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::NA);
     }
     if c1 == usize::MAX {
+        // 접두사를 먼저 적용한다 (CONVERT(3,"C","mK") = 3273.15, 대조 실험 misc4)
         let (k, b) = TEMP_AB[i][j];
-        return num(((x * p1) * k + b) / p2);
+        return num((x * p1 / p2) * k + b);
     }
     num(x * CATS[c1].m[i][j] * (p1 / p2))
 }

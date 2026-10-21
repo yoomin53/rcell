@@ -52,8 +52,8 @@ fn logicals(ctx: &mut Ctx, args: &[Value], xor: bool) -> Result<Vec<bool>, Error
                             Value::Number(n) => out.push(*n != 0.0),
                             Value::Error(e) => err = Some(*e),
                             Value::Text(t) => {
-                                if let Some(n) = value::parse_number(t, date1904) {
-                                    out.push(n != 0.0);
+                                if let Some(b) = text_logical(t, date1904) {
+                                    out.push(b);
                                 }
                             }
                             _ => {}
@@ -70,12 +70,21 @@ fn logicals(ctx: &mut Ctx, args: &[Value], xor: bool) -> Result<Vec<bool>, Error
                         Value::Bool(b) => out.push(*b),
                         Value::Number(n) => out.push(*n != 0.0),
                         Value::Error(e) => return Err(*e),
+                        Value::Text(t) => {
+                            if let Some(b) = text_logical(t, date1904) {
+                                out.push(b);
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
             Value::Empty => out.push(false),
             Value::Text(_) if xor => return Err(ErrorKind::Value),
+            Value::Text(t) => match text_logical(t, date1904) {
+                Some(b) => out.push(b),
+                None => return Err(ErrorKind::Value),
+            },
             other => out.push(ctx.boolean(other)?),
         }
     }
@@ -83,6 +92,11 @@ fn logicals(ctx: &mut Ctx, args: &[Value], xor: bool) -> Result<Vec<bool>, Error
         return Err(ErrorKind::Value);
     }
     Ok(out)
+}
+
+/// 글의 논리 값: "TRUE"·"FALSE", 숫자로 읽히면 0 이 아닌가 (AND("5") = TRUE, 대조 실험 misc4)
+fn text_logical(t: &str, date1904: bool) -> Option<bool> {
+    value::parse_bool_text(t).or_else(|| value::parse_number(t, date1904).map(|n| n != 0.0))
 }
 
 fn and(ctx: &mut Ctx, a: &[Value]) -> Value {

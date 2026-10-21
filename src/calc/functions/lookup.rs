@@ -624,8 +624,8 @@ fn row_col(ctx: &mut Ctx, a: &[Value], row: bool) -> Value {
 
 fn dims(_ctx: &mut Ctx, a: &[Value], rows: bool) -> Value {
     match &a[0] {
-        // 여러 영역·빈 교차는 #VALUE! (ROWS((A1:A3,B1:B5)), ROWS(A1:A3 B1:B3), 대조 실험 lookup·ops)
-        Value::Error(ErrorKind::Null) => Value::Error(ErrorKind::Value),
+        // 여러 영역·오류(빈 교차 포함)는 #VALUE! (ROWS((A1:A3,B1:B5)), ROWS(#N/A), 대조 실험 lookup·misc4)
+        Value::Error(_) => Value::Error(ErrorKind::Value),
         Value::Ref(r) => {
             if r.len() != 1 {
                 return Value::Error(ErrorKind::Value);
@@ -633,7 +633,6 @@ fn dims(_ctx: &mut Ctx, a: &[Value], rows: bool) -> Value {
             Value::Number(if rows { r[0].rows() } else { r[0].cols() } as f64)
         }
         Value::Array(arr) => Value::Number(if rows { arr.rows } else { arr.cols } as f64),
-        Value::Error(e) => Value::Error(*e),
         _ => Value::Number(1.0),
     }
 }

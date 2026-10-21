@@ -409,7 +409,12 @@ fn weekend_mask(ctx: &mut Ctx, v: Option<&Value>, _bad: ErrorKind) -> Result<[bo
             m[0] = true;
             m[6] = true;
         }
-        Some(Value::Text(t)) if t.chars().count() == 1 && t.chars().all(|c| c.is_ascii_digit()) => {
+        // 0·1 로만 된 두 글자 이상은 요일 표 (일곱 글자가 아니면 #VALUE!), 그 밖의 숫자 글은 번호
+        // ("1"·"2"·"12" 는 번호, "011" 은 #VALUE!, 대조 실험 misc3·misc4)
+        Some(Value::Text(t))
+            if !(t.chars().count() > 1 && t.chars().all(|c| c == '0' || c == '1'))
+                && t.parse::<f64>().is_ok() =>
+        {
             let n = t.parse::<f64>().unwrap_or(0.0);
             return weekend_mask(ctx, Some(&Value::Number(n)), _bad);
         }

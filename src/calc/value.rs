@@ -368,7 +368,7 @@ impl fmt::Display for Value {
 // ---------------------------------------------------------------------------
 
 /// 숫자를 글로 (연결 연산자·글 함수·복소수 글). 한셀의 규칙 (함수 대조 실험 conv·misc3 묶음):
-/// - 유효숫자 15자리. 1E+15 이상은 17자리로 반올림한 뒤 15자리 뒤를 버린다
+/// - 유효숫자 15자리. 1E+15 이상을 그대로 쓸 때는 16자리로 반올림한 뒤 15자리 뒤를 버린다
 ///   (2^60 = 1152921504606846976 → "1152921504606840000", 12345678901234499584 → "12345678901234500000"),
 ///   그보다 작으면 15자리로 반올림 (2/3 → "0.666666666666667"). 복소수 글은 늘 15자리 반올림
 ///   ([`number_to_text_rounded`]).
@@ -392,25 +392,24 @@ fn format_general(v: f64, round_large: bool) -> String {
     }
     let a = v.abs();
     let neg = if v < 0.0 { "-" } else { "" };
-    let (digits, exp) = if a >= 1e15 && !round_large {
-        // 17자리 반올림의 앞 15자리
-        let s = format!("{a:.16e}");
+    // 15자리 반올림 (작은 수·지수 꼴), 그리고 큰 수를 그대로 쓸 때의 16자리 반올림 뒤 15자리 버림
+    let split = |s: String, keep: usize| -> (String, i32) {
         let (mant, e) = s.split_once('e').unwrap_or((&s, "0"));
         let d = mant.replace('.', "");
-        (d[..15].trim_end_matches('0').to_string(), e.parse().unwrap_or(0))
-    } else {
-        let s = format!("{a:.14e}");
-        let (mant, e) = s.split_once('e').unwrap_or((&s, "0"));
-        let d = mant.replace('.', "");
-        (d.trim_end_matches('0').to_string(), e.parse().unwrap_or(0))
+        let d = d[..keep.min(d.len())].trim_end_matches('0').to_string();
+        (if d.is_empty() { "0".to_string() } else { d }, e.parse().unwrap_or(0))
     };
-    let digits = if digits.is_empty() { "0".to_string() } else { digits };
+    let (r_digits, r_exp) = split(format!("{a:.14e}"), 15);
+    let (digits, exp) = if a >= 1e15 && !round_large { split(format!("{a:.15e}"), 15) } else { (r_digits.clone(), r_exp) };
     let k = digits.len() as i32;
     let positional = if exp >= 0 {
         exp.max(a.mlog10().floor() as i32) < 20
     } else {
         k - 1 - exp <= 18
     };
+    // 지수 꼴은 15자리 반올림 (2^69 → 5.90295810358706E+20)
+    let (digits, exp) = if positional { (digits, exp) } else { (r_digits, r_exp) };
+    let k = digits.len() as i32;
     if positional {
         if exp >= 0 {
             let int_len = exp + 1;

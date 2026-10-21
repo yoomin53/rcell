@@ -145,12 +145,22 @@ impl Criterion {
             }
             CritVal::Num(n) => match cell {
                 Value::Number(x) => cmp_ok(value::cmp_num(*x, *n)),
-                Value::Text(t) if !self.database => {
-                    // 한셀은 숫자로 읽히는 글 칸을 숫자로 비교한다 (COUNTIF(…,5) 가 글 "5" 를 센다,
-                    // ">0" 도 마찬가지, 대조 실험 stat)
+                Value::Text(t) if !self.database && !matches!(self.op, CritOp::Eq | CritOp::Ne) => {
+                    // 한셀은 크기 비교에서 숫자로 읽히는 글 칸을 숫자로 본다 (">0" 이 글 "5" 를 센다,
+                    // 대조 실험 stat·misc4)
                     match value::parse_number(t, self.date1904) {
                         Some(x) => cmp_ok(value::cmp_num(x, *n)),
-                        None => self.op == CritOp::Ne,
+                        None => false,
+                    }
+                }
+                Value::Text(t) if !self.database => {
+                    // = · <> 는 글끼리: 조건의 숫자 글과 칸의 글이 같은가 (COUNTIF(…,5) 는 글 "5" 를 세고
+                    // 글 "1E3" 은 1000 으로 세지 않는다, 대조 실험 misc4)
+                    let want = self.num_text.clone().unwrap_or_else(|| value::number_to_text(*n));
+                    let same = value::fold(t) == value::fold(&want);
+                    match self.op {
+                        CritOp::Eq => same,
+                        _ => !same,
                     }
                 }
                 Value::Text(t) => {

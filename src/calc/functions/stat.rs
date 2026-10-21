@@ -687,6 +687,16 @@ pub fn quartile(v: &[f64], q: f64, inclusive: bool) -> Value {
         if !(1.0..=3.0).contains(&q) {
             return Value::Error(ErrorKind::Num);
         }
+        // 한셀: 1·3 사분위는 보간하지 않고 순위 q(n+1)/4 의 정수 부분 칸 (대조 실험 stat·misc4)
+        if q != 2.0 {
+            let mut s = v.to_vec();
+            s.sort_by(f64::total_cmp);
+            let r = (q * (s.len() as f64 + 1.0) / 4.0).floor();
+            if r < 1.0 || r > s.len() as f64 {
+                return Value::Error(ErrorKind::Num);
+            }
+            return num(s[r as usize - 1]);
+        }
         percentile_exc(v, q / 4.0)
     }
 }
@@ -872,7 +882,7 @@ fn averageif(ctx: &mut Ctx, a: &[Value]) -> Value {
 
 /// AVERAGEIFS·MAXIFS·MINIFS (대상 범위, (조건 범위, 조건)…)
 fn target_ifs(ctx: &mut Ctx, a: &[Value], kind: u8) -> Value {
-    if a.len() % 2 != 1 || a.iter().step_by(2).any(|v| !matches!(v, Value::Ref(_))) {
+    if a.len() % 2 != 1 || std::iter::once(&a[0]).chain(a[1..].iter().step_by(2)).any(|v| !matches!(v, Value::Ref(_))) {
         return Value::Error(ErrorKind::Value);
     }
     let pairs: Vec<(&Value, &Value)> = a[1..].chunks(2).map(|p| (&p[0], &p[1])).collect();
@@ -1621,8 +1631,23 @@ fn poisson(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x < 0.0 || m < 0.0 {
         return Value::Error(ErrorKind::Num);
     }
-    if m == 0.0 {
-        return Value::Number(if cum || x == 0.0 { 1.0 } else { 0.0 });
+    // 평균이 e^-20 보다 작으면 거듭제곱 쪽만 e^-20 으로 (POISSON(1,0,FALSE) = e^-20, 누적은 1 을
+    // 조금 넘는다, 대조 실험 misc4)
+    let floor_l = (-20.0f64).mexp();
+    if m < floor_l {
+        let mut s = 0.0;
+        let mut term = (-m).mexp();
+        let mut k = 0.0;
+        let pmf_at = |k: f64| (k * floor_l.mln() - m - sp::ln_gamma(k + 1.0)).mexp();
+        if !cum {
+            return num(if x == 0.0 { term } else { pmf_at(x) });
+        }
+        while k <= x {
+            s += if k == 0.0 { term } else { pmf_at(k) };
+            k += 1.0;
+        }
+        term = s;
+        return num(term);
     }
     if cum {
         num(sp::gamma_q(x + 1.0, m))

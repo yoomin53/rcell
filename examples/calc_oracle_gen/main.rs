@@ -178,6 +178,8 @@ fn data_sheet() -> Sheet {
     // 복소수 글 AG1:AG4, 진법 글 AH1:AH3
     column(&mut c, "AG", 1, &texts(&["3+4i", "1-i", "-2.5j", "2"]));
     column(&mut c, "AH", 1, &[S("101"), S("FF"), N(777.0)]);
+    // 논리·숫자처럼 보이는 글 AI1:AI5
+    column(&mut c, "AI", 1, &texts(&["TRUE", "FALSE", "0", " 5", "1E3"]));
     // 한 행 자료 A12:J12 (HLOOKUP·가로 찾기)
     for (k, v) in [10.0, 20.0, 30.0, 40.0, 50.0].iter().enumerate() {
         put(&mut c, &format!("{}12", ["A", "B", "C", "D", "E"][k]), N(*v));

@@ -15,6 +15,7 @@
 //! - Q1:T11 목록(Name Dept Age Score), 조건 표 V1:W3 · Y1:Y2 · V5:W6
 //! - AA1:AA6 현금 흐름, AB1:AB6 그 날짜 · AC1:AD4 값·확률 · AE1:AE3 구간 · AF1:AF2 휴일
 //! - AG1:AG4 복소수 글 · AH1:AH3 진법 글 · A12:E12 가로 숫자, A13:E13 가로 글
+//! - AI1:AI5 글 "TRUE" "FALSE" "0" " 5" "1E3"
 //!
 //! `Hid` 시트: A1:A10 = 1…10, C1:C10, 3·6행 숨김, B5·B10 은 부분합 수식. `S1`–`S3`: A1:A3 숫자.
 //! 이름: Nums, Rate, Two, Greeting, Arr, Local(통합 문서 + T 시트), DataTop, Both.
@@ -1719,6 +1720,226 @@ fn misc3() -> Vec<Case> {
     v
 }
 
+// ---------------------------------------------------------------------------
+// 네 번째 묶음: 남은 규칙 확인과 수치 함수 표본
+// ---------------------------------------------------------------------------
+
+/// 규칙 확인 (숫자→글 경계, CONVERT 접두사, 논리 글 칸, 비트 소수, QUARTILE.EXC, 949 바이트, XLOOKUP …)
+fn misc4() -> Vec<Case> {
+    let mut v = Vec::new();
+    for x in [
+        "2^64", "2^63", "2^62", "2/3*1E+16", "2/3*1E+14", "123456789012345+0.67", "9.99999999999999E-5",
+        "9.99999999999999E-4", "9.9999999999999E+19", "9.99999999999998E+19", "9.999999999E+19", "2^69",
+        "2^67", "1.5*2^64", "1/3*1E+15", "1/3*1E+19", "0.1+0.2", "999999999999999.9", "-2^60",
+    ] {
+        v.push(c(format!("({x})&\"\"")));
+    }
+    // CONVERT: 접두사를 붙일 수 있는 단위, 접두사 글자, 계산 순서
+    for u in [
+        "g", "sg", "lbm", "u", "ozm", "m", "mi", "Nmi", "in", "ft", "yd", "ang", "Pica", "yr", "day", "hr", "mn",
+        "sec", "Pa", "atm", "mmHg", "N", "dyn", "lbf", "J", "e", "c", "cal", "eV", "HPh", "Wh", "flb", "BTU",
+        "HP", "W", "T", "ga", "C", "F", "K", "tsp", "tbs", "oz", "cup", "pt", "uk_pt", "qt", "gal", "l",
+    ] {
+        v.push(c(format!("CONVERT(1,\"k{u}\",\"{u}\")")));
+        v.push(c(format!("CONVERT(1,\"{u}\",\"m{u}\")")));
+    }
+    for p in ["Y", "Z", "E", "P", "T", "G", "M", "k", "h", "e", "da", "d", "c", "m", "u", "n", "p", "f", "a", "z", "y", "µ"] {
+        v.push(c(format!("CONVERT(1,\"{p}m\",\"m\")")));
+    }
+    for f in [
+        "CONVERT(3,\"km\",\"cm\")", "CONVERT(7,\"mg\",\"kg\")", "CONVERT(1/3,\"km\",\"um\")",
+        "CONVERT(0.1,\"kl\",\"ml\")", "CONVERT(3,\"mi\",\"km\")", "CONVERT(1/3,\"kg\",\"mg\")",
+        "CONVERT(0.7,\"cm\",\"in\")", "CONVERT(1/7,\"Gm\",\"mi\")", "CONVERT(3,\"mC\",\"F\")",
+        "CONVERT(3,\"C\",\"mK\")", "CONVERT(3,\"kK\",\"mK\")", "CONVERT(1.5,\"F\",\"kK\")",
+    ] {
+        v.push(c(f));
+    }
+    // 논리 함수와 글 칸
+    for f in [
+        "AND(Data!AI1)", "AND(Data!AI2)", "AND(Data!AI3)", "AND(Data!AI4)", "AND(Data!AI5)", "OR(Data!AI1:AI2)",
+        "XOR(Data!AI1)", "XOR(Data!AI1:AI5)", "AND(Data!AI1:AI5)", "OR(Data!AI2:AI3)", "AND({\"5\"})",
+        "AND({TRUE,\"TRUE\"})", "OR(\"FALSE\")", "AND(\"5\")", "_xlfn.XOR(Data!AI3,TRUE)",
+    ] {
+        v.push(c(f.replace("XOR(", "_xlfn.XOR(").replace("_xlfn._xlfn.", "_xlfn.")));
+    }
+    // 비트 함수의 소수
+    for f in [
+        "_xlfn.BITAND(1.6,1)", "_xlfn.BITAND(2.4,7)", "_xlfn.BITAND(2.5,7)", "_xlfn.BITAND(2.6,7)",
+        "_xlfn.BITAND(0.9,1)", "_xlfn.BITAND(5.5,7)", "_xlfn.BITAND(5.4,7)", "_xlfn.BITAND(2^48,2^48)",
+        "_xlfn.BITOR(2^47,2^47)", "_xlfn.BITAND(0.5,1)", "_xlfn.BITAND(0.6,1)", "_xlfn.BITAND(7,2.51)",
+        "_xlfn.BITXOR(3.5,1)", "_xlfn.BITRSHIFT(2^48,1)", "_xlfn.BITLSHIFT(2^47,1)", "_xlfn.BITLSHIFT(5.9,1)",
+    ] {
+        v.push(c(f));
+    }
+    // QUARTILE.EXC (n 마다)
+    for n in 3..=12 {
+        let list: Vec<String> = (1..=n).map(|i| (i * i % 17).to_string()).collect();
+        for q in 1..=3 {
+            v.push(c(format!("_xlfn.QUARTILE.EXC({{{}}},{q})", list.join(","))));
+            v.push(c(format!("_xlfn.PERCENTILE.EXC({{{}}},{})", list.join(","), q as f64 / 4.0)));
+        }
+    }
+    // 949 바이트 수와 CODE
+    for ch in [
+        "ß", "ñ", "Ä", "±", "×", "°", "§", "¶", "α", "Д", "①", "ㄱ", "가", "漢", "Ａ", "ˇ", "‰", "€", "™", "㈜", "♥",
+        "★", "←", "∀", "“", "‘", "…", "·", "¨", "¡", "¿", "¤", "é", "Æ", "Ð", "æ", "ø", "ł", "ŀ", "Ǒ", "ア", "あ",
+        "丂", "갂", "힣", "\u{E000}",
+    ] {
+        v.push(c(format!("LENB(\"{ch}\")")));
+        v.push(c(format!("CODE(\"{ch}\")")));
+    }
+    for f in [
+        "LEFTB(\"ß가\",1)", "LEFTB(\"ß가\",2)", "MIDB(\"aß가\",2,2)", "RIGHTB(\"가ß\",2)", "LEFTB(\"À가\",2)",
+        "SEARCHB(\"가\",\"ß가\")", "FINDB(\"가\",\"À가\")", "REPLACEB(\"가나\",1,1,\"x\")",
+        "CHAR(129)", "CHAR(254)", "CHAR(161)", "CHAR(127)", "UPPER(\"ǆ\")", "LOWER(\"İ\")", "PROPER(\"élan vital\")",
+        "PROPER(\"αβγ δεζ\")", "PROPER(\"дом мир\")",
+    ] {
+        v.push(c(f));
+    }
+    // NUMBERSTRING 의 한자·숫자 읽기
+    for f in [
+        "NUMBERSTRING(567890,2)", "NUMBERSTRING(123456789012,2)", "NUMBERSTRING(105,3)", "NUMBERSTRING(0,3)",
+        "NUMBERSTRING(0,2)", "NUMBERSTRING(1000000000005,1)", "NUMBERSTRING(98765432109876,2)",
+        "NUMBERSTRING(10000000000000000,1)", "NUMBERSTRING(1.5,3)", "NUMBERSTRING(2.5,1)",
+    ] {
+        v.push(c(f));
+    }
+    // XLOOKUP 기본 찾기 (넷째 인수 없이)
+    for x in ["0", "1", "2", "2.5", "3", "4", "5", "6", "9"] {
+        v.push(c(format!("_xlfn.XLOOKUP({x},{{1,2,3,4,5}},{{\"a\",\"b\",\"c\",\"d\",\"e\"}})")));
+        v.push(c(format!("_xlfn.XLOOKUP({x},{{3,1,4,1,5}},{{\"a\",\"b\",\"c\",\"d\",\"e\"}})")));
+        v.push(c(format!("_xlfn.XLOOKUP({x},{{5,4,3,2,1}},{{\"a\",\"b\",\"c\",\"d\",\"e\"}})")));
+        v.push(c(format!("_xlfn.XLOOKUP({x},Data!A1:A10,Data!G1:G10)")));
+        v.push(c(format!("_xlfn.XLOOKUP({x},Data!A1:A10,Data!G1:G10,\"nf\")")));
+    }
+    for f in [
+        "_xlfn.XLOOKUP(\"b\",{\"a\",\"b\",\"c\"},{1,2,3})", "_xlfn.XLOOKUP(\"bb\",{\"a\",\"b\",\"c\"},{1,2,3})",
+        "_xlfn.XLOOKUP(\"Lee\",Data!Q2:Q11,Data!S2:S11)", "_xlfn.XLOOKUP(\"Zed\",Data!Q2:Q11,Data!S2:S11)",
+        "_xlfn.XLOOKUP(\"Jung\",Data!Q2:Q11,Data!S2:S11)", "_xlfn.XLOOKUP(70,Data!F1:F10,Data!G1:G10)",
+        "_xlfn.XLOOKUP(75,Data!F1:F10,Data!G1:G10)", "_xlfn.XLOOKUP(5,Data!F1:F10,Data!G1:G10)",
+    ] {
+        v.push(c(f));
+    }
+    // TEXT 의 ? 자리와 General
+    for f in [
+        "TEXT(5,\"0.0?\")", "TEXT(1.5,\"0.0?\")", "TEXT(1.25,\"0.0?\")", "TEXT(5,\"# ??/??\")", "TEXT(0.5,\"# ?/?\")",
+        "TEXT(1.25,\"?.??\")", "TEXT(5,\"??0\")", "TEXT(5.5,\"# ?/2\")", "TEXT(5,\"general\")", "TEXT(5,\"GENERAL\")",
+        "TEXT(5,\"0 General\")", "TEXT(45000,\"G\")", "TEXT(45000,\"gg\")", "TEXT(45000,\"ggg\")", "TEXT(45000,\"eeee\")",
+        "TEXT(45000,\"n\")", "TEXT(45000,\"r\")", "TEXT(45000,\"l\")", "TEXT(5,\"0_)_)\")", "TEXT(-5,\"0_);0_)\")",
+        "TEXT(0,\"0;0;0_)\")", "TEXT(5,\"*-0\")", "TEXT(5,\"0*-\")",
+    ] {
+        v.push(c(f));
+    }
+    // 그 밖
+    for f in [
+        "MINVERSE({1,2;2,4})", "INDEX(MINVERSE({1,2;2,4}),1,2)", "INDEX(MINVERSE({1,2;2,4}),2,1)",
+        "INDEX(MINVERSE({1,2;2,4}),2,2)", "INDEX(MINVERSE({2,4;1,2}),1,1)", "INDEX(MINVERSE({0,1;1,0}),1,2)",
+        "INDEX(MINVERSE({1,2,3;4,5,6;7,8,9}),1,1)", "INDEX(MINVERSE({1,2,3;4,5,6;7,8,9}),2,2)",
+        "INDEX(MINVERSE({1,2,3;4,5,6;7,8,9}),3,3)", "MDETERM({1,2;2,4})", "MDETERM({1,2,3;4,5,6;7,8,9})",
+        "POISSON(1,0,FALSE)", "POISSON(2,0,FALSE)", "POISSON(4,0,FALSE)", "POISSON(3,0,TRUE)", "POISSON(3,1E-300,FALSE)",
+        "COUNTIF(Data!H1:H10,\"=#N/A\")", "COUNTIF(Data!H1:H10,\"#DIV/0!\")", "COUNTIF(Data!C1:C10,\"<>5\")",
+        "COUNTIF(Data!AI1:AI5,TRUE)", "COUNTIF(Data!AI1:AI5,0)", "COUNTIF(Data!AI1:AI5,\">2\")", "COUNTIF(Data!AI1:AI5,1000)",
+        "SUMIF(Data!AI1:AI5,\">2\",Data!A1:A5)", "_xlfn.NETWORKDAYS.INTL(45292,45310,9)", "_xlfn.NETWORKDAYS.INTL(45292,45310,10)",
+        "_xlfn.NETWORKDAYS.INTL(45292,45310,7.5)", "_xlfn.NETWORKDAYS.INTL(45292,45310,\"2\")", "_xlfn.NETWORKDAYS.INTL(45292,45310,\"12\")",
+        "_xlfn.WORKDAY.INTL(45292,5,\"7\")", "SUBTOTAL(9)", "SUBTOTAL(9,Data!A1:A10,Data!B1:B10)",
+        "_xlfn.TEXTJOIN(\",\",TRUE,{1,\"\",3})", "_xlfn.TEXTJOIN(\",\",FALSE,{1,\"\",3})", "_xlfn.TEXTJOIN({\"-\",\"+\"},TRUE,1,2,3,4)",
+        "VAR(1,2,3,4,5,6,7,8,9,10)", "N(Data!AI1)", "TYPE(Data!AI1:AI2)", "ROWS(#N/A)", "ROWS(1/0)",
+    ] {
+        v.push(c(f));
+    }
+    v
+}
+
+/// 정규 분포 함수 표본 (근사식 찾기)
+fn norm4() -> Vec<Case> {
+    let mut v = Vec::new();
+    for i in -400..=400 {
+        let x = i as f64 / 10.0;
+        v.push(c(format!("_xlfn.NORM.S.DIST({x},TRUE)")));
+    }
+    for i in -40..=40 {
+        let x = i as f64 / 4.0;
+        v.push(c(format!("_xlfn.NORM.S.DIST({x},FALSE)")));
+        v.push(c(format!("NORMDIST({x},0,1,TRUE)")));
+        v.push(c(format!("NORMSDIST({x})")));
+        v.push(c(format!("NORMDIST({x},1,2,TRUE)")));
+    }
+    for i in -100..=100 {
+        let x = i as f64 / 20.0;
+        v.push(c(format!("_xlfn.GAUSS({x})")));
+    }
+    for p in [
+        "1E-10", "1E-6", "0.0001", "0.001", "0.01", "0.025", "0.05", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6",
+        "0.7", "0.8", "0.9", "0.95", "0.975", "0.99", "0.999", "0.9999", "0.999999",
+    ] {
+        v.push(c(format!("_xlfn.NORM.S.INV({p})")));
+        v.push(c(format!("NORMSINV({p})")));
+        v.push(c(format!("NORMINV({p},1,2)")));
+    }
+    for i in 1..=99 {
+        v.push(c(format!("CONFIDENCE({},1,1)", i as f64 / 100.0)));
+    }
+    v
+}
+
+/// t·카이제곱·F 분포 표본
+fn dist4() -> Vec<Case> {
+    let mut v = Vec::new();
+    let dfs = [1, 2, 3, 5, 10, 30, 100];
+    for df in dfs {
+        for i in -20..=20 {
+            let x = i as f64 / 2.0;
+            v.push(c(format!("_xlfn.T.DIST({x},{df},TRUE)")));
+        }
+        for i in 0..=40 {
+            let x = i as f64 / 2.0;
+            v.push(c(format!("_xlfn.T.DIST.2T({x},{df})")));
+            v.push(c(format!("TDIST({x},{df},1)")));
+        }
+        for p in ["0.0001", "0.001", "0.01", "0.05", "0.1", "0.25", "0.5", "0.75", "0.9", "0.95", "0.99", "0.999"] {
+            v.push(c(format!("_xlfn.T.INV({p},{df})")));
+            v.push(c(format!("TINV({p},{df})")));
+        }
+    }
+    for df in [1, 2, 3, 5, 10, 50] {
+        for i in 1..=40 {
+            let x = i as f64 / 2.0;
+            v.push(c(format!("_xlfn.CHISQ.DIST({x},{df},TRUE)")));
+            v.push(c(format!("CHIDIST({x},{df})")));
+        }
+        for p in ["0.001", "0.01", "0.05", "0.1", "0.5", "0.9", "0.95", "0.99", "0.999"] {
+            v.push(c(format!("_xlfn.CHISQ.INV({p},{df})")));
+            v.push(c(format!("CHIINV({p},{df})")));
+        }
+    }
+    for (d1, d2) in [(1, 1), (2, 3), (5, 10), (10, 10), (6, 4)] {
+        for i in 1..=20 {
+            let x = i as f64 / 4.0;
+            v.push(c(format!("_xlfn.F.DIST({x},{d1},{d2},TRUE)")));
+            v.push(c(format!("FDIST({x},{d1},{d2})")));
+        }
+        for p in ["0.01", "0.1", "0.5", "0.9", "0.99"] {
+            v.push(c(format!("_xlfn.F.INV({p},{d1},{d2})")));
+            v.push(c(format!("FINV({p},{d1},{d2})")));
+        }
+    }
+    v
+}
+
+/// 베셀 함수 표본
+fn bessel4() -> Vec<Case> {
+    let mut v = Vec::new();
+    let xs = ["0", "0.1", "0.5", "1", "1.5", "2", "2.5", "3", "4", "5", "7.5", "10", "15", "20", "25", "30", "50", "100"];
+    for f in ["BESSELJ", "BESSELY", "BESSELI", "BESSELK"] {
+        for n in 0..=5 {
+            for x in xs {
+                v.push(c(format!("{f}({x},{n})")));
+            }
+        }
+    }
+    v
+}
+
 /// (문서 이름, 경우, 1904 날짜 체계)
 pub fn catalog() -> Vec<(&'static str, Vec<Case>, bool)> {
     vec![
@@ -1745,5 +1966,9 @@ pub fn catalog() -> Vec<(&'static str, Vec<Case>, bool)> {
         ("units", units(), false),
         ("units2", units2(), false),
         ("misc3", misc3(), false),
+        ("misc4", misc4(), false),
+        ("norm4", norm4(), false),
+        ("dist4", dist4(), false),
+        ("bessel4", bessel4(), false),
     ]
 }

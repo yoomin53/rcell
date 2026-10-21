@@ -150,7 +150,7 @@ pub const FNS: &[FnSpec] = &[
     f("SUMX2PY2", 2, 2, A, |c, a| sum_xy(c, a, |x, y| x * x + y * y)),
     f("SUMXMY2", 2, 2, A, |c, a| sum_xy(c, a, |x, y| (x - y) * (x - y))),
     f("SERIESSUM", 4, 4, VVA, seriessum),
-    f("SUBTOTAL", 2, MANY, VR, |c, a| subtotal(c, a, false)),
+    f("SUBTOTAL", 1, MANY, VR, |c, a| subtotal(c, a, false)),
     f("SUBTOTALA", 1, MANY, VR, |c, a| subtotal(c, a, true)),
     f("AGGREGATE", 3, MANY, &[Arg::V, Arg::V, Arg::R], aggregate),
     f("MMULT", 2, 2, A, mmult),

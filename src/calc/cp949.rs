@@ -113,9 +113,7 @@ const ROWS: [(u8, &str); 89] = [
 /// 949 의 두 바이트 코드 (한 바이트 글자·없는 글자는 None)
 pub fn encode(c: char) -> Option<u16> {
     let u = c as u32;
-    // 한셀은 U+0080–U+00FF 를 949 에 있는 글자(ß, Æ …)까지 1바이트로 센다
-    // (LENB("ÀÉÎ ñ ß") = 7, 대조 실험 text)
-    if u < 0x100 {
+    if u < 0x80 {
         return None;
     }
     if let Some(&k) = table().0.get(&c) {
@@ -154,17 +152,19 @@ pub fn encode(c: char) -> Option<u16> {
     None
 }
 
-/// 949 로 몇 바이트인가 (없는 글자는 `?` 하나)
+/// 바이트 함수의 바이트 수: 한셀은 949 표가 아니라 U+0100 미만이면 1, 이상이면 2 로 센다
+/// (LENB("ß") = 1, 949 에 없는 LENB("Ǒ")·LENB("丂") = 2, 대조 실험 misc4)
 pub fn byte_len(c: char) -> usize {
-    if encode(c).is_some() { 2 } else { 1 }
+    if (c as u32) < 0x100 { 1 } else { 2 }
 }
 
-/// CODE: 949 코드 (없는 글자는 63 `?`)
+/// CODE: 949 코드 (없는 글자는 63 `?`). 확장 영역(둘째 바이트 A1 미만)의 한글은 첫 바이트를 부호 있는
+/// 바이트로 늘린 값 (CODE("갂") = 0xFF81, CODE("힣") = 0xFFC6, 대조 실험 misc4)
 pub fn code(c: char) -> u32 {
     match encode(c) {
+        Some(k) if (k & 0xFF) < 0xA1 => 0xFF00 | (k as u32 >> 8),
         Some(k) => k as u32,
         None if (c as u32) < 0x80 => c as u32,
-        None if c == '\u{80}' => 0x80,
         None => 63,
     }
 }
@@ -200,6 +200,7 @@ mod tests {
         assert_eq!(code('한'), 0xC7D1);
         assert_eq!(code('Ａ'), 0xA3C1);
         assert_eq!(code('À'), 63);
+        assert_eq!(code('±'), 0xA1BE);
         assert_eq!(code('A'), 65);
         assert_eq!(encode('갂'), Some(0x8141));
         assert_eq!(encode('힣'), Some(0xC652));
@@ -208,7 +209,10 @@ mod tests {
         assert_eq!(encode('가'), Some(0xB0A1));
         assert_eq!(encode('\u{E000}'), Some(0xC9A1));
         assert_eq!(byte_len('ß'), 1);
-        assert_eq!(code('ß'), 63);
+        assert_eq!(code('ß'), 0xA9AC);
+        assert_eq!(code('갂'), 0xFF81);
+        assert_eq!(code('Ǒ'), 63);
+        assert_eq!(byte_len('Ǒ'), 2);
         assert_eq!(byte_len('漢'), 2);
         for row in ROWS {
             assert_eq!(row.1.chars().count(), 94, "{:X}", row.0);

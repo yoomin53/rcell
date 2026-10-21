@@ -24,9 +24,9 @@ pub const FNS: &[FnSpec] = &[
     f("DEC2BIN", 1, 2, V, |c, a| dec2(c, a, 2)),
     f("DEC2OCT", 1, 2, V, |c, a| dec2(c, a, 8)),
     f("DEC2HEX", 1, 2, V, |c, a| dec2(c, a, 16)),
-    f("BITAND", 2, 2, V, |c, a| bit(c, a, |x, y| x & y)),
-    f("BITOR", 2, 2, V, |c, a| bit(c, a, |x, y| x | y)),
-    f("BITXOR", 2, 2, V, |c, a| bit(c, a, |x, y| x ^ y)),
+    f("BITAND", 2, 2, V, |c, a| bit(c, a, |x, y| x & y, true)),
+    f("BITOR", 2, 2, V, |c, a| bit(c, a, |x, y| x | y, false)),
+    f("BITXOR", 2, 2, V, |c, a| bit(c, a, |x, y| x ^ y, false)),
     f("BITLSHIFT", 2, 2, V, |c, a| shift(c, a, true)),
     f("BITRSHIFT", 2, 2, V, |c, a| shift(c, a, false)),
     f("DELTA", 1, 2, V, |c, a| {
@@ -228,31 +228,33 @@ fn dec2(ctx: &mut Ctx, a: &[Value], radix: u32) -> Value {
     }
 }
 
-/// 비트 함수 인수: 소수점 아래는 버리되 BITAND·BITOR·BITXOR 은 소수 부분이 0.5 보다 크면 #NUM!
-/// (BITOR(1.5,1) = 1, BITAND(-0.5,1) = 0, BITAND(5.9,7) = #NUM!), 버린 값은 0 이상 2^48 이하
-/// (BITAND(2^48,1) = 0, BITAND(2^52,1) = #NUM!) — 대조 실험 engineering·misc3
-fn bit_arg(ctx: &mut Ctx, a: &[Value], i: usize, strict: bool) -> Result<u64, ErrorKind> {
+/// 비트 함수 인수: 소수점 아래를 버린다. BITAND 만 양의 소수 부분이 있으면 #NUM! (BITAND(0.5,1),
+/// BITAND(-0.5,1) = 0, BITOR(1.5,1) = 1, BITXOR(3.5,1) = 2). 버린 값은 0 이상 2^48 이하 (자리 이동
+/// 함수는 2^48 미만) — 대조 실험 engineering·misc3·misc4
+fn bit_arg(ctx: &mut Ctx, a: &[Value], i: usize, strict: bool, limit: f64) -> Result<u64, ErrorKind> {
     let x = num_arg(ctx, a, i)?;
     let n = x.trunc();
-    if (strict && x - n > 0.5) || n < 0.0 || n > 281_474_976_710_656.0 {
+    if (strict && x - n > 0.0) || n < 0.0 || n > limit {
         return Err(ErrorKind::Num);
     }
     Ok(n as u64)
 }
 
-/// 결과가 2^48 이상이면 #NUM! (BITOR(2^48,1))
-fn bit(ctx: &mut Ctx, a: &[Value], f: fn(u64, u64) -> u64) -> Value {
-    let x = try_v!(bit_arg(ctx, a, 0, true));
-    let y = try_v!(bit_arg(ctx, a, 1, true));
+const BIT_MAX: f64 = 281_474_976_710_656.0;
+
+/// 결과가 2^48 을 넘으면 #NUM! (BITOR(2^48,1); BITAND(2^48,2^48) = 2^48 은 된다)
+fn bit(ctx: &mut Ctx, a: &[Value], f: fn(u64, u64) -> u64, strict: bool) -> Value {
+    let x = try_v!(bit_arg(ctx, a, 0, strict, BIT_MAX));
+    let y = try_v!(bit_arg(ctx, a, 1, strict, BIT_MAX));
     let r = f(x, y);
-    if r >= 281_474_976_710_656 {
+    if r > 281_474_976_710_656 {
         return Value::Error(ErrorKind::Num);
     }
     Value::Number(r as f64)
 }
 
 fn shift(ctx: &mut Ctx, a: &[Value], left: bool) -> Value {
-    let x = try_v!(bit_arg(ctx, a, 0, false));
+    let x = try_v!(bit_arg(ctx, a, 0, false, BIT_MAX - 1.0));
     let s = try_v!(num_arg(ctx, a, 1)).trunc();
     if s.abs() > 53.0 {
         return Value::Error(ErrorKind::Num);
