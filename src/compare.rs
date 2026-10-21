@@ -2206,19 +2206,22 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
         // 메모 상자: 자리(px)·채우기·선·그림자·셀 고정·글 맞춤. 선 색은 한셀이 레거시에서 읽지 못한다
         // (메모 대조 실험) — 도형 세부와 함께 뺀다. 1 pt 선은 0.75 pt 로 본다: 한셀은 1 pt(VML 기본값)를 XML 에 쓰지
         // 않고, 두께가 없으면 0.75 pt 로 읽는다
+        // 이름은 한셀이 세 형식에서 지키는 도형 이름 (메모 이름 실험), 없으면 rcell 이 쓰는 `메모 k`
         let note_boxes = |sh: &Sheet| {
             let mut v: Vec<String> = sh
                 .comments
                 .iter()
-                .map(|c| {
+                .enumerate()
+                .map(|(k, c)| {
                     let b = c
                         .shape
                         .clone()
                         .unwrap_or_else(|| crate::model::CommentShape::implied(c.cell));
                     format!(
-                        "{}@{:?} fill={} line={}/{}pt{}{}{} align={}/{}",
+                        "{}@{:?} {:?} fill={} line={}/{}pt{}{}{} align={}/{}",
                         c.cell,
                         b.anchor,
+                        b.name_or(k),
                         b.fill_color,
                         if opts.ignore_shape_detail {
                             "-"

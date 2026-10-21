@@ -1536,7 +1536,7 @@ impl SheetCtx<'_, '_> {
                 false,
             ));
             comments = Some(self.comments(&sheet.comments));
-            vml = Some(crate::writer::comments_vml(sheet, comments_number));
+            vml = Some(crate::writer::comments_vml(sheet, comments_number, true));
         }
         // 한셀이 늘 쓰는 빈 묶음: ActiveX 컨트롤(643, 645), 표 목록(660 개수 0, 662)
         o.e(643);
@@ -2353,7 +2353,14 @@ fn data_bars14(o: &mut Out, bars: &[DataBar14]) {
 /// 조작한 XML → 한셀 → 바이너리 BrtTop10Filter). 필터 범위의 머리글 아래 그 열의 숫자 값(글·빈 칸은 빼고, 숨은 행도
 /// 넣는다)을 늘어놓고 위(아래)에서 k번째 값이다. k 는 개수, 백분율이면 ⌊숫자 수 × 값 / 100⌋ (적어도 1, 11개의 20% → 2,
 /// 50% → 5, 5% → 1), 숫자 수보다 크면 끝 값. 같은 값도 하나씩 센다. 숫자가 없으면 0
-fn top10_value(sheet: &Sheet, range: CellRange, col_id: u32, top: bool, percent: bool, val: f64) -> f64 {
+fn top10_value(
+    sheet: &Sheet,
+    range: CellRange,
+    col_id: u32,
+    top: bool,
+    percent: bool,
+    val: f64,
+) -> f64 {
     let col = range.start.col + col_id;
     let mut nums: Vec<f64> = sheet
         .cells
@@ -3344,7 +3351,16 @@ mod tests {
         assert_eq!(top10_value(&s, r, 0, true, false, 3.0), 5.0);
         assert_eq!(top10_value(&s, r, 0, true, false, 4.0), 4.0);
         assert_eq!(top10_value(&s, r, 0, false, false, 2.0), 1.0);
-        let mixed = [Some(10.), None, Some(30.), None, Some(20.), Some(50.), None, Some(40.)];
+        let mixed = [
+            Some(10.),
+            None,
+            Some(30.),
+            None,
+            Some(20.),
+            Some(50.),
+            None,
+            Some(40.),
+        ];
         let (s, r) = sheet_of(&mixed);
         assert_eq!(top10_value(&s, r, 0, true, false, 2.0), 40.0);
         let d8: Vec<Option<f64>> = (1..=25).map(|v| Some(f64::from(v))).collect();

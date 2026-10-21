@@ -180,7 +180,7 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 | 통합 문서 관계 | rId1 테마, rId2 styles.bin, rId3 sharedStrings.bin, rId4… 시트, 그 뒤 외부 연결 (`externalLinks/externalLinkN.bin`). 문자열이 하나도 없으면 sharedStrings.bin 과 그 관계·콘텐츠 타입이 없고 시트가 rId3 부터다 (3차원 참조 대조 실험의 숫자·수식만 있는 문서) |
 | 시트 관계 | 하이퍼링크(외부), 그리기, VML, 메모 순. 대상은 상대 경로 (`../drawings/drawing1.xml`) |
 | 외부 연결 파트 | `BrtBeginSupBook`(360: `sbt 0`, 관계 ID `rId1`, 빈 문자열 0xFFFFFFFF), `BrtSupTabs`(359), `BrtEndSupBook`(588). 관계는 경로를 잃은 연결도 보통의 `externalLinkPath` |
-| 그리기·차트·그림·VML | XML 파트 그대로 (차트는 모델에서 `chart_xml` 로). 한셀은 그리기·차트·그림 파트에 **세션 전체의 번호**를 붙인다 (같은 문서의 `X.cell` 은 `drawing69.xml`, `X.bin.cell` 은 `drawing70.xml`) — 문서의 정보가 아니다. 메모 VML 은 문서의 VML 도형(이름 `메모 N`, 앵커, z-index, `o:spid`, `x:ShapeUri`)을 그대로 옮긴다 — rcell 모델에는 도형 정보가 없어 XML 쓰기와 같은 기본 VML 을 쓴다 (코퍼스 6개 문서가 다르다) |
+| 그리기·차트·그림·VML | XML 파트 그대로 (차트는 모델에서 `chart_xml` 로). 한셀은 그리기·차트·그림 파트에 **세션 전체의 번호**를 붙인다 (같은 문서의 `X.cell` 은 `drawing69.xml`, `X.bin.cell` 은 `drawing70.xml`) — 문서의 정보가 아니다. 메모 VML 은 XML 저장본과 같은 꼴 ([cell-2024.md](cell-2024.md) 7.5절: 이름, 시트 안 `o:spid`, 그리기 개체 수에서 이어지는 z-index, `idmap 0`, 세션 GUID `x:ShapeUri`) — rcell 은 메모 상자 모델(`CommentShape`, 이름 포함)에서 같은 꼴로 쓴다 (코퍼스 6개 문서의 VML 이 `x:ShapeUri` 말고 같다) |
 | docProps | app.xml: `Application` Cell, 시트 이름 목록(`TitlesOfParts`), `TotalTime` 원본 값(서식 파일 51 → 51, 없으면 0), `AppVersion` 12.0300. core.xml 은 늘 쓰고 끝에 `cp:version` 1300.0100.01 (바이너리 113개 모두). 수정 번호(+1)·수정 날짜(저장 시각)는 저장할 때 바뀐다 — rcell 은 모델 값을 쓰고, 대조(`binary::parity`)와 `rcell diff` 는 이 둘과 수정한 사람을 뺀다 |
 
 ### 4.2 `workbook.bin`
@@ -225,7 +225,7 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 | `BrtPageSetup` | 해상도는 XML 의 dpi 그대로, 끝의 관계 ID 는 빈 문자열(cch 0) |
 | 머리글·바닥글 | 글이 하나라도 있을 때만 쓴다 (빈 `headerFooter` 는 쓰지 않는다) |
 | `BrtBrk` | 끝 칸: 행 나누기 1048575, 열 나누기 16383 (XML 의 `max` 와 반대) |
-| 메모 | `commentsN.bin`: 작성자는 처음 나온 순서, 글은 RichStr (조각 글꼴은 styles.bin 의 글꼴 번호). VML 은 XML 과 같다 |
+| 메모 | `commentsN.bin`: 작성자는 처음 나온 순서, 글은 RichStr (조각 글꼴은 styles.bin 의 글꼴 번호). VML 은 XML 저장본과 같다 (4.1절) |
 
 ### 4.4 `styles.bin`
 
@@ -311,8 +311,8 @@ XML 이 같은데 바이너리가 다른 칸 — rcell 은 가장 흔한 값을 
 (22)·(24), `BrtPrintOptions` 0x10, 테두리 자동 색의 `DF`/`FF`, 머리글·바닥글 여백의 HWPUNIT 하나, 병합과 공유 문자열의
 순서, 몇몇 서식 파일의 XTI 순서와 쓰이지 않는 XTI, XF 의 순서가 바뀐 문서 하나, 쓰이지 않는 글꼴 하나, 차등 서식의
 이중 회계 밑줄(XML 은 단일 회계로 쓴다), 데이터 막대의 GUID, 동적 필터가 데이터로 계산한 값(원본에 없을 때),
-`BrtAbsPath15` 의 폴더. rcell 모델에 없어 다른 것: 메모 VML 도형 (4.1절), 다시 부호화한 그림과 조작한 XML 의 그림 앵커
-정규화 (2.1절). 데이터 막대의 x14 확장(방향·축·플래그·x14 기준 값·색)은 모델(`DataBar::ext`)에서 쓰고 `rcell diff` 가
+`BrtAbsPath15` 의 폴더, 메모 VML 의 `x:ShapeUri` (세션 GUID — 레코드 대조는 뺀다). rcell 모델에 없어 다른 것: 다시
+부호화한 그림과 조작한 XML 의 그림 앵커 정규화 (2.1절). 데이터 막대의 x14 확장(방향·축·플래그·x14 기준 값·색)은 모델(`DataBar::ext`)에서 쓰고 `rcell diff` 가
 비교한다 (x14 조건부 서식 실험). 표·피벗·매크로 프로젝트는 바이너리 쓰기가 아직 쓰지 않는다 (XML 쓰기는 쓴다 —
 [cell-2024.md](cell-2024.md) 7.10절).
 

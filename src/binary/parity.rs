@@ -260,12 +260,14 @@ fn align(a: &[Record], b: &[Record]) -> Vec<Step> {
     out
 }
 
-/// docProps/core.xml 의 `cp:revision`·`dcterms:modified`·`cp:lastModifiedBy`
+/// docProps/core.xml 의 `cp:revision`·`dcterms:modified`·`cp:lastModifiedBy`, 그리고 메모 VML 의 `x:ShapeUri` (한셀이
+/// 문서를 읽을 때마다 새로 만드는 GUID — 메모 이름 실험)
 fn is_save_stamp(e: &crate::xml::Element) -> bool {
     const CP: &str = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties";
     match e.ns.as_deref() {
         Some(CP) => matches!(e.name.as_str(), "revision" | "lastModifiedBy"),
         Some("http://purl.org/dc/terms/") => e.name == "modified",
+        Some(crate::ns::VML_EXCEL) => e.name == "ShapeUri",
         _ => false,
     }
 }

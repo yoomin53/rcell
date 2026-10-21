@@ -182,6 +182,7 @@ fn comments_roundtrip() {
         size_with_cells: false,
         text_halign: Some("Right".into()),
         text_valign: Some("Bottom".into()),
+        name: Some("메모 9".into()),
     };
     a.sheets[0].comments[1].shape = Some(shape.clone());
     let out = write(&a, Flavor::Cell).unwrap();
@@ -190,11 +191,26 @@ fn comments_roundtrip() {
     assert!(diffs.is_empty(), "{}", diffs.join("\n"));
     assert_eq!(b.sheets[0].comments.len(), 2);
     assert_eq!(b.sheets[0].comments[1].shape, Some(shape));
-    // 모양이 없는 메모는 셀 오른쪽 위에 둔다
+    // 모양이 없는 메모는 셀 오른쪽 위에, 이름은 시트 안 순서로 (`메모 1`) 둔다
     assert_eq!(
         b.sheets[0].comments[0].shape,
-        Some(CommentShape::implied(CellRef { row: 0, col: 0 }))
+        Some(CommentShape {
+            name: Some("메모 1".into()),
+            ..CommentShape::implied(CellRef { row: 0, col: 0 })
+        })
     );
+    // 한셀의 VML 꼴: 이름이 v:shape id, 시트 안 순서의 o:spid, 모든 시트 idmap 0 (메모 이름 실험)
+    let vml = String::from_utf8(
+        rcell::container::read_entry(
+            &write(&a, Flavor::Cell).unwrap(),
+            "xl/drawings/vmlDrawing1.vml",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(vml.contains(r#"<v:shape id="메모 9" style="position:absolute;visibility:visible;z-index:1" o:spid="_x0000_s2""#), "{vml}");
+    assert!(vml.contains(r#"strokeweight="2.00pt""#), "{vml}");
+    assert!(vml.contains(r#"<o:idmap data="0" v:ext="edit"/>"#), "{vml}");
 }
 
 #[test]

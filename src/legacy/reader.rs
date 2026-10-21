@@ -3198,6 +3198,8 @@ fn legacy_comment_shape(
             4 => Some("Distributed".into()),
             _ => None,
         },
+        // 도형 이름 0x0380 — 한셀은 VML 의 v:shape id 를 여기에 쓰고 다시 읽는다 (메모 이름 실험: `메모 7`, `foo`, `메모 0`)
+        name: e.string(0x0380).filter(|s| !s.is_empty()),
     }
 }
 
