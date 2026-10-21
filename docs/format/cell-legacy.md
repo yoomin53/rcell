@@ -202,6 +202,10 @@ flags & 0x01 이면: cRun u16, (ich u16, ifnt u16) × cRun
 | SUPBOOK (0x01AE) | `ctab u16, cch u16` — `cch` 가 `0x0401` 이면 이 통합 문서, `0x3A01` 이면 추가 기능, 그 밖이면 외부 문서: `flag u8, 가상 경로 UTF-16[cch], (cch u16, flag u8, 시트 이름 UTF-16) × ctab` | BIFF8 + 관측 |
 | EXTERNSHEET (0x0017) | BIFF8 과 같다: `n u16, (iSupBook u16, itabFirst u16, itabLast u16) × n` | BIFF8 |
 | NAME (0x0018) | BIFF8 Lbl + 이름 UTF-16: `grbit u16 (0x01 숨김, 0x20 내장), chKey u8, cch u8, cce u16, 예약 u16, itab u16 (시트 범위, 1부터), 사용자 메뉴·설명·도움말·상태 글 길이 u8 × 4, flag u8, 이름, 토큰`, 그 뒤에 길이가 0 이 아닌 글들 (`flag u8 + UTF-16`) — 설명이 XML `comment`. 수식이 없는 NAME 은 정의되지 않은 이름(`=XYZ`)이나 `_xlfn.` 자리 | 관측 |
+| **0xB005** (112) | 표 하나의 시작 — 바이너리 `BrtBeginList`(343)와 같은 꼴 ([cell-binary.md](cell-binary.md) 2절): `RfX (행·열 u32 ×4), 종류 u32, 표 번호 u32, 머리글 행 수 u32, 요약 행 수 u32, 플래그 u32 (0x01 요약 행을 보인 적 있음), 차등 서식 6개 u32, 연결 번호 u32, 이름·표시 이름·설명·셀 스타일 3개 (cch u32 + UTF-16)`. 없는 문자열은 빈 문자열(cch 0)로 쓴다. 전역에 표 번호 순서와 상관없이 모여 있다 | 관측 (표 대조 실험) |
+| **0xB00B** (가변) | 표의 열 — `BrtBeginListCol`(347)과 같은 꼴 (`열 번호, 요약 함수 (0 없음, 1 average, 2 count, 3 countNums, 4 max, 5 min, 6 sum, 7 stdDev, 8 var, 9 custom), 차등 서식 3개, 쿼리 표 필드, 고유 이름·이름·요약 글·셀 스타일 3개`) 뒤에 수식 표지 u8: 0x02 면 요약 행 사용자 수식 `fArray u8, cce u16, 토큰` 이 이어진다 (바이너리의 BrtListTrFmla). 계산 열 수식은 한셀이 버린다 | 관측 |
+| **0xB00C** (가변) | 표 스타일 — `BrtTableStyleClient`(513): `플래그 u16 (0x01 첫 열, 0x02 끝 열, 0x04 행 줄무늬, 0x08 열 줄무늬), 이름` | 관측 |
+| **0xB00D** (0) | 표 끝 | 관측 |
 | XFEXT (0x087D) | FRT 머리 12, `예약 u16, ixfe u16, 예약 u16, cexts u16`, ExtProp(`종류 u16, cb u16 (머리 포함), 값`) × cexts. 한셀은 그라데이션 채우기(종류 6)만 쓴다: `종류 u32 (0 직선, 1 경로), 각도·왼쪽·오른쪽·위·아래 f64, 정지점 수 u32, (색 종류 u16 — 2 RGB, 값 u32, 위치 f64, 밝기 f64) × n`. 다른 색은 XF 의 한컴 확장에 있다 | [MS-XLS] + 관측 (그라데이션 대조 실험) |
 
 ## 6. 워크시트 레코드
@@ -233,6 +237,8 @@ flags & 0x01 이면: cRun u16, (ich u16, ifnt u16) × cRun
 | MSODRAWING (0x00EC) | OfficeArt(Escher). 메모·도형의 위치 `OfficeArtClientAnchor`(0xF010)는 **22바이트**: `flag u16, col1 u16, dx1 u16, rw1 u32, dy1 u16, col2 u16, dx2 u16, rw2 u32, dy2 u16` (행 u32) | 관측 |
 | SHEETEXT (0x0862) | 탭 색: FRT 머리 12 + `cb u32` + `icvPlain u32`(팔레트) + **COLORREF**(한컴, 실제 RGB) | BIFF8 FRT + 관측 |
 | CODENAME (0x01BA) | `cch u16, flag u8, UTF-16` → `sheetPr/@codeName` | 관측 |
+| **0xB00A** (4) | 이 시트의 표: 표 번호 u32 (전역 0xB005 의 번호). 시트 끝, 표마다 하나 | 관측 (표 대조 실험) |
+| **0xB006** (0), **0xB007** (2) | 바로 앞 0xB00A 표의 자동 필터 시작과 끝 (`열 수 u16`). 범위는 요약 행을 뺀 표 범위다. **필터 조건은 저장하지 않는다** — 한셀도 다시 열 때 조건 없는 필터로 읽는다 | 관측 |
 
 ### 6.1 보기·인쇄 레코드 (한셀 해석과 대조)
 
@@ -416,6 +422,7 @@ BIFF8 Ptg 와 같고 다음만 다르다 (관측, `src/legacy/formula.rs`):
 | PtgTbl | 6 | `rw u32, col u16` — 데이터 표(TABLE)의 왼쪽 위 셀 |
 | PtgNameX | 6 | `ixti u16, 이름 번호 u32` — XTI 의 SUPBOOK 아래 EXTERNNAME (1부터) |
 | PtgExp | 6 | `rw u32, col u16` — 공유 수식(SHRFMLA, 범위 행 u32)의 기준 셀 |
+| PtgList (0x18 0x19) | 12 | 구조적 참조, XLSB 와 같은 꼴: `ixti u16, 플래그 u16 (비트 0–1 열: 0 없음·1 하나·2 범위, 비트 2–6 행 종류: 0 기본·0x01 #All·0x02 #Headers·0x04 #Data·0x08 #Totals·0x10 #This Row), 표 번호 u32, 첫 열 u16, 끝 열 u16` (표 대조 실험, 글의 꼴은 [cell-binary.md](cell-binary.md) 2절) |
 
 Excel 2007 에서 생긴 함수(SUMIFS, AVERAGEIF …)는 `PtgName` 이 가리키는 NAME `_xlfn.이름` (grbit 0x000B 또는 0x038B) 이나
 추가 기능 SUPBOOK 의 EXTERNNAME(`PtgNameX`)을 첫 인자로 한 PtgFuncVar 255 다. 한컴 함수(WON, JUNJA, RANKAVG, RANKEQ,
@@ -460,6 +467,7 @@ XTI 가 외부 SUPBOOK 을 가리키면 XML 표기로 `[n]시트!A1` 이 된다.
 | 사용자 정의 표 스타일 | 파일(0x088E–0x0890)에는 있지만 한셀이 다시 열 때 읽지 않는다 — 기본 스타일 이름만 남는다 |
 | 조건부 서식의 차등 서식 | 세로 맞춤을 읽지 않고 사용자 표시 형식을 깨뜨린다 (6.3절) |
 | 하이퍼링크의 화면 설명 | 저장되지 않는다. 다시 열면 주소(대상, 없으면 위치)가 설명이 된다 (6절 HLINKTOOLTIP) |
+| 표 | 자동 필터 조건이 저장되지 않는다 (0xB006). 요약 행 밖의 구조적 참조 수식(`SUM(Table1[가])`, `[#This Row]` 계산 열 …)이나 요약 행 사용자 수식이 있는 레거시 저장본을 한셀은 다시 열다 멈춘다 (RPC_E_SERVERFAULT — 요약 행 함수만 있는 표는 연다). 다시 열 때 같은 내용이 된 차등 서식을 합쳐 표의 `totalsRowDxfId` 등 번호가 바뀌고, 요약 행이 있는 표의 열에 `totalsRowDxfId` 를 붙인다 |
 | 조건부 서식의 x14 확장 | 데이터 막대의 테두리·그라데이션·음수 색·축, `autoMin`/`autoMax`, 사용자 지정 아이콘, x14 구역의 수식 규칙은 저장되지 않는다. 남는 방향(오른쪽에서 왼쪽)도 다시 열 때 읽지 않는다 (6.3절) |
 
 ## 9. 검증 방법

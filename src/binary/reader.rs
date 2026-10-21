@@ -1046,9 +1046,16 @@ fn parse_styles(data: &[u8]) -> Styles {
                         let dg = r.u8()? as usize;
                         let _res = r.u8()?;
                         let c = color(r)?;
-                        Some((dg != 0).then(|| BorderEdge {
-                            style: BORDER_STYLES.get(dg).map(|s| s.to_string()),
-                            color: c,
+                        // 선 종류가 없어도 색은 남긴다: 한셀은 표의 데이터 영역 서식(dataDxfId)을 셀 테두리 색에서
+                        // 다시 만든다 (패키지 파트 실험, docs/format/cell-2024.md 7.10절)
+                        Some((dg != 0 || c.is_some()).then(|| {
+                            BorderEdge {
+                                style: BORDER_STYLES
+                                    .get(dg)
+                                    .filter(|_| dg != 0)
+                                    .map(|s| s.to_string()),
+                                color: c,
+                            }
                         }))
                     };
                     let top = edge(&mut r)?;
@@ -1440,6 +1447,51 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
         })
         .collect();
     let name_list: Vec<String> = names.iter().map(|n| n.0.clone()).collect();
+    // 표 파트 (시트 관계 table): 수식의 구조적 참조는 다른 시트의 표도 가리키므로 시트보다 먼저 읽는다
+    let mut lists: Vec<(String, crate::model::Table)> = Vec::new();
+    let mut list_formulas: Vec<ListFormulas> = Vec::new();
+    for b in &bundles {
+        let Some(rel) = rels.iter().find(|r| r.id == b.rel_id) else {
+            continue;
+        };
+        for r in pkg.relationships(&rel.target)? {
+            if r.external || !r.rel_type.ends_with("/table") {
+                continue;
+            }
+            if let Some(d) = pkg.read_bytes(&r.target)?
+                && let Some((t, fs)) = read_table_part(&d)
+            {
+                lists.push((r.target.clone(), t));
+                list_formulas.push(fs);
+            }
+        }
+    }
+    let table_names = table_names(lists.iter().map(|(_, t)| t));
+    for ((_, t), fs) in lists.iter_mut().zip(list_formulas) {
+        let base = CellRange::parse(&t.range)
+            .map(|r| r.start)
+            .unwrap_or_default();
+        for (i, calc, rgce) in fs {
+            let ctx = Context {
+                xti_sheets: &xti_sheets,
+                names: &name_list,
+                xti_names: &[],
+                base,
+                xlsb: true,
+                row_shift: 0,
+                tables: &table_names,
+            };
+            if let Ok(Decoded::Text(text)) = formula::decode(&rgce, &ctx)
+                && let Some(c) = t.columns.get_mut(i)
+            {
+                if calc {
+                    c.calculated_formula = Some(text);
+                } else {
+                    c.totals_formula = Some(text);
+                }
+            }
+        }
+    }
     wb.defined_names = names
         .iter()
         .filter(|n| !n.3.is_empty() && !n.0.starts_with("_xlfn."))
@@ -1451,6 +1503,7 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
                 base: CellRef::default(),
                 xlsb: true,
                 row_shift: 0,
+                tables: &table_names,
             };
             let formula = match formula::decode(rgce, &ctx) {
                 Ok(Decoded::Text(t)) => t,
@@ -1508,7 +1561,13 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
             let srels = pkg.relationships(&rel.target)?;
             let local_names =
                 formula::names_for_sheet(&name_list, &name_scopes, &sheet_names, wb.sheets.len());
-            read_sheet(&data, &mut sheet, &wb, &srels, (&xti_sheets, &local_names))?;
+            read_sheet(
+                &data,
+                &mut sheet,
+                &wb,
+                &srels,
+                (&xti_sheets, &local_names, &table_names, &lists),
+            )?;
             read_comments(pkg, &srels, &wb.styles.fonts, &mut sheet)?;
             crate::parser::read_sheet_drawings(pkg, &srels, &mut wb.raw_parts, &mut sheet)?;
             sheet.part_links = crate::parser::read_part_links(
@@ -1524,17 +1583,286 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
     Ok(wb)
 }
 
-/// 자동 필터에서 지금 읽고 있는 열
-fn cur_filter_column(sheet: &mut Sheet) -> Option<&mut FilterColumn> {
-    sheet.auto_filter.as_mut()?.columns.last_mut()
+/// 표 열의 요약 행 함수 (`ilta` 순서, 0 = 없음)
+const TOTALS_FUNCTIONS: [&str; 10] = [
+    "none",
+    "average",
+    "count",
+    "countNums",
+    "max",
+    "min",
+    "sum",
+    "stdDev",
+    "var",
+    "custom",
+];
+
+/// 표에서 나중에 글로 바꿀 수식: (열 번호, 계산 열이면 참·요약 행이면 거짓, 토큰열). 구조적 참조가 다른 표를 가리킬 수
+/// 있어 표를 모두 읽은 뒤에 바꾼다
+pub(crate) type ListFormulas = Vec<(usize, bool, Vec<u8>)>;
+
+/// BrtBeginList (343) — 레거시 0xB005 도 같은 꼴이다 (표 대조 실험): RfX, 종류 u32 (0 worksheet, 1 xml, 2 queryTable),
+/// 표 번호 u32, 머리글 행 수 u32, 요약 행 수 u32, 플래그 u32 (0x01 요약 행을 보인 적 있음), 차등 서식 6개 (머리글·데이터·
+/// 요약·표 테두리·머리글 테두리·요약 테두리, 0xFFFFFFFF = 없음), 연결 번호 u32, 이름·표시 이름·설명·셀 스타일 3개
+/// (XLNullableWideString — 레거시는 없는 값을 빈 문자열로 쓴다)
+pub(crate) fn begin_list(b: &[u8]) -> Option<crate::model::Table> {
+    let mut r = Rd::new(b);
+    let (r1, r2, c1, c2) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+    let (lt, id, header, totals, flags) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+    let mut dxfs = [None; 6];
+    for d in &mut dxfs {
+        *d = r.u32().filter(|&v| v != 0xFFFF_FFFF);
+    }
+    let conn = r.u32()?;
+    let mut s = || r.nwstr().flatten().filter(|s| !s.is_empty());
+    let (name, display, comment) = (s(), s(), s());
+    let cell_styles = [s(), s(), s()];
+    Some(crate::model::Table {
+        id,
+        display_name: display.or_else(|| name.clone()).unwrap_or_default(),
+        name: name.unwrap_or_default(),
+        range: CellRange {
+            start: CellRef { row: r1, col: c1 },
+            end: CellRef { row: r2, col: c2 },
+        }
+        .to_string(),
+        header_rows: header,
+        totals_rows: totals,
+        totals_shown: flags & 0x01 != 0,
+        table_type: match lt {
+            1 => Some("xml".into()),
+            2 => Some("queryTable".into()),
+            _ => None,
+        },
+        comment,
+        connection_id: (conn != 0).then_some(conn),
+        dxfs,
+        cell_styles,
+        ..Default::default()
+    })
 }
+
+/// BrtBeginListCol (347) — 레거시 0xB00B 도 같은 꼴: 열 번호 u32, 요약 함수 u32 ([`TOTALS_FUNCTIONS`]), 차등 서식 3개
+/// (머리글·데이터·요약), 쿼리 표 필드 u32, 고유 이름·이름·요약 글·셀 스타일 3개. 레거시는 끝에 수식 표지 u8 (0x02 요약 행
+/// 수식)과 수식(fArray u8, cce u16, 토큰열)이 붙는다 — 돌려주는 토큰열 (바이너리는 BrtListTrFmla 352 가 따로 온다)
+pub(crate) fn list_col(
+    b: &[u8],
+    legacy: bool,
+) -> Option<(crate::model::TableColumn, Option<Vec<u8>>)> {
+    let mut r = Rd::new(b);
+    let (id, ilta) = (r.u32()?, r.u32()?);
+    let mut dxfs = [None; 3];
+    for d in &mut dxfs {
+        *d = r.u32().filter(|&v| v != 0xFFFF_FFFF);
+    }
+    let qsif = r.u32()?;
+    let mut s = || r.nwstr().flatten().filter(|s| !s.is_empty());
+    let (unique, name, label) = (s(), s(), s());
+    let _styles = [s(), s(), s()];
+    let totals = if legacy && r.u8().is_some_and(|f| f & 0x02 != 0) {
+        r.u8();
+        let n = r.u16()? as usize;
+        r.take(n).map(<[u8]>::to_vec)
+    } else {
+        None
+    };
+    Some((
+        crate::model::TableColumn {
+            id,
+            name: name.unwrap_or_default(),
+            unique_name: unique,
+            totals_function: TOTALS_FUNCTIONS
+                .get(ilta as usize)
+                .filter(|f| **f != "none")
+                .map(|f| f.to_string()),
+            totals_label: label,
+            dxfs,
+            query_table_field_id: (qsif != 0).then_some(qsif),
+            ..Default::default()
+        },
+        totals,
+    ))
+}
+
+/// BrtTableStyleClient (513, 레거시 0xB00C): 플래그 u16 (0x01 첫 열, 0x02 끝 열, 0x04 행 줄무늬, 0x08 열 줄무늬), 이름
+pub(crate) fn table_style_client(b: &[u8]) -> Option<crate::model::TableStyleInfo> {
+    let mut r = Rd::new(b);
+    let f = r.u16()?;
+    Some(crate::model::TableStyleInfo {
+        name: r.nwstr().flatten().filter(|s| !s.is_empty()),
+        first_column: f & 0x01 != 0,
+        last_column: f & 0x02 != 0,
+        row_stripes: f & 0x04 != 0,
+        column_stripes: f & 0x08 != 0,
+    })
+}
+
+/// 바이너리 표 파트 (BrtBeginList … BrtEndList): 표, 그리고 나중에 바꿀 수식. 자동 필터는 시트의 것과 같은 레코드,
+/// 계산 열·요약 행 수식은 열 안의 BrtListCCFmla(351)·BrtListTrFmla(352: fArray u8 + CellParsedFormula)
+fn read_table_part(data: &[u8]) -> Option<(crate::model::Table, ListFormulas)> {
+    let mut table: Option<crate::model::Table> = None;
+    let mut formulas = ListFormulas::new();
+    for rec in biff12::records(data) {
+        let mut r = Rd::new(rec.data);
+        match rec.rtype {
+            343 => table = begin_list(rec.data),
+            347 => {
+                if let (Some(t), Some((c, _))) = (table.as_mut(), list_col(rec.data, false)) {
+                    t.columns.push(c);
+                }
+            }
+            351 | 352 => {
+                if let Some(t) = table.as_ref()
+                    && let Some(i) = t.columns.len().checked_sub(1)
+                    && r.u8().is_some()
+                    && let Some(tokens) = parsed_formula(&mut r)
+                {
+                    formulas.push((i, rec.rtype == 351, tokens.to_vec()));
+                }
+            }
+            513 => {
+                if let Some(t) = table.as_mut() {
+                    t.style = table_style_client(rec.data);
+                }
+            }
+            161..=174 => {
+                if let Some(t) = table.as_mut() {
+                    filter_record(rec.rtype, &mut r, &mut t.auto_filter);
+                }
+            }
+            _ => {}
+        }
+    }
+    table.map(|t| (t, formulas))
+}
+
+/// 표의 이름과 열 이름 (구조적 참조를 글로 바꿀 때)
+pub(crate) fn table_names<'a>(
+    tables: impl Iterator<Item = &'a crate::model::Table>,
+) -> Vec<formula::TableName> {
+    tables
+        .map(|t| {
+            (
+                t.id,
+                t.name.clone(),
+                t.columns.iter().map(|c| c.name.clone()).collect(),
+            )
+        })
+        .collect()
+}
+
+/// 자동 필터 레코드 하나 (시트와 표 파트가 함께 쓴다): BrtBeginAFilter(161) … BrtDynamicFilter(171)
+fn filter_record(rtype: u32, r: &mut Rd, af: &mut Option<AutoFilter>) {
+    match rtype {
+        161 => {
+            // BrtBeginAFilter: RfX (rwFirst, rwLast, colFirst, colLast)
+            if let (Some(r1), Some(r2), Some(c1), Some(c2)) = (r.u32(), r.u32(), r.u32(), r.u32()) {
+                *af = Some(AutoFilter {
+                    range: CellRange {
+                        start: CellRef { row: r1, col: c1 },
+                        end: CellRef { row: r2, col: c2 },
+                    }
+                    .to_string(),
+                    columns: Vec::new(),
+                });
+            }
+        }
+        163 => {
+            // BrtBeginFilterColumn: dwCol u32, 플래그 u16 (단추 숨김 등)
+            if let (Some(af), Some(col)) = (af.as_mut(), r.u32()) {
+                af.columns.push(FilterColumn {
+                    col_id: col,
+                    ..Default::default()
+                });
+            }
+        }
+        165 => {
+            // BrtBeginFilters: fBlank u32, 달력 종류 u32
+            if let Some(c) = af.as_mut().and_then(|f| f.columns.last_mut()) {
+                c.blank = r.u32().is_some_and(|v| v != 0);
+            }
+        }
+        167 => {
+            if let (Some(v), Some(c)) = (r.wstr(), af.as_mut().and_then(|f| f.columns.last_mut())) {
+                c.values.push(v);
+            }
+        }
+        172 => {
+            if let Some(c) = af.as_mut().and_then(|f| f.columns.last_mut()) {
+                c.custom_and = r.u32().is_some_and(|v| v != 0);
+            }
+        }
+        174 => {
+            // BrtCustomFilter: vts u8 (4 수, 6 문자열, 8 논리/오류, 0x0C 빈 칸, 0x0E 빈 칸 아님),
+            // grbitSign u8, 값 8바이트 (문자열이면 이어서 XLWideString)
+            let (Some(vts), Some(sign)) = (r.u8(), r.u8()) else {
+                return;
+            };
+            let op = FILTER_OPERATORS.get(sign as usize).copied().unwrap_or("");
+            let op = if op.is_empty() { "equal" } else { op };
+            let val = match vts {
+                4 => r.f64().map(formula::number_text),
+                6 => {
+                    r.take(8);
+                    r.wstr()
+                }
+                8 => r.u8().map(|b| {
+                    if b != 0 {
+                        "TRUE".into()
+                    } else {
+                        "FALSE".into()
+                    }
+                }),
+                0x0C => Some(String::new()),
+                0x0E => Some(String::new()),
+                _ => None,
+            };
+            if let (Some(v), Some(c)) = (val, af.as_mut().and_then(|f| f.columns.last_mut())) {
+                c.custom.push((op.to_string(), v));
+            }
+        }
+        170 => {
+            // BrtTop10Filter: 플래그 u8 (1 위, 2 백분율, 4 기준값 있음), 개수/백분율 f64, 기준값 f64
+            if let (Some(f), Some(v), Some(c)) = (
+                r.u8(),
+                r.f64(),
+                af.as_mut().and_then(|f| f.columns.last_mut()),
+            ) {
+                c.top10 = Some((f & 0x01 != 0, f & 0x02 != 0, v));
+                c.filter_val = r.f64().filter(|_| f & 0x04 != 0);
+            }
+        }
+        171 => {
+            // BrtDynamicFilter: cft u32, 플래그 u8, 값 f64, 최댓값 f64. 한셀은 플래그 바이트를 채우지 않고 쓰므로
+            // (관측: 같은 종류에 0x03·0x63·0xCC) 값은 플래그와 상관없이 0 이 아니면 있는 것으로 본다
+            if let (Some(t), Some(c)) = (r.u32(), af.as_mut().and_then(|f| f.columns.last_mut())) {
+                c.dynamic = DYNAMIC_FILTER_TYPES
+                    .get(t as usize)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let _flags = r.u8();
+                c.dynamic_val = r.f64().filter(|&v| v != 0.0);
+                c.dynamic_max_val = r.f64().filter(|&v| v != 0.0);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 시트 수식에 필요한 통합 문서 정보: XTI 별 시트, 이름, 표 이름, 표 파트 (파트 이름, 표)
+type SheetRefs<'a> = (
+    &'a Vec<Option<String>>,
+    &'a Vec<String>,
+    &'a [formula::TableName],
+    &'a [(String, crate::model::Table)],
+);
 
 fn read_sheet(
     data: &[u8],
     sheet: &mut Sheet,
     wb: &Workbook,
     rels: &[Relationship],
-    (xti_sheets, names): (&Vec<Option<String>>, &Vec<String>),
+    (xti_sheets, names, list_names, lists): SheetRefs,
 ) -> Result<()> {
     let rel_by_id: HashMap<&str, &Relationship> = rels.iter().map(|r| (r.id.as_str(), r)).collect();
     let mut row: u32 = 0;
@@ -1565,6 +1893,7 @@ fn read_sheet(
             base,
             xlsb: true,
             row_shift: 0,
+            tables: list_names,
         };
         let d = if relative {
             formula::decode_relative(t, &ctx)
@@ -1834,6 +2163,7 @@ fn read_sheet(
                             base,
                             xlsb: true,
                             row_shift: 0,
+                            tables: list_names,
                         };
                         formulas.push(match formula::decode_relative(rgce, &ctx) {
                             Ok(Decoded::Text(t)) => t,
@@ -1946,6 +2276,7 @@ fn read_sheet(
                         base,
                         xlsb: true,
                         row_shift: 0,
+                        tables: list_names,
                     };
                     match formula::decode_relative(rgce, &ctx) {
                         Ok(Decoded::Text(t)) => Some(t),
@@ -2062,93 +2393,16 @@ fn read_sheet(
                     states,
                 ));
             }
-            161 => {
-                // BrtBeginAFilter: RfX (rwFirst, rwLast, colFirst, colLast)
-                if let (Some(r1), Some(r2), Some(c1), Some(c2)) =
-                    (r.u32(), r.u32(), r.u32(), r.u32())
+            161 | 163 | 165 | 167 | 170 | 171 | 172 | 174 => {
+                filter_record(rec.rtype, &mut r, &mut sheet.auto_filter)
+            }
+            661 => {
+                // BrtListPart: 표 파트의 관계 ID (BrtBeginListParts 660 안, 시트 끝). 표 번호 순서가 아니라 이 순서로 쓴다
+                if let Some(id) = r.wstr()
+                    && let Some(rel) = rel_by_id.get(id.as_str())
+                    && let Some((_, t)) = lists.iter().find(|l| l.0 == rel.target)
                 {
-                    sheet.auto_filter = Some(AutoFilter {
-                        range: CellRange {
-                            start: CellRef { row: r1, col: c1 },
-                            end: CellRef { row: r2, col: c2 },
-                        }
-                        .to_string(),
-                        columns: Vec::new(),
-                    });
-                }
-            }
-            163 => {
-                // BrtBeginFilterColumn: dwCol u32, 플래그 u16 (단추 숨김 등)
-                if let (Some(af), Some(col)) = (sheet.auto_filter.as_mut(), r.u32()) {
-                    af.columns.push(FilterColumn {
-                        col_id: col,
-                        ..Default::default()
-                    });
-                }
-            }
-            165 => {
-                // BrtBeginFilters: fBlank u32, 달력 종류 u32
-                if let Some(c) = cur_filter_column(sheet) {
-                    c.blank = r.u32().is_some_and(|v| v != 0);
-                }
-            }
-            167 => {
-                if let (Some(v), Some(c)) = (r.wstr(), cur_filter_column(sheet)) {
-                    c.values.push(v);
-                }
-            }
-            172 => {
-                if let Some(c) = cur_filter_column(sheet) {
-                    c.custom_and = r.u32().is_some_and(|v| v != 0);
-                }
-            }
-            174 => {
-                // BrtCustomFilter: vts u8 (4 수, 6 문자열, 8 논리/오류, 0x0C 빈 칸, 0x0E 빈 칸 아님),
-                // grbitSign u8, 값 8바이트 (문자열이면 이어서 XLWideString)
-                let (Some(vts), Some(sign)) = (r.u8(), r.u8()) else {
-                    continue;
-                };
-                let op = FILTER_OPERATORS.get(sign as usize).copied().unwrap_or("");
-                let op = if op.is_empty() { "equal" } else { op };
-                let val = match vts {
-                    4 => r.f64().map(formula::number_text),
-                    6 => {
-                        r.take(8);
-                        r.wstr()
-                    }
-                    8 => r.u8().map(|b| {
-                        if b != 0 {
-                            "TRUE".into()
-                        } else {
-                            "FALSE".into()
-                        }
-                    }),
-                    0x0C => Some(String::new()),
-                    0x0E => Some(String::new()),
-                    _ => None,
-                };
-                if let (Some(v), Some(c)) = (val, cur_filter_column(sheet)) {
-                    c.custom.push((op.to_string(), v));
-                }
-            }
-            170 => {
-                // BrtTop10Filter: 플래그 u8 (1 위, 2 백분율, 4 기준값 있음), 개수/백분율 f64, 기준값 f64
-                if let (Some(f), Some(v), Some(c)) = (r.u8(), r.f64(), cur_filter_column(sheet)) {
-                    c.top10 = Some((f & 0x01 != 0, f & 0x02 != 0, v));
-                    c.filter_val = r.f64().filter(|_| f & 0x04 != 0);
-                }
-            }
-            171 => {
-                // BrtDynamicFilter: cft u32, 플래그 u8, 값 f64, 최댓값 f64. 한셀은 플래그 바이트를 채우지 않고 쓰므로
-                // (관측: 같은 종류에 0x03·0x63·0xCC) 값은 플래그와 상관없이 0 이 아니면 있는 것으로 본다
-                if let (Some(t), Some(c)) = (r.u32(), cur_filter_column(sheet)) {
-                    c.dynamic = DYNAMIC_FILTER_TYPES
-                        .get(t as usize)
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string());
-                    let _flags = r.u8();
-                    c.dynamic_val = r.f64().filter(|&v| v != 0.0);
-                    c.dynamic_max_val = r.f64().filter(|&v| v != 0.0);
+                    sheet.tables.push(t.clone());
                 }
             }
             485 => {
@@ -2261,6 +2515,7 @@ fn read_sheet(
                     base: at,
                     xlsb: true,
                     row_shift: 0,
+                    tables: list_names,
                 };
                 // 배열 수식 범위 안의 다른 셀 (PtgExp 가 왼쪽 위의 행을 가리킨다): 수식은 왼쪽 위에만 둔다
                 let in_array = |m: CellRef| {
@@ -2369,6 +2624,7 @@ fn read_sheet(
                             base: cell.r,
                             xlsb: true,
                             row_shift: 0,
+                            tables: list_names,
                         };
                         if let Ok(Decoded::Text(t)) = formula::decode_relative(tokens, &ctx) {
                             f.text = t;
@@ -2663,7 +2919,14 @@ mod tests {
 
         let mut sheet = Sheet::default();
         let wb = Workbook::default();
-        read_sheet(&s, &mut sheet, &wb, &[], (&Vec::new(), &Vec::new())).unwrap();
+        read_sheet(
+            &s,
+            &mut sheet,
+            &wb,
+            &[],
+            (&Vec::new(), &Vec::new(), &[], &[]),
+        )
+        .unwrap();
         let bar_rule = &sheet.conditional_formats[0].rules[0];
         let bar = bar_rule.data_bar.as_ref().unwrap();
         assert_eq!((bar.min_length, bar.max_length), (Some(5), Some(95)));
@@ -2741,7 +3004,14 @@ mod tests {
         s.extend(rec(2, &le(&[5, 0, 0])));
         let mut sheet = Sheet::default();
         let wb = Workbook::default();
-        read_sheet(&s, &mut sheet, &wb, &[], (&Vec::new(), &Vec::new())).unwrap();
+        read_sheet(
+            &s,
+            &mut sheet,
+            &wb,
+            &[],
+            (&Vec::new(), &Vec::new(), &[], &[]),
+        )
+        .unwrap();
         let f = |row, col| {
             sheet
                 .cell(CellRef { row, col })
@@ -2788,7 +3058,14 @@ mod tests {
         });
         let mut sheet = Sheet::default();
         let wb = Workbook::default();
-        read_sheet(&s, &mut sheet, &wb, &rels, (&Vec::new(), &Vec::new())).unwrap();
+        read_sheet(
+            &s,
+            &mut sheet,
+            &wb,
+            &rels,
+            (&Vec::new(), &Vec::new(), &[], &[]),
+        )
+        .unwrap();
         let v: Vec<_> = sheet
             .hyperlinks
             .iter()
@@ -2846,5 +3123,125 @@ mod tests {
         let mut e = crate::model::DataBarExt::default();
         assign_bar_colors(vec![c(1), c(2), c(3), c(4)], &mut e);
         assert_eq!(slots(&e), [true; 4]);
+    }
+
+    /// XLNullableWideString
+    fn nws(s: Option<&str>) -> Vec<u8> {
+        match s {
+            None => le(&[u32::MAX]),
+            Some(s) => {
+                let mut b = le(&[s.encode_utf16().count() as u32]);
+                b.extend(s.encode_utf16().flat_map(u16::to_le_bytes));
+                b
+            }
+        }
+    }
+
+    #[test]
+    fn table_part_records() {
+        // 표 대조 실험에서 한셀이 쓴 표 파트 (A1:D6, 요약 행, 필터 조건, 요약 행 사용자 수식)
+        let mut list = le(&[0, 5, 0, 3, 0, 1, 1, 1, 1]);
+        list.extend(le(&[u32::MAX, u32::MAX, 2, u32::MAX, u32::MAX, 0, 0]));
+        for s in [Some("Table1"), Some("Table1"), None, None, None, None] {
+            list.extend(nws(s));
+        }
+        let col = |id: u32, ilta: u32, name: &str, label: Option<&str>| {
+            let mut b = le(&[id, ilta, u32::MAX, 1, u32::MAX, 0]);
+            for s in [None, Some(name), label, None, None, None] {
+                b.extend(nws(s));
+            }
+            b
+        };
+        let mut part = rec(343, &list);
+        part.extend(rec(161, &le(&[0, 4, 0, 3])));
+        part.extend(rec(163, &[0, 0, 0, 0, 0, 0]));
+        part.extend(rec(165, &le(&[0, 0])));
+        part.extend(rec(167, &nws(Some("사과"))));
+        part.extend(rec(166, &[]));
+        part.extend(rec(164, &[]));
+        part.extend(rec(162, &[]));
+        part.extend(rec(345, &le(&[4])));
+        for (i, (ilta, name, label)) in [
+            (0, "이름", Some("합계")),
+            (6, "수량", None),
+            (1, "단가", None),
+            (9, "금액", None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            part.extend(rec(347, &col(i as u32 + 1, ilta, name, label)));
+            if ilta == 9 {
+                // BrtListTrFmla: fArray u8 + CellParsedFormula (SUM(Table1[금액])/2)
+                let rgce = [
+                    0x18, 0x19, 0, 0, 1, 0, 1, 0, 0, 0, 3, 0, 0, 0, 0x19, 0x10, 0, 0, 0x1e, 2, 0, 6,
+                ];
+                let mut f = vec![0];
+                f.extend(le(&[rgce.len() as u32]));
+                f.extend_from_slice(&rgce);
+                f.extend(le(&[0]));
+                part.extend(rec(352, &f));
+            }
+            part.extend(rec(348, &[]));
+        }
+        part.extend(rec(346, &[]));
+        part.extend(rec(
+            513,
+            &[[7u8, 0].to_vec(), nws(Some("TableStyleMedium3"))].concat(),
+        ));
+        part.extend(rec(344, &[]));
+
+        let (t, fs) = read_table_part(&part).unwrap();
+        assert_eq!(
+            (t.id, t.name.as_str(), t.range.as_str()),
+            (1, "Table1", "A1:D6")
+        );
+        assert_eq!((t.header_rows, t.totals_rows, t.totals_shown), (1, 1, true));
+        assert_eq!(t.dxfs, [None, None, Some(2), None, None, Some(0)]);
+        let af = t.auto_filter.as_ref().unwrap();
+        assert_eq!(
+            (af.range.as_str(), af.columns[0].values.clone()),
+            ("A1:D5", vec!["사과".to_string()])
+        );
+        let names: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["이름", "수량", "단가", "금액"]);
+        assert_eq!(t.columns[0].totals_label.as_deref(), Some("합계"));
+        assert_eq!(t.columns[1].totals_function.as_deref(), Some("sum"));
+        assert_eq!(t.columns[2].totals_function.as_deref(), Some("average"));
+        assert_eq!(t.columns[3].totals_function.as_deref(), Some("custom"));
+        assert_eq!(t.columns[1].dxfs, [None, Some(1), None]);
+        let st = t.style.as_ref().unwrap();
+        assert_eq!(st.name.as_deref(), Some("TableStyleMedium3"));
+        assert!(st.first_column && st.last_column && st.row_stripes && !st.column_stripes);
+        // 요약 행 수식은 표 이름을 안 뒤에 글로 바꾼다
+        assert_eq!((fs[0].0, fs[0].1), (3, false));
+        let names = table_names(std::iter::once(&t));
+        let ctx = Context {
+            xti_sheets: &[],
+            names: &[],
+            xti_names: &[],
+            base: CellRef::default(),
+            xlsb: true,
+            row_shift: 0,
+            tables: &names,
+        };
+        assert_eq!(
+            formula::decode(&fs[0].2, &ctx).unwrap(),
+            Decoded::Text("SUM(Table1[금액])/2".into())
+        );
+
+        // 레거시 0xB00B: 없는 문자열은 빈 문자열, 끝에 요약 행 수식 표지와 수식
+        let mut b = le(&[4, 9, u32::MAX, 1, u32::MAX, 0, 0]);
+        b.extend(nws(Some("금액")));
+        b.extend(le(&[0, 0, 0, 0]));
+        b.extend_from_slice(&[2, 0, 3, 0, 0x1e, 2, 0]);
+        let (c, f) = list_col(&b, true).unwrap();
+        assert_eq!((c.name.as_str(), c.unique_name.as_deref()), ("금액", None));
+        assert_eq!(f.as_deref(), Some(&[0x1e, 2, 0][..]));
+        let mut b = le(&[1, 0, u32::MAX, 1, u32::MAX, 0, 0]);
+        b.extend(nws(Some("이름")));
+        b.extend(le(&[0, 0, 0, 0]));
+        b.push(0);
+        assert_eq!(list_col(&b, true).unwrap().1, None);
     }
 }

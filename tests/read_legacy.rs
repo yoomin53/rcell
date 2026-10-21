@@ -720,3 +720,112 @@ fn array_formulas_data_tables_and_local_names() {
     assert_eq!(note.comment.as_deref(), Some("설명"));
     assert_eq!(wb.defined_names.iter().filter(|n| n.name == "L").count(), 2);
 }
+
+/// 표 대조 실험에서 한셀이 쓴 배치: 전역의 표(0xB005 BrtBeginList, 0xB00B 열 + 요약 행 수식, 0xB00C 스타일, 0xB00D),
+/// 시트의 0xB00A(표 번호)·0xB006·0xB007(자동 필터), 구조적 참조(PtgList) 수식
+#[test]
+fn tables_and_structured_references() {
+    let le = |v: &[u32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+    let ws = |s: &str| {
+        let mut b = le(&[s.encode_utf16().count() as u32]);
+        b.extend(utf16(s));
+        b
+    };
+    let mut b = Biff::default();
+    b.rec(0x0809, &bof(0x0005));
+    let mut bs = vec![0, 0, 0, 0, 0, 0, 6, 0];
+    bs.extend(utf16("Sheet1"));
+    let bs_at = b.rec(0x0085, &bs);
+    // 표 1: A1:B4, 머리글 1, 요약 1 (요약 행을 보인 적 있음), 요약 차등 서식 2
+    let mut list = le(&[0, 3, 0, 1, 0, 1, 1, 1, 1]);
+    list.extend(le(&[u32::MAX, u32::MAX, 2, u32::MAX, u32::MAX, 0, 0]));
+    list.extend(ws("Table1"));
+    list.extend(ws("Table1"));
+    list.extend(le(&[0, 0, 0, 0]));
+    b.rec(0xB005, &list);
+    let col = |id: u32, ilta: u32, name: &str, label: &str, tail: &[u8]| {
+        let mut c = le(&[id, ilta, u32::MAX, 1, u32::MAX, 0, 0]);
+        c.extend(ws(name));
+        c.extend(ws(label));
+        c.extend(le(&[0, 0, 0]));
+        c.extend_from_slice(tail);
+        c
+    };
+    b.rec(0xB00B, &col(1, 0, "가", "합", &[0]));
+    // 요약 행 사용자 수식 SUM(Table1[나])/2: 표지 0x02, fArray, cce u16, 토큰열
+    let rgce = [
+        0x18, 0x19, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0x19, 0x10, 0, 0, 0x1e, 2, 0, 6,
+    ];
+    let mut tail = vec![2, 0, rgce.len() as u8, 0];
+    tail.extend_from_slice(&rgce);
+    b.rec(0xB00B, &col(2, 9, "나", "", &tail));
+    let mut st = vec![4, 0];
+    st.extend(ws("TableStyleLight9"));
+    b.rec(0xB00C, &st);
+    b.rec(0xB00D, &[]);
+    b.rec(0x000A, &[]);
+    let sheet_at = b.rec(0x0809, &bof(0x0010)) as u32;
+    // D1 = ROWS(Table1[#All]), D2 = SUM(Table1[[#Data],[가]:[나]])
+    let formula = |row: u32, col: u16, tokens: &[u8]| {
+        let mut fm = cell_head(row, col);
+        fm.extend_from_slice(&4.0f64.to_le_bytes());
+        fm.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        fm.extend_from_slice(&(tokens.len() as u16).to_le_bytes());
+        fm.extend_from_slice(tokens);
+        fm
+    };
+    b.rec(
+        0x0006,
+        &formula(
+            0,
+            3,
+            &[
+                0x18, 0x19, 0, 0, 4, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0x41, 0x4c, 0,
+            ],
+        ),
+    );
+    b.rec(
+        0x0006,
+        &formula(
+            1,
+            3,
+            &[
+                0x18, 0x19, 0, 0, 0x12, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0x19, 0x10, 0, 0,
+            ],
+        ),
+    );
+    b.rec(0xB00A, &le(&[1]));
+    b.rec(0xB006, &[]);
+    b.rec(0xB007, &[2, 0]);
+    b.rec(0x000A, &[]);
+    b.0[bs_at + 4..bs_at + 8].copy_from_slice(&sheet_at.to_le_bytes());
+
+    let wb = read_workbook_stream(&b.0).unwrap();
+    let s = &wb.sheets[0];
+    let t = &s.tables[0];
+    assert_eq!(
+        (t.id, t.name.as_str(), t.range.as_str()),
+        (1, "Table1", "A1:B4")
+    );
+    assert_eq!((t.header_rows, t.totals_rows, t.dxfs[2]), (1, 1, Some(2)));
+    // 레거시는 필터 조건을 담지 않는다: 범위만 (요약 행을 뺀 표 범위)
+    let af = t.auto_filter.as_ref().unwrap();
+    assert_eq!((af.range.as_str(), af.columns.len()), ("A1:B3", 0));
+    assert_eq!(t.columns[0].totals_label.as_deref(), Some("합"));
+    assert_eq!(t.columns[1].totals_function.as_deref(), Some("custom"));
+    assert_eq!(
+        t.columns[1].totals_formula.as_deref(),
+        Some("SUM(Table1[나])/2")
+    );
+    assert_eq!(
+        t.style.as_ref().unwrap().name.as_deref(),
+        Some("TableStyleLight9")
+    );
+    let f = |row, col| {
+        s.cell(CellRef { row, col })
+            .and_then(|c| c.formula.as_ref())
+            .map(|f| f.text.clone())
+    };
+    assert_eq!(f(0, 3).as_deref(), Some("ROWS(Table1[#All])"));
+    assert_eq!(f(1, 3).as_deref(), Some("SUM(Table1[[#Data],[가]:[나]])"));
+}

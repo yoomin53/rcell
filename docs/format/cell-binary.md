@@ -20,7 +20,8 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
 | `xl/sharedStrings.bin` | `application/vnd.ms-excel.sharedStrings` |
 | `xl/theme/theme1.xml` | 테마 (XML 그대로) |
 | `xl/vbsProject.bin` | 한컴 매크로 프로젝트 — XML 과 같은 복합 문서 파트 (`application/vnd.hancom-office.vbsProject`, [cell-2024.md](cell-2024.md) 7.10절) |
-| `xl/tables/tableN.bin`, `xl/pivotTables/pivotTableN.bin`, `xl/pivotCache/pivotCacheDefinitionN.bin`·`pivotCacheRecordsN.bin` | 표(`BrtBeginList` 343 …)·피벗 — 레코드 파트. rcell 은 아직 읽지 않는다 |
+| `xl/tables/tableN.bin` | 표 — 레코드 파트 (2절 표) |
+| `xl/pivotTables/pivotTableN.bin`, `xl/pivotCache/pivotCacheDefinitionN.bin`·`pivotCacheRecordsN.bin` | 피벗 — 레코드 파트. rcell 은 아직 읽지 않는다 |
 
 ## 2. 한셀 고유 사항 (관측)
 
@@ -39,6 +40,8 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
 | 이름 | `BrtName` 의 `fBuiltin`(0x20) 이면 `Print_Area` 같은 내장 이름 → XML 의 `_xlnm.Print_Area`. `itab` 은 시트 범위(0xFFFFFFFF 통합 문서), 수식 뒤 `comment`(XLNullableWideString)가 XML `comment` |
 | 배열 수식 | 왼쪽 위 셀의 `BrtFmla*` 뒤에 `BrtArrFmla`(426: RfX, 플래그 u8, 수식). 범위 안 셀은 모두 `PtgExp`(왼쪽 위의 행 + PtgExtraCol 열) 수식 셀이다 (수식 대조 실험) |
 | 하이퍼링크 | `BrtHLink`(494: RfX, 관계 ID XLNullableWideString, 위치·화면 설명·표시 글 XLWideString). 한셀은 관계 ID·위치가 없는 링크에 **앞 레코드의 값을 그대로 남긴다** (하이퍼링크 대조 실험: 위치만 있는 링크에 앞 링크의 `rId1`, 주소만 있는 링크에 앞 링크의 위치) — rcell 은 앞 레코드와 한쪽만 같은 값을 남은 값으로 보고 버린다 (주소·위치가 함께 바뀌는 링크는 그대로) |
+| 표 | 표 파트 (시트 관계 `table`, 시트 끝 `BrtBeginListParts`(660) 안 `BrtListPart`(661: 관계 ID) 순서): `BrtBeginList`(343: RfX, 종류 u32 (0 worksheet, 1 xml, 2 queryTable), 표 번호, 머리글 행 수, 요약 행 수, 플래그 u32 (0x01 요약 행을 보인 적 있음), 차등 서식 6개 (머리글·데이터·요약·표 테두리·머리글 테두리·요약 테두리, 없으면 0xFFFFFFFF), 연결 번호, 이름·표시 이름·설명·셀 스타일 3개 XLNullableWideString), 시트와 같은 자동 필터 레코드(161…), `BrtBeginListCols`(345: 열 수), 열마다 `BrtBeginListCol`(347: 열 번호, 요약 함수 (0 없음, 1 average, 2 count, 3 countNums, 4 max, 5 min, 6 sum, 7 stdDev, 8 var, 9 custom), 차등 서식 3개 (머리글·데이터·요약), 쿼리 표 필드, 고유 이름·이름·요약 글·셀 스타일 3개)와 요약 행 사용자 수식 `BrtListTrFmla`(352: fArray u8 + CellParsedFormula), `BrtTableStyleClient`(513: 플래그 u16 — 0x01 첫 열, 0x02 끝 열, 0x04 행 줄무늬, 0x08 열 줄무늬 — 와 이름), `BrtEndList`(344). 한셀은 `totalsRowBorderDxfId` 를 늘 0 으로 쓴다 (표 대조 실험) |
+| 구조적 참조 | `PtgList`(0x18 0x19): `ixti u16, 플래그 u16, 표 번호 u32, 첫 열 u16, 끝 열 u16`. 플래그 비트 0–1 열 (0 없음, 1 하나, 2 범위), 비트 2–6 행 종류 (0 기본(데이터), 0x01 `#All`, 0x02 `#Headers`, 0x04 `#Data`, 0x08 `#Totals`, 0x10 `#This Row`, 겹치면 합), 비트 10–11 토큰 클래스. `ixti` 는 표가 있는 시트의 XTI. 한셀이 XML 에 쓰는 글: `Table1[수량]`, `Table1[]`(열 없음), `Table1[[수량]:[단가]]`, `Table1[#All]`, `Table1[[#This Row],[수량]]`, 겹친 행 종류는 `#Data`·`#Headers`·`#Totals` 순 (`[[#Headers],[#Data],[수량]]` → `[[#Data],[#Headers],[수량]]`) |
 | 데이터 표 | `BrtTable`(428: RfX, 입력 1 행·열 u32, 입력 2 행·열 u32, 플래그 u8 — 0x01 행 입력, 0x02 2변수)이 왼쪽 위 셀 **앞에** 온다. 표의 셀은 수식 없이 값 셀이다. 1변수 표의 입력 2 는 0 |
 | 외부 연결 | `workbook.bin` 의 `BrtSupBookSrc`(355) = 관계 ID → `xl/externalLinks/externalLinkN.bin`: `BrtBeginSupBook`(360, `sbt u16` 0 = 외부 + 관계 ID → `externalLinkPath`), `BrtSupTabs`(359, `cTab u32` + 시트 이름들) |
 | 통합 문서 | `BrtWbProp`(153): `플래그 u32 (0x01 1904 날짜 체계), dwThemeVersion u32, 코드 이름 XLWideString` (`workbookPr/@codeName`). `BrtBookView`(158, 29바이트): `xWn i32, yWn i32, dxWn u32, dyWn u32 (1/20 pt), iTabRatio u32, itabFirst u32, itabCur u32, 플래그 u8` — 0x08 가로 스크롤, 0x10 세로 스크롤, 0x20 시트 탭 ([MS-XLSB] 그대로, 통합 문서 창 대조 실험) |
@@ -232,7 +235,7 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 |---|---|
 | 글꼴 | 계열·문자 집합이 없으면 2·0x81, 색은 RGB `05 00 00 00 R G B FF` |
 | 채우기 | 무늬 색이 없으면 `05 40 00 00 00 00 00 FF`, 배경색이 없으면 `01 41 00 00 FF FF FF FF`, RGB 는 icv 칸에 0x40(무늬)·0x41(배경), 색인 64 는 `03 40 00 00 FF FF FF DF`. 그라데이션은 두 색 칸에 `01 40 … DF`·`01 41 … FF` |
-| 테두리 | 선의 자동 색은 `01 00 00 00 FF FF FF DF` (서식 파일 683·조작 문서 33 선; 새 문서 15 선은 `FF` — 숨은 상태), 선 없음은 RGB 색 그대로, 자동·없음이면 검정 RGB |
+| 테두리 | 선 종류가 없는 선(dg 0)에도 색이 있다 (한셀은 검정 RGB) — rcell 은 남겨 XML 에 쓴다 ([cell-2024.md](cell-2024.md) 7.10절의 `dataDxfId`). 선의 자동 색은 `01 00 00 00 FF FF FF DF` (서식 파일 683·조작 문서 33 선; 새 문서 15 선은 `FF` — 숨은 상태), 선 없음은 RGB 색 그대로, 자동·없음이면 검정 RGB |
 | XF | 맞춤이 없으면 세로 아래(2), 보호가 없으면 잠금. 적용 비트는 XML 의 `apply*` 그대로 |
 | 스타일 | 모두 `fBuiltIn`, 사용자 정의 스타일은 앞 스타일의 내장 번호, 수준 없음 0xFF |
 | 차등 서식 | XFProp 은 채우기 → 글꼴 → 테두리 순, 묶음 안은 번호 순. `fNewBorder`(0x8000)는 위·아래·왼쪽·오른쪽을 모두 지정한 테두리. 속성 없는 글꼴은 0x18(이름)으로 자리를 남긴다 |

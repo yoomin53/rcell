@@ -887,6 +887,9 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
     let mut para_refs: Vec<u32> = Vec::new();
     // MSODRAWINGGROUP: OfficeArtDggContainer (그림 저장소)
     let mut dgg: Vec<u8> = Vec::new();
+    // 표 (0xB005…0xB00D), 그리고 요약 행 수식 (표 번호, 열 번호, 토큰열) — 표를 모두 읽은 뒤 글로 바꾼다
+    let mut tables: Vec<crate::model::Table> = Vec::new();
+    let mut table_formulas: Vec<(usize, usize, Vec<u8>)> = Vec::new();
 
     // 전역 부분: 첫 EOF 까지
     for rec in recs.iter().skip(1) {
@@ -930,6 +933,24 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 wb.code_name = r.utf16(cch).filter(|s| !s.is_empty());
             }
             0x00EB => dgg.extend_from_slice(d),
+            // 표 (한컴): 0xB005 = BrtBeginList, 0xB00B = BrtBeginListCol (+ 요약 행 수식), 0xB00C = BrtTableStyleClient,
+            // 0xB00D 끝 — 바이너리 표 파트와 같은 꼴이다. 어느 시트의 표인지는 시트의 0xB00A 가 정한다 (표 대조 실험)
+            0xB005 => tables.extend(crate::binary::reader::begin_list(d)),
+            0xB00B => {
+                if let Some((c, totals)) = crate::binary::reader::list_col(d, true)
+                    && let Some(i) = tables.len().checked_sub(1)
+                {
+                    if let Some(rgce) = totals {
+                        table_formulas.push((i, tables[i].columns.len(), rgce));
+                    }
+                    tables[i].columns.push(c);
+                }
+            }
+            0xB00C => {
+                if let Some(t) = tables.last_mut() {
+                    t.style = crate::binary::reader::table_style_client(d);
+                }
+            }
             // 통합 문서 보호: PROTECT (구조), WINDOWPROTECT (창), PASSWORD
             0x0012 | 0x0019 | 0x0013 => {
                 let v = r.u16().unwrap_or(0);
@@ -1328,6 +1349,23 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         })
         .collect();
     let name_list: Vec<String> = pending_names.iter().map(|n| n.name.clone()).collect();
+    let table_names = crate::binary::reader::table_names(tables.iter());
+    for (i, col, rgce) in table_formulas {
+        let ctx = Context {
+            xti_sheets: &xti_sheets,
+            names: &name_list,
+            xti_names: &xti_names,
+            base: CellRef::default(),
+            xlsb: false,
+            row_shift: 0,
+            tables: &table_names,
+        };
+        if let Ok(Decoded::Text(t)) = formula::decode(&rgce, &ctx)
+            && let Some(c) = tables[i].columns.get_mut(col)
+        {
+            c.totals_formula = Some(t);
+        }
+    }
 
     // 수식이 없는 NAME 은 정의되지 않은 이름(=XYZ)이나 _xlfn. 함수 이름 자리다.
     wb.defined_names = pending_names
@@ -1341,6 +1379,7 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 base: CellRef::default(),
                 xlsb: false,
                 row_shift: 0,
+                tables: &table_names,
             };
             let formula = match formula::decode(&n.rgce, &ctx) {
                 Ok(Decoded::Text(t)) => t,
@@ -1391,7 +1430,13 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 .ok_or_else(|| bad("BOUNDSHEET 위치에 BOF 가 없습니다"))?;
             let local_names =
                 formula::names_for_sheet(&name_list, &name_scopes, &sheet_names, wb.sheets.len());
-            let ctx_sheets = (&xti_sheets, &local_names, &xti_names);
+            let ctx_sheets = (
+                &xti_sheets,
+                &local_names,
+                &xti_names,
+                &table_names[..],
+                &tables[..],
+            );
             let mut charts = Vec::new();
             read_sheet(
                 &recs[start..],
@@ -1588,12 +1633,21 @@ fn rk_value(rk: u32) -> f64 {
 }
 
 /// 시트 하나. `charts` 에는 한컴 차트(0x7EF0) 레코드를 나온 순서대로 담는다 — 시트의 앞 도형들이 그 차트다
+/// 시트 수식에 필요한 통합 문서 정보: XTI 별 시트, 이름, XTI 별 외부 이름, 표 이름, 표
+type SheetRefs<'a> = (
+    &'a Vec<Option<String>>,
+    &'a Vec<String>,
+    &'a Vec<Vec<String>>,
+    &'a [formula::TableName],
+    &'a [crate::model::Table],
+);
+
 fn read_sheet(
     recs: &[Logical],
     sheet: &mut Sheet,
     wb: &Workbook,
     cell_map: &HashMap<u16, u32>,
-    (xti_sheets, names, xti_names): (&Vec<Option<String>>, &Vec<String>, &Vec<Vec<String>>),
+    (xti_sheets, names, xti_names, list_names, lists): SheetRefs,
     dxf_extra: &mut Vec<(u32, Dxfn)>,
     charts: &mut Vec<Vec<u8>>,
 ) -> Result<()> {
@@ -1759,6 +1813,7 @@ fn read_sheet(
                                 base: copy.r,
                                 xlsb: false,
                                 row_shift: (row - first) as i64,
+                                tables: list_names,
                             };
                             if let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx) {
                                 copy.formula = Some(Formula {
@@ -1879,6 +1934,7 @@ fn read_sheet(
                     base: at,
                     xlsb: false,
                     row_shift: 0,
+                    tables: list_names,
                 };
                 let formula = match formula::decode(rgce, &ctx) {
                     Ok(Decoded::Text(t)) => {
@@ -1909,6 +1965,7 @@ fn read_sheet(
                                     base: at,
                                     xlsb: false,
                                     row_shift: 0,
+                                    tables: list_names,
                                 };
                                 match formula::decode(tokens, &c) {
                                     Ok(Decoded::Text(t)) => Some(t),
@@ -1935,6 +1992,26 @@ fn read_sheet(
                 });
                 pending_string_cell = is_string.then(|| sheet.cells.len() - 1);
             }
+            // 이 시트의 표 (전역 0xB005… 의 표 번호), 이어지는 0xB006·0xB007(열 수)은 그 표의 자동 필터 — 필터 조건은
+            // 레거시에 남지 않는다 (표 대조 실험)
+            0xB00A => {
+                if let Some(id) = r.u32()
+                    && let Some(t) = lists.iter().find(|t| t.id == id)
+                {
+                    sheet.tables.push(t.clone());
+                }
+            }
+            0xB006 => {
+                if let Some(t) = sheet.tables.last_mut()
+                    && let Some(mut rg) = CellRange::parse(&t.range)
+                {
+                    rg.end.row = rg.end.row.saturating_sub(t.totals_rows);
+                    t.auto_filter = Some(crate::model::AutoFilter {
+                        range: rg.to_string(),
+                        columns: Vec::new(),
+                    });
+                }
+            }
             0x0221 => {
                 // ARRAY: rwFirst u32, rwLast u32, colFirst u16, colLast u16, grbit u16, chn u32, cce u16 + 토큰.
                 // 직전 FORMULA(PtgExp 가 자기 자신)가 왼쪽 위 셀이다 (수식 대조 실험)
@@ -1956,6 +2033,7 @@ fn read_sheet(
                     base: start,
                     xlsb: false,
                     row_shift: 0,
+                    tables: list_names,
                 };
                 if let Some(cell) = sheet.cells.last_mut()
                     && cell.r == start
@@ -2061,6 +2139,7 @@ fn read_sheet(
                             base: cell.r,
                             xlsb: false,
                             row_shift: 0,
+                            tables: list_names,
                         };
                         if let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx) {
                             tokens_at.insert((cell.r.row, cell.r.col), tokens.to_vec());
@@ -2178,6 +2257,7 @@ fn read_sheet(
                         base,
                         xlsb: false,
                         row_shift: 0,
+                        tables: list_names,
                     };
                     match formula::decode(t, &ctx) {
                         Ok(Decoded::Text(x)) => Some(x),
@@ -2287,6 +2367,7 @@ fn read_sheet(
                         base,
                         xlsb: false,
                         row_shift: 0,
+                        tables: list_names,
                     };
                     match formula::decode(t, &ctx) {
                         Ok(Decoded::Text(x)) => x,
@@ -2404,6 +2485,7 @@ fn read_sheet(
                         base,
                         xlsb: false,
                         row_shift: 0,
+                        tables: list_names,
                     };
                     match formula::decode(t, &ctx) {
                         Ok(Decoded::Text(x)) => Some(x),
