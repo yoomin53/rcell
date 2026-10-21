@@ -84,6 +84,10 @@ impl<'a> Ctx<'a> {
             Expr::Array(a) => Value::Array(a.clone()),
             Expr::Ref(r) => self.resolve_ref(r),
             Expr::Name(n) => self.eval_name(n),
+            Expr::Table(t) => match self.eng.resolve_table(t, self.sheet, self.row, self.col) {
+                Ok(a) => Value::Ref(Rc::new(vec![a])),
+                Err(e) => Value::Error(e),
+            },
             Expr::Paren(x) => self.eval(x),
             Expr::Unary(op, x) => self.unary(*op, x),
             Expr::Binary(op, a, b) => match op {
@@ -168,7 +172,7 @@ impl<'a> Ctx<'a> {
         };
         match v {
             Value::Empty => Value::Number(0.0),
-            Value::Number(n) if n == 0.0 => Value::Number(0.0),
+            Value::Number(0.0) => Value::Number(0.0),
             Value::Number(n) if !n.is_finite() => Value::Error(ErrorKind::Num),
             other => other,
         }
@@ -559,7 +563,7 @@ pub fn broadcast_dim(a: usize, b: usize) -> usize {
 /// 참조를 돌려줄 수 있는 식인가 (참조, 이름, 참조 연산, 참조 함수)
 pub fn is_reference_expr(e: &Expr) -> bool {
     match e {
-        Expr::Ref(_) | Expr::Name(_) => true,
+        Expr::Ref(_) | Expr::Name(_) | Expr::Table(_) => true,
         Expr::Paren(x) => is_reference_expr(x),
         Expr::Binary(BinaryOp::Range | BinaryOp::Union | BinaryOp::Intersect, _, _) => true,
         Expr::Call(c) => matches!(

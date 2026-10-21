@@ -11,10 +11,12 @@ pub mod drawing;
 pub mod shared_strings;
 pub mod sheet;
 pub mod styles;
+pub mod table;
 
 use crate::error::{Error, Result};
 use crate::model::{
-    CellValue, DefinedName, ExternalLink, FileVersion, Sheet, SheetKind, SheetState, Workbook,
+    CellValue, DefinedName, ExternalLink, FileVersion, PartLink, RawPart, Sheet, SheetKind,
+    SheetState, Workbook,
 };
 use crate::ns;
 use crate::package::{Package, Relationship};
@@ -89,6 +91,7 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
         };
         wb.application = field("Application");
         wb.app_version = field("AppVersion");
+        wb.total_time = field("TotalTime").and_then(|t| t.parse().ok());
     }
     wb.properties = read_core_properties(pkg, &root_rels)?;
 
@@ -107,7 +110,12 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
     }
     if let Some(pr) = root.sml_child("workbookPr") {
         wb.date1904 = pr.attr_bool("date1904").unwrap_or(false);
+        wb.code_name = pr.attr("codeName").map(str::to_string);
     }
+    wb.view = root
+        .sml_child("bookViews")
+        .and_then(|b| b.sml_child("workbookView"))
+        .map(parse_workbook_view);
     if let Some(p) = root.sml_child("workbookProtection") {
         wb.protection = Some(crate::model::WorkbookProtection {
             lock_structure: p.attr_bool("lockStructure").unwrap_or(false),
@@ -138,6 +146,7 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
                 local_sheet_id: d.attr_u32("localSheetId"),
                 hidden: d.attr_bool("hidden").unwrap_or(false),
                 formula: d.text(),
+                comment: d.attr("comment").map(str::to_string),
             })
             .collect();
     }
@@ -199,11 +208,28 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
         .iter()
         .find(|r| r.rel_type == ns::REL_HANCOM_VBS_PROJECT)
         .map(|r| r.target.clone());
+    wb.part_links = read_part_links(pkg, &wb_rels, WORKBOOK_PART_LINKS, false, &mut wb.raw_parts)?;
+    // 피벗 캐시 번호 (피벗 표의 cacheId 가 가리킨다)
+    for pc in root
+        .sml_child("pivotCaches")
+        .into_iter()
+        .flat_map(|p| p.sml_children("pivotCache"))
+    {
+        if let (Some(id), Some(rel)) = (
+            pc.attr_u32("cacheId"),
+            pc.rel_id().and_then(|r| wb_rels.iter().find(|x| x.id == r)),
+        ) && let Some(l) = wb.part_links.iter_mut().find(|l| l.part == rel.target)
+        {
+            l.cache_id = Some(id);
+        }
+    }
+    wb.hancom.vbs_project = vbs_project_of(&wb.part_links, &wb.raw_parts);
 
     if let Some(sst) = wb_rels.iter().find(|r| rel_is(r, "/sharedStrings"))
         && let Some(e) = pkg.read_xml(&sst.target)?
     {
         wb.shared_strings = shared_strings::parse_shared_strings(&e);
+        wb.shared_strings_count = e.attr_u32("count");
     }
     if let Some(th) = wb_rels.iter().find(|r| rel_is(r, "/theme"))
         && let Some(e) = pkg.read_xml(&th.target)?
@@ -251,14 +277,113 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
             && let Some(ws) = pkg.read_xml(&rel.target)?
         {
             let rels = pkg.relationships(&rel.target)?;
-            sheet::parse_worksheet(&ws, &mut sheet, &wb.shared_strings, &rels);
+            sheet::parse_worksheet(
+                &ws,
+                &mut sheet,
+                &wb.shared_strings,
+                &rels,
+                &mut wb.styles.dxfs,
+            );
             read_sheet_comments(pkg, &ws, &rels, &mut sheet)?;
             read_sheet_drawings(pkg, &rels, &mut wb.raw_parts, &mut sheet)?;
+            read_sheet_tables(pkg, &ws, &rels, &mut wb.raw_parts, &mut sheet)?;
+            sheet.part_links =
+                read_part_links(pkg, &rels, SHEET_PART_LINKS, false, &mut wb.raw_parts)?;
         }
         wb.sheets.push(sheet);
     }
     finish_selection(&root, &mut wb);
     Ok(wb)
+}
+
+/// 원본 그대로 옮겨 쓰는 통합 문서 관계: (관계 종류 끝부분, 바이너리 원본에서도 같은 꼴의 파트인지).
+/// 피벗 캐시·연결·XML 대응은 바이너리에서 `.bin` 레코드 파트라 XML 패키지로 옮길 수 없다
+pub(crate) const WORKBOOK_PART_LINKS: &[(&str, bool)] = &[
+    ("/pivotCacheDefinition", false),
+    ("/connections", false),
+    ("/xmlMaps", false),
+    ("/customXml", true),
+    ("/vbaProject", true),
+    ("/vbsProject", true),
+];
+
+/// 원본 그대로 옮겨 쓰는 시트 관계 (표는 모델로도 읽는다 — [`read_sheet_tables`])
+pub(crate) const SHEET_PART_LINKS: &[(&str, bool)] = &[
+    ("/pivotTable", false),
+    ("/queryTable", false),
+    ("/printerSettings", true),
+];
+
+/// 관계 가운데 원본 그대로 옮겨 쓸 파트를 골라 (관계가 가리키는 파트까지) 복사하고 관계를 돌려준다.
+/// `binary` 면 바이너리 원본에서도 같은 꼴인 파트만
+pub(crate) fn read_part_links(
+    pkg: &mut Package,
+    rels: &[Relationship],
+    kinds: &[(&str, bool)],
+    binary: bool,
+    raw_parts: &mut Vec<RawPart>,
+) -> Result<Vec<PartLink>> {
+    let mut out = Vec::new();
+    for r in rels.iter().filter(|r| !r.external) {
+        if !kinds
+            .iter()
+            .any(|(k, same)| r.rel_type.ends_with(k) && (*same || !binary))
+            || !pkg.has_part(&r.target)
+        {
+            continue;
+        }
+        copy_part_tree(pkg, &r.target, raw_parts)?;
+        out.push(PartLink {
+            rel_type: r.rel_type.clone(),
+            part: r.target.clone(),
+            cache_id: None,
+        });
+    }
+    Ok(out)
+}
+
+/// 한컴 매크로 프로젝트 파트(복합 문서)의 `_VBS_PROJECT_W` 스트림
+pub(crate) fn vbs_project_of(links: &[PartLink], raw_parts: &[RawPart]) -> Option<Vec<u8>> {
+    let l = links
+        .iter()
+        .find(|l| l.rel_type == ns::REL_HANCOM_VBS_PROJECT)?;
+    let p = raw_parts.iter().find(|p| p.name == l.part)?;
+    crate::cfb::Cfb::open(&p.data)
+        .ok()?
+        .read(ns::VBS_PROJECT_STREAM)
+        .ok()
+}
+
+/// 시트의 표 파트를 `tableParts` 순서로 모델로 읽고, 파트는 그대로 보관한다
+fn read_sheet_tables(
+    pkg: &mut Package,
+    ws: &crate::xml::Element,
+    rels: &[Relationship],
+    raw_parts: &mut Vec<RawPart>,
+    sheet: &mut Sheet,
+) -> Result<()> {
+    let mut list: Vec<&Relationship> = ws
+        .sml_child("tableParts")
+        .into_iter()
+        .flat_map(|t| t.sml_children("tablePart"))
+        .filter_map(|t| t.rel_id())
+        .filter_map(|id| rels.iter().find(|r| r.id == id))
+        .collect();
+    for r in rels.iter().filter(|r| rel_is(r, "/table")) {
+        if !list.iter().any(|x| x.id == r.id) {
+            list.push(r);
+        }
+    }
+    for r in list.into_iter().filter(|r| !r.external) {
+        let Some(e) = pkg.read_xml(&r.target)? else {
+            continue;
+        };
+        let mut t = table::parse_table(&e);
+        t.part = Some(r.target.clone());
+        copy_part_tree(pkg, &r.target, raw_parts)?;
+        sheet.tables.push(t);
+    }
+    Ok(())
 }
 
 /// 시트의 메모 파트(관계 `comments`)와 VML(`legacyDrawing`)을 읽는다. XML·바이너리 시트가 함께 쓴다.
@@ -361,6 +486,24 @@ fn copy_part_tree(
         }
     }
     Ok(())
+}
+
+/// `workbookView`: 창 위치·크기(1/20 pt), 탭 비율, 첫 탭, 활성 탭, 스크롤 막대·탭 표시
+fn parse_workbook_view(v: &crate::xml::Element) -> crate::model::WorkbookView {
+    let d = crate::model::WorkbookView::default();
+    let int = |n: &str| v.attr(n).and_then(|x| x.trim().parse::<i32>().ok());
+    crate::model::WorkbookView {
+        x_window: int("xWindow").unwrap_or(d.x_window),
+        y_window: int("yWindow").unwrap_or(d.y_window),
+        window_width: v.attr_u32("windowWidth").unwrap_or(d.window_width),
+        window_height: v.attr_u32("windowHeight").unwrap_or(d.window_height),
+        tab_ratio: v.attr_u32("tabRatio").unwrap_or(d.tab_ratio),
+        first_sheet: v.attr_u32("firstSheet").unwrap_or(d.first_sheet),
+        active_tab: v.attr_u32("activeTab").unwrap_or(d.active_tab),
+        show_horizontal_scroll: v.attr_bool("showHorizontalScroll").unwrap_or(true),
+        show_vertical_scroll: v.attr_bool("showVerticalScroll").unwrap_or(true),
+        show_sheet_tabs: v.attr_bool("showSheetTabs").unwrap_or(true),
+    }
 }
 
 fn finish_selection(root: &crate::xml::Element, wb: &mut Workbook) {

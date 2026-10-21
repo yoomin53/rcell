@@ -11,8 +11,16 @@
 //! - `_x`(공백 맞춤)와 `*x`(채우기)는 표시 문자열에 아무것도 넣지 않는다
 //! - 반올림 결과가 0 이면 음수 부호를 붙이지 않는다
 //! - 조건부 서식에서 조건에 맞지 않아 마지막 구역을 쓰면 음수에 `-` 를 붙인다
-//! - `aaa`/`aaaa` 와 `[$-412]` 의 `ddd`/`dddd` 는 한국어 요일
+//! - `aaa`/`aaaa` 와 `[$-412]` 의 `ddd`/`dddd` 는 한국어 요일, `[$-412]` 의 AM/PM·A/P 는 오전/오후
 //! - 표시할 수 없는 날짜(음수, 9999년 이후)는 `#` 로 채운다
+//! - 일반 서식은 유효숫자 10자리(1 미만은 9자리), `[DBNum]` 일반 서식은 15자리, `@` 의 숫자도 15자리
+//! - `[DBNum1]`–`[DBNum4]`: 한자(六 은 호환 한자 U+F9D1)·갖은자·전각·한글 숫자. 일반 서식과 날짜의 월·일·시·분·초는
+//!   자릿값(十二, 壹拾貳, 일십이), 자리 표시자 서식과 연도는 숫자마다
+//! - `G/표준` 은 일반 서식이 아니다 (연호 G + 글자 `/표준`)
+//! - 조건 구역은 `[<0]` 만 음수 부호를 뺀다, 고정 분모 분수(`?/4`)는 정수부를 버린다, 공학 표기는 가수의 소수를 자른다
+//! - `[$-F800]`·`[$-F400]` 은 한국어 시스템 날짜·시간, `[$-411]` 은 일본 연호, `[$-804]` 의 `aaaa` 는 星期
+//!
+//! 자세한 관측은 docs/format/cell-2024.md 7.11절.
 
 use crate::model::CellValue;
 use std::cell::Cell;
@@ -139,6 +147,12 @@ struct Section {
     color: Option<String>,
     cond: Option<(Op, f64)>,
     korean: bool,
+    /// `[$-xxx]` 의 언어 번호 (16진, 예 0x411 일본어, 0xF800 시스템 긴 날짜)
+    locale: u32,
+    /// 시스템 시간([$-F400])의 초를 버린다: 원래 구역에 초가 없을 때 (있으면 반올림)
+    sys_trunc: bool,
+    /// `[DBNum1]`–`[DBNum4]`: 한자·갖은자·전각·한글 숫자 (이 구역만)
+    dbnum: u8,
 }
 
 impl Section {
@@ -277,12 +291,15 @@ fn parse_section(src: &str) -> Section {
                     sec.toks.push(Tok::Elapsed('m', il.len()));
                 } else if !il.is_empty() && il.chars().all(|c| c == 's') {
                     sec.toks.push(Tok::Elapsed('s', il.len()));
+                } else if let Some(k) = il.strip_prefix("dbnum") {
+                    sec.dbnum = k.parse().ok().filter(|k| (1..=4).contains(k)).unwrap_or(0);
                 } else if let Some(cur) = inner.strip_prefix('$') {
                     let (sym, loc) = cur.split_once('-').unwrap_or((cur, ""));
                     if !sym.is_empty() {
                         push_lit(&mut sec.toks, sym);
                     }
-                    if loc.eq_ignore_ascii_case("412") {
+                    sec.locale = u32::from_str_radix(loc.trim(), 16).unwrap_or(0);
+                    if sec.locale == 0x412 {
                         sec.korean = true;
                     }
                 }
@@ -294,11 +311,6 @@ fn parse_section(src: &str) -> Section {
         if rest_l.starts_with("general") {
             sec.toks.push(Tok::General);
             i += 7;
-            continue;
-        }
-        if rest.starts_with("G/표준") {
-            sec.toks.push(Tok::General);
-            i += 4;
             continue;
         }
         if rest_l.starts_with("am/pm") {
@@ -351,6 +363,19 @@ fn parse_section(src: &str) -> Section {
         i += 1;
     }
     resolve_minutes(&mut sec.toks);
+    // 시스템 날짜·시간 ([$-F800] 긴 날짜, [$-F400] 시간): 한셀은 구역의 나머지와 상관없이 한국어 꼴로 쓴다
+    // (`2026년 10월 19일 월요일`, `오후 1:37:38` — 표시 형식 대조 실험)
+    let system = match sec.locale {
+        0xF800 => Some("yyyy\"년\" m\"월\" d\"일\" dddd"),
+        0xF400 => Some("AM/PM h:mm:ss"),
+        _ => None,
+    };
+    if let Some(code) = system {
+        sec.sys_trunc = !sec.toks.iter().any(|t| matches!(t, Tok::Dt('s', _)));
+        let s = parse_section(code);
+        sec.toks = s.toks;
+        sec.korean = true;
+    }
     // 날짜 서식에서 '/' 는 글자 그대로다
     if sec.is_date() {
         for t in sec.toks.iter_mut() {
@@ -359,7 +384,116 @@ fn parse_section(src: &str) -> Section {
             }
         }
     }
+    // [DBNum] 구역의 글자(따옴표 안 숫자 포함)는 숫자를 바꾸지 않는다: 표지로 감싸 두고 마지막에 뗀다
+    if sec.dbnum != 0 {
+        for t in sec.toks.iter_mut() {
+            if let Tok::Lit(l) = t {
+                *l = format!("{LIT_OPEN}{l}{LIT_CLOSE}");
+            }
+        }
+    }
     sec
+}
+
+/// [DBNum] 구역에서 바꾸지 않을 글자의 표지 (사용자 영역 문자, 출력 전에 뗀다)
+const LIT_OPEN: char = '\u{E000}';
+const LIT_CLOSE: char = '\u{E001}';
+
+/// `[DBNumN]` 의 숫자 0–9 (한셀 표시 결과, 표시 형식 대조 실험): 1 한자 (0 은 전각 ０), 2 갖은자 (四·六·七·八·九 는
+/// 보통 한자), 3 전각 아라비아 숫자, 4 한글. 한셀은 六·零·參 을 한자 호환 영역 글자(KS X 1001 의 따로 읽는 한자)로
+/// 쓴다: 六 U+F9D1, 零 U+F9B2, 參 U+F96B (DBNum2 의 拾 도 U+F973)
+fn dbnum_digit(kind: u8, d: u32) -> char {
+    const D: [[char; 10]; 4] = [
+        ['０', '一', '二', '三', '四', '五', '六', '七', '八', '九'],
+        ['零', '壹', '貳', '參', '四', '伍', '六', '七', '八', '九'],
+        ['０', '１', '２', '３', '４', '５', '６', '７', '８', '９'],
+        ['영', '일', '이', '삼', '사', '오', '육', '칠', '팔', '구'],
+    ];
+    D[(kind.clamp(1, 4) - 1) as usize][d.min(9) as usize]
+}
+
+/// 정수의 자릿값 읽기 — `[DBNum]` 일반 서식의 정수부와 날짜의 월·일·시·분·초: 네 자리마다 만·억·조, 그 안은
+/// 천·백·십. 0 인 자리는 건너뛰고, DBNum1·3 은 십·백·천 앞의 1 을 쓰지 않는다 (`12` → 十二, `10000` → 一万,
+/// `11000` → 一万千), DBNum2·4 는 쓴다 (壹拾貳, 일만일천)
+fn dbnum_positional(kind: u8, n: u64) -> String {
+    if n == 0 {
+        return dbnum_digit(kind, 0).to_string();
+    }
+    let (units, groups): ([&str; 3], [&str; 4]) = match kind {
+        2 => (["拾", "百", "阡"], ["萬", "億", "兆", "京"]),
+        4 => (["십", "백", "천"], ["만", "억", "조", "경"]),
+        _ => (["十", "百", "千"], ["万", "億", "兆", "京"]),
+    };
+    let omit_one = matches!(kind, 1 | 3);
+    let mut gs = Vec::new();
+    let mut m = n;
+    while m > 0 {
+        gs.push(m % 10_000);
+        m /= 10_000;
+    }
+    let mut s = String::new();
+    for (gi, &g) in gs.iter().enumerate().rev() {
+        if g == 0 {
+            continue;
+        }
+        for pos in (0..4u32).rev() {
+            let d = (g / 10u64.pow(pos)) % 10;
+            if d == 0 {
+                continue;
+            }
+            if pos == 0 || !(omit_one && d == 1) {
+                s.push(dbnum_digit(kind, d as u32));
+            }
+            if pos > 0 {
+                s.push_str(units[pos as usize - 1]);
+            }
+        }
+        if gi > 0 {
+            s.push_str(groups.get(gi - 1).copied().unwrap_or(""));
+        }
+    }
+    s
+}
+
+/// `[DBNum]` 일반 서식: 정수부는 자릿값 읽기, 소수점 뒤는 지수까지 글자마다 바꾼다. 소수점이 없으면 지수는 아라비아
+/// 숫자 그대로다 (한셀: `1.234E-6` → 一.二三四E-六, `1.5E+20` → 一.五E+二０, `1E+15` → 一E+15, `9E-5` → 九E-5)
+fn dbnum_general(kind: u8, s: &str) -> String {
+    let n = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (int, rest) = s.split_at(n);
+    let mut out = dbnum_positional(kind, int.parse().unwrap_or(0));
+    if rest.starts_with('.') {
+        out.push_str(&dbnum_each(kind, rest));
+    } else {
+        out.push_str(rest);
+    }
+    out
+}
+
+/// 숫자 글자마다 바꾸기 (연도, DBNum3 의 날짜)
+fn dbnum_each(kind: u8, s: &str) -> String {
+    s.chars()
+        .map(|c| match c.to_digit(10) {
+            Some(d) if c.is_ascii_digit() => dbnum_digit(kind, d),
+            _ => c,
+        })
+        .collect()
+}
+
+/// 표시 문자열 마무리: 표지 밖의 아라비아 숫자를 `[DBNum]` 숫자로 바꾸고 표지를 뗀다 (`kind` 0 이면 표지만)
+fn dbnum_finish(s: &str, kind: u8) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut lit = false;
+    for c in s.chars() {
+        match c {
+            LIT_OPEN => lit = true,
+            LIT_CLOSE => lit = false,
+            c if kind != 0 && !lit && c.is_ascii_digit() => {
+                out.push(dbnum_digit(kind, c as u32 - '0' as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// `m` 이 시(h) 뒤나 초(s) 앞에 오면 분이다.
@@ -480,8 +614,23 @@ fn group_thousands(int: &str) -> String {
     out
 }
 
-/// 일반 서식 (유효숫자 15자리, 아주 크거나 작으면 지수).
+/// 일반 서식 — 한셀 표시 결과 (표시 형식 대조 실험): 1 이상은 유효숫자 10자리, 1 보다 작으면 9자리
+/// (`1234567.891`, `3.141592654`, `0.123456789`, `0.000123456789`), 정수부가 11자리를 넘으면 지수 (가수 유효숫자
+/// 6자리, `1.23457E+11`). 0.0001 보다 작은 수는 소수 7자리 안에 들면 그대로 (`0.0000123`, `0.0000001`) 아니면 지수
+/// (`1.234E-5` — 음의 지수는 0 을 채우지 않는다)
 pub fn general(v: f64) -> String {
+    general_with(v, 10, 9, 1e11, 5, 7)
+}
+
+/// `[DBNum]` 의 일반 서식: 유효숫자 15자리, 1E+15 부터 지수 (한셀: `12345678901234` 을 자릿값으로 다 읽고,
+/// `45663.0347222222` 의 소수를 다 쓴다), 0.0001 보다 작으면 늘 지수 (`9E-5`, `1.23E-5`)
+fn general_dbnum(v: f64) -> String {
+    general_with(v, 15, 15, 1e15, 14, 0)
+}
+
+/// 텍스트 서식(`@`)의 숫자: 유효숫자 15자리, 1E-9 보다 작거나 1E+15 이상이면 지수 (한셀: `0.000000001`,
+/// `123456789012`, `3.14159265358979`, `1E-20`)
+fn general_text(v: f64) -> String {
     let a = v.abs();
     if a != 0.0 && !(1e-9..1e15).contains(&a) {
         let s = format!("{v:.14E}");
@@ -491,6 +640,64 @@ pub fn general(v: f64) -> String {
         return format!("{m}E{}{:02}", if e < 0 { '-' } else { '+' }, e.abs());
     }
     crate::model::format_general(v)
+}
+
+/// 일반 서식의 틀: 유효숫자 `sig_big`(1 이상)·`sig_small`(1 미만), `sci_from` 부터 지수, 지수의 가수 소수 자릿수,
+/// 0.0001 보다 작은 수를 그대로 쓸 소수 자릿수의 한도
+fn general_with(
+    v: f64,
+    sig_big: i32,
+    sig_small: i32,
+    sci_from: f64,
+    mant: usize,
+    small_fixed: usize,
+) -> String {
+    if v == 0.0 {
+        return "0".into();
+    }
+    if !v.is_finite() {
+        return v.to_string();
+    }
+    let a = v.abs();
+    let sign = if v < 0.0 { "-" } else { "" };
+    let trim = |s: String| -> String {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
+    };
+    let sci = |a: f64| -> String {
+        let s = format!("{a:.mant$e}");
+        let (m, e) = s.split_once('e').unwrap_or((&s, "0"));
+        let m = trim(m.to_string());
+        let e: i32 = e.parse().unwrap_or(0);
+        if e < 0 {
+            format!("{m}E-{}", -e)
+        } else {
+            format!("{m}E+{e:02}")
+        }
+    };
+    if a.round() >= sci_from {
+        return format!("{sign}{}", sci(a));
+    }
+    let lead = a.log10().floor() as i32;
+    if a < 1e-4 {
+        let decimals = (-lead - 1 + sig_small).max(0) as usize;
+        let fixed = trim(format!("{a:.decimals$}"));
+        let ndec = fixed.split_once('.').map_or(0, |(_, f)| f.len());
+        return if ndec <= small_fixed {
+            format!("{sign}{fixed}")
+        } else {
+            format!("{sign}{}", sci(a))
+        };
+    }
+    let decimals = if a >= 1.0 {
+        (sig_big - lead - 1).max(0)
+    } else {
+        sig_small - lead - 1
+    } as usize;
+    format!("{sign}{}", trim(format!("{a:.decimals$}")))
 }
 
 fn fill_int(toks: &[&Tok], digits: &str, thousands: bool) -> String {
@@ -600,11 +807,12 @@ fn format_number(sec: &Section, v: f64, signed: bool) -> String {
     if toks.iter().any(|t| matches!(t, Tok::Exp(_))) {
         return format_exp(sec, v, signed);
     }
-    // 분모 자리 표시자 또는 정한 분모 숫자(`# ?/2`)
+    // 분수: 분모가 자리 표시자이거나 고정된 수 (`# ?/8`)
     if let Some(si) = toks.iter().position(|t| *t == Tok::Slash)
         && toks[..si].iter().any(|t| matches!(t, Tok::Digit(_)))
         && (toks[si + 1..].iter().any(|t| matches!(t, Tok::Digit(_)))
-            || matches!(toks.get(si + 1), Some(Tok::Lit(l)) if l.trim().parse::<u64>().is_ok_and(|d| d > 0)))
+            || matches!(toks.get(si + 1), Some(Tok::Lit(l))
+                if l.trim_matches(|c| c == LIT_OPEN || c == LIT_CLOSE).trim().parse::<u64>().is_ok()))
     {
         return format_fraction(sec, v, si, signed);
     }
@@ -687,7 +895,7 @@ fn push_simple(out: &mut String, t: &Tok, v: f64) {
     match t {
         Tok::Lit(l) => out.push_str(l),
         Tok::Percent => out.push('%'),
-        Tok::At => out.push_str(&general(v)),
+        Tok::At => out.push_str(&general_text(v)),
         Tok::General => out.push_str(&general(v.abs())),
         Tok::Slash => out.push('/'),
         _ => {}
@@ -717,11 +925,19 @@ fn format_exp(sec: &Section, v: f64, signed: bool) -> String {
         .iter()
         .filter(|t| matches!(t, Tok::Digit(_)))
         .count();
-    let a = v.abs();
     let engineering = int_ph > 1
         && mant
             .iter()
             .any(|t| matches!(t, Tok::Digit('#')) || matches!(t, Tok::Digit('?')));
+    // 한셀: 공학 표기 패턴(`##0.0E+0`)은 값을 (정수 자리 표시자 + 소수 자리) 유효숫자로 먼저 반올림하고, 가수의 소수는
+    // 자른다 (1999 → 1.9E+3, 32874.25 → 32.8E+3, 987654 → 987.7E+3, 123.45 → 123.5E+0 — 표시 형식 대조 실험)
+    let a = v.abs();
+    let a = if engineering && a != 0.0 {
+        let p = a.log10().floor() as i32 - (int_ph + decimals) as i32 + 1;
+        (a / 10f64.powi(p)).round() * 10f64.powi(p)
+    } else {
+        a
+    };
     let mut e = if a == 0.0 {
         0
     } else {
@@ -737,7 +953,15 @@ fn format_exp(sec: &Section, v: f64, signed: bool) -> String {
         e -= int_ph as i32 - 1;
     }
     let mut m = if a == 0.0 { 0.0 } else { a / 10f64.powi(e) };
-    let (mut int, mut frac) = round_decimal(m, decimals);
+    let cut = |m: f64| {
+        if eng_pattern {
+            let k = 10f64.powi(decimals as i32);
+            round_decimal(((m * k) + 1e-7).floor() / k, decimals)
+        } else {
+            round_decimal(m, decimals)
+        }
+    };
+    let (mut int, mut frac) = cut(m);
     // 반올림으로 자리가 넘친 경우
     // 정수부 자릿수: 공학 표기 패턴인데 음수 지수면 한 자리, 아니면 자리 표시자 수
     let int_digits = if eng_pattern && !engineering {
@@ -748,7 +972,7 @@ fn format_exp(sec: &Section, v: f64, signed: bool) -> String {
     if a != 0.0 && int.parse::<f64>().unwrap_or(0.0) >= 10f64.powi(int_digits) {
         e += if engineering { int_ph as i32 } else { 1 };
         m = a / 10f64.powi(e);
-        (int, frac) = round_decimal(m, decimals);
+        (int, frac) = cut(m);
     }
     let mut out = String::new();
     if signed && v < 0.0 {
@@ -807,11 +1031,17 @@ fn format_fraction(sec: &Section, v: f64, si: usize, signed: bool) -> String {
         .iter()
         .take_while(|t| matches!(t, Tok::Lit(_)))
         .find_map(|t| match t {
-            Tok::Lit(l) => l.trim().parse().ok(),
+            Tok::Lit(l) => l
+                .trim_matches(|c| c == LIT_OPEN || c == LIT_CLOSE)
+                .trim()
+                .parse()
+                .ok(),
             _ => None,
         });
     let a = v.abs();
-    let (whole, x) = if has_int {
+    // 한셀: 분모가 고정된 분수(`?/4`)는 정수 자리가 없어도 정수부를 버리고 소수부만 쓴다 (4385.5 → 2/4),
+    // 분자가 0 이면 아무것도 쓰지 않는다 (표시 형식 대조 실험). 고정되지 않은 분수(`?/?`)는 가분수다
+    let (whole, x) = if has_int || fixed_den.is_some() {
         (a.trunc(), a.fract())
     } else {
         (0.0, a)
@@ -820,6 +1050,13 @@ fn format_fraction(sec: &Section, v: f64, si: usize, signed: bool) -> String {
         Some(d) => ((x * d as f64).round() as u64, d),
         None => best_fraction(x, 10u64.pow(den_len as u32) - 1),
     };
+    if !has_int && fixed_den.is_some() && n == 0 {
+        return if signed && v < 0.0 {
+            "-".into()
+        } else {
+            String::new()
+        };
+    }
     // 한셀: 분수가 1/1 로 반올림돼도 정수부로 올리지 않는다 (99.999 → 99 1/1)
     let whole = whole as u64;
     let mut out = String::new();
@@ -832,7 +1069,9 @@ fn format_fraction(sec: &Section, v: f64, si: usize, signed: bool) -> String {
             .copied()
             .filter(|t| matches!(t, Tok::Digit(_)))
             .collect();
-        let int_str = if whole == 0 && n != 0 {
+        // 정수부 0 은 자리 표시자가 '0' 일 때만 쓴다 (`0 ?/2` → 0 1/2, `# ?/2` → " 1/2")
+        let zero_ph = int_ph.iter().any(|t| matches!(t, Tok::Digit('0')));
+        let int_str = if whole == 0 && n != 0 && !zero_ph {
             String::new()
         } else {
             whole.to_string()
@@ -845,7 +1084,6 @@ fn format_fraction(sec: &Section, v: f64, si: usize, signed: bool) -> String {
         for t in lits_before {
             push_simple(&mut out, t, v);
         }
-        let _ = int_ph;
         out.push_str(&int_str);
         let after_int = int_toks
             .iter()
@@ -900,6 +1138,28 @@ const DAYS: [&str; 7] = [
     "Saturday",
 ];
 const DAYS_KO: [&str; 7] = ["일", "월", "화", "수", "목", "금", "토"];
+const DAYS_ZH: [&str; 7] = ["日", "一", "二", "三", "四", "五", "六"];
+
+/// 연호 이름 (머리글자, 첫 한자, 이름)
+type EraNames = (&'static str, &'static str, &'static str);
+
+/// 일본 연호: 이름, 시작 (연, 월, 일)
+const JAPANESE_ERAS: [(EraNames, (i64, u32, u32)); 5] = [
+    (("M", "明", "明治"), (1868, 1, 1)),
+    (("T", "大", "大正"), (1912, 7, 30)),
+    (("S", "昭", "昭和"), (1926, 12, 25)),
+    (("H", "平", "平成"), (1989, 1, 8)),
+    (("R", "令", "令和"), (2019, 5, 1)),
+];
+
+/// 날짜의 일본 연호와 그 해 (한셀: 1912-01-02 → 明45, 1990-04-02 → 平2, 2019-05-01 → 令1)
+fn japanese_era(p: &DateParts) -> Option<(EraNames, i64)> {
+    JAPANESE_ERAS
+        .iter()
+        .rev()
+        .find(|(_, start)| (p.y, p.mo, p.d) >= *start)
+        .map(|(names, start)| (*names, p.y - start.0 + 1))
+}
 
 /// 1970-01-01 기준 일수 → (연, 월, 일) (Howard Hinnant 알고리즘).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
@@ -985,12 +1245,43 @@ fn format_date(sec: &Section, v: f64, date1904: bool) -> Option<String> {
                 .count()
         })
         .unwrap_or(0);
+    // 시스템 시간([$-F400])은 원래 구역에 초가 없으면 초를 반올림하지 않고 버린다 (한셀: `[$-F400]h` 의 8.64초 → 8초,
+    // `[$-F400]h:mm:ss AM/PM` 은 9초)
+    let v = if sec.sys_trunc && v >= 0.0 {
+        (v * 86_400.0 + 1e-4).floor() / 86_400.0
+    } else {
+        v
+    };
     let parts = if date1904 {
         date_parts_1904(v, sub_digits)?
     } else {
         date_parts(v, sub_digits)?
     };
     let has_ampm = sec.toks.iter().any(|t| matches!(t, Tok::AmPm(..)));
+    // [DBNum] 날짜의 숫자 (한셀 표시 결과): 연도는 글자마다, 월·일·시·분·초는 자릿값 읽기 — 두 자리 꼴에서 10 보다 작은
+    // 값은 앞에 0 (`０九`). DBNum3 은 모두 글자마다 (`１０월`)
+    let part = |n: u32, width: usize| -> String {
+        let ascii = format!("{n:0width$}");
+        match sec.dbnum {
+            0 => ascii,
+            3 => dbnum_each(3, &ascii),
+            k => {
+                let p = dbnum_positional(k, u64::from(n));
+                if width >= 2 && n < 10 {
+                    format!("{}{p}", dbnum_digit(k, 0))
+                } else {
+                    p
+                }
+            }
+        }
+    };
+    let year = |s: String| -> String {
+        if sec.dbnum == 0 {
+            s
+        } else {
+            dbnum_each(sec.dbnum, &s)
+        }
+    };
     let mut out = String::new();
     let mut i = 0;
     while i < sec.toks.len() {
@@ -998,22 +1289,39 @@ fn format_date(sec: &Section, v: f64, date1904: bool) -> Option<String> {
         match t {
             Tok::Dt('y', n) => {
                 if *n <= 2 {
-                    out.push_str(&format!("{:02}", parts.y.rem_euclid(100)));
+                    out.push_str(&year(format!("{:02}", parts.y.rem_euclid(100))));
                 } else {
-                    out.push_str(&format!("{:04}", parts.y));
+                    out.push_str(&year(format!("{:04}", parts.y)));
                 }
             }
-            Tok::Dt('e', _) => out.push_str(&parts.y.to_string()),
+            // 일본어([$-411])의 e 는 연호의 해 (0 을 채우지 않는다)
+            Tok::Dt('e', _) if sec.locale == 0x411 => out.push_str(&year(
+                japanese_era(&parts).map_or(parts.y, |e| e.1).to_string(),
+            )),
+            Tok::Dt('e', _) => out.push_str(&year(parts.y.to_string())),
+            // 연호 이름 (일본어): g 머리글자, gg 첫 한자, ggg 이름 — 해(e·y)가 없는 구역에는 쓰지 않는다
+            Tok::Dt('g', n)
+                if sec.locale == 0x411
+                    && sec.toks.iter().any(|t| matches!(t, Tok::Dt('e' | 'y', _))) =>
+            {
+                if let Some((era, _)) = japanese_era(&parts) {
+                    out.push_str(match n {
+                        1 => era.0,
+                        2 => era.1,
+                        _ => era.2,
+                    });
+                }
+            }
             Tok::Dt('m', n) => match n {
-                1 => out.push_str(&parts.mo.to_string()),
-                2 => out.push_str(&format!("{:02}", parts.mo)),
+                1 => out.push_str(&part(parts.mo, 1)),
+                2 => out.push_str(&part(parts.mo, 2)),
                 3 => out.push_str(&MONTHS[parts.mo as usize - 1][..3]),
                 5 => out.push_str(&MONTHS[parts.mo as usize - 1][..1]),
                 _ => out.push_str(MONTHS[parts.mo as usize - 1]),
             },
             Tok::Dt('d', n) => match n {
-                1 => out.push_str(&parts.d.to_string()),
-                2 => out.push_str(&format!("{:02}", parts.d)),
+                1 => out.push_str(&part(parts.d, 1)),
+                2 => out.push_str(&part(parts.d, 2)),
                 3 if sec.korean => out.push_str(DAYS_KO[parts.weekday]),
                 3 => out.push_str(&DAYS[parts.weekday][..3]),
                 _ if sec.korean => {
@@ -1022,6 +1330,11 @@ fn format_date(sec: &Section, v: f64, date1904: bool) -> Option<String> {
                 }
                 _ => out.push_str(DAYS[parts.weekday]),
             },
+            // 중국어([$-804])의 aaaa 는 星期六 꼴
+            Tok::Dt('a', n) if sec.locale == 0x804 && *n >= 4 => {
+                out.push_str("星期");
+                out.push_str(DAYS_ZH[parts.weekday]);
+            }
             Tok::Dt('a', n) => {
                 out.push_str(DAYS_KO[parts.weekday]);
                 if *n >= 4 {
@@ -1035,26 +1348,10 @@ fn format_date(sec: &Section, v: f64, date1904: bool) -> Option<String> {
                 } else {
                     parts.h
                 };
-                if *n >= 2 {
-                    out.push_str(&format!("{h:02}"));
-                } else {
-                    out.push_str(&h.to_string());
-                }
+                out.push_str(&part(h, (*n).min(2)));
             }
-            Tok::Minute(n) => {
-                if *n >= 2 {
-                    out.push_str(&format!("{:02}", parts.mi));
-                } else {
-                    out.push_str(&parts.mi.to_string());
-                }
-            }
-            Tok::Dt('s', n) => {
-                if *n >= 2 {
-                    out.push_str(&format!("{:02}", parts.s));
-                } else {
-                    out.push_str(&parts.s.to_string());
-                }
-            }
+            Tok::Minute(n) => out.push_str(&part(parts.mi, (*n).min(2))),
+            Tok::Dt('s', n) => out.push_str(&part(parts.s, (*n).min(2))),
             Tok::Elapsed(c, n) => {
                 let total = parts.total_seconds.floor() as i64;
                 let v = match c {
@@ -1063,6 +1360,10 @@ fn format_date(sec: &Section, v: f64, date1904: bool) -> Option<String> {
                     _ => total,
                 };
                 out.push_str(&format!("{v:0width$}", width = *n));
+            }
+            // 한국어([$-412])는 AM/PM·A/P 모두 오전/오후
+            Tok::AmPm(..) if sec.korean => {
+                out.push_str(if parts.h < 12 { "오전" } else { "오후" })
             }
             Tok::AmPm(am, pm) => out.push_str(if parts.h < 12 { am } else { pm }),
             Tok::Dot if sub_digits > 0 => {
@@ -1133,7 +1434,9 @@ fn pick_number_section(secs: &[Section], v: f64) -> (usize, bool) {
         for &i in &numeric {
             if let Some(c) = secs[i].cond {
                 if cond_true(c, v) {
-                    return (i, false);
+                    // 한셀: 조건이 `[<0]` 인 구역만 음수 부호를 빼고, 다른 조건(`[<=0]`, `[<-5]`, `[<=9999999]` …)은
+                    // 음수에 `-` 를 붙인다 (표시 형식 대조 실험)
+                    return (i, !(c.0 == Op::Lt && c.1 == 0.0));
                 }
             } else {
                 // 조건 없는 구역 = 나머지. 음수면 부호를 붙인다.
@@ -1186,7 +1489,7 @@ pub fn format(value: &CellValue, code: &str, date1904: bool) -> Formatted {
                         }
                     }
                     Formatted {
-                        text: out,
+                        text: dbnum_finish(&out, 0),
                         color: s.color.clone(),
                         overflow: false,
                     }
@@ -1224,6 +1527,15 @@ fn format_number_value(v: f64, secs: &[Section], date1904: bool) -> Formatted {
     let Some(sec) = secs.get(i) else {
         return Formatted::default();
     };
+    let mut f = format_section(sec, v, signed, date1904);
+    if sec.dbnum != 0 {
+        f.text = dbnum_finish(&f.text, sec.dbnum);
+    }
+    f
+}
+
+/// 고른 구역 하나로 숫자를 표시한다 ([DBNum] 숫자 바꾸기는 [`dbnum_finish`] 가 마무리한다)
+fn format_section(sec: &Section, v: f64, signed: bool, date1904: bool) -> Formatted {
     let color = sec.color.clone();
     if sec.toks.is_empty() {
         return Formatted {
@@ -1253,7 +1565,15 @@ fn format_number_value(v: f64, secs: &[Section], date1904: bool) -> Formatted {
             out.push('-');
         }
         for t in &sec.toks {
-            push_simple(&mut out, t, v);
+            match t {
+                // [DBNum] 일반 서식은 자릿값으로 읽는다 (표지로 감싸 마무리에서 다시 바꾸지 않게)
+                Tok::General if sec.dbnum != 0 => {
+                    out.push(LIT_OPEN);
+                    out.push_str(&dbnum_general(sec.dbnum, &general_dbnum(v.abs())));
+                    out.push(LIT_CLOSE);
+                }
+                t => push_simple(&mut out, t, v),
+            }
         }
         return Formatted {
             text: out,
@@ -1373,5 +1693,138 @@ mod tests {
         assert_eq!(f("aaa", 0.0), "토");
         assert_eq!(f("yy\\.m\\.d", 1234567.891), "80.2.15");
         assert!(format(&CellValue::Number(-1.0), "yyyy-mm-dd", false).overflow);
+    }
+    /// [DBNum1]–[DBNum4] (한셀 Range.Text, 표시 형식 대조 실험)
+    #[test]
+    fn dbnum_digits() {
+        // 일반 서식: 자릿값 읽기 — DBNum1·3 은 십·백·천 앞의 1 을 빼고, 2·4 는 쓴다
+        assert_eq!(f("[DBNum1]General", 12.0), "十二");
+        assert_eq!(f("[DBNum1]General", 105.0), "百五");
+        assert_eq!(f("[DBNum1]General", 11000.0), "一万千");
+        assert_eq!(
+            f("[DBNum1]General", 123456789.0),
+            "一億二千三百四十五万六千七百八十九"
+        );
+        assert_eq!(
+            f("[DBNum1]General", 12345678901234.0),
+            "十二兆三千四百五十六億七千八百九十万千二百三十四"
+        );
+        assert_eq!(f("[DBNum1]General", 0.5), "０.五");
+        assert_eq!(f("[DBNum1]General", -1.0), "-一");
+        assert_eq!(f("[DBNum1]General", 1e15), "一E+15");
+        assert_eq!(f("[DBNum1]General", 1.234e-6), "一.二三四E-六");
+        assert_eq!(f("[DBNum2]General", 12.0), "壹拾貳");
+        assert_eq!(f("[DBNum2]General", 0.0), "零");
+        assert_eq!(f("[DBNum2]General", 101000.0), "壹拾萬壹阡");
+        assert_eq!(f("[DBNum3]General", 20.0), "２十");
+        assert_eq!(f("[DBNum3]General", 46022.5), "４万６千２十２.５");
+        assert_eq!(f("[DBNum4]General", 11000.0), "일만일천");
+        assert_eq!(f("[DBNum4]General", 10.0), "일십");
+        // 자리 표시자 서식: 숫자마다 (0 도), 쉼표·소수점·글자는 그대로
+        assert_eq!(f("[DBNum1]0", 105.0), "一０五");
+        assert_eq!(f("[DBNum1]#,##0\"원\"", 1234.5678), "一,二三五원");
+        assert_eq!(f("[DBNum1]0\"1\"", 21.0), "二一1");
+        assert_eq!(f("[DBNum2]0.00", 3.25), "參.貳伍");
+        assert_eq!(f("[DBNum3]#,##0", 123456789.0), "１２３,４５６,７８９");
+        assert_eq!(f("[DBNum4]0.00", 1001.0), "일영영일.영영");
+        assert_eq!(f("[DBNum1]0.00E+00", 1234.5678), "一.二三E+０三");
+        assert_eq!(f("[DBNum1]# ?/?", 3.25), "三 一/四");
+        // 날짜: 연도는 숫자마다, 월·일·시·분·초는 자릿값 (두 자리 꼴의 한 자리 값은 앞에 0), DBNum3 은 숫자마다
+        assert_eq!(
+            f("[DBNum1]yyyy\"년\" m\"월\" d\"일\"", 46314.75),
+            "二０二六년 十월 十九일"
+        );
+        assert_eq!(
+            f("[DBNum1]yy\"년\" mm\"월\" dd\"일\"", 1010.0),
+            "０二년 十월 ０六일"
+        );
+        assert_eq!(f("[DBNum2]m\"월\" d\"일\"", 46022.0), "壹拾貳월 參拾壹일");
+        assert_eq!(
+            f("[DBNum3]yyyy\"년\" m\"월\" d\"일\"", 46314.75),
+            "２０２６년 １０월 １９일"
+        );
+        assert_eq!(f("[DBNum4]hh:mm:ss", 46022.9583449074), "이십삼:영영:영일");
+        assert_eq!(f("[DBNum1]h:m:s", 45689.3802083333), "九:七:三十");
+        // [DBNum] 은 그 구역에만
+        assert_eq!(f("[DBNum1][>100]0;0.0", 10.0), "10.0");
+        assert_eq!(f("[DBNum1][>100]0;0.0", 1001.0), "一００一");
+    }
+
+    #[test]
+    fn general_precision() {
+        // 1 이상 유효숫자 10자리, 1 미만 9자리, 정수부 12자리부터 지수, 작은 수는 소수 7자리까지
+        assert_eq!(general(1234567.891), "1234567.891");
+        assert_eq!(general(1234567.89012), "1234567.89");
+        assert_eq!(general(1.23456789123), "1.234567891");
+        assert_eq!(general(1.0 / 3.0), "0.333333333");
+        assert_eq!(general(0.0001234567891), "0.000123456789");
+        assert_eq!(general(12345678901.2), "12345678901");
+        assert_eq!(general(123456789012.0), "1.23457E+11");
+        assert_eq!(general(99999999999.5), "1E+11");
+        assert_eq!(general(0.0000123), "0.0000123");
+        assert_eq!(general(0.00001234), "1.234E-5");
+        assert_eq!(general(1e-7), "0.0000001");
+        assert_eq!(general(1.2e-7), "1.2E-7");
+        assert_eq!(general(1.5e-10), "1.5E-10");
+        assert_eq!(general(-0.5), "-0.5");
+        // 텍스트 서식(@)의 숫자는 유효숫자 15자리
+        assert_eq!(f("@", 0.00001234), "0.00001234");
+        assert_eq!(f("@", 123456789012.0), "123456789012");
+        assert_eq!(f("@", 1e-9), "0.000000001");
+        // [DBNum] 일반 서식은 0.0001 보다 작으면 늘 지수, 소수점 뒤는 지수까지 바꾼다
+        assert_eq!(f("[DBNum1]General", 0.00009), "九E-5");
+        assert_eq!(f("[DBNum1]General", 1.5e20), "一.五E+二０");
+        assert_eq!(f("[DBNum1]General", 0.0001), "０.０００一");
+    }
+
+    #[test]
+    fn engineering_rounds_to_significant_digits_then_cuts() {
+        // 한셀: (정수 자리 표시자 + 소수 자리) 유효숫자로 반올림한 뒤 가수의 소수를 자른다
+        assert_eq!(f("##0.0E+0", 1999.0), "1.9E+3");
+        assert_eq!(f("##0.0E+0", 32874.25), "32.8E+3");
+        assert_eq!(f("##0.0E+0", 987654.0), "987.7E+3");
+        assert_eq!(f("##0.0E+0", 123.45), "123.5E+0");
+        assert_eq!(f("##0.0E+0", 0.00987), "9.8E-3");
+        assert_eq!(f("##0.00E+00", 1949.9), "1.94E+03");
+        assert_eq!(f("0.0E+0", 1999.0), "2.0E+3");
+    }
+
+    #[test]
+    fn hancell_codes() {
+        // G/표준 은 일반 서식이 아니다: G 는 연호(한국어에서 빈칸), 나머지는 글자 (파일에서 읽어도 같다)
+        assert_eq!(f("G/표준", 12.0), "/표준");
+        assert!(format(&CellValue::Number(-1.0), "G/표준", false).overflow);
+        // 조건 구역: [<0] 만 음수 부호를 뺀다
+        assert_eq!(f("[<0]0;0.0", -1.0), "1");
+        assert_eq!(f("[<=0]0;0", -1.0), "-1");
+        assert_eq!(f("[<=9999999]###-####;(0##) ###-####", -1.0), "--1");
+        assert_eq!(f("[>100]0;[<-100]0.0;0.00", -101.0), "-101.0");
+        // 고정 분모: 정수 자리가 없으면 정수부를 버린다, 분자가 0 이면 분수를 쓰지 않는다
+        assert_eq!(f("# ?/8", 1234.5678), "1234 5/8");
+        assert_eq!(f("# ?/8", 0.5), " 4/8");
+        assert_eq!(f("# ?/8", 1.0), "1 ");
+        assert_eq!(f("?/4", 4385.5), "2/4");
+        assert_eq!(f("?/4", 32965.0), "");
+        assert_eq!(f("0 ?/2", 1.0 / 3.0), "0 1/2");
+        // 로캘: 한국어 오전/오후, 시스템 날짜·시간, 일본 연호, 중국어 요일
+        assert_eq!(f("[$-412]A/P h:mm", 0.1), "오전 2:24");
+        assert_eq!(f("[$-412]h:mm AM/PM", 2.0 / 3.0), "4:00 오후");
+        assert_eq!(
+            f("[$-F800]dddd, mmmm dd, yyyy", 46314.75),
+            "2026년 10월 19일 월요일"
+        );
+        assert_eq!(f("[$-F400]h:mm:ss AM/PM", 1234.5678), "오후 1:37:38");
+        assert_eq!(f("[$-F400]h", 0.0001), "오전 12:00:08");
+        assert_eq!(f("[$-411]ge.m.d", 46314.75), "R8.10.19");
+        assert_eq!(f("[$-411]gge", 4385.5), "明45");
+        assert_eq!(
+            f("[$-411]ggge\"年\"m\"月\"d\"日\"", 10000.0),
+            "昭和2年5月18日"
+        );
+        assert_eq!(f("[$-411]ee", 32965.0), "2");
+        assert_eq!(
+            f("[$-804]yyyy\"年\"m\"月\"d\"日\" aaaa", 43586.0),
+            "2019年5月1日 星期三"
+        );
     }
 }

@@ -234,6 +234,7 @@ fn formula_cell(at: CellRef, text: &str, array: Option<&str>) -> Cell {
             },
             shared_index: None,
             range: array.map(str::to_string),
+            data_table: None,
         }),
     }
 }
@@ -300,6 +301,7 @@ fn build(cases: &[Case], date1904: bool) -> Workbook {
         local_sheet_id: local,
         hidden: false,
         formula: f.into(),
+        ..Default::default()
     };
     Workbook {
         date1904,

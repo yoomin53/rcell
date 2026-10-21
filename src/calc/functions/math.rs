@@ -102,7 +102,7 @@ pub const FNS: &[FnSpec] = &[
         }
         num((n / d).trunc())
     }),
-    f("FACT", 1, 1, V, |c, a| un(c, a, |x| fact(x))),
+    f("FACT", 1, 1, V, |c, a| un(c, a, fact)),
     f("FACTDOUBLE", 1, 1, V, |c, a| un(c, a, |x| {
         // FACTDOUBLE(-1) 은 #NUM!, FACTDOUBLE(-0.5) 는 1 (버린 값이 음수인가, 대조 실험 math)
         let n = x.trunc();

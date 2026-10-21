@@ -609,12 +609,11 @@ fn array_numbers(ctx: &mut Ctx, v: &Value) -> Result<Vec<f64>, ErrorKind> {
         match x {
             Value::Number(n) => out.push(n),
             Value::Error(e) => return Err(e),
-            Value::Text(_) | Value::Bool(_) | Value::Empty => {
+            Value::Text(_) | Value::Bool(_) | Value::Empty
                 // 직접 준 스칼라는 숫자로 바꾼다
-                if !matches!(v, Value::Ref(_) | Value::Array(_)) {
+                if !matches!(v, Value::Ref(_) | Value::Array(_)) => {
                     out.push(ctx.num(&x)?);
                 }
-            }
             _ => {}
         }
     }
@@ -715,7 +714,7 @@ fn percentrank(ctx: &mut Ctx, a: &[Value], inclusive: bool) -> Value {
         return Value::Error(ErrorKind::NA);
     }
     let less = s.iter().filter(|&&y| y < x).count();
-    let exact = s.iter().any(|&y| y == x);
+    let exact = s.contains(&x);
     let r = if exact {
         if inclusive {
             if s.len() == 1 {
@@ -848,7 +847,7 @@ fn countif(ctx: &mut Ctx, a: &[Value]) -> Value {
 }
 
 fn countifs(ctx: &mut Ctx, a: &[Value]) -> Value {
-    if a.len() % 2 != 0 {
+    if !a.len().is_multiple_of(2) {
         return Value::Error(ErrorKind::Value);
     }
     if a.len() == 2 {
@@ -1043,11 +1042,10 @@ fn least_squares(y: &[f64], xs: &[Vec<f64>], with_const: bool) -> Option<Vec<f64
     Some(coef)
 }
 
-fn regression_inputs(
-    ctx: &mut Ctx,
-    a: &[Value],
-    log: bool,
-) -> Result<(Vec<f64>, Vec<Vec<f64>>, (usize, usize)), ErrorKind> {
+/// (y, x 열들, y 의 모양)
+type RegressionInputs = (Vec<f64>, Vec<Vec<f64>>, (usize, usize));
+
+fn regression_inputs(ctx: &mut Ctx, a: &[Value], log: bool) -> Result<RegressionInputs, ErrorKind> {
     let ya = to_array(ctx, &a[0])?;
     let mut y = Vec::new();
     for v in &ya.data {

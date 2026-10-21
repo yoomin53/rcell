@@ -553,7 +553,7 @@ pub fn bessel_i(n: i32, x: f64) -> f64 {
     sum
 }
 
-const EULER: f64 = 0.577_215_664_901_532_9;
+const EULER: f64 = std::f64::consts::EULER_GAMMA;
 
 /// Y0, Y1 (노이만 급수: J 값들로)
 fn bessel_y01(x: f64) -> (f64, f64) {

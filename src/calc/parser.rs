@@ -11,7 +11,7 @@
 
 use std::rc::Rc;
 
-use super::ast::{BinaryOp, Call, Expr, NameExpr, RefExpr, SheetSpec, UnaryOp};
+use super::ast::{BinaryOp, Call, Expr, NameExpr, RefExpr, SheetSpec, TableRef, UnaryOp};
 use super::value::{Array, ErrorKind, MAX_COLS, MAX_ROWS, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +34,7 @@ enum Tok {
     Bool(bool),
     Ref(RefExpr),
     Name(NameExpr),
+    Table(TableRef),
     /// 함수 이름 (여는 괄호까지 읽었다)
     Func(String),
     Op(&'static str),
@@ -94,7 +95,7 @@ fn parse_col(s: &str) -> Option<u32> {
     for b in s.bytes() {
         n = n * 26 + (b.to_ascii_uppercase() - b'A' + 1) as u32;
     }
-    (n >= 1 && n <= MAX_COLS).then(|| n - 1)
+    (1..=MAX_COLS).contains(&n).then(|| n - 1)
 }
 
 /// `$12`, `12` → 0부터 시작하는 행
@@ -104,7 +105,7 @@ fn parse_row(s: &str) -> Option<u32> {
         return None;
     }
     let n: u32 = s.parse().ok()?;
-    (n >= 1 && n <= MAX_ROWS).then(|| n - 1)
+    (1..=MAX_ROWS).contains(&n).then(|| n - 1)
 }
 
 /// `$A$1` → (행, 열)
@@ -420,7 +421,8 @@ impl Lexer {
             j += 1;
         }
         if j == start + 1 || self.c.get(j) != Some(&']') {
-            return self.err("구조적 참조는 지원하지 않음");
+            // 표 이름 없는 구조적 참조 ([@열], [#This Row] …)
+            return self.structured(String::new());
         }
         let book: u32 = self.c[start + 1..j]
             .iter()
@@ -462,6 +464,101 @@ impl Lexer {
         }
         self.i += 1;
         self.target(Some(book), sheet)
+    }
+
+    /// 구조적 참조 `표[…]` (`self.i` 는 '[' 자리): `[]`, `[열]`, `[#All]`, `[[#Data],[열1]:[열2]]`,
+    /// `[@열]`·`[@[열 이름]]`. 열 이름의 `'` 는 다음 글자를 그대로 둔다.
+    fn structured(&mut self, table: String) -> Result<Tok, ParseError> {
+        let start = self.i;
+        let mut depth = 0i32;
+        let mut j = self.i;
+        while j < self.c.len() {
+            match self.c[j] {
+                '\'' => {
+                    j += 2;
+                    continue;
+                }
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        if j >= self.c.len() {
+            return self.err("닫히지 않은 구조적 참조");
+        }
+        let inner: Vec<char> = self.c[start + 1..j].to_vec();
+        self.i = j + 1;
+        let unescape = |s: &[char]| -> String {
+            let mut out = String::new();
+            let mut k = 0;
+            while k < s.len() {
+                if s[k] == '\'' && k + 1 < s.len() {
+                    k += 1;
+                }
+                out.push(s[k]);
+                k += 1;
+            }
+            out
+        };
+        // 항목 (괄호 안 글)과 항목 뒤 구분자
+        let mut items: Vec<(String, Option<char>)> = Vec::new();
+        let mut t = TableRef { table, ..Default::default() };
+        let mut body: &[char] = &inner;
+        if body.first() == Some(&'@') {
+            t.this_row = true;
+            body = &body[1..];
+        }
+        if body.first() == Some(&'[') {
+            let mut k = 0;
+            while k < body.len() {
+                match body[k] {
+                    '[' => {
+                        let mut e = k + 1;
+                        while e < body.len() && body[e] != ']' {
+                            if body[e] == '\'' {
+                                e += 1;
+                            }
+                            e += 1;
+                        }
+                        let text = unescape(&body[k + 1..e.min(body.len())]);
+                        items.push((text.trim().to_string(), None));
+                        k = e + 1;
+                    }
+                    ',' | ':' => {
+                        if let Some(last) = items.last_mut() {
+                            last.1 = Some(body[k]);
+                        }
+                        k += 1;
+                    }
+                    _ => k += 1,
+                }
+            }
+        } else if !body.is_empty() {
+            items.push((unescape(body).trim().to_string(), None));
+        }
+        let mut cols: Vec<String> = Vec::new();
+        for (text, _) in &items {
+            match text.to_ascii_lowercase().as_str() {
+                "#all" => t.all = true,
+                "#data" => t.data = true,
+                "#headers" => t.headers = true,
+                "#totals" => t.totals = true,
+                "#this row" => t.this_row = true,
+                _ => cols.push(text.clone()),
+            }
+        }
+        t.cols = match cols.len() {
+            0 => None,
+            1 => Some((cols[0].clone(), cols[0].clone())),
+            _ => Some((cols[0].clone(), cols[cols.len() - 1].clone())),
+        };
+        Ok(Tok::Table(t))
     }
 
     /// 시트 접두사 뒤의 대상: 셀·영역·행·열, 이름, #REF!
@@ -512,7 +609,8 @@ impl Lexer {
                 return Ok(Tok::Func(w));
             }
             if next == Some('[') {
-                return self.err("구조적 참조는 지원하지 않음");
+                self.i = j;
+                return self.structured(w);
             }
         }
         // 영역 A1:B2, A:C
@@ -766,7 +864,7 @@ impl Parser {
             }
             let starts_operand = matches!(
                 self.toks.get(k).map(|t| &t.0),
-                Some(Tok::Ref(_) | Tok::Name(_) | Tok::Func(_) | Tok::LParen)
+                Some(Tok::Ref(_) | Tok::Name(_) | Tok::Table(_) | Tok::Func(_) | Tok::LParen)
             );
             if !starts_operand {
                 break;
@@ -798,6 +896,7 @@ impl Parser {
             Tok::Err(e) => Expr::Error(e),
             Tok::Ref(r) => Expr::Ref(r),
             Tok::Name(n) => Expr::Name(n),
+            Tok::Table(t) => Expr::Table(t),
             Tok::LParen => {
                 let save = self.union_ok;
                 self.union_ok = true;

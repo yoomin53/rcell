@@ -563,7 +563,8 @@ fn text_code(code: &str) -> Option<(String, Vec<usize>)> {
     let (mut digits, mut dates) = (false, false);
     // "General" 은 TEXT 에서 일반 서식이 아니다: G 는 연호(빈 글), e 는 연도, 나머지 글자는 그대로
     // (TEXT(5,"General") = "1900n1900ral", 대조 실험 misc3·misc4)
-    let code = replace_general(&code.replace("오전/오후", "AM/PM"));
+    // 셀 표시와 달리 TEXT 에서는 "G/표준" 이 일반 서식이다 (TEXT(5,"G/표준") = "5", 대조 실험 misc3)
+    let code = replace_general(&code.replace("오전/오후", "AM/PM")).replace("G/표준", "General");
     let chars: Vec<char> = code.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -642,7 +643,7 @@ pub fn group(int: &str) -> String {
     let b: Vec<char> = int.chars().collect();
     let mut out = String::new();
     for (i, c) in b.iter().enumerate() {
-        if i > 0 && (b.len() - i) % 3 == 0 {
+        if i > 0 && (b.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(*c);

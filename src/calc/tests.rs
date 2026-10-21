@@ -257,3 +257,154 @@ fn same_value_rules() {
     assert!(same_value(&e("#DIV/0!"), &e("#DIV/0!"), None, false));
     assert!(!same_value(&t("1"), &n(1.0), None, false));
 }
+
+/// 표(A1:C5, 머리글 1행·요약 1행: 이름 수량 단가)와 구조적 참조
+#[test]
+fn structured_references() {
+    use crate::model::{Table, TableColumn};
+    let mut s = sheet(
+        "S",
+        &[
+            ("A1", "이름"),
+            ("B1", "수량"),
+            ("C1", "단가"),
+            ("A2", "가"),
+            ("B2", "2"),
+            ("C2", "10"),
+            ("A3", "나"),
+            ("B3", "3"),
+            ("C3", "20"),
+            ("A4", "다"),
+            ("B4", "5"),
+            ("C4", "30"),
+            ("A5", "합계"),
+            ("B5", "=SUBTOTAL(109,Table1[수량])"),
+            ("D2", "=Table1[[#This Row],[수량]]*Table1[[#This Row],[단가]]"),
+            ("D3", "=[@수량]*[@단가]"),
+            ("E1", "=SUM(Table1[[수량]:[단가]])"),
+            ("E2", "=ROWS(Table1[#All])"),
+            ("E3", "=ROWS(Table1)"),
+            ("E4", "=Table1[[#Headers],[단가]]"),
+            ("E5", "=Table1[[#Totals],[수량]]"),
+            ("E6", "=COUNTA(Table1[[#Headers],[#Data],[이름]])"),
+            ("E7", "=SUM(table1[수량])"),
+            ("E8", "=Table1[없는열]"),
+            ("E9", "=Table1[[#This Row],[수량]]"),
+        ],
+    );
+    s.tables.push(Table {
+        name: "Table1".into(),
+        display_name: "Table1".into(),
+        range: "A1:C5".into(),
+        header_rows: 1,
+        totals_rows: 1,
+        columns: ["이름", "수량", "단가"]
+            .iter()
+            .map(|n| TableColumn {
+                name: n.to_string(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    });
+    let w = wb(vec![s]);
+    assert_eq!(calc(&w, "B5"), n(10.0));
+    assert_eq!(calc(&w, "D2"), n(20.0));
+    assert_eq!(calc(&w, "D3"), e("#REF!"), "D 열은 표 밖이라 [@…] 의 표가 없다");
+    assert_eq!(calc(&w, "E1"), n(70.0));
+    assert_eq!(calc(&w, "E2"), n(5.0));
+    assert_eq!(calc(&w, "E3"), n(3.0));
+    assert_eq!(calc(&w, "E4"), t("단가"));
+    assert_eq!(calc(&w, "E5"), n(10.0));
+    assert_eq!(calc(&w, "E6"), n(4.0));
+    assert_eq!(calc(&w, "E7"), n(10.0));
+    assert_eq!(calc(&w, "E8"), e("#REF!"));
+    assert_eq!(calc(&w, "E9"), e("#VALUE!"), "9행은 표의 데이터 행이 아니다");
+}
+
+/// 모델의 배열 수식 (FormulaKind::Array + 범위): 범위 칸마다 결과
+#[test]
+fn array_formula_from_model() {
+    use crate::model::FormulaKind;
+    let mut s = sheet("S", &[("A1", "1"), ("A2", "2"), ("A3", "3")]);
+    s.cells.push(Cell {
+        r: CellRef::parse("C1").unwrap(),
+        style: 0,
+        value: CellValue::Number(0.0),
+        formula: Some(Formula {
+            text: "A1:A3*10".into(),
+            kind: FormulaKind::Array,
+            range: Some("C1:C3".into()),
+            ..Default::default()
+        }),
+    });
+    s.cells.push(Cell {
+        r: CellRef::parse("D1").unwrap(),
+        style: 0,
+        value: CellValue::Number(0.0),
+        formula: Some(Formula {
+            text: "SUM(A1:A3*A1:A3)".into(),
+            kind: FormulaKind::Array,
+            range: Some("D1".into()),
+            ..Default::default()
+        }),
+    });
+    s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    let w = wb(vec![s]);
+    assert_eq!(calc(&w, "C1"), n(10.0));
+    assert_eq!(calc(&w, "C2"), n(20.0));
+    assert_eq!(calc(&w, "C3"), n(30.0));
+    assert_eq!(calc(&w, "D1"), n(14.0));
+}
+
+/// 데이터 표 (What-If): 1변수 열 입력과 2변수
+#[test]
+fn data_tables() {
+    use crate::model::{DataTableInput, FormulaKind};
+    let mut s = sheet(
+        "S",
+        &[
+            ("A1", "0.05"),
+            ("B1", "=A1*100"),
+            ("C1", "3"),
+            ("E1", "=B1"),
+            ("D2", "0.1"),
+            ("D3", "0.2"),
+            ("G1", "=A1*C1"),
+            ("H1", "1"),
+            ("I1", "2"),
+            ("G2", "10"),
+            ("G3", "20"),
+            ("K1", "=B1+1"),
+        ],
+    );
+    let dt = |at: &str, rg: &str, inp: DataTableInput| Cell {
+        r: CellRef::parse(at).unwrap(),
+        style: 0,
+        value: CellValue::Number(0.0),
+        formula: Some(Formula {
+            text: String::new(),
+            kind: FormulaKind::DataTable,
+            range: Some(rg.into()),
+            data_table: Some(inp),
+            ..Default::default()
+        }),
+    };
+    s.cells.push(dt("E2", "E2:E3", DataTableInput { r1: Some("A1".into()), ..Default::default() }));
+    s.cells.push(dt(
+        "H2",
+        "H2:I3",
+        DataTableInput { two_d: true, r1: Some("A1".into()), r2: Some("C1".into()), ..Default::default() },
+    ));
+    s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    let w = wb(vec![s]);
+    assert_eq!(calc(&w, "E2"), n(10.0));
+    assert_eq!(calc(&w, "E3"), n(20.0));
+    assert_eq!(calc(&w, "H2"), n(10.0));
+    assert_eq!(calc(&w, "I2"), n(20.0));
+    assert_eq!(calc(&w, "H3"), n(20.0));
+    assert_eq!(calc(&w, "I3"), n(40.0));
+    // 입력 셀과 그에 기대는 수식은 원래 값으로 돌아온다
+    assert_eq!(calc(&w, "B1"), n(5.0));
+    assert_eq!(calc(&w, "K1"), n(6.0));
+}

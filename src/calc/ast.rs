@@ -27,6 +27,22 @@ pub enum Expr {
     Call(Box<Call>),
     /// 괄호 — 함수 인수 안의 합집합 `SUM((A1,B1))` 을 구별하려고 남긴다
     Paren(Box<Expr>),
+    /// 표의 구조적 참조 `표1[[#Data],[열1]:[열2]]`
+    Table(TableRef),
+}
+
+/// 구조적 참조. 행 종류가 하나도 없으면 데이터 행 (`표1[열]`, `표1[]`)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TableRef {
+    /// 표 이름 (빈 글이면 수식이 든 표: `[@열]`)
+    pub table: String,
+    pub all: bool,
+    pub data: bool,
+    pub headers: bool,
+    pub totals: bool,
+    pub this_row: bool,
+    /// (첫 열, 끝 열) 이름. 없으면 표의 모든 열
+    pub cols: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +143,7 @@ impl Expr {
         match self {
             Expr::Ref(r) => f(RefOrName::Ref(r)),
             Expr::Name(n) => f(RefOrName::Name(n)),
+            Expr::Table(t) => f(RefOrName::Table(t)),
             Expr::Unary(_, a) | Expr::Paren(a) => a.visit_refs(f),
             Expr::Binary(_, a, b) => {
                 a.visit_refs(f);
@@ -145,4 +162,5 @@ impl Expr {
 pub enum RefOrName<'a> {
     Ref(&'a RefExpr),
     Name(&'a NameExpr),
+    Table(&'a TableRef),
 }

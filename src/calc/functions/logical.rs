@@ -207,7 +207,7 @@ fn catch(ctx: &mut Ctx, args: &[Expr], hit: fn(ErrorKind) -> bool) -> Value {
 /// IFS: 인수 개수가 홀수면 #VALUE!, 조건이 오류이거나 논리로 바꿀 수 없으면 #N/A (IFS("x",1),
 /// IFS(FALSE,1,1/0,2), 대조 실험 logical)
 fn ifs(ctx: &mut Ctx, args: &[Expr]) -> Value {
-    if args.len() % 2 != 0 {
+    if !args.len().is_multiple_of(2) {
         return Value::Error(ErrorKind::Value);
     }
     for pair in args.chunks(2) {

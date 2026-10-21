@@ -21,11 +21,13 @@ use crate::parser::styles::parse_color;
 use crate::xml::Element;
 
 /// 워크시트 DOM 을 `sheet` 에 채운다. `sheet` 의 이름·ID·파트는 호출자가 미리 넣는다.
+/// x14 구역의 조건부 서식이 규칙 안에 담은 차등 서식은 `dxfs` 끝에 더한다.
 pub fn parse_worksheet(
     root: &Element,
     sheet: &mut Sheet,
     shared: &[RichText],
     rels: &[Relationship],
+    dxfs: &mut Vec<crate::model::Dxf>,
 ) {
     let rel_by_id: HashMap<&str, &Relationship> = rels.iter().map(|r| (r.id.as_str(), r)).collect();
 
@@ -126,11 +128,28 @@ pub fn parse_worksheet(
                 .collect(),
         });
     }
+    // 본 규칙의 x14:id → (서식, 규칙) 위치. x14 확장 구역의 같은 id 규칙이 데이터 막대 확장 등을 담는다
+    let mut x14_ids: HashMap<String, (usize, usize)> = HashMap::new();
     sheet.conditional_formats = root
         .sml_children("conditionalFormatting")
-        .map(|cf| ConditionalFormat {
+        .enumerate()
+        .map(|(i, cf)| ConditionalFormat {
             sqref: cf.attr("sqref").unwrap_or("").to_string(),
-            rules: cf.sml_children("cfRule").map(parse_cf_rule).collect(),
+            rules: cf
+                .sml_children("cfRule")
+                .enumerate()
+                .map(|(j, r)| {
+                    if let Some(id) = r
+                        .sml_child("extLst")
+                        .into_iter()
+                        .flat_map(|l| l.sml_children("ext"))
+                        .find_map(|e| e.child_ns(ns::X14, "id"))
+                    {
+                        x14_ids.insert(id.text().trim().to_string(), (i, j));
+                    }
+                    parse_cf_rule(r)
+                })
+                .collect(),
         })
         .collect();
     if let Some(dvs) = root.sml_child("dataValidations") {
@@ -165,7 +184,8 @@ pub fn parse_worksheet(
         }
     }
 
-    // x14 확장: <x:extLst><x:ext uri="{05C60535-...}"><x14:sparklineGroups>
+    // x14 확장: <x:extLst><x:ext uri="{05C60535-...}"><x14:sparklineGroups>,
+    // <x:ext uri="{78C0D931-...}"><x14:conditionalFormattings>
     if let Some(ext_lst) = root.sml_child("extLst") {
         for ext in ext_lst.sml_children("ext") {
             if let Some(groups) = ext.child_ns(ns::X14, "sparklineGroups") {
@@ -174,6 +194,190 @@ pub fn parse_worksheet(
                     .filter(|g| g.is(ns::X14, "sparklineGroup"))
                     .count();
             }
+            if let Some(cfs) = ext.child_ns(ns::X14, "conditionalFormattings") {
+                apply_x14_conditional_formats(cfs, sheet, &x14_ids, dxfs);
+            }
+        }
+    }
+}
+
+/// x14 구역의 기준 값: `type`, `gte`, 값은 `xm:f` (없으면 `val` 속성)
+fn parse_x14_cfvo(e: &Element) -> Cfvo {
+    Cfvo {
+        kind: e.attr("type").unwrap_or("").to_string(),
+        val: e
+            .child_ns(ns::XM, "f")
+            .map(|f| f.text())
+            .or_else(|| e.attr("val").map(str::to_string)),
+        gte: e.attr_bool("gte").unwrap_or(true),
+    }
+}
+
+/// `x14:dataBar` 를 막대에 더한다. 길이·값 표시는 x14 쪽이 이긴다 (한셀은 본 규칙에도 x14 값을 쓴다).
+/// `x14:fillColor` 는 한셀이 버린다 (막대 색은 본 규칙의 `color`)
+fn apply_x14_data_bar(d: &Element, bar: &mut DataBar) {
+    bar.min_length = d.attr_u32("minLength");
+    bar.max_length = d.attr_u32("maxLength");
+    bar.show_value &= d.attr_bool("showValue").unwrap_or(true);
+    let color = |n: &str| d.child_ns(ns::X14, n).map(parse_color);
+    bar.ext = Some(crate::model::DataBarExt {
+        cfvos: d
+            .elements()
+            .filter(|c| c.is(ns::X14, "cfvo"))
+            .map(parse_x14_cfvo)
+            .collect(),
+        border: d.attr_bool("border").unwrap_or(false),
+        gradient: d.attr_bool("gradient").unwrap_or(true),
+        direction: d
+            .attr("direction")
+            .filter(|v| *v != "context")
+            .map(str::to_string),
+        negative_same_as_positive: d
+            .attr_bool("negativeBarColorSameAsPositive")
+            .unwrap_or(false),
+        negative_border_same_as_positive: d
+            .attr_bool("negativeBarBorderColorSameAsPositive")
+            .unwrap_or(true),
+        axis_position: d
+            .attr("axisPosition")
+            .filter(|v| *v != "automatic")
+            .map(str::to_string),
+        border_color: color("borderColor"),
+        negative_fill_color: color("negativeFillColor"),
+        negative_border_color: color("negativeBorderColor"),
+        axis_color: color("axisColor"),
+    });
+}
+
+/// `x14:iconSet` (사용자 지정 아이콘 `x14:cfIcon` 포함)
+fn parse_x14_icon_set(i: &Element) -> IconSet {
+    IconSet {
+        set: i.attr("iconSet").unwrap_or("3TrafficLights1").to_string(),
+        cfvos: i
+            .elements()
+            .filter(|c| c.is(ns::X14, "cfvo"))
+            .map(parse_x14_cfvo)
+            .collect(),
+        show_value: i.attr_bool("showValue").unwrap_or(true),
+        reverse: i.attr_bool("reverse").unwrap_or(false),
+        percent: i.attr_bool("percent").unwrap_or(true),
+        custom_icons: i
+            .elements()
+            .filter(|c| c.is(ns::X14, "cfIcon"))
+            .map(|c| {
+                (
+                    c.attr("iconSet").unwrap_or("NoIcons").to_string(),
+                    c.attr_u32("iconId").unwrap_or(0),
+                )
+            })
+            .collect(),
+    }
+}
+
+/// x14 구역의 그 밖의 규칙 (수식·값 비교 …): 수식은 `xm:f`, 서식은 규칙 안의 `x14:dxf` — 차등 서식 표 끝에
+/// 더한다. 한셀은 이 규칙을 처음에는 x14 구역에, 다시 저장하면 본 구역에 `dxfId` 로 쓴다 (x14 조건부 서식 실험)
+fn parse_x14_rule(r: &Element, dxfs: &mut Vec<crate::model::Dxf>) -> CfRule {
+    let s = |n: &str| r.attr(n).map(str::to_string);
+    let dxf_id = match r.child_ns(ns::X14, "dxf") {
+        Some(d) => {
+            dxfs.push(crate::parser::styles::parse_dxf(d));
+            Some(dxfs.len() as u32 - 1)
+        }
+        None => r.attr_u32("dxfId"),
+    };
+    CfRule {
+        kind: r.attr("type").unwrap_or("").to_string(),
+        priority: r.attr_u32("priority").unwrap_or(0),
+        dxf_id,
+        stop_if_true: r.attr_bool("stopIfTrue").unwrap_or(false),
+        operator: s("operator"),
+        formulas: r
+            .elements()
+            .filter(|e| e.is(ns::XM, "f"))
+            .map(|f| f.text())
+            .collect(),
+        text: s("text"),
+        time_period: s("timePeriod"),
+        rank: r.attr_u32("rank"),
+        percent: r.attr_bool("percent").unwrap_or(false),
+        bottom: r.attr_bool("bottom").unwrap_or(false),
+        above_average: r.attr_bool("aboveAverage"),
+        equal_average: r.attr_bool("equalAverage").unwrap_or(false),
+        std_dev: r.attr_u32("stdDev"),
+        ..Default::default()
+    }
+}
+
+/// `x14:conditionalFormattings`: 본 규칙과 id 로 이어지는 규칙은 그 규칙에 더하고(데이터 막대 확장, 아이콘
+/// 집합), 이어지지 않는 아이콘 집합·데이터 막대는 x14 구역의 규칙으로, 그 밖의 종류는 보통 규칙으로 더한다
+fn apply_x14_conditional_formats(
+    cfs: &Element,
+    sheet: &mut Sheet,
+    x14_ids: &HashMap<String, (usize, usize)>,
+    dxfs: &mut Vec<crate::model::Dxf>,
+) {
+    for cf in cfs
+        .elements()
+        .filter(|e| e.is(ns::X14, "conditionalFormatting"))
+    {
+        let sqref = cf
+            .child_ns(ns::XM, "sqref")
+            .map(|s| s.text().trim().to_string())
+            .unwrap_or_default();
+        let mut extra = Vec::new();
+        for r in cf.elements().filter(|e| e.is(ns::X14, "cfRule")) {
+            let target = r.attr("id").and_then(|id| x14_ids.get(id.trim())).copied();
+            let main = target.and_then(|(i, j)| {
+                sheet
+                    .conditional_formats
+                    .get_mut(i)
+                    .and_then(|c| c.rules.get_mut(j))
+            });
+            match (r.attr("type"), main) {
+                (Some("dataBar"), Some(rule)) => {
+                    if let (Some(d), Some(bar)) =
+                        (r.child_ns(ns::X14, "dataBar"), rule.data_bar.as_mut())
+                    {
+                        apply_x14_data_bar(d, bar);
+                    }
+                }
+                (Some("iconSet"), Some(rule)) => {
+                    if let Some(i) = r.child_ns(ns::X14, "iconSet") {
+                        rule.icon_set = Some(parse_x14_icon_set(i));
+                    }
+                }
+                (Some(kind @ ("dataBar" | "iconSet")), None) => {
+                    let mut rule = CfRule {
+                        kind: kind.to_string(),
+                        priority: r.attr_u32("priority").unwrap_or(0),
+                        x14: true,
+                        ..Default::default()
+                    };
+                    if let Some(d) = r.child_ns(ns::X14, "dataBar") {
+                        let mut bar = DataBar {
+                            show_value: true,
+                            ..Default::default()
+                        };
+                        apply_x14_data_bar(d, &mut bar);
+                        bar.cfvos = bar
+                            .ext
+                            .as_ref()
+                            .map(|e| e.cfvos.clone())
+                            .unwrap_or_default();
+                        rule.data_bar = Some(bar);
+                    }
+                    rule.icon_set = r.child_ns(ns::X14, "iconSet").map(parse_x14_icon_set);
+                    extra.push(rule);
+                }
+                (Some(_), None) => extra.push(parse_x14_rule(r, dxfs)),
+                _ => {}
+            }
+        }
+        if !extra.is_empty() {
+            sheet.conditional_formats.push(ConditionalFormat {
+                sqref,
+                rules: extra,
+            });
         }
     }
 }
@@ -214,7 +418,7 @@ fn parse_sheet_view(v: &Element) -> SheetView {
     view
 }
 
-fn parse_filter_column(c: &Element) -> FilterColumn {
+pub(crate) fn parse_filter_column(c: &Element) -> FilterColumn {
     let mut fc = FilterColumn {
         col_id: c.attr_u32("colId").unwrap_or(0),
         ..Default::default()
@@ -244,11 +448,13 @@ fn parse_filter_column(c: &Element) -> FilterColumn {
             t.attr_bool("percent").unwrap_or(false),
             t.attr_f64("val").unwrap_or(10.0),
         ));
+        fc.filter_val = t.attr_f64("filterVal");
     }
-    fc.dynamic = c
-        .sml_child("dynamicFilter")
-        .and_then(|d| d.attr("type"))
-        .map(str::to_string);
+    if let Some(d) = c.sml_child("dynamicFilter") {
+        fc.dynamic = d.attr("type").map(str::to_string);
+        fc.dynamic_val = d.attr_f64("val");
+        fc.dynamic_max_val = d.attr_f64("maxVal");
+    }
     fc
 }
 
@@ -288,6 +494,7 @@ fn parse_cf_rule(r: &Element) -> CfRule {
             show_value: d.attr_bool("showValue").unwrap_or(true),
             min_length: d.attr_u32("minLength"),
             max_length: d.attr_u32("maxLength"),
+            ext: None,
         }),
         icon_set: r.sml_child("iconSet").map(|i| IconSet {
             set: i.attr("iconSet").unwrap_or("3TrafficLights1").to_string(),
@@ -295,7 +502,9 @@ fn parse_cf_rule(r: &Element) -> CfRule {
             show_value: i.attr_bool("showValue").unwrap_or(true),
             reverse: i.attr_bool("reverse").unwrap_or(false),
             percent: i.attr_bool("percent").unwrap_or(true),
+            custom_icons: Vec::new(),
         }),
+        x14: false,
     }
 }
 
@@ -461,16 +670,28 @@ fn parse_cell(c: &Element, r: CellRef, shared: &[RichText]) -> Cell {
             .map(CellValue::Number)
             .unwrap_or(CellValue::Text(v)),
     };
-    let formula = c.sml_child("f").map(|f| Formula {
-        text: f.text(),
-        kind: match f.attr("t") {
+    let formula = c.sml_child("f").map(|f| {
+        let kind = match f.attr("t") {
             Some("shared") => FormulaKind::Shared,
             Some("array") => FormulaKind::Array,
             Some("dataTable") => FormulaKind::DataTable,
             _ => FormulaKind::Normal,
-        },
-        shared_index: f.attr_u32("si"),
-        range: f.attr("ref").map(str::to_string),
+        };
+        let flag = |n: &str| f.attr_bool(n).unwrap_or(false);
+        Formula {
+            text: f.text(),
+            kind,
+            shared_index: f.attr_u32("si"),
+            range: f.attr("ref").map(str::to_string),
+            data_table: (kind == FormulaKind::DataTable).then(|| crate::model::DataTableInput {
+                two_d: flag("dt2D"),
+                row_input: flag("dtr"),
+                r1: f.attr("r1").map(str::to_string),
+                r2: f.attr("r2").map(str::to_string),
+                del1: flag("del1"),
+                del2: flag("del2"),
+            }),
+        }
     });
     Cell {
         r,

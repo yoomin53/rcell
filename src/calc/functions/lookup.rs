@@ -306,11 +306,10 @@ fn x_find(vals: &[Value], x: &Value, mm: f64, sm: f64) -> Option<usize> {
                 let ob = value::compare(v, &vals[b]);
                 if mm < 0.0 { ob == Ordering::Greater } else { ob == Ordering::Less }
             };
-            if (mm < 0.0 && o == Ordering::Less) || (mm > 0.0 && o == Ordering::Greater) {
-                if best.is_none_or(better) {
+            if ((mm < 0.0 && o == Ordering::Less) || (mm > 0.0 && o == Ordering::Greater))
+                && best.is_none_or(better) {
                     best = Some(i);
                 }
-            }
         }
     }
     best
@@ -373,9 +372,9 @@ fn lookup(ctx: &mut Ctx, a: &[Value]) -> Value {
             // (LOOKUP(35,Data!F1:F10,Data!A12:E12), 대조 실험 lookup)
             let vertical = arr.cols == 1 && arr.rows > 1;
             let horizontal = arr.rows == 1 && arr.cols > 1;
-            let rv: Vec<Value> = if vertical && res.rows == 1 && res.cols > 1 {
-                vec![res.get(0, 0).clone()]
-            } else if horizontal && res.cols == 1 && res.rows > 1 {
+            let rv: Vec<Value> = if (vertical && res.rows == 1 && res.cols > 1)
+                || (horizontal && res.cols == 1 && res.rows > 1)
+            {
                 vec![res.get(0, 0).clone()]
             } else {
                 try_v!(vector(&res))

@@ -50,6 +50,7 @@ fn external_links_roundtrip() {
         local_sheet_id: None,
         hidden: false,
         formula: "'[1]첫 시트'!$A$1".into(),
+        comment: None,
     });
     let b = rcell::from_bytes(write(&a, Flavor::Cell).unwrap()).unwrap();
     assert_eq!(b.external_links.len(), 1);
@@ -153,7 +154,7 @@ fn written_cell_uses_hancom_package_conventions() {
 
 #[test]
 fn comments_roundtrip() {
-    use rcell::model::{CellRef, Comment, RichText};
+    use rcell::model::{CellRef, Comment, CommentShape, RichText};
     let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
     for (row, col, author, text, visible) in [
         (0, 0, "yoomin53", "첫 메모", false),
@@ -167,13 +168,33 @@ fn comments_roundtrip() {
                 runs: Vec::new(),
             },
             visible,
+            shape: None,
         });
     }
+    // 둘째 메모: 자리·색·선·그림자·셀 고정·맞춤 (메모 대조 실험의 값)
+    let shape = CommentShape {
+        anchor: [3, 5, 1, 7, 6, 20, 8, 3],
+        fill_color: "#c0ffc0".into(),
+        stroke_color: "#ff0000".into(),
+        stroke_weight: 2.0,
+        shadow: true,
+        move_with_cells: true,
+        size_with_cells: false,
+        text_halign: Some("Right".into()),
+        text_valign: Some("Bottom".into()),
+    };
+    a.sheets[0].comments[1].shape = Some(shape.clone());
     let out = write(&a, Flavor::Cell).unwrap();
     let b = rcell::from_bytes(out).unwrap();
     let diffs = compare(&a, &b, Options::default());
     assert!(diffs.is_empty(), "{}", diffs.join("\n"));
     assert_eq!(b.sheets[0].comments.len(), 2);
+    assert_eq!(b.sheets[0].comments[1].shape, Some(shape));
+    // 모양이 없는 메모는 셀 오른쪽 위에 둔다
+    assert_eq!(
+        b.sheets[0].comments[0].shape,
+        Some(CommentShape::implied(CellRef { row: 0, col: 0 }))
+    );
 }
 
 #[test]
@@ -381,6 +402,7 @@ fn conditional_formats_and_validations_roundtrip() {
                         show_value: false,
                         reverse: false,
                         percent: true,
+                        custom_icons: Vec::new(),
                     }),
                     ..Default::default()
                 },
@@ -450,8 +472,21 @@ fn outline_auto_filter_and_protection_roundtrip() {
     states[12] = true; // sort 는 막고 나머지는 기본값과 다르게
     s.protection = Some(SheetProtection::from_states(Some("CC1A".into()), states));
     s.auto_filter = Some(AutoFilter {
-        range: "A1:C3".into(),
+        range: "A1:E3".into(),
         columns: vec![
+            FilterColumn {
+                col_id: 3,
+                dynamic: Some("thisWeek".into()),
+                dynamic_val: Some(46311.0),
+                dynamic_max_val: Some(46318.0),
+                ..Default::default()
+            },
+            FilterColumn {
+                col_id: 4,
+                dynamic: Some("aboveAverage".into()),
+                dynamic_val: Some(72.5),
+                ..Default::default()
+            },
             FilterColumn {
                 col_id: 0,
                 values: vec!["1".into(), "x".into()],
@@ -470,6 +505,7 @@ fn outline_auto_filter_and_protection_roundtrip() {
             FilterColumn {
                 col_id: 2,
                 top10: Some((false, true, 25.0)),
+                filter_val: Some(-3.0),
                 ..Default::default()
             },
         ],
@@ -691,11 +727,37 @@ fn document_properties_roundtrip() {
         last_printed: Some("1997-05-05T14:10:37Z".into()),
         ..Default::default()
     };
+    a.total_time = Some(979);
     let out = write(&a, Flavor::Cell).unwrap();
     let b = rcell::from_bytes(out).unwrap();
     let diffs = compare(&a, &b, Options::default());
     assert!(diffs.is_empty(), "{}", diffs.join("\n"));
     assert_eq!(b.properties, a.properties);
+    assert_eq!(b.total_time, Some(979));
+}
+
+#[test]
+fn workbook_view_and_code_name_roundtrip() {
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    a.code_name = Some("MyBook".into());
+    a.view = Some(rcell::model::WorkbookView {
+        x_window: -15,
+        y_window: 30,
+        window_width: 12000,
+        window_height: 8000,
+        tab_ratio: 250,
+        first_sheet: 1,
+        active_tab: 0,
+        show_horizontal_scroll: false,
+        show_vertical_scroll: true,
+        show_sheet_tabs: false,
+    });
+    let out = write(&a, Flavor::Cell).unwrap();
+    let b = rcell::from_bytes(out).unwrap();
+    let diffs = compare(&a, &b, Options::default());
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    assert_eq!(b.view, a.view);
+    assert_eq!(b.code_name.as_deref(), Some("MyBook"));
 }
 
 #[test]
@@ -718,4 +780,546 @@ fn margins_survive_truncation_to_hwpunit() {
     assert_eq!((m.header as f32 as f64 * 7200.0).trunc(), 3683.0);
     assert!((m.header - v).abs() < 1e-5);
     assert_eq!(m.left, 0.75);
+}
+
+#[test]
+fn x14_conditional_formats_roundtrip() {
+    use rcell::model::{CfRule, Cfvo, Color, ConditionalFormat, DataBar, DataBarExt, IconSet};
+    let rgb = |v: &str| Color {
+        rgb: Some(v.into()),
+        ..Default::default()
+    };
+    let cfvo = |kind: &str, val: Option<&str>| Cfvo {
+        kind: kind.into(),
+        val: val.map(str::to_string),
+        gte: true,
+    };
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    a.sheets[0].conditional_formats = vec![
+        ConditionalFormat {
+            sqref: "B1:B3".into(),
+            rules: vec![CfRule {
+                kind: "dataBar".into(),
+                priority: 1,
+                data_bar: Some(DataBar {
+                    cfvos: vec![cfvo("min", None), cfvo("max", None)],
+                    color: Some(rgb("ff638ec6")),
+                    show_value: false,
+                    min_length: Some(5),
+                    max_length: Some(95),
+                    ext: Some(DataBarExt {
+                        cfvos: vec![cfvo("autoMin", None), cfvo("num", Some("40"))],
+                        border: true,
+                        gradient: false,
+                        direction: Some("rightToLeft".into()),
+                        negative_border_same_as_positive: false,
+                        axis_position: Some("middle".into()),
+                        border_color: Some(rgb("ff1f4e79")),
+                        negative_fill_color: Some(rgb("ffff0000")),
+                        axis_color: Some(Color {
+                            indexed: Some(64),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                }),
+                ..Default::default()
+            }],
+        },
+        ConditionalFormat {
+            sqref: "C1:C3".into(),
+            rules: vec![CfRule {
+                kind: "iconSet".into(),
+                priority: 2,
+                icon_set: Some(IconSet {
+                    set: "3Arrows".into(),
+                    cfvos: vec![
+                        cfvo("percent", Some("0")),
+                        cfvo("num", Some("2")),
+                        cfvo("percentile", Some("70")),
+                    ],
+                    show_value: true,
+                    reverse: true,
+                    percent: true,
+                    custom_icons: vec![("3Flags".into(), 0), ("NoIcons".into(), 0)],
+                }),
+                ..Default::default()
+            }],
+        },
+    ];
+    let out = write(&a, Flavor::Cell).unwrap();
+    let mut pkg = rcell::open_package(out.clone()).unwrap();
+    let sheet = pkg
+        .read_string("xl/worksheets/sheet1.xml")
+        .unwrap()
+        .unwrap();
+    assert!(sheet.contains("<x14:dataBar minLength=\"5\" maxLength=\"95\" showValue=\"0\" border=\"1\" gradient=\"0\" direction=\"rightToLeft\" negativeBarBorderColorSameAsPositive=\"0\" axisPosition=\"middle\">"));
+    assert!(sheet.contains("<x14:cfIcon iconSet=\"NoIcons\" iconId=\"0\"/>"));
+    // 사용자 지정 아이콘이 있는 규칙은 x14 구역에만 쓴다
+    assert!(!sheet.contains("<x:iconSet"));
+    let b = rcell::from_bytes(out).unwrap();
+    let diffs = compare(&a, &b, Options::default());
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    let bar = b.sheets[0].conditional_formats[0].rules[0]
+        .data_bar
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        bar.ext,
+        a.sheets[0].conditional_formats[0].rules[0]
+            .data_bar
+            .as_ref()
+            .unwrap()
+            .ext
+    );
+    assert!(b.sheets[0].conditional_formats[1].rules[0].x14);
+}
+
+#[test]
+fn array_formulas_data_tables_and_names_roundtrip() {
+    use rcell::model::{
+        Cell, CellRef, CellValue, DataTableInput, DefinedName, Formula, FormulaKind,
+    };
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    let s = &mut a.sheets[0];
+    s.cells.retain(|c| c.r.row > 4 || c.r.col > 4);
+    let cell = |row, col, formula| Cell {
+        r: CellRef { row, col },
+        style: 0,
+        value: CellValue::Number(1.0),
+        formula,
+    };
+    s.cells.push(cell(
+        0,
+        0,
+        Some(Formula {
+            text: "B1:B2*2".into(),
+            kind: FormulaKind::Array,
+            range: Some("A1:A2".into()),
+            ..Default::default()
+        }),
+    ));
+    s.cells.push(cell(1, 0, None));
+    s.cells.push(cell(
+        2,
+        3,
+        Some(Formula {
+            kind: FormulaKind::DataTable,
+            range: Some("D3:E4".into()),
+            data_table: Some(DataTableInput {
+                two_d: true,
+                row_input: true,
+                r1: Some("A1".into()),
+                r2: Some("B1".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    ));
+    s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    a.defined_names.push(DefinedName {
+        name: "Hidden".into(),
+        local_sheet_id: Some(0),
+        hidden: true,
+        formula: "'데이터'!$A$1".into(),
+        comment: Some("설명 글".into()),
+    });
+    let out = write(&a, Flavor::Cell).unwrap();
+    let mut pkg = rcell::open_package(out.clone()).unwrap();
+    let sheet = pkg
+        .read_string("xl/worksheets/sheet1.xml")
+        .unwrap()
+        .unwrap();
+    assert!(sheet.contains("<x:f t=\"array\" ref=\"A1:A2\">B1:B2*2</x:f>"));
+    // 한셀처럼 2변수 표에는 dtr 을 쓰지 않는다
+    assert!(sheet.contains("<x:f t=\"dataTable\" ref=\"D3:E4\" dt2D=\"1\" r1=\"A1\" r2=\"B1\"/>"));
+    let b = rcell::from_bytes(out).unwrap();
+    let diffs = compare(&a, &b, Options::default());
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    let n = b.defined_names.iter().find(|n| n.name == "Hidden").unwrap();
+    assert!(n.hidden);
+    assert_eq!(n.comment.as_deref(), Some("설명 글"));
+}
+
+#[test]
+fn model_shape_details_roundtrip() {
+    use rcell::model::{
+        Anchor, DrawColor, LineEnd, Marker, Outline, Paint, Shape, ShapeKind, ShapeShadow,
+    };
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    let rgb = |v: &str| DrawColor {
+        value: format!("srgb:{v}"),
+        mods: Vec::new(),
+    };
+    // 레거시에서 읽은 것처럼 원문(raw) 없이 모델만 있는 도형: 그림자·잠금·clientData·선 끝/겹선/이음/화살표
+    a.sheets[0].shapes.push(Shape {
+        anchor: Anchor {
+            from: Marker {
+                col: 1,
+                row: 1,
+                ..Default::default()
+            },
+            to: Some(Marker {
+                col: 4,
+                row: 3,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        kind: ShapeKind::Shape,
+        id: 2,
+        name: "도형 1".into(),
+        geometry: Some("rect".into()),
+        fill: Some(Paint::Solid(rgb("FFF2CC"))),
+        line: Some(Outline {
+            width: Some(38100),
+            fill: Some(Paint::Solid(rgb("FF0000"))),
+            dash: Some("dash".into()),
+            cap: Some("rnd".into()),
+            compound: Some("dbl".into()),
+            join: Some("bevel".into()),
+            head: Some(LineEnd {
+                kind: Some("triangle".into()),
+                w: Some("lg".into()),
+                len: Some("sm".into()),
+            }),
+            tail: None,
+        }),
+        shadow: Some(ShapeShadow {
+            dist: 25399,
+            dir: 13_500_000,
+            blur: 0,
+            align: Some("t".into()),
+            rot_with_shape: false,
+            color: DrawColor {
+                value: "srgb:808080".into(),
+                mods: vec![("alpha".into(), 50000)],
+            },
+        }),
+        locks: vec!["noMove".into(), "noRot".into()],
+        locks_with_sheet: Some(true),
+        prints_with_sheet: Some(false),
+        ..Default::default()
+    });
+    let out = write(&a, Flavor::Cell).unwrap();
+    let mut pkg = rcell::open_package(out.clone()).unwrap();
+    let d = pkg
+        .read_string("xl/drawings/drawing1.xml")
+        .unwrap()
+        .unwrap();
+    assert!(d.contains("<a:spLocks noMove=\"1\" noRot=\"1\"/>"));
+    assert!(d.contains("<a:ln w=\"38100\" cap=\"rnd\" cmpd=\"dbl\">"));
+    assert!(d.contains(
+        "<a:effectLst><a:outerShdw dist=\"25399\" dir=\"13500000\" algn=\"t\" rotWithShape=\"0\">"
+    ));
+    assert!(d.contains("<xdr:clientData fLocksWithSheet=\"1\" fPrintsWithSheet=\"0\"/>"));
+    let b = rcell::from_bytes(out).unwrap();
+    let diffs = compare(&a, &b, Options::default());
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+}
+
+#[test]
+fn unknown_drawing_anchors_are_kept() {
+    // mc:AlternateContent 로 감싼 앵커와 모르는 개체(contentPart)를 담은 앵커는 원문 그대로 다시 쓴다
+    let anchor = |inner: &str| {
+        format!(
+            "<xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>{inner}<xdr:clientData/></xdr:twoCellAnchor>"
+        )
+    };
+    let sp = |name: &str| {
+        format!(
+            "<xdr:sp><xdr:nvSpPr><xdr:cNvPr id=\"2\" name=\"{name}\"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:sp>"
+        )
+    };
+    let drawing = format!(
+        "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><mc:Choice xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\" Requires=\"a14\">{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent>{}</xdr:wsDr>",
+        anchor(&sp("선택")),
+        anchor(&sp("대체")),
+        anchor(
+            "<xdr:contentPart xmlns:p14=\"http://schemas.microsoft.com/office/powerpoint/2010/main\" r:id=\"rId9\"/>"
+        )
+    );
+    let bytes = common::build_zip(&[
+        (
+            "[Content_Types].xml",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/></Types>"#,
+        ),
+        (
+            "_rels/.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="/xl/workbook.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/workbook.xml",
+            r#"<x:workbook xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><x:sheets><x:sheet name="그림" sheetId="1" r:id="rId1"/></x:sheets></x:workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            r#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><x:sheetData/><x:drawing r:id="rId1"/></x:worksheet>"#,
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#,
+        ),
+        ("xl/drawings/drawing1.xml", &drawing),
+    ]);
+    let a = rcell::from_bytes(bytes).unwrap();
+    let shapes = &a.sheets[0].shapes;
+    assert_eq!(shapes.len(), 2);
+    assert_eq!(shapes[0].name, "선택");
+    assert_eq!(shapes[1].kind, rcell::model::ShapeKind::Other);
+    let out = write(&a, Flavor::Cell).unwrap();
+    let mut pkg = rcell::open_package(out.clone()).unwrap();
+    let d = pkg
+        .read_string("xl/drawings/drawing1.xml")
+        .unwrap()
+        .unwrap();
+    assert!(d.contains("<mc:AlternateContent"));
+    assert!(d.contains("xdr:contentPart"));
+    let b = rcell::from_bytes(out).unwrap();
+    assert_eq!(b.sheets[0].shapes.len(), 2);
+}
+
+#[test]
+fn package_parts_roundtrip() {
+    const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const PR: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+    const T: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.";
+    let rels = |list: &[(&str, &str, &str)]| {
+        let mut s = format!("<Relationships xmlns=\"{PR}\">");
+        for (id, ty, target) in list {
+            s.push_str(&format!(
+                "<Relationship Id=\"{id}\" Type=\"{ty}\" Target=\"{target}\"/>"
+            ));
+        }
+        s + "</Relationships>"
+    };
+    let ct = format!(
+        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"bin\" ContentType=\"{T}printerSettings\"/><Override PartName=\"/xl/tables/table1.xml\" ContentType=\"{T}table+xml\"/><Override PartName=\"/xl/pivotTables/pivotTable1.xml\" ContentType=\"{T}pivotTable+xml\"/><Override PartName=\"/xl/pivotCache/pivotCacheDefinition1.xml\" ContentType=\"{T}pivotCacheDefinition+xml\"/><Override PartName=\"/xl/pivotCache/pivotCacheRecords1.xml\" ContentType=\"{T}pivotCacheRecords+xml\"/><Override PartName=\"/xl/connections.xml\" ContentType=\"{T}connections+xml\"/><Override PartName=\"/xl/queryTables/queryTable1.xml\" ContentType=\"{T}queryTable+xml\"/><Override PartName=\"/xl/vbsProject.bin\" ContentType=\"application/vnd.hancom-office.vbsProject\"/></Types>"
+    );
+    let wb_rels = rels(&[
+        ("rId1", &format!("{R}/worksheet"), "worksheets/sheet1.xml"),
+        ("rId2", &format!("{R}/connections"), "connections.xml"),
+        ("rId3", &format!("{R}/customXml"), "../customXml/item1.xml"),
+        (
+            "rId4",
+            &format!("{R}/pivotCacheDefinition"),
+            "pivotCache/pivotCacheDefinition1.xml",
+        ),
+        (
+            "rId5",
+            "http://schemas.hancom.com/office/relationships/vbsProject",
+            "vbsProject.bin",
+        ),
+    ]);
+    let sheet_rels = rels(&[
+        ("rId1", &format!("{R}/table"), "../tables/table1.xml"),
+        (
+            "rId2",
+            &format!("{R}/pivotTable"),
+            "../pivotTables/pivotTable1.xml",
+        ),
+        (
+            "rId3",
+            &format!("{R}/queryTable"),
+            "../queryTables/queryTable1.xml",
+        ),
+        (
+            "rId4",
+            &format!("{R}/printerSettings"),
+            "../printerSettings/printerSettings1.bin",
+        ),
+    ]);
+    let pt_rels = rels(&[(
+        "rId1",
+        &format!("{R}/pivotCacheDefinition"),
+        "../pivotCache/pivotCacheDefinition1.xml",
+    )]);
+    let pc_rels = rels(&[(
+        "rId1",
+        &format!("{R}/pivotCacheRecords"),
+        "pivotCacheRecords1.xml",
+    )]);
+    let cx_rels = rels(&[("rId1", &format!("{R}/customXmlProps"), "itemProps1.xml")]);
+    let workbook = format!(
+        "<x:workbook xmlns:x=\"{SML}\" xmlns:r=\"{R}\"><x:sheets><x:sheet name=\"표\" sheetId=\"1\" r:id=\"rId1\"/></x:sheets><x:calcPr/><x:pivotCaches><x:pivotCache cacheId=\"3\" r:id=\"rId4\"/></x:pivotCaches></x:workbook>"
+    );
+    let sheet = format!(
+        "<x:worksheet xmlns:x=\"{SML}\" xmlns:r=\"{R}\"><x:sheetData><x:row r=\"1\"><x:c r=\"A1\" t=\"inlineStr\"><x:is><x:t>이름</x:t></x:is></x:c><x:c r=\"B1\" t=\"inlineStr\"><x:is><x:t>수량</x:t></x:is></x:c></x:row><x:row r=\"2\"><x:c r=\"B2\"><x:v>5</x:v></x:c></x:row></x:sheetData><x:pageMargins left=\"0.7\" right=\"0.7\" top=\"0.75\" bottom=\"0.75\" header=\"0.3\" footer=\"0.3\"/><x:pageSetup paperSize=\"9\" orientation=\"landscape\" r:id=\"rId4\"/><x:tableParts count=\"1\"><x:tablePart r:id=\"rId1\"/></x:tableParts></x:worksheet>"
+    );
+    let table = format!(
+        "<table xmlns=\"{SML}\" id=\"4\" name=\"Table4\" displayName=\"Table4\" ref=\"A1:B3\" totalsRowCount=\"1\" totalsRowDxfId=\"0\"><autoFilter ref=\"A1:B2\"><filterColumn colId=\"1\"><filters><filter val=\"5\"/></filters></filterColumn></autoFilter><tableColumns count=\"2\"><tableColumn id=\"1\" name=\"이름\" totalsRowLabel=\"합계\"/><tableColumn id=\"2\" name=\"수량\" totalsRowFunction=\"custom\" dataDxfId=\"0\"><calculatedColumnFormula>Table4[[#This Row],[수량]]*2</calculatedColumnFormula><totalsRowFormula>SUM(Table4[수량])</totalsRowFormula></tableColumn></tableColumns><tableStyleInfo name=\"TableStyleMedium2\" showFirstColumn=\"0\" showLastColumn=\"0\" showRowStripes=\"1\" showColumnStripes=\"0\"/></table>"
+    );
+    let pivot = format!(
+        "<pivotTableDefinition xmlns=\"{SML}\" name=\"피벗1\" cacheId=\"3\" dataCaption=\"값\"><location ref=\"D1:E3\" firstHeaderRow=\"1\" firstDataRow=\"1\" firstDataCol=\"1\"/><pivotFields count=\"2\"><pivotField axis=\"axisRow\" showAll=\"0\"><items count=\"2\"><item x=\"0\"/><item t=\"default\"/></items></pivotField><pivotField dataField=\"1\" showAll=\"0\"/></pivotFields><rowFields count=\"1\"><field x=\"0\"/></rowFields><dataFields count=\"1\"><dataField name=\"합계 : 수량\" fld=\"1\" baseField=\"0\" baseItem=\"0\"/></dataFields></pivotTableDefinition>"
+    );
+    let cache = format!(
+        "<pivotCacheDefinition xmlns=\"{SML}\" xmlns:r=\"{R}\" r:id=\"rId1\" recordCount=\"1\"><cacheSource type=\"worksheet\"><worksheetSource ref=\"A1:B2\" sheet=\"표\"/></cacheSource><cacheFields count=\"2\"><cacheField name=\"이름\" numFmtId=\"0\"><sharedItems count=\"1\"><m/></sharedItems></cacheField><cacheField name=\"수량\" numFmtId=\"0\"><sharedItems containsNumber=\"1\" minValue=\"5\" maxValue=\"5\"/></cacheField></cacheFields></pivotCacheDefinition>"
+    );
+    let records = format!(
+        "<pivotCacheRecords xmlns=\"{SML}\" count=\"1\"><r><x v=\"0\"/><n v=\"5\"/></r></pivotCacheRecords>"
+    );
+    let connections = format!(
+        "<connections xmlns=\"{SML}\"><connection id=\"1\" name=\"q\" type=\"6\"/></connections>"
+    );
+    let query = format!("<queryTable xmlns=\"{SML}\" name=\"q\" connectionId=\"1\"/>");
+    let root_rels = rels(&[("rId1", &format!("{R}/officeDocument"), "xl/workbook.xml")]);
+    let base = common::build_zip(&[
+        ("[Content_Types].xml", &ct),
+        ("_rels/.rels", &root_rels),
+        ("xl/workbook.xml", &workbook),
+        ("xl/_rels/workbook.xml.rels", &wb_rels),
+        ("xl/worksheets/sheet1.xml", &sheet),
+        ("xl/worksheets/_rels/sheet1.xml.rels", &sheet_rels),
+        ("xl/tables/table1.xml", &table),
+        ("xl/pivotTables/pivotTable1.xml", &pivot),
+        ("xl/pivotTables/_rels/pivotTable1.xml.rels", &pt_rels),
+        ("xl/pivotCache/pivotCacheDefinition1.xml", &cache),
+        (
+            "xl/pivotCache/_rels/pivotCacheDefinition1.xml.rels",
+            &pc_rels,
+        ),
+        ("xl/pivotCache/pivotCacheRecords1.xml", &records),
+        ("xl/connections.xml", &connections),
+        ("xl/queryTables/queryTable1.xml", &query),
+        (
+            "customXml/item1.xml",
+            "<rc:data xmlns:rc=\"urn:rcell:test\"/>",
+        ),
+        ("customXml/_rels/item1.xml.rels", &cx_rels),
+        (
+            "customXml/itemProps1.xml",
+            "<ds:datastoreItem ds:itemID=\"{00000000-0000-0000-0000-000000000001}\" xmlns:ds=\"http://schemas.openxmlformats.org/officeDocument/2006/customXml\"/>",
+        ),
+    ]);
+    // 매크로 프로젝트 스트림: 머리 0x104 바이트 + 글자 수 u32 + UTF-16
+    let mut stream = vec![0u8; 0x104];
+    stream[..8].copy_from_slice(&[1, 1, 1, 0, 0, 1, 0x20, 2]);
+    let text: Vec<u16> = "Sub A()\nEnd Sub\n".encode_utf16().collect();
+    stream.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    for u in &text {
+        stream.extend_from_slice(&u.to_le_bytes());
+    }
+    let vbs = rcell::cfb_write::write_streams(&[("_VBS_PROJECT_W", &stream)]).unwrap();
+    let printer = vec![7u8; 220];
+    let bytes = rcell::container::replace_zip_parts(
+        &base,
+        &[
+            ("xl/vbsProject.bin".into(), vbs.clone()),
+            (
+                "xl/printerSettings/printerSettings1.bin".into(),
+                printer.clone(),
+            ),
+        ],
+    )
+    .unwrap();
+
+    // 이 패키지에는 styles.xml 이 없다 (rcell 은 기본 서식을 쓴다)
+    let no_styles = Options {
+        skip_styles: true,
+        ..Default::default()
+    };
+    let a = rcell::from_bytes(bytes).unwrap();
+    let sh = &a.sheets[0];
+    let t = &sh.tables[0];
+    assert_eq!(
+        (t.id, t.name.as_str(), t.range.as_str()),
+        (4, "Table4", "A1:B3")
+    );
+    assert_eq!((t.header_rows, t.totals_rows, t.dxfs[2]), (1, 1, Some(0)));
+    assert_eq!(t.auto_filter.as_ref().unwrap().columns[0].values, ["5"]);
+    assert_eq!(t.columns[0].totals_label.as_deref(), Some("합계"));
+    assert_eq!(t.columns[1].totals_function.as_deref(), Some("custom"));
+    assert_eq!(
+        t.columns[1].totals_formula.as_deref(),
+        Some("SUM(Table4[수량])")
+    );
+    assert_eq!(t.columns[1].dxfs[1], Some(0));
+    assert_eq!(
+        t.style.as_ref().unwrap().name.as_deref(),
+        Some("TableStyleMedium2")
+    );
+    let kinds = |l: &[rcell::model::PartLink]| {
+        l.iter()
+            .map(|l| l.rel_type.rsplit("/").next().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        kinds(&sh.part_links),
+        ["pivotTable", "queryTable", "printerSettings"]
+    );
+    assert_eq!(
+        kinds(&a.part_links),
+        [
+            "connections",
+            "customXml",
+            "pivotCacheDefinition",
+            "vbsProject"
+        ]
+    );
+    assert_eq!(a.part_links[2].cache_id, Some(3));
+    assert_eq!(a.hancom.vbs_project.as_deref(), Some(&stream[..]));
+
+    // XML 로 쓰면 파트·관계·참조 요소가 그대로 남는다
+    let out = write(&a, Flavor::Cell).unwrap();
+    let b = rcell::from_bytes(out.clone()).unwrap();
+    let diffs = compare(&a, &b, no_styles);
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    let part = |w: &rcell::Workbook, n: &str| {
+        w.raw_parts
+            .iter()
+            .find(|p| p.name == n)
+            .map(|p| p.data.clone())
+    };
+    assert_eq!(part(&b, "xl/vbsProject.bin"), Some(vbs.clone()));
+    assert_eq!(
+        part(&b, "xl/printerSettings/printerSettings1.bin"),
+        Some(printer)
+    );
+    assert_eq!(
+        part(&b, "xl/tables/table1.xml"),
+        Some(table.as_bytes().to_vec())
+    );
+    assert!(part(&b, "customXml/itemProps1.xml").is_some());
+    assert!(part(&b, "xl/pivotCache/pivotCacheRecords1.xml").is_some());
+    assert_eq!(b.part_links[2].cache_id, Some(3));
+    let mut pkg = rcell::open_package(out).unwrap();
+    let x = pkg
+        .read_string("xl/worksheets/sheet1.xml")
+        .unwrap()
+        .unwrap();
+    assert!(
+        x.contains("<x:tableParts count=\"1\"><x:tablePart r:id=\"rIdT1\"/></x:tableParts>"),
+        "{x}"
+    );
+    assert!(x.contains(" r:id=\"rIdP3\"/>"), "{x}");
+    let w = pkg.read_string("xl/workbook.xml").unwrap().unwrap();
+    assert!(
+        w.contains("<x:pivotCaches><x:pivotCache cacheId=\"3\" r:id=\"rIdX3\"/></x:pivotCaches>"),
+        "{w}"
+    );
+
+    // Excel 형식에는 매크로 프로젝트를 쓰지 않는다
+    let c = rcell::from_bytes(write(&a, Flavor::Xlsx).unwrap()).unwrap();
+    assert!(part(&c, "xl/vbsProject.bin").is_none());
+    assert!(c.hancom.vbs_project.is_none());
+    assert_eq!(c.part_links.len(), 3);
+
+    // 레거시처럼 파트 없이 스트림과 모델만 있으면: 매크로는 복합 문서로, 표는 모델로 쓴다
+    let mut d = a.clone();
+    d.raw_parts.clear();
+    d.part_links.clear();
+    d.sheets[0].part_links.clear();
+    d.sheets[0].tables[0].part = None;
+    let e = rcell::from_bytes(write(&d, Flavor::Cell).unwrap()).unwrap();
+    assert_eq!(e.hancom.vbs_project.as_deref(), Some(&stream[..]));
+    let mut expect = d.sheets[0].tables.clone();
+    expect[0].part = Some("xl/tables/table1.xml".into());
+    assert_eq!(e.sheets[0].tables, expect);
+    let diffs = compare(&d, &e, no_styles);
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
 }

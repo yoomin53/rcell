@@ -40,6 +40,11 @@ pub const HANCOM_OFFICE_8: &str = "http://schemas.haansoft.com/office/8.0";
 /// 한컴 매크로(VBScript) 프로젝트 관계 타입. HncOOXML.dll 문자열 테이블에서 확인.
 pub const REL_HANCOM_VBS_PROJECT: &str =
     "http://schemas.hancom.com/office/relationships/vbsProject";
+/// 한컴 매크로 프로젝트 콘텐츠 타입 (`xl/vbsProject.bin`)
+pub const CT_HANCOM_VBS_PROJECT: &str = "application/vnd.hancom-office.vbsProject";
+/// 한컴 매크로 프로젝트 스트림. XML·바이너리는 `xl/vbsProject.bin` 복합 문서 안, 레거시는 OLE 루트에 있다
+/// (패키지 파트 실험)
+pub const VBS_PROJECT_STREAM: &str = "/_VBS_PROJECT_W";
 
 /// 한컴이 정의한 네임스페이스인지 판정한다.
 pub fn is_hancom(uri: &str) -> bool {

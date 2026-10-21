@@ -802,6 +802,7 @@ fn coup_days(pcd: f64, ncd: f64, fr: f64, b: u8, _d1904: bool) -> f64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bond_price(s: f64, m: f64, rate: f64, yld: f64, red: f64, fr: f64, b: u8, d1904: bool) -> f64 {
     let (pcd, ncd, n) = coupon_dates(s, m, fr, d1904);
     let e = coup_days(pcd, ncd, fr, b, d1904);

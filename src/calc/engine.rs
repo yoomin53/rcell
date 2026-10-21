@@ -71,6 +71,35 @@ pub(crate) struct FormulaCell {
     pub unsupported: bool,
     pub cycle: bool,
     pub data_table: bool,
+    /// 데이터 표 입력: (2변수, 행 입력, r1 셀, r2 셀)
+    pub dt: Option<DataTableSpec>,
+}
+
+/// (입력 셀, 값을 가져올 셀) — 둘 다 (행, 열)
+type InputFrom = ((u32, u32), (u32, u32));
+
+/// 데이터 표(What-If)의 입력. 셀은 (행, 열), 같은 시트
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DataTableSpec {
+    pub two_d: bool,
+    pub row_input: bool,
+    pub r1: Option<(u32, u32)>,
+    pub r2: Option<(u32, u32)>,
+}
+
+/// 표 (구조적 참조용)
+struct TableDef {
+    sheet: u32,
+    /// 접은 표 이름·표시 이름
+    names: [String; 2],
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    header_rows: u32,
+    totals_rows: u32,
+    /// 접은 열 이름 (차례대로)
+    cols: Vec<String>,
 }
 
 struct NameDef {
@@ -100,6 +129,7 @@ pub struct Engine {
     pub(crate) sheets: Vec<SheetData>,
     sheet_index: HashMap<String, u32>,
     names: Vec<NameDef>,
+    tables: Vec<TableDef>,
     externals: Vec<Vec<ExtSheet>>,
     pub(crate) formulas: Vec<FormulaCell>,
     depth: u32,
@@ -133,7 +163,7 @@ impl Engine {
             let mut extra: Vec<(u32, u32)> = Vec::new();
             for c in &s.cells {
                 if let Some(f) = &c.formula
-                    && f.kind == FormulaKind::Array
+                    && matches!(f.kind, FormulaKind::Array | FormulaKind::DataTable)
                     && let Some(rg) = f.range.as_deref().and_then(crate::model::CellRange::parse)
                 {
                     for r in rg.start.row..=rg.end.row {
@@ -162,14 +192,18 @@ impl Engine {
             for (k, &ci) in order.iter().enumerate() {
                 let c = &s.cells[ci];
                 let Some(f) = &c.formula else { continue };
-                if f.text.is_empty() {
+                if f.text.is_empty() && f.kind != FormulaKind::DataTable {
                     continue;
                 }
-                let (expr, parse_error) = match parser::parse(&f.text) {
-                    Ok(e) => (Some(Rc::new(e)), None),
-                    Err(e) => (None, Some(e.to_string())),
+                let (expr, parse_error) = if f.kind == FormulaKind::DataTable {
+                    (None, None)
+                } else {
+                    match parser::parse(&f.text) {
+                        Ok(e) => (Some(Rc::new(e)), None),
+                        Err(e) => (None, Some(e.to_string())),
+                    }
                 };
-                let array = if f.kind == FormulaKind::Array {
+                let array = if matches!(f.kind, FormulaKind::Array | FormulaKind::DataTable) {
                     f.range
                         .as_deref()
                         .and_then(crate::model::CellRange::parse)
@@ -193,6 +227,14 @@ impl Engine {
                     unsupported: false,
                     cycle: false,
                     data_table: f.kind == FormulaKind::DataTable,
+                    dt: f.data_table.as_ref().map(|d| {
+                        let cell = |s: &Option<String>| {
+                            s.as_deref()
+                                .and_then(|x| crate::model::CellRef::parse(x.replace('$', "").as_str()))
+                                .map(|r| (r.row, r.col))
+                        };
+                        DataTableSpec { two_d: d.two_d, row_input: d.row_input, r1: cell(&d.r1), r2: cell(&d.r2) }
+                    }),
                 });
             }
             // 배열 수식 칸: 없는 칸은 끼워 넣고, 기준 셀의 수식 번호를 가리킨다
@@ -245,6 +287,25 @@ impl Engine {
                 }
             }
             sheets.push(sd);
+        }
+        let mut tables = Vec::new();
+        for (si, s) in wb.sheets.iter().enumerate() {
+            for t in &s.tables {
+                let Some(rg) = crate::model::CellRange::parse(&t.range) else {
+                    continue;
+                };
+                tables.push(TableDef {
+                    sheet: si as u32,
+                    names: [value::fold(&t.name), value::fold(&t.display_name)],
+                    r0: rg.start.row,
+                    c0: rg.start.col,
+                    r1: rg.end.row,
+                    c1: rg.end.col,
+                    header_rows: t.header_rows,
+                    totals_rows: t.totals_rows,
+                    cols: t.columns.iter().map(|c| value::fold(&c.name)).collect(),
+                });
+            }
         }
         let mut names = Vec::new();
         for d in &wb.defined_names {
@@ -305,6 +366,7 @@ impl Engine {
             sheets,
             sheet_index,
             names,
+            tables,
             externals,
             formulas,
             depth: 0,
@@ -378,6 +440,15 @@ impl Engine {
             .find(|n| n.folded == f && n.scope == Some(want))
             .or_else(|| self.names.iter().find(|n| n.folded == f && n.scope.is_none()))
             .map(|n| n.expr.clone())
+            // 이름이 없으면 표 이름: 표의 데이터 행 (`ROWS(Table1)`)
+            .or_else(|| {
+                self.tables.iter().any(|t| t.names[0] == f || t.names[1] == f).then(|| {
+                    Rc::new(Expr::Table(crate::calc::ast::TableRef {
+                        table: name.to_string(),
+                        ..Default::default()
+                    }))
+                })
+            })
     }
 
     // -----------------------------------------------------------------------
@@ -658,12 +729,150 @@ impl Engine {
         }
     }
 
-    /// 모든 수식을 의존 순서대로 계산한다
+    /// 모든 수식을 의존 순서대로 계산한다. 데이터 표는 끝에 따로 계산한다.
     pub fn recalc_all(&mut self) {
         let order = self.topo_order();
         for fid in order {
             self.run(fid);
         }
+        let tables: Vec<u32> = (0..self.formulas.len() as u32).filter(|&i| self.formulas[i as usize].dt.is_some()).collect();
+        for fid in tables {
+            self.compute_data_table(fid);
+        }
+    }
+
+    /// 데이터 표 (What-If 분석): 결과 칸마다 입력 셀에 머리 행·열의 값을 넣고 가장자리 수식을 다시 계산한다.
+    /// 1변수 열 입력은 위 행의 수식과 왼쪽 열의 값, 행 입력은 왼쪽 열의 수식과 위 행의 값, 2변수는 왼쪽 위
+    /// 모서리의 수식과 위 행(행 입력 r1)·왼쪽 열(열 입력 r2)의 값.
+    fn compute_data_table(&mut self, fid: u32) {
+        let (sheet, row0, col0, (h, w), spec) = {
+            let f = &self.formulas[fid as usize];
+            match (f.array, f.dt) {
+                (Some(a), Some(d)) => (f.sheet, f.row, f.col, a, d),
+                _ => return,
+            }
+        };
+        if row0 == 0 || col0 == 0 {
+            return;
+        }
+        let inputs: Vec<(u32, u32)> = [spec.r1, spec.r2].into_iter().flatten().collect();
+        if inputs.is_empty() {
+            return;
+        }
+        let affected = self.dependents_of(sheet, &inputs);
+        let mut results = Vec::with_capacity((h * w) as usize);
+        for r in row0..row0 + h {
+            for c in col0..col0 + w {
+                let (edge, sets): ((u32, u32), Vec<InputFrom>) = if spec.two_d {
+                    let mut s = Vec::new();
+                    if let Some(i) = spec.r1 {
+                        s.push((i, (row0 - 1, c)));
+                    }
+                    if let Some(i) = spec.r2 {
+                        s.push((i, (r, col0 - 1)));
+                    }
+                    ((row0 - 1, col0 - 1), s)
+                } else if spec.row_input {
+                    ((r, col0 - 1), spec.r1.map(|i| vec![(i, (row0 - 1, c))]).unwrap_or_default())
+                } else {
+                    ((row0 - 1, c), spec.r1.map(|i| vec![(i, (r, col0 - 1))]).unwrap_or_default())
+                };
+                results.push(((r, c), self.what_if(sheet, edge, &sets, &affected)));
+            }
+        }
+        let sd = &mut self.sheets[sheet as usize];
+        for ((r, c), v) in results {
+            if let Some(i) = sd.find(r, c) {
+                sd.values[i] = match v {
+                    Value::Empty => Value::Number(0.0),
+                    o => o,
+                };
+            }
+        }
+        let f = &mut self.formulas[fid as usize];
+        f.state = State::Done;
+        f.unsupported = false;
+    }
+
+    /// 입력 셀들에 (직접·간접으로) 기대는 수식 번호
+    fn dependents_of(&self, sheet: u32, inputs: &[(u32, u32)]) -> Vec<u32> {
+        let areas: Vec<Vec<Area>> = self
+            .formulas
+            .iter()
+            .map(|f| match &f.expr {
+                Some(e) => self.static_areas(e, f.sheet, f.row, f.col),
+                None => Vec::new(),
+            })
+            .collect();
+        let hits = |a: &Area, s: u32, r: u32, c: u32| {
+            a.book == 0 && (a.sheet..=a.sheet_last).contains(&s) && (a.r0..=a.r1).contains(&r) && (a.c0..=a.c1).contains(&c)
+        };
+        let mut on = vec![false; self.formulas.len()];
+        let mut cells: Vec<(u32, u32, u32)> = inputs.iter().map(|&(r, c)| (sheet, r, c)).collect();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (i, list) in areas.iter().enumerate() {
+                if on[i] || self.formulas[i].dt.is_some() {
+                    continue;
+                }
+                if list.iter().any(|a| cells.iter().any(|&(s, r, c)| hits(a, s, r, c))) {
+                    on[i] = true;
+                    changed = true;
+                    let f = &self.formulas[i];
+                    let (h, w) = f.array.unwrap_or((1, 1));
+                    for r in f.row..f.row + h {
+                        for c in f.col..f.col + w {
+                            cells.push((f.sheet, r, c));
+                        }
+                    }
+                }
+            }
+        }
+        (0..self.formulas.len() as u32).filter(|&i| on[i as usize]).collect()
+    }
+
+    /// 입력 셀 값을 잠시 바꾸고 가장자리 칸을 다시 계산한 값 (끝나면 모두 되돌린다)
+    fn what_if(&mut self, sheet: u32, edge: (u32, u32), sets: &[InputFrom], affected: &[u32]) -> Value {
+        // 넣을 값을 먼저 읽는다
+        let vals: Vec<((u32, u32), Value)> = sets
+            .iter()
+            .map(|&(input, from)| (input, self.cell_value(0, sheet, from.0, from.1)))
+            .collect();
+        // 되돌릴 것: 입력 셀 값, 영향받는 수식의 상태와 칸 값
+        let mut saved_cells: Vec<(u32, usize, Value)> = Vec::new();
+        let mut saved_states: Vec<(u32, State)> = Vec::new();
+        for &(input, ref v) in &vals {
+            let sd = &mut self.sheets[sheet as usize];
+            if let Some(i) = sd.find(input.0, input.1) {
+                saved_cells.push((sheet, i, sd.values[i].clone()));
+                sd.values[i] = v.clone();
+            }
+        }
+        for &g in affected {
+            let f = &self.formulas[g as usize];
+            saved_states.push((g, f.state));
+            let (s, r0, c0, (h, w)) = (f.sheet, f.row, f.col, f.array.unwrap_or((1, 1)));
+            for r in r0..r0 + h {
+                for c in c0..c0 + w {
+                    if let Some(i) = self.sheets[s as usize].find(r, c) {
+                        saved_cells.push((s, i, self.sheets[s as usize].values[i].clone()));
+                    }
+                }
+            }
+            self.formulas[g as usize].state = State::Pending;
+        }
+        if let Some(e) = self.formula_at(sheet, edge.0, edge.1) {
+            self.run(e);
+        }
+        let out = self.cell_value(0, sheet, edge.0, edge.1);
+        for (s, i, v) in saved_cells.into_iter().rev() {
+            self.sheets[s as usize].values[i] = v;
+        }
+        for (g, st) in saved_states {
+            self.formulas[g as usize].state = st;
+        }
+        out
     }
 
     /// 셀 하나만 계산한다 (필요한 선행 셀 포함)
@@ -677,7 +886,7 @@ impl Engine {
     /// 임의의 수식을 셀 위치에서 계산한다 (셀에 넣지 않는다)
     pub fn evaluate_expr(&mut self, e: &Expr, sheet: u32, row: u32, col: u32) -> Value {
         // 식이 참조하는 수식 셀을 먼저 계산
-        for area in self.static_areas(e, sheet) {
+        for area in self.static_areas(e, sheet, row, col) {
             let ids: Vec<u32> = self.formulas_in(&area);
             for id in ids {
                 self.run(id);
@@ -691,22 +900,97 @@ impl Engine {
     // 의존 그래프
     // -----------------------------------------------------------------------
 
+    /// 구조적 참조의 영역. 행 종류: 없으면 데이터, #All 전체, #Headers·#Data·#Totals 는 이어 붙이고,
+    /// #This Row 는 수식이 있는 행 (데이터 행 밖이면 #VALUE!). 없는 표·열·행 종류는 #REF!
+    pub(crate) fn resolve_table(
+        &self,
+        t: &crate::calc::ast::TableRef,
+        sheet: u32,
+        row: u32,
+        col: u32,
+    ) -> Result<Area, ErrorKind> {
+        let def = if t.table.is_empty() {
+            self.tables
+                .iter()
+                .find(|d| d.sheet == sheet && (d.r0..=d.r1).contains(&row) && (d.c0..=d.c1).contains(&col))
+        } else {
+            let k = value::fold(&t.table);
+            self.tables.iter().find(|d| d.names[0] == k || d.names[1] == k)
+        };
+        let d = def.ok_or(ErrorKind::Ref)?;
+        let data0 = d.r0 + d.header_rows;
+        let data1 = d.r1.checked_sub(d.totals_rows).ok_or(ErrorKind::Ref)?;
+        let (r0, r1) = if t.all {
+            (d.r0, d.r1)
+        } else if t.this_row {
+            if row < data0 || row > data1 {
+                return Err(ErrorKind::Value);
+            }
+            (row, row)
+        } else {
+            let mut parts: Vec<(u32, u32)> = Vec::new();
+            let any = t.headers || t.data || t.totals;
+            if t.headers {
+                if d.header_rows == 0 {
+                    return Err(ErrorKind::Ref);
+                }
+                parts.push((d.r0, data0 - 1));
+            }
+            if t.data || !any {
+                if data0 > data1 {
+                    return Err(ErrorKind::Ref);
+                }
+                parts.push((data0, data1));
+            }
+            if t.totals {
+                if d.totals_rows == 0 {
+                    return Err(ErrorKind::Ref);
+                }
+                parts.push((data1 + 1, d.r1));
+            }
+            let lo = parts.iter().map(|p| p.0).min().ok_or(ErrorKind::Ref)?;
+            let hi = parts.iter().map(|p| p.1).max().ok_or(ErrorKind::Ref)?;
+            (lo, hi)
+        };
+        let (c0, c1) = match &t.cols {
+            None => (d.c0, d.c1),
+            Some((a, b)) => {
+                let find = |n: &str| {
+                    let k = value::fold(n);
+                    d.cols.iter().position(|c| *c == k).map(|i| d.c0 + i as u32)
+                };
+                let (x, y) = (find(a).ok_or(ErrorKind::Ref)?, find(b).ok_or(ErrorKind::Ref)?);
+                (x.min(y), x.max(y))
+            }
+        };
+        Ok(Area {
+            book: 0,
+            sheet: d.sheet,
+            sheet_last: d.sheet,
+            r0,
+            c0,
+            r1,
+            c1,
+        })
+    }
+
     /// 식의 정적 참조 영역 (이 문서 안, 이름을 따라간다)
-    fn static_areas(&self, e: &Expr, sheet: u32) -> Vec<Area> {
+    fn static_areas(&self, e: &Expr, sheet: u32, row: u32, col: u32) -> Vec<Area> {
         let mut out = Vec::new();
         let mut seen_names: HashSet<String> = HashSet::new();
-        self.collect_areas(e, sheet, &mut out, &mut seen_names, 0);
+        self.collect_areas(e, (sheet, row, col), &mut out, &mut seen_names, 0);
         out
     }
 
     fn collect_areas(
         &self,
         e: &Expr,
-        sheet: u32,
+        at: (u32, u32, u32),
         out: &mut Vec<Area>,
         seen: &mut HashSet<String>,
         depth: u32,
     ) {
+        let (sheet, row, col) = at;
         if depth > 16 {
             return;
         }
@@ -734,7 +1018,12 @@ impl Engine {
                     return;
                 }
                 if let Some(x) = self.name_expr(&n.name, scope, sheet) {
-                    self.collect_areas(&x, sheet, out, seen, depth + 1);
+                    self.collect_areas(&x, at, out, seen, depth + 1);
+                }
+            }
+            RefOrName::Table(t) => {
+                if let Ok(a) = self.resolve_table(t, sheet, row, col) {
+                    out.push(a);
                 }
             }
         });
@@ -769,17 +1058,17 @@ impl Engine {
         let mut area_ids: HashMap<Area, usize> = HashMap::new();
         let mut deps: Vec<Vec<usize>> = vec![Vec::new(); nf];
         let mut area_list: Vec<Area> = Vec::new();
-        for fid in 0..nf {
-            let Some(e) = self.formulas[fid].expr.clone() else {
+        for (fid, dep) in deps.iter_mut().enumerate() {
+            let f = &self.formulas[fid];
+            let Some(e) = f.expr.clone() else {
                 continue;
             };
-            let sheet = self.formulas[fid].sheet;
-            for a in self.static_areas(&e, sheet) {
+            for a in self.static_areas(&e, f.sheet, f.row, f.col) {
                 let id = *area_ids.entry(a).or_insert_with(|| {
                     area_list.push(a);
                     nf + area_list.len() - 1
                 });
-                deps[fid].push(id);
+                dep.push(id);
             }
         }
         for a in &area_list {

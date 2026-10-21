@@ -365,6 +365,7 @@ fn ymd_checked(y: i64, m: i64, d: i64, date1904: bool) -> Option<f64> {
 /// - `Mon D`, `D Mon`, `D-Mon`(올해), `Mon D, Y`, `D-Mon-Y`, `Mon-Y`(Y 가 31 이하면 올해의 그날).
 ///   달 이름은 세 글자 약어, `Mon D, Y`·`D-Mon-Y` 에서는 전체 이름도.
 /// - `Y년 M월 D일` (한 칸씩 띄어서).
+///
 /// 앞뒤 공백이 있으면 날짜가 아니다.
 pub fn parse_date(s: &str, date1904: bool) -> Option<f64> {
     if s.is_empty() || s.starts_with(' ') || s.ends_with(' ') {

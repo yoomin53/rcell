@@ -9,4 +9,8 @@
 //! 형식 분석: `docs/format/cell-binary.md`.
 
 pub mod biff12;
+pub mod encrypt;
+pub mod formula;
+pub mod parity;
 pub mod reader;
+pub mod writer;
