@@ -368,23 +368,36 @@ impl fmt::Display for Value {
 // ---------------------------------------------------------------------------
 
 /// 숫자를 글로 (연결 연산자·글 함수·복소수 글). 한셀의 규칙 (함수 대조 실험 conv·misc3 묶음):
-/// - 유효숫자 15자리. 1E+15 이상은 정수 자릿수의 앞 15자리만 남기고 버린다
-///   (2^60 = 1152921504606846976 → "1152921504606840000"), 그보다 작으면 반올림 (2/3 → "0.666666666666667").
+/// - 유효숫자 15자리. 1E+15 이상은 17자리로 반올림한 뒤 15자리 뒤를 버린다
+///   (2^60 = 1152921504606846976 → "1152921504606840000", 12345678901234499584 → "12345678901234500000"),
+///   그보다 작으면 15자리로 반올림 (2/3 → "0.666666666666667"). 복소수 글은 늘 15자리 반올림
+///   ([`number_to_text_rounded`]).
 /// - 부호를 뺀 그대로의 꼴이 20자 이내면 그대로 쓴다: 정수 자리 20자리까지 (`99000000000000000000`),
 ///   1 보다 작으면 소수 자리 18자리까지 (`0.000000000000000001`, `0.000123456789012345`).
 ///   넘으면 지수 꼴 (`1E+20`, `1E-19`, `3.33333333333333E-6`) — 지수 자리는 채우지 않는다.
 /// - 정수 자릿수는 log10 으로 재는 듯하다: 9.99999999999999E+19 는 log10 이 20.0 으로 반올림되어 지수 꼴.
 pub fn number_to_text(v: f64) -> String {
+    format_general(v, false)
+}
+
+/// [`number_to_text`] 과 같되 큰 수도 15자리로 반올림한다 (복소수 글: IMSUM("123456789012345678","0") →
+/// "123456789012345000", 대조 실험 misc3).
+pub fn number_to_text_rounded(v: f64) -> String {
+    format_general(v, true)
+}
+
+fn format_general(v: f64, round_large: bool) -> String {
     if v == 0.0 || !v.is_finite() {
         return "0".into();
     }
     let a = v.abs();
     let neg = if v < 0.0 { "-" } else { "" };
-    let (digits, exp) = if a >= 1e15 {
-        // 정확한 정수 자릿수에서 앞 15자리
-        let s = format!("{a:.0}");
-        let exp = s.len() as i32 - 1;
-        (s[..15].trim_end_matches('0').to_string(), exp)
+    let (digits, exp) = if a >= 1e15 && !round_large {
+        // 17자리 반올림의 앞 15자리
+        let s = format!("{a:.16e}");
+        let (mant, e) = s.split_once('e').unwrap_or((&s, "0"));
+        let d = mant.replace('.', "");
+        (d[..15].trim_end_matches('0').to_string(), e.parse().unwrap_or(0))
     } else {
         let s = format!("{a:.14e}");
         let (mant, e) = s.split_once('e').unwrap_or((&s, "0"));

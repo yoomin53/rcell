@@ -26,6 +26,7 @@ pub mod math;
 pub mod special;
 pub mod stat;
 pub mod text;
+pub mod units;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
