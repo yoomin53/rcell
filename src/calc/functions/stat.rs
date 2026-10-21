@@ -5,12 +5,13 @@
 
 //! 통계 함수.
 
+use crate::calc::fm::Fm;
 use std::rc::Rc;
 
 use super::math::{grid, ifs_mask, resized};
 use super::special as sp;
 use super::{
-    A, Agg, Arg, FnSpec, MANY, R, V, bool_or, collect_numbers, f, flatten, num_arg, num_or, opt,
+    A, Agg, Arg, FnSpec, MANY, R, V, bool_or, collect_numbers, f, flatten, num_arg, num_or, opt, pairs,
     paired_numbers, to_array,
 };
 use crate::calc::eval::Ctx;
@@ -70,7 +71,7 @@ pub const FNS: &[FnSpec] = &[
         if v.is_empty() || v.iter().any(|&x| x <= 0.0) {
             return Value::Error(ErrorKind::Num);
         }
-        num((v.iter().map(|x| x.ln()).sum::<f64>() / v.len() as f64).exp())
+        num((v.iter().map(|x| x.mln()).sum::<f64>() / v.len() as f64).mexp())
     }),
     f("HARMEAN", 1, MANY, R, |c, a| {
         let v = try_v!(collect_numbers(c, a, Agg::Numbers));
@@ -117,11 +118,11 @@ pub const FNS: &[FnSpec] = &[
         num((x - m) / s)
     }),
     f("COUNTIF", 2, 2, RV, countif),
-    f("COUNTIFS", 2, MANY, RV, countifs),
+    pairs(f("COUNTIFS", 2, MANY, RV, countifs), 2),
     f("AVERAGEIF", 2, 3, RVR, averageif),
-    f("AVERAGEIFS", 3, MANY, RRV, |c, a| target_ifs(c, a, 1)),
-    f("MAXIFS", 3, MANY, RRV, |c, a| target_ifs(c, a, 4)),
-    f("MINIFS", 3, MANY, RRV, |c, a| target_ifs(c, a, 5)),
+    pairs(f("AVERAGEIFS", 3, MANY, RRV, |c, a| target_ifs(c, a, 1)), 2),
+    pairs(f("MAXIFS", 3, MANY, RRV, |c, a| target_ifs(c, a, 4)), 2),
+    pairs(f("MINIFS", 3, MANY, RRV, |c, a| target_ifs(c, a, 5)), 2),
     f("CORREL", 2, 2, A, |c, a| correl(c, a, false)),
     f("PEARSON", 2, 2, A, |c, a| correl(c, a, false)),
     f("RSQ", 2, 2, A, |c, a| correl(c, a, true)),
@@ -150,9 +151,9 @@ pub const FNS: &[FnSpec] = &[
         if x.abs() >= 1.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num(0.5 * ((1.0 + x) / (1.0 - x)).ln())
+        num(0.5 * ((1.0 + x) / (1.0 - x)).mln())
     }),
-    f("FISHERINV", 1, 1, V, |c, a| num(try_v!(num_arg(c, a, 0)).tanh())),
+    f("FISHERINV", 1, 1, V, |c, a| num(try_v!(num_arg(c, a, 0)).mtanh())),
     f("PERMUT", 2, 2, V, |c, a| {
         let n = try_v!(num_arg(c, a, 0)).trunc();
         let k = try_v!(num_arg(c, a, 1)).trunc();
@@ -173,7 +174,7 @@ pub const FNS: &[FnSpec] = &[
         if n < 0.0 || k < 0.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num(n.powf(k))
+        num(n.mpow(k))
     }),
     f("GAMMA", 1, 1, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
@@ -516,7 +517,7 @@ fn kurt(ctx: &mut Ctx, a: &[Value]) -> Value {
     if s == 0.0 {
         return Value::Error(ErrorKind::Div0);
     }
-    let sum4: f64 = v.iter().map(|x| ((x - m) / s).powi(4)).sum();
+    let sum4: f64 = v.iter().map(|x| ((x - m) / s).mpowi(4)).sum();
     num(n * (n + 1.0) / ((n - 1.0) * (n - 2.0) * (n - 3.0)) * sum4
         - 3.0 * (n - 1.0) * (n - 1.0) / ((n - 2.0) * (n - 3.0)))
 }
@@ -536,7 +537,7 @@ fn skew(ctx: &mut Ctx, a: &[Value], population: bool) -> Value {
     if s == 0.0 {
         return Value::Error(ErrorKind::Div0);
     }
-    let sum3: f64 = v.iter().map(|x| ((x - m) / s).powi(3)).sum();
+    let sum3: f64 = v.iter().map(|x| ((x - m) / s).mpowi(3)).sum();
     if population {
         num(sum3 / n)
     } else {
@@ -666,7 +667,7 @@ fn percentrank(ctx: &mut Ctx, a: &[Value], inclusive: bool) -> Value {
             (less as f64 + frac) / (n + 1.0)
         }
     };
-    let p = 10f64.powi(sig as i32);
+    let p = 10f64.mpowi(sig as i32);
     num((value::round15(r * p)).floor() / p)
 }
 
@@ -960,7 +961,7 @@ fn regression_inputs(
                 if *n <= 0.0 {
                     return Err(ErrorKind::Num);
                 }
-                n.ln()
+                n.mln()
             } else {
                 *n
             }),
@@ -1009,7 +1010,7 @@ fn linest(ctx: &mut Ctx, a: &[Value], log: bool) -> Value {
     // 출력: m_k … m_1, b
     let mut first: Vec<f64> = coef[..k].iter().rev().copied().collect();
     first.push(if with_const { coef[k] } else { 0.0 });
-    let tr = |v: f64| if log { v.exp() } else { v };
+    let tr = |v: f64| if log { v.mexp() } else { v };
     let row1: Vec<Value> = first.iter().map(|&v| num(tr(v))).collect();
     if !stats {
         let n = row1.len();
@@ -1118,7 +1119,7 @@ fn trend(ctx: &mut Ctx, a: &[Value], log: bool) -> Value {
             for (j, x) in new_x.iter().enumerate() {
                 s += coef[j] * x[i];
             }
-            num(if log { s.exp() } else { s })
+            num(if log { s.mexp() } else { s })
         })
         .collect();
     Value::from(Array::new(m, 1, out))
@@ -1224,7 +1225,7 @@ fn lognorm_dist(ctx: &mut Ctx, a: &[Value], has_cum: bool) -> Value {
     if x <= 0.0 || s <= 0.0 {
         return Value::Error(ErrorKind::Num);
     }
-    let z = (x.ln() - m) / s;
+    let z = (x.mln() - m) / s;
     num(if cum {
         sp::norm_s_cdf(z)
     } else {
@@ -1239,7 +1240,7 @@ fn lognorm_inv(ctx: &mut Ctx, a: &[Value]) -> Value {
     if p <= 0.0 || p >= 1.0 || s <= 0.0 {
         return Value::Error(ErrorKind::Num);
     }
-    num((m + s * sp::norm_s_inv(p)).exp())
+    num((m + s * sp::norm_s_inv(p)).mexp())
 }
 
 fn confidence(ctx: &mut Ctx, a: &[Value], t: bool) -> Value {
@@ -1288,7 +1289,7 @@ fn expon_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x < 0.0 || l <= 0.0 {
         return Value::Error(ErrorKind::Num);
     }
-    num(if cum { 1.0 - (-l * x).exp() } else { l * (-l * x).exp() })
+    num(if cum { 1.0 - (-l * x).mexp() } else { l * (-l * x).mexp() })
 }
 
 fn weibull(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -1299,11 +1300,11 @@ fn weibull(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x < 0.0 || al <= 0.0 || be <= 0.0 {
         return Value::Error(ErrorKind::Num);
     }
-    let t = (x / be).powf(al);
+    let t = (x / be).mpow(al);
     num(if cum {
-        1.0 - (-t).exp()
+        1.0 - (-t).mexp()
     } else {
-        al / be.powf(al) * x.powf(al - 1.0) * (-t).exp()
+        al / be.mpow(al) * x.mpow(al - 1.0) * (-t).mexp()
     })
 }
 
@@ -1436,7 +1437,7 @@ fn negbinom(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
     if fl < 0.0 || s < 1.0 || p <= 0.0 || p >= 1.0 {
         return Value::Error(ErrorKind::Num);
     }
-    let pmf = |f: f64| sp::binom_coef(f + s - 1.0, s - 1.0) * p.powf(s) * (1.0 - p).powf(f);
+    let pmf = |f: f64| sp::binom_coef(f + s - 1.0, s - 1.0) * p.mpow(s) * (1.0 - p).mpow(f);
     if cum {
         num(sp::beta_i(p, s, fl + 1.0))
     } else {
@@ -1483,7 +1484,7 @@ fn poisson(ctx: &mut Ctx, a: &[Value]) -> Value {
     if cum {
         num(sp::gamma_q(x + 1.0, m))
     } else {
-        num((x * m.ln() - m - sp::ln_gamma(x + 1.0)).exp())
+        num((x * m.mln() - m - sp::ln_gamma(x + 1.0)).mexp())
     }
 }
 
@@ -1615,7 +1616,7 @@ fn ttest(ctx: &mut Ctx, a: &[Value]) -> Value {
             if se2 == 0.0 {
                 return Value::Error(ErrorKind::Div0);
             }
-            let df = se2 * se2 / ((v1 / n1).powi(2) / (n1 - 1.0) + (v2 / n2).powi(2) / (n2 - 1.0));
+            let df = se2 * se2 / ((v1 / n1).mpowi(2) / (n1 - 1.0) + (v2 / n2).mpowi(2) / (n2 - 1.0));
             (diff / se2.sqrt(), df)
         }
     };

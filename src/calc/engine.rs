@@ -111,11 +111,17 @@ pub struct Engine {
     /// 셀 서식 번호 → 표시 형식 코드 (CELL("format"), TEXT 비교)
     pub(crate) xf_codes: Vec<String>,
     pub(crate) sheet_names: Vec<String>,
+    /// 한셀이 모르는 Excel 함수도 계산한다 ([`crate::calc::CalcOptions::excel_functions`])
+    pub(crate) excel_functions: bool,
+    /// 문서 파일 이름 (CELL("address") 가 다른 시트를 가리킬 때 `[이름]` 으로 쓴다)
+    pub(crate) file_name: Option<String>,
 }
 
 impl Engine {
     pub fn new(wb: &Workbook, now: f64) -> Engine {
         let date1904 = wb.date1904;
+        // 연도 없는 날짜 글(`1/15`)은 계산 시각의 해
+        crate::calc::date::set_this_year(crate::calc::date::ymd_from_serial(now, date1904).map(|d| d.0));
         let mut sheets = Vec::with_capacity(wb.sheets.len());
         let mut formulas = Vec::new();
         let mut sheet_index = HashMap::new();
@@ -309,6 +315,8 @@ impl Engine {
             rng: seed,
             xf_codes,
             sheet_names: wb.sheets.iter().map(|s| s.name.clone()).collect(),
+            excel_functions: false,
+            file_name: None,
         }
     }
 
@@ -341,7 +349,8 @@ impl Engine {
                 SheetSpec::Span(a, b) => {
                     let i = self.sheet_index(a).ok_or(ErrorKind::Ref)?;
                     let j = self.sheet_index(b).ok_or(ErrorKind::Ref)?;
-                    Ok((0, i.min(j), i.max(j)))
+                    // 거꾸로 쓴 3차원 참조('S3:S1'!A1)는 바꾸지 않는다 — 한셀은 빈 범위로 계산한다 (SUM = 0)
+                    Ok((0, i, j))
                 }
             },
             Some(0) => Err(ErrorKind::Ref),

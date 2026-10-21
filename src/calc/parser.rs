@@ -317,9 +317,10 @@ impl Lexer {
             }
         }
         let s: String = self.c[start..self.i].iter().collect();
-        match s.parse::<f64>() {
-            Ok(v) => Ok(Tok::Num(v)),
-            Err(_) => self.err(format!("숫자가 아님 {s:?}")),
+        match super::value::parse_decimal15(&s) {
+            // 한셀은 수식 안 숫자 상수의 유효숫자 15자리 뒤를 버린다 (1234567890123456 → 1234567890123450)
+            Some(v) => Ok(Tok::Num(v)),
+            None => self.err(format!("숫자가 아님 {s:?}")),
         }
     }
 

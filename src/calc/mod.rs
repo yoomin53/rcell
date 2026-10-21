@@ -27,10 +27,12 @@ macro_rules! try_v {
 }
 
 pub mod ast;
+pub mod collate;
 pub mod criteria;
 pub mod date;
 pub mod engine;
 pub mod eval;
+pub mod fm;
 pub mod functions;
 pub mod parser;
 pub mod value;
@@ -52,6 +54,10 @@ pub struct CalcOptions {
     pub now: Option<f64>,
     /// 현재 시각을 쓸 때의 시간대 (분). 기본 +9:00 (한국 표준시) — 표준 라이브러리로는 지역 시간대를 알 수 없다.
     pub utc_offset_minutes: i32,
+    /// 한셀이 모르는 Excel 함수(AGGREGATE, XMATCH …)도 계산한다. 기본은 한셀처럼 #NAME?.
+    pub excel_functions: bool,
+    /// 문서 파일 이름 (CELL("address") 가 다른 시트를 가리키면 한셀은 `[이름]시트!$A$1` 로 쓴다)
+    pub file_name: Option<String>,
 }
 
 impl Default for CalcOptions {
@@ -59,6 +65,8 @@ impl Default for CalcOptions {
         CalcOptions {
             now: None,
             utc_offset_minutes: 9 * 60,
+            excel_functions: false,
+            file_name: None,
         }
     }
 }
@@ -121,7 +129,10 @@ fn engine_for(wb: &Workbook, opts: &CalcOptions) -> Engine {
     let now = opts
         .now
         .unwrap_or_else(|| now_serial(opts.utc_offset_minutes, wb.date1904));
-    Engine::new(wb, now)
+    let mut eng = Engine::new(wb, now);
+    eng.excel_functions = opts.excel_functions;
+    eng.file_name = opts.file_name.clone();
+    eng
 }
 
 /// 계산을 마친 엔진에서 수식 셀마다 결과와 요약을 모은다

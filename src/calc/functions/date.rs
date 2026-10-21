@@ -3,11 +3,13 @@
 //
 // rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
 
-//! 날짜·시간 함수.
+//! 날짜·시간 함수. 한셀과 다른 점은 함수 대조 실험(date·date1904·conv 묶음)으로 맞췄다
+//! (`docs/format/calc.md`).
 
-use super::{Arg, FnSpec, R, V, f, flatten, num_arg, num_or, opt, volatile};
+use super::{Arg, FnSpec, V, f, flatten, given, num_arg, num_or, opt, volatile};
 use crate::calc::date::{
-    self as dt, days_in_month, hms_from_serial, is_leap, serial_from_ymd, ymd_from_serial,
+    self as dt, Parsed, days_in_month, hms_from_serial, is_leap, serial_from_ymd, ymd_for_months,
+    ymd_from_serial,
 };
 use crate::calc::eval::Ctx;
 use crate::calc::value::{ErrorKind, Value, num};
@@ -19,17 +21,21 @@ pub const FNS: &[FnSpec] = &[
     f("DATE", 3, 3, V, date),
     f("TIME", 3, 3, V, time),
     f("DATEVALUE", 1, 1, V, |c, a| match &a[0] {
-        Value::Text(t) => match dt::parse_datetime(t, c.date1904()) {
-            Some(v) => num(v.floor()),
-            None => Value::Error(ErrorKind::Value),
+        Value::Text(t) => match dt::classify_text(t, c.date1904()) {
+            Some(Parsed::Date(v)) | Some(Parsed::DateTime(v, _)) => num(v.floor()),
+            Some(Parsed::Time(_)) => Value::Number(0.0),
+            _ => Value::Error(ErrorKind::Value),
         },
         Value::Error(e) => Value::Error(*e),
         _ => Value::Error(ErrorKind::Value),
     }),
     f("TIMEVALUE", 1, 1, V, |c, a| match &a[0] {
-        Value::Text(t) => match dt::parse_datetime(t, c.date1904()) {
-            Some(v) => num(v - v.floor()),
-            None => Value::Error(ErrorKind::Value),
+        // 시각만 쓴 글은 하루를 넘어도 그대로 (TIMEVALUE("25:00") = 1.0417, 한셀)
+        Value::Text(t) => match dt::classify_text(t, c.date1904()) {
+            Some(Parsed::Time(v)) => num(v),
+            Some(Parsed::DateTime(_, t)) => num(t),
+            Some(Parsed::Date(_)) => Value::Number(0.0),
+            _ => Value::Error(ErrorKind::Value),
         },
         Value::Error(e) => Value::Error(*e),
         _ => Value::Error(ErrorKind::Value),
@@ -44,15 +50,19 @@ pub const FNS: &[FnSpec] = &[
     f("WEEKNUM", 1, 2, V, weeknum),
     f("ISOWEEKNUM", 1, 1, V, |c, a| {
         let s = try_v!(serial_arg(c, a, 0));
-        num(iso_week(s, c.date1904()) as f64)
+        match iso_week(s, c.date1904()) {
+            Some(w) => num(w as f64),
+            None => Value::Error(ErrorKind::Num),
+        }
     }),
     volatile(f("NOW", 0, 0, V, |c, _| num(c.now()))),
     volatile(f("TODAY", 0, 0, V, |c, _| num(c.now().floor()))),
     f("EDATE", 2, 2, V, |c, a| add_months(c, a, false)),
     f("EOMONTH", 2, 2, V, |c, a| add_months(c, a, true)),
+    // DAYS 는 음수 일련 번호도 받는다 (DAYS(-1,0) = −1, 한셀)
     f("DAYS", 2, 2, V, |c, a| {
-        let e = try_v!(serial_arg(c, a, 0)).floor();
-        let s = try_v!(serial_arg(c, a, 1)).floor();
+        let e = try_v!(num_arg(c, a, 0)).floor();
+        let s = try_v!(num_arg(c, a, 1)).floor();
         num(e - s)
     }),
     f("DAYS360", 2, 3, V, days360),
@@ -76,10 +86,10 @@ fn value_r(r: Result<f64, ErrorKind>) -> Value {
     crate::calc::value::num_r(r)
 }
 
-/// 날짜 인수 (음수는 #NUM!)
+/// 날짜 인수 (음수·마지막 날 뒤는 #NUM!)
 pub fn serial_arg(ctx: &mut Ctx, a: &[Value], i: usize) -> Result<f64, ErrorKind> {
     let v = num_arg(ctx, a, i)?;
-    if v < 0.0 || v > dt::max_serial(ctx.date1904()) + 1.0 {
+    if v < 0.0 || v >= dt::max_serial(ctx.date1904()) + 1.0 {
         return Err(ErrorKind::Num);
     }
     Ok(v)
@@ -92,12 +102,12 @@ fn date(ctx: &mut Ctx, a: &[Value]) -> Value {
     if !(0.0..10000.0).contains(&y) {
         return Value::Error(ErrorKind::Num);
     }
-    if y < 1900.0 && !ctx.date1904() {
-        y += 1900.0;
-    } else if y < 1904.0 && ctx.date1904() {
+    // 1900 보다 작은 해는 1900 을 더한다 (1904 체계도 1900 기준 — 한셀: DATE(0,1,1) = −1461)
+    if y < 1900.0 {
         y += 1900.0;
     }
-    if m.abs() > 1e9 || d.abs() > 1e12 {
+    // 한셀은 일 인수가 크면(DATE(2024,1,1000000)) #NUM! — 32767 을 넘는 일은 받지 않는다고 본다
+    if m.abs() > 1e9 || d.abs() > 32_767.0 {
         return Value::Error(ErrorKind::Num);
     }
     match serial_from_ymd(y as i64, m as i64, d as i64, ctx.date1904()) {
@@ -133,10 +143,7 @@ fn ymd_part(ctx: &mut Ctx, a: &[Value], which: u8) -> Value {
 }
 
 fn hms_part(ctx: &mut Ctx, a: &[Value], which: u8) -> Value {
-    let s = try_v!(num_arg(ctx, a, 0));
-    if s < 0.0 {
-        return Value::Error(ErrorKind::Num);
-    }
+    let s = try_v!(serial_arg(ctx, a, 0));
     let (h, m, sec) = hms_from_serial(s);
     num(match which {
         0 => h,
@@ -163,15 +170,33 @@ fn weekday(ctx: &mut Ctx, a: &[Value]) -> Value {
     num(r as f64)
 }
 
-/// ISO 8601 주 번호
-fn iso_week(serial: f64, date1904: bool) -> u32 {
+/// 한 해의 몇째 날 (1월 1일 = 1, 한셀 달력)
+fn day_of_year(serial: f64, date1904: bool) -> Option<f64> {
+    let (y, _, _) = ymd_from_serial(serial, date1904)?;
+    let jan1 = serial_from_ymd(y, 1, 1, date1904)?;
+    Some(serial.floor() - jan1 + 1.0)
+}
+
+/// ISO 주 번호 (한셀): ⌊(연중 날 − ISO 요일 + 10) / 7⌋. 0 이면 지난해 12월 31일의 번호. 연말에 다음 해
+/// 1주로 넘기지 않는다 (2024-12-31 → 53, 표준은 1). 1900-01-00 과 그 이전은 #NUM!
+/// (한셀은 ISOWEEKNUM(1) 에서 죽는다).
+fn iso_week(serial: f64, date1904: bool) -> Option<u32> {
     let n = serial.floor();
+    let (y, m, d) = ymd_from_serial(n, date1904)?;
+    if d == 0 {
+        return None;
+    }
     let w = dt::weekday(n, date1904) as i64; // 0 일
-    let iso_dow = if w == 0 { 7 } else { w }; // 월 1 … 일 7
-    let thursday = n + (4 - iso_dow) as f64;
-    let (y, _, _) = ymd_from_serial(thursday, date1904).unwrap_or((1900, 1, 1));
-    let jan1 = serial_from_ymd(y, 1, 1, date1904).unwrap_or(1.0);
-    ((thursday - jan1) / 7.0).floor() as u32 + 1
+    let iso_dow = if w == 0 { 7 } else { w };
+    let doy = day_of_year(n, date1904)? as i64;
+    let week = (doy - iso_dow + 10) / 7;
+    if week >= 1 {
+        return Some(week as u32);
+    }
+    let _ = m;
+    // 기준일 앞으로는 가지 않는다 (1904 체계 ISOWEEKNUM(0) = #NUM!)
+    let dec31 = serial_from_ymd(y - 1, 12, 31, date1904).filter(|&v| v >= 0.0)?;
+    iso_week(dec31, date1904)
 }
 
 fn weeknum(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -185,13 +210,19 @@ fn weeknum(ctx: &mut Ctx, a: &[Value]) -> Value {
         14 => 4,
         15 => 5,
         16 => 6,
-        21 => return num(iso_week(s, ctx.date1904()) as f64),
+        21 => {
+            return match iso_week(s, ctx.date1904()) {
+                Some(w) => num(w as f64),
+                None => Value::Error(ErrorKind::Num),
+            };
+        }
         _ => return Value::Error(ErrorKind::Num),
     };
     let d1904 = ctx.date1904();
-    let (y, _, _) = match ymd_from_serial(s, d1904) {
-        Some(x) => x,
-        None => return Value::Error(ErrorKind::Num),
+    // 0 (1900-01-00) 은 1900년 1주
+    let s = s.max(dt::min_serial(d1904) + 1.0);
+    let Some((y, _, _)) = ymd_from_serial(s, d1904) else {
+        return Value::Error(ErrorKind::Num);
     };
     let jan1 = serial_from_ymd(y, 1, 1, d1904).unwrap_or(1.0);
     let wd = dt::weekday(jan1, d1904) as i64;
@@ -203,7 +234,7 @@ fn add_months(ctx: &mut Ctx, a: &[Value], eom: bool) -> Value {
     let s = try_v!(serial_arg(ctx, a, 0)).floor();
     let m = try_v!(num_arg(ctx, a, 1)).trunc();
     let d1904 = ctx.date1904();
-    let Some((y, mo, d)) = ymd_from_serial(s, d1904) else {
+    let Some((y, mo, d)) = ymd_for_months(s, d1904) else {
         return Value::Error(ErrorKind::Num);
     };
     let total = y * 12 + (mo as i64 - 1) + m as i64;
@@ -267,6 +298,7 @@ fn days360(ctx: &mut Ctx, a: &[Value]) -> Value {
         d2 = d2.min(30);
     } else {
         // 시작일이 그 달 마지막 날이면 30일. 끝 날이 31일이면 시작일이 30일 전일 때 다음 달 1일, 아니면 30일.
+        // 한셀은 두 날이 모두 2월 말일이어도 끝 날을 30일로 바꾸지 않는다 (DAYS360(2023-02-28,2024-02-29) = 359).
         if d1 == days_in_month(y1, m1) {
             d1 = 30;
         }
@@ -311,14 +343,15 @@ fn datedif(ctx: &mut Ctx, a: &[Value]) -> Value {
             }
         }
         "YD" => {
-            // 같은 해로 옮긴 시작일부터
-            let mut ys = y2;
-            if (m1, d1) > (m2, d2) {
-                ys -= 1;
+            // 끝 날의 월·일을 시작 해에 놓는다 (넘치는 날은 DATE 처럼 다음 달로). 시작보다 앞이면 다음 해.
+            // 한셀: DATEDIF(2020-01-01, 2023-03-15, "YD") = 74 (2020 년은 윤년)
+            let here = serial_from_ymd(y1, m2 as i64, d2 as i64, d1904).unwrap_or(s);
+            if here >= s {
+                num(here - s)
+            } else {
+                let next = serial_from_ymd(y1 + 1, m2 as i64, d2 as i64, d1904).unwrap_or(e);
+                num(next - s)
             }
-            let dd = d1.min(days_in_month(ys, m1));
-            let start = serial_from_ymd(ys, m1 as i64, dd as i64, d1904).unwrap_or(s);
-            num(e - start)
         }
         _ => Value::Error(ErrorKind::Num),
     }
@@ -359,8 +392,9 @@ pub fn year_frac(s: f64, e: f64, basis: u8, date1904: bool) -> Result<f64, Error
     }
 }
 
-/// 주말 지정 (번호 1–7, 11–17 또는 "0000011" 글) → 요일(0 일요일)별 쉬는 날
-fn weekend_mask(ctx: &mut Ctx, v: Option<&Value>) -> Result<[bool; 7], ErrorKind> {
+/// 주말 지정 (번호 1–7, 11–17 또는 "0000011" 글) → 요일(0 일요일)별 쉬는 날. 한셀은 모든 날이 주말인
+/// "1111111" 도 받는다 (WORKDAY.INTL 은 그때 끝나지 않는다). 없는 번호는 `bad` 오류.
+fn weekend_mask(ctx: &mut Ctx, v: Option<&Value>, bad: ErrorKind) -> Result<[bool; 7], ErrorKind> {
     let mut m = [false; 7];
     match v {
         None => {
@@ -369,7 +403,7 @@ fn weekend_mask(ctx: &mut Ctx, v: Option<&Value>) -> Result<[bool; 7], ErrorKind
         }
         Some(Value::Text(t)) => {
             let b: Vec<char> = t.chars().collect();
-            if b.len() != 7 || b.iter().any(|c| *c != '0' && *c != '1') || b.iter().all(|c| *c == '1') {
+            if b.len() != 7 || b.iter().any(|c| *c != '0' && *c != '1') {
                 return Err(ErrorKind::Value);
             }
             // 글은 월요일부터
@@ -386,8 +420,9 @@ fn weekend_mask(ctx: &mut Ctx, v: Option<&Value>) -> Result<[bool; 7], ErrorKind
                     m[a as usize] = true;
                     m[((a + 1) % 7) as usize] = true;
                 }
-                11..=17 => m[((n - 10) % 7) as usize] = true,
-                _ => return Err(ErrorKind::Num),
+                // 11 일요일만, 12 월요일만 … 17 토요일만
+                11..=17 => m[(n - 11) as usize] = true,
+                _ => return Err(bad),
             }
         }
     }
@@ -412,9 +447,13 @@ fn holidays(ctx: &mut Ctx, v: Option<&Value>) -> Result<Vec<f64>, ErrorKind> {
 fn networkdays(ctx: &mut Ctx, a: &[Value], intl: bool) -> Value {
     let s = try_v!(serial_arg(ctx, a, 0)).floor();
     let e = try_v!(serial_arg(ctx, a, 1)).floor();
-    let (wk, hol_i) = if intl { (opt(a, 2), 3) } else { (None, 2) };
-    let mask = try_v!(weekend_mask(ctx, wk));
-    let hol = try_v!(holidays(ctx, opt(a, hol_i)));
+    let (wk, hol_i) = if intl { (given(a, 2), 3) } else { (None, 2) };
+    // 한셀의 NETWORKDAYS.INTL·WORKDAY.INTL 은 휴일 인수가 있으면 #NUM! (함수 대조 실험)
+    if intl && given(a, hol_i).is_some() {
+        return Value::Error(ErrorKind::Num);
+    }
+    let mask = try_v!(weekend_mask(ctx, wk, ErrorKind::Value));
+    let hol = try_v!(holidays(ctx, given(a, hol_i)));
     let (lo, hi, sign) = if s <= e { (s, e, 1.0) } else { (e, s, -1.0) };
     let d1904 = ctx.date1904();
     let mut n = 0.0;
@@ -432,10 +471,17 @@ fn networkdays(ctx: &mut Ctx, a: &[Value], intl: bool) -> Value {
 fn workday(ctx: &mut Ctx, a: &[Value], intl: bool) -> Value {
     let s = try_v!(serial_arg(ctx, a, 0)).floor();
     let days = try_v!(num_arg(ctx, a, 1)).trunc();
-    let (wk, hol_i) = if intl { (opt(a, 2), 3) } else { (None, 2) };
-    let mask = try_v!(weekend_mask(ctx, wk));
-    let hol = try_v!(holidays(ctx, opt(a, hol_i)));
+    let (wk, hol_i) = if intl { (given(a, 2), 3) } else { (None, 2) };
+    if intl && given(a, hol_i).is_some() {
+        return Value::Error(ErrorKind::Num);
+    }
+    let mask = try_v!(weekend_mask(ctx, wk, ErrorKind::Num));
+    let hol = try_v!(holidays(ctx, given(a, hol_i)));
     let d1904 = ctx.date1904();
+    if days != 0.0 && mask.iter().all(|&w| w) {
+        // 한셀은 여기서 끝나지 않는다 — 대신 #NUM!
+        return Value::Error(ErrorKind::Num);
+    }
     let step = if days >= 0.0 { 1.0 } else { -1.0 };
     let mut left = days.abs();
     let mut d = s;
@@ -451,6 +497,3 @@ fn workday(ctx: &mut Ctx, a: &[Value], intl: bool) -> Value {
     }
     num(d)
 }
-
-#[allow(dead_code)]
-const _R: &[Arg] = R;

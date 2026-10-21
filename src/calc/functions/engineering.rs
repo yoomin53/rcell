@@ -5,6 +5,7 @@
 
 //! 공학 함수: 진법 변환, 비트 연산, 복소수, 단위 변환, 베셀 함수, 오차 함수.
 
+use crate::calc::fm::Fm;
 use super::special as sp;
 use super::{FnSpec, MANY, R, V, f, flatten, num_arg, num_or, opt, text_arg};
 use crate::calc::eval::Ctx;
@@ -72,15 +73,15 @@ pub const FNS: &[FnSpec] = &[
     }),
     f("IMREAL", 1, 1, V, |c, a| im1n(c, a, |z| Ok(z.0))),
     f("IMAGINARY", 1, 1, V, |c, a| im1n(c, a, |z| Ok(z.1))),
-    f("IMABS", 1, 1, V, |c, a| im1n(c, a, |z| Ok(z.0.hypot(z.1)))),
+    f("IMABS", 1, 1, V, |c, a| im1n(c, a, |z| Ok(z.0.mhypot(z.1)))),
     f("IMARGUMENT", 1, 1, V, |c, a| im1n(c, a, |z| {
-        if z.0 == 0.0 && z.1 == 0.0 { Err(ErrorKind::Div0) } else { Ok(z.1.atan2(z.0)) }
+        if z.0 == 0.0 && z.1 == 0.0 { Err(ErrorKind::Div0) } else { Ok(z.1.matan2(z.0)) }
     })),
     f("IMCONJUGATE", 1, 1, V, |c, a| im1(c, a, |z| Ok((z.0, -z.1)))),
     f("IMSQRT", 1, 1, V, |c, a| im1(c, a, |z| {
-        let r = z.0.hypot(z.1).sqrt();
-        let t = z.1.atan2(z.0) / 2.0;
-        Ok((r * t.cos(), r * t.sin()))
+        let r = z.0.mhypot(z.1).sqrt();
+        let t = z.1.matan2(z.0) / 2.0;
+        Ok((r * t.mcos(), r * t.msin()))
     })),
     f("IMEXP", 1, 1, V, |c, a| im1(c, a, |z| Ok(cexp(z)))),
     f("IMLN", 1, 1, V, |c, a| im1(c, a, cln)),
@@ -107,16 +108,16 @@ pub const FNS: &[FnSpec] = &[
     f("IMPOWER", 2, 2, V, |c, a| {
         let (z, s) = try_v!(complex_arg(c, &a[0]));
         let p = try_v!(num_arg(c, a, 1));
-        let r = z.0.hypot(z.1);
+        let r = z.0.mhypot(z.1);
         if r == 0.0 {
             if p <= 0.0 {
                 return Value::Error(ErrorKind::Num);
             }
             return Value::from(fmt_complex(0.0, 0.0, s));
         }
-        let t = z.1.atan2(z.0);
-        let rp = r.powf(p);
-        Value::from(fmt_complex(rp * (p * t).cos(), rp * (p * t).sin(), s))
+        let t = z.1.matan2(z.0);
+        let rp = r.mpow(p);
+        Value::from(fmt_complex(rp * (p * t).mcos(), rp * (p * t).msin(), s))
     }),
     f("IMDIV", 2, 2, V, |c, a| im2(c, a, cdiv)),
     f("IMSUB", 2, 2, V, |c, a| im2(c, a, |x, y| Ok((x.0 - y.0, x.1 - y.1)))),
@@ -249,7 +250,7 @@ fn shift(ctx: &mut Ctx, a: &[Value], left: bool) -> Value {
     }
     let s = if left { s } else { -s };
     let r = if s >= 0.0 {
-        (x as f64) * 2f64.powi(s as i32)
+        (x as f64) * 2f64.mpowi(s as i32)
     } else {
         (x >> (-s) as u32) as f64
     };
@@ -420,31 +421,31 @@ fn cdiv(x: C, y: C) -> Result<C, ErrorKind> {
 }
 
 fn cexp(z: C) -> C {
-    let e = z.0.exp();
-    (e * z.1.cos(), e * z.1.sin())
+    let e = z.0.mexp();
+    (e * z.1.mcos(), e * z.1.msin())
 }
 
 fn cln(z: C) -> Result<C, ErrorKind> {
     if z.0 == 0.0 && z.1 == 0.0 {
         return Err(ErrorKind::Num);
     }
-    Ok((z.0.hypot(z.1).ln(), z.1.atan2(z.0)))
+    Ok((z.0.mhypot(z.1).mln(), z.1.matan2(z.0)))
 }
 
 fn csin(z: C) -> C {
-    (z.0.sin() * z.1.cosh(), z.0.cos() * z.1.sinh())
+    (z.0.msin() * z.1.mcosh(), z.0.mcos() * z.1.msinh())
 }
 
 fn ccos(z: C) -> C {
-    (z.0.cos() * z.1.cosh(), -z.0.sin() * z.1.sinh())
+    (z.0.mcos() * z.1.mcosh(), -z.0.msin() * z.1.msinh())
 }
 
 fn csinh(z: C) -> C {
-    (z.0.sinh() * z.1.cos(), z.0.cosh() * z.1.sin())
+    (z.0.msinh() * z.1.mcos(), z.0.mcosh() * z.1.msin())
 }
 
 fn ccosh(z: C) -> C {
-    (z.0.cosh() * z.1.cos(), z.0.sinh() * z.1.sin())
+    (z.0.mcosh() * z.1.mcos(), z.0.msinh() * z.1.msin())
 }
 
 // ---------------------------------------------------------------------------
@@ -553,7 +554,7 @@ fn bessel_y01(x: f64) -> (f64, f64) {
         let y1 = asymptotic_y(1.0, x);
         return (y0, y1);
     }
-    let lnx = (x / 2.0).ln() + EULER;
+    let lnx = (x / 2.0).mln() + EULER;
     // Y0 = 2/π [ (ln(x/2)+γ) J0 − 2 Σ (−1)^k J_{2k}/k ]
     let mut s = 0.0;
     let mut k = 1;
@@ -576,7 +577,7 @@ fn bessel_y01(x: f64) -> (f64, f64) {
         // Y1 = 2/π [ (ln(x/2)+γ) J1 − J0/x … ] 대신 수치 미분: Y1 = −Y0'
         let h = 1e-5 * x.max(1.0);
         let f = |t: f64| {
-            let lt = (t / 2.0).ln() + EULER;
+            let lt = (t / 2.0).mln() + EULER;
             let mut s = 0.0;
             let mut k = 1;
             loop {
@@ -606,7 +607,7 @@ fn asymptotic_y(nu: f64, x: f64) -> f64 {
     let mut term = 1.0;
     let mut k: f64 = 1.0;
     loop {
-        term *= (mu - (2.0 * k - 1.0).powi(2)) / (k * 8.0 * x);
+        term *= (mu - (2.0 * k - 1.0).mpowi(2)) / (k * 8.0 * x);
         if term.abs() < 1e-17 || k > 60.0 {
             break;
         }
@@ -618,7 +619,7 @@ fn asymptotic_y(nu: f64, x: f64) -> f64 {
         k += 1.0;
     }
     let chi = x - (nu / 2.0 + 0.25) * PI;
-    (2.0 / (PI * x)).sqrt() * (p * chi.sin() + q * chi.cos())
+    (2.0 / (PI * x)).sqrt() * (p * chi.msin() + q * chi.mcos())
 }
 
 pub fn bessel_y(n: i32, x: f64) -> f64 {
@@ -640,7 +641,7 @@ fn bessel_k01(x: f64) -> (f64, f64) {
     if x <= 2.0 {
         // K0 = −(ln(x/2)+γ) I0 + Σ (x²/4)^k/(k!)² H_k
         let q = x * x / 4.0;
-        let lnx = (x / 2.0).ln() + EULER;
+        let lnx = (x / 2.0).mln() + EULER;
         let mut term = 1.0;
         let mut h = 0.0;
         let mut s0 = 0.0;
@@ -662,10 +663,10 @@ fn bessel_k01(x: f64) -> (f64, f64) {
     // K_ν(x) = ∫_0^∞ exp(−x cosh t) cosh(νt) dt (사다리꼴 — 매끈한 함수라 아주 정확하다)
     let integ = |nu: f64| {
         let h = 0.02;
-        let mut s = 0.5 * (-x).exp();
+        let mut s = 0.5 * (-x).mexp();
         let mut t: f64 = h;
         loop {
-            let v = (-x * t.cosh()).exp() * (nu * t).cosh();
+            let v = (-x * t.mcosh()).mexp() * (nu * t).mcosh();
             s += v;
             if v < 1e-300 || t > 50.0 {
                 break;
@@ -917,7 +918,7 @@ fn unit(name: &str) -> Option<(u8, f64)> {
                 } else {
                     1
                 };
-                return Some((cat, k * pk.powi(power)));
+                return Some((cat, k * pk.mpowi(power)));
             }
             if temp_kind(rest) == Some('K') {
                 return Some((8, *pk));

@@ -9,6 +9,7 @@
 //! `A` 분류 인수 안)에서는 참조가 배열이 되고, 연산자와 값 인수 함수는 원소마다 계산한다.
 //! 배열 상수와 배열을 돌려주는 함수의 결과는 어느 문맥에서나 원소마다 계산한다.
 
+use crate::calc::fm::Fm;
 use std::rc::Rc;
 
 use super::ast::{BinaryOp, Call, Expr, NameExpr, RefExpr, SheetSpec, UnaryOp};
@@ -309,7 +310,8 @@ impl<'a> Ctx<'a> {
                         None => Some(*area),
                         Some(x) => match x.bounding(area) {
                             Some(b) => Some(b),
-                            None => return Value::Error(ErrorKind::Value),
+                            // 다른 시트끼리의 범위 연산 (SUM(Data!A1:A2:B3)) — 한셀은 #NULL!
+                            None => return Value::Error(ErrorKind::Null),
                         },
                     };
                 }
@@ -460,6 +462,9 @@ impl<'a> Ctx<'a> {
     // -----------------------------------------------------------------------
 
     fn call(&mut self, c: &Call) -> Value {
+        if !self.eng.excel_functions && super::functions::hcell_unknown(&c.name) {
+            return Value::Error(ErrorKind::Name);
+        }
         let Some(spec) = c.func else {
             if super::functions::is_known(&c.name) {
                 self.eng.mark_unsupported(&c.name);
@@ -562,7 +567,7 @@ pub fn is_reference_expr(e: &Expr) -> bool {
     }
 }
 
-/// 사칙연산과 거듭제곱
+/// 사칙연산과 거듭제곱 연산자
 pub fn arith(op: BinaryOp, x: f64, y: f64) -> Value {
     let r = match op {
         BinaryOp::Add => x + y,
@@ -574,30 +579,24 @@ pub fn arith(op: BinaryOp, x: f64, y: f64) -> Value {
             }
             x / y
         }
+        // 한셀의 `^` 는 0^0 = 1 (POWER(0,0) 은 #NUM!)
+        BinaryOp::Pow if x == 0.0 && y == 0.0 => return Value::Number(1.0),
         BinaryOp::Pow => return power(x, y),
         _ => return Value::Error(ErrorKind::Value),
     };
     value::num(r)
 }
 
-/// 거듭제곱: 0^0 과 음수의 분수 제곱은 #NUM!, 0 의 음수 제곱은 #DIV/0!
+/// POWER: 0^0·0 의 음수 제곱·음수의 분수 제곱은 #NUM! (한셀은 세제곱근 같은 홀수 제곱근도 #NUM!)
 pub fn power(x: f64, y: f64) -> Value {
     if x == 0.0 {
-        if y == 0.0 {
+        if y <= 0.0 {
             return Value::Error(ErrorKind::Num);
-        }
-        if y < 0.0 {
-            return Value::Error(ErrorKind::Div0);
         }
         return Value::Number(0.0);
     }
     if x < 0.0 && y.fract() != 0.0 {
-        // 1/홀수 꼴 (세제곱근 등)은 실수 결과가 있다
-        let inv = 1.0 / y;
-        if (inv.round() - inv).abs() < 1e-10 && (inv.round() as i64) % 2 != 0 {
-            return value::num(-(-x).powf(y));
-        }
         return Value::Error(ErrorKind::Num);
     }
-    value::num(x.powf(y))
+    value::num(x.mpow(y))
 }

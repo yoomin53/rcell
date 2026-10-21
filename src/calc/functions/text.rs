@@ -8,6 +8,7 @@
 //! 글자 위치는 유니코드 글자 단위로 센다. 바이트 함수(LENB …)는 한국어 환경처럼 ASCII 밖의 글자를
 //! 2바이트로 센다.
 
+use crate::calc::fm::Fm;
 use super::math::{Rounding, round_digits};
 use super::{Arg, FnSpec, MANY, R, V, bool_or, f, flatten, num_arg, num_or, opt, text_arg};
 use crate::calc::criteria::wildcard_match;
@@ -83,10 +84,12 @@ pub const FNS: &[FnSpec] = &[
         _ => Value::from(""),
     }),
     f("VALUE", 1, 1, V, |c, a| match &a[0] {
-        Value::Text(s) => match value::parse_number(s, c.date1904()) {
+        // "TRUE" 는 1 (한셀). 논리 값 인수는 #VALUE!
+        Value::Text(s) => match value::parse_bool_text(s).map(|b| b as u8 as f64).or_else(|| value::parse_number(s, c.date1904())) {
             Some(n) => Value::Number(n),
             None => Value::Error(ErrorKind::Value),
         },
+        Value::Bool(_) => Value::Error(ErrorKind::Value),
         v => value::num_r(c.num(v)),
     }),
     f("NUMBERVALUE", 1, 3, V, numbervalue),
@@ -439,7 +442,7 @@ fn numbervalue(ctx: &mut Ctx, a: &[Value]) -> Value {
     }
     match out.parse::<f64>() {
         Ok(v) if out.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E')) => {
-            Value::Number(v / 100f64.powi(pct))
+            Value::Number(v / 100f64.mpowi(pct))
         }
         _ => Value::Error(ErrorKind::Value),
     }

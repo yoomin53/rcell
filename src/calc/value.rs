@@ -13,6 +13,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::model::CellValue;
+use super::fm::Fm;
 
 /// 오류 값.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -366,12 +367,58 @@ impl fmt::Display for Value {
 // 숫자 ↔ 글
 // ---------------------------------------------------------------------------
 
-/// 숫자를 글로 (연결 연산자·글 함수): 유효숫자 15자리 일반 표기, 아주 크거나 작으면 지수.
+/// 숫자를 글로 (연결 연산자·글 함수·복소수 글). 한셀의 규칙 (함수 대조 실험 conv·misc3 묶음):
+/// - 유효숫자 15자리. 1E+15 이상은 정수 자릿수의 앞 15자리만 남기고 버린다
+///   (2^60 = 1152921504606846976 → "1152921504606840000"), 그보다 작으면 반올림 (2/3 → "0.666666666666667").
+/// - 부호를 뺀 그대로의 꼴이 20자 이내면 그대로 쓴다: 정수 자리 20자리까지 (`99000000000000000000`),
+///   1 보다 작으면 소수 자리 18자리까지 (`0.000000000000000001`, `0.000123456789012345`).
+///   넘으면 지수 꼴 (`1E+20`, `1E-19`, `3.33333333333333E-6`) — 지수 자리는 채우지 않는다.
+/// - 정수 자릿수는 log10 으로 재는 듯하다: 9.99999999999999E+19 는 log10 이 20.0 으로 반올림되어 지수 꼴.
 pub fn number_to_text(v: f64) -> String {
-    if v == 0.0 {
+    if v == 0.0 || !v.is_finite() {
         return "0".into();
     }
-    crate::numfmt::general(v)
+    let a = v.abs();
+    let neg = if v < 0.0 { "-" } else { "" };
+    let (digits, exp) = if a >= 1e15 {
+        // 정확한 정수 자릿수에서 앞 15자리
+        let s = format!("{a:.0}");
+        let exp = s.len() as i32 - 1;
+        (s[..15].trim_end_matches('0').to_string(), exp)
+    } else {
+        let s = format!("{a:.14e}");
+        let (mant, e) = s.split_once('e').unwrap_or((&s, "0"));
+        let d = mant.replace('.', "");
+        (d.trim_end_matches('0').to_string(), e.parse().unwrap_or(0))
+    };
+    let digits = if digits.is_empty() { "0".to_string() } else { digits };
+    let k = digits.len() as i32;
+    let positional = if exp >= 0 {
+        exp.max(a.mlog10().floor() as i32) < 20
+    } else {
+        k - 1 - exp <= 18
+    };
+    if positional {
+        if exp >= 0 {
+            let int_len = exp + 1;
+            if k <= int_len {
+                format!("{neg}{digits}{}", "0".repeat((int_len - k) as usize))
+            } else {
+                let (a, b) = digits.split_at(int_len as usize);
+                format!("{neg}{a}.{b}")
+            }
+        } else {
+            format!("{neg}0.{}{digits}", "0".repeat((-exp - 1) as usize))
+        }
+    } else {
+        let (a, b) = digits.split_at(1);
+        let sign = if exp < 0 { '-' } else { '+' };
+        if b.is_empty() {
+            format!("{neg}{a}E{sign}{}", exp.abs())
+        } else {
+            format!("{neg}{a}.{b}E{sign}{}", exp.abs())
+        }
+    }
 }
 
 /// 유효숫자 15자리로 반올림 (스프레드시트가 저장·비교에 쓰는 정밀도)
@@ -382,103 +429,141 @@ pub fn round15(v: f64) -> f64 {
     format!("{v:.14e}").parse().unwrap_or(v)
 }
 
-/// 글을 숫자로 (VALUE 와 암묵 변환): 공백, 부호, 천 단위 쉼표, 소수, 지수, 백분율, 통화 기호,
-/// 괄호 음수, 분수(`1 1/2`), 날짜·시각.
+/// 십진 숫자 글(`123.45`, `1.5e-3`)을 유효숫자 15자리까지만 남기고(뒤 자리는 버림) 읽는다.
+/// 한셀은 수식 안 숫자 상수와 글→숫자 변환을 이렇게 읽는다 (함수 대조 실험 misc3:
+/// `1234567890123456` → 1234567890123450, `"0.99999999999999999"*1` → 0.999999999999999).
+pub fn parse_decimal15(s: &str) -> Option<f64> {
+    let (mant, exp) = match s.find(['e', 'E']) {
+        Some(k) => (&s[..k], &s[k..]),
+        None => (s, ""),
+    };
+    let mut out = String::with_capacity(s.len());
+    let mut sig = 0;
+    for c in mant.chars() {
+        if c.is_ascii_digit() && (sig > 0 || c != '0') {
+            sig += 1;
+            if sig > 15 {
+                out.push('0');
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out.push_str(exp);
+    out.parse().ok()
+}
+
+/// 글이 논리 상수인가 (`TRUE`·`true`·`False` …, 앞뒤 공백 없이). 한셀은 연산자·VALUE 에서 1/0 으로 바꾼다.
+pub fn parse_bool_text(s: &str) -> Option<bool> {
+    if s.eq_ignore_ascii_case("TRUE") {
+        Some(true)
+    } else if s.eq_ignore_ascii_case("FALSE") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// 글을 숫자로 (VALUE 와 암묵 변환): 숫자 꼴, 대분수, 시각, 날짜(·시각). 논리 글은 다루지 않는다
+/// ([`parse_bool_text`]). 문법은 한셀을 따른다 (함수 대조 실험 conv 묶음, `docs/format/calc.md`).
 pub fn parse_number(s: &str, date1904: bool) -> Option<f64> {
-    let t = s.trim_matches(|c: char| c == ' ' || c == '\u{3000}');
+    crate::calc::date::classify_text(s, date1904).map(|p| p.value())
+}
+
+/// 숫자 꼴 (앞뒤 공백·탭·전각 공백은 무시, 전각 숫자는 숫자):
+/// `[+-]? [$₩\]? [+-]? 숫자(,세 자리 이상)* [.숫자] [E[+-]숫자] (%|[$₩\])?` 또는 `(…)` (음수, 안에 부호 없이).
+/// 통화 기호와 % 는 함께 쓸 수 없다. 공백이 끼면 숫자가 아니다 (`- 5`, `$ 5`, `50 %`).
+pub fn parse_plain_number(t: &str) -> Option<f64> {
+    let t = t.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\u{3000}'));
     if t.is_empty() {
         return None;
     }
-    if let Some(v) = parse_plain_number(t) {
-        return Some(v);
-    }
-    if let Some(v) = parse_fraction(t) {
-        return Some(v);
-    }
-    crate::calc::date::parse_datetime(t, date1904)
-}
-
-/// 숫자 꼴만: [-+]? [₩$]? 숫자(쉼표) [.숫자] [E±숫자] [%]  또는 (숫자)
-fn parse_plain_number(t: &str) -> Option<f64> {
-    let mut s = t;
+    let t: String = t
+        .chars()
+        .map(|c| match c as u32 {
+            0xFF10..=0xFF19 => char::from(b'0' + (c as u32 - 0xFF10) as u8),
+            _ => c,
+        })
+        .collect();
+    let mut s = t.as_str();
     let mut neg = false;
-    // 괄호 음수
-    if let Some(inner) = s.strip_prefix('(').and_then(|x| x.strip_suffix(')')) {
+    let paren = s.starts_with('(') && s.ends_with(')') && s.len() >= 2;
+    if paren {
+        s = &s[1..s.len() - 1];
         neg = true;
-        s = inner.trim();
     }
-    let mut sign_seen = false;
-    let strip_sign = |s: &mut &str, neg: &mut bool, seen: &mut bool| {
-        if !*seen {
-            if let Some(r) = s.strip_prefix('-') {
-                *neg = !*neg;
-                *s = r.trim_start();
-                *seen = true;
-            } else if let Some(r) = s.strip_prefix('+') {
-                *s = r.trim_start();
-                *seen = true;
-            }
+    let mut signed = false;
+    let strip_sign = |s: &mut &str, neg: &mut bool, signed: &mut bool| {
+        if *signed || paren {
+            return;
+        }
+        if let Some(r) = s.strip_prefix('-') {
+            *neg = !*neg;
+            *s = r;
+            *signed = true;
+        } else if let Some(r) = s.strip_prefix('+') {
+            *s = r;
+            *signed = true;
         }
     };
-    strip_sign(&mut s, &mut neg, &mut sign_seen);
+    strip_sign(&mut s, &mut neg, &mut signed);
+    const CUR: [&str; 4] = ["$", "₩", "\\", "￦"];
     let mut currency = false;
-    for sym in ["₩", "\\", "$", "￦"] {
+    for sym in CUR {
         if let Some(r) = s.strip_prefix(sym) {
-            s = r.trim_start();
+            s = r;
             currency = true;
             break;
         }
     }
     if currency {
-        strip_sign(&mut s, &mut neg, &mut sign_seen);
+        strip_sign(&mut s, &mut neg, &mut signed);
     }
-    let mut percent = 0;
-    while let Some(r) = s.strip_suffix('%') {
-        s = r.trim_end();
-        percent += 1;
-    }
-    if !currency {
-        for sym in ["₩", "원"] {
+    let mut percent = false;
+    if let Some(r) = s.strip_suffix('%') {
+        if currency {
+            return None;
+        }
+        s = r;
+        percent = true;
+    } else if !currency {
+        for sym in CUR {
             if let Some(r) = s.strip_suffix(sym) {
-                s = r.trim_end();
+                s = r;
                 break;
             }
         }
     }
-    if s.is_empty() {
+    let b = s.as_bytes();
+    if b.is_empty() {
         return None;
     }
-    // 가수부
-    let b = s.as_bytes();
     let mut i = 0;
-    let mut digits = String::new();
-    let mut int_digits = 0;
-    let mut saw_comma = false;
+    let mut num = String::new();
+    // 정수 부분 (쉼표 뒤에는 숫자 세 개 이상)
     while i < b.len() {
         match b[i] {
-            b'0'..=b'9' => {
-                digits.push(b[i] as char);
-                int_digits += 1;
-            }
-            b',' if int_digits > 0 => {
-                // 쉼표 뒤에는 숫자 세 개
-                let next3 = b.get(i + 1..i + 4);
-                if !next3.is_some_and(|n| n.iter().all(u8::is_ascii_digit)) {
+            b'0'..=b'9' => num.push(b[i] as char),
+            b',' => {
+                if num.is_empty() {
                     return None;
                 }
-                saw_comma = true;
+                let run = b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+                if run < 3 {
+                    return None;
+                }
             }
             _ => break,
         }
         i += 1;
     }
-    let _ = saw_comma;
+    let int_digits = num.len();
     let mut frac_digits = 0;
     if i < b.len() && b[i] == b'.' {
-        digits.push('.');
+        num.push('.');
         i += 1;
         while i < b.len() && b[i].is_ascii_digit() {
-            digits.push(b[i] as char);
+            num.push(b[i] as char);
             frac_digits += 1;
             i += 1;
         }
@@ -488,27 +573,27 @@ fn parse_plain_number(t: &str) -> Option<f64> {
     }
     if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
         let mut j = i + 1;
-        let mut exp = String::from("e");
+        let mut e = String::from("e");
         if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
-            exp.push(b[j] as char);
+            e.push(b[j] as char);
             j += 1;
         }
         let start = j;
         while j < b.len() && b[j].is_ascii_digit() {
-            exp.push(b[j] as char);
+            e.push(b[j] as char);
             j += 1;
         }
         if j == start {
             return None;
         }
-        digits.push_str(&exp);
+        num.push_str(&e);
         i = j;
     }
     if i != b.len() {
         return None;
     }
-    let mut v: f64 = digits.parse().ok()?;
-    for _ in 0..percent {
+    let mut v: f64 = parse_decimal15(&num)?;
+    if percent {
         v /= 100.0;
     }
     if neg {
@@ -517,54 +602,37 @@ fn parse_plain_number(t: &str) -> Option<f64> {
     v.is_finite().then_some(v)
 }
 
-/// `1 1/2`, `3/4` 꼴 분수 (분모 1–… , 분자 < 분모가 아니어도 받는다)
-fn parse_fraction(t: &str) -> Option<f64> {
-    let (neg, s) = match t.strip_prefix('-') {
-        Some(r) => (true, r.trim_start()),
-        None => (false, t.strip_prefix('+').unwrap_or(t).trim_start()),
-    };
-    let (whole, frac) = match s.split_once(' ') {
-        Some((w, f)) => (Some(w.trim()), f.trim()),
-        None => (None, s),
-    };
+/// 대분수 `정수 분자/분모` (부호 없이, 분모 0 은 안 됨, 분자가 분모보다 커도 된다: `1 3/2` = 2.5).
+/// `3/4` 처럼 정수 부분이 없으면 날짜로 읽는다.
+pub fn parse_fraction(t: &str) -> Option<f64> {
+    let t = t.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\u{3000}'));
+    let (whole, frac) = t.split_once(' ')?;
     let (n, d) = frac.split_once('/')?;
-    if n.is_empty() || d.is_empty() || !n.bytes().all(|c| c.is_ascii_digit()) {
+    let all = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
+    if !all(whole) || !all(n) || !all(d) {
         return None;
     }
-    if !d.bytes().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    let n: f64 = n.parse().ok()?;
-    let d: f64 = d.parse().ok()?;
+    let (w, n, d): (f64, f64, f64) = (whole.parse().ok()?, n.parse().ok()?, d.parse().ok()?);
     if d == 0.0 {
         return None;
     }
-    let w: f64 = match whole {
-        Some(w) if w.bytes().all(|c| c.is_ascii_digit()) && !w.is_empty() => w.parse().ok()?,
-        Some(_) => return None,
-        None => {
-            // `3/4` 단독은 날짜(3월 4일)로 읽는다 — 분수로 보지 않는다
-            return None;
-        }
-    };
-    if n >= d {
-        return None;
-    }
-    let v = w + n / d;
-    Some(if neg { -v } else { v })
+    Some(w + n / d)
 }
 
 // ---------------------------------------------------------------------------
 // 스칼라 변환
 // ---------------------------------------------------------------------------
 
-/// 숫자로 (연산자·숫자 인수). 빈 값 0, 논리 0/1, 글은 해석, 오류는 그대로.
+/// 숫자로 (연산자·숫자 인수). 빈 값 0, 논리 0/1, 글은 해석(`"TRUE"` 는 1 — 한셀), 오류는 그대로.
 pub fn to_number(v: &Value, date1904: bool) -> Result<f64, ErrorKind> {
     match v {
         Value::Empty => Ok(0.0),
         Value::Number(n) => Ok(*n),
         Value::Bool(b) => Ok(*b as u8 as f64),
-        Value::Text(s) => parse_number(s, date1904).ok_or(ErrorKind::Value),
+        Value::Text(s) => match parse_bool_text(s) {
+            Some(b) => Ok(b as u8 as f64),
+            None => parse_number(s, date1904).ok_or(ErrorKind::Value),
+        },
         Value::Error(e) => Err(*e),
         Value::Array(a) => to_number(a.data.first().unwrap_or(&Value::Empty), date1904),
         Value::Ref(_) => Err(ErrorKind::Value),
@@ -605,11 +673,9 @@ pub fn to_bool(v: &Value) -> Result<bool, ErrorKind> {
     }
 }
 
-/// 글 비교: 대소문자 무시
+/// 글 비교: 대소문자 무시, 한셀의 언어별 정렬 순서 ([`crate::calc::collate`])
 pub fn cmp_text(a: &str, b: &str) -> Ordering {
-    let la = fold(a);
-    let lb = fold(b);
-    la.cmp(&lb)
+    crate::calc::collate::compare(a, b)
 }
 
 /// 대소문자 무시 비교용 정규화

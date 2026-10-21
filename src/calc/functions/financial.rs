@@ -8,6 +8,7 @@
 //! 금액 부호는 스프레드시트 관례대로 받는 돈 +, 내는 돈 −. 날짜 기준(basis): 0 미국 30/360,
 //! 1 실제/실제, 2 실제/360, 3 실제/365, 4 유럽 30/360.
 
+use crate::calc::fm::Fm;
 use super::date::{days_30_360, year_frac};
 use super::{Agg, Arg, FnSpec, MANY, R, V, collect_numbers, f, flatten, num_arg, num_or, opt};
 use crate::calc::date::{days_in_month, serial_from_ymd, ymd_from_serial};
@@ -71,7 +72,7 @@ pub const FNS: &[FnSpec] = &[
             return Value::Error(ErrorKind::Div0);
         }
         let v = try_v!(collect_numbers(c, &a[1..], Agg::Numbers));
-        num(v.iter().enumerate().map(|(i, x)| x / (1.0 + r).powi(i as i32 + 1)).sum())
+        num(v.iter().enumerate().map(|(i, x)| x / (1.0 + r).mpowi(i as i32 + 1)).sum())
     }),
     f("XNPV", 3, 3, VRR, xnpv_fn),
     f("IRR", 1, 2, RV, irr),
@@ -105,7 +106,7 @@ pub const FNS: &[FnSpec] = &[
         if r <= 0.0 || n < 1.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num((1.0 + r / n).powf(n) - 1.0)
+        num((1.0 + r / n).mpow(n) - 1.0)
     }),
     f("NOMINAL", 2, 2, V, |c, a| {
         let r = try_v!(num_arg(c, a, 0));
@@ -113,7 +114,7 @@ pub const FNS: &[FnSpec] = &[
         if r <= 0.0 || n < 1.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num(n * ((1.0 + r).powf(1.0 / n) - 1.0))
+        num(n * ((1.0 + r).mpow(1.0 / n) - 1.0))
     }),
     f("FVSCHEDULE", 2, 2, &[Arg::V, Arg::A], |c, a| {
         let mut p = try_v!(num_arg(c, a, 0));
@@ -136,7 +137,7 @@ pub const FNS: &[FnSpec] = &[
         if r <= 0.0 || p <= 0.0 || fv_ <= 0.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num((fv_.ln() - p.ln()) / (1.0 + r).ln())
+        num((fv_.mln() - p.mln()) / (1.0 + r).mln())
     }),
     f("RRI", 3, 3, V, |c, a| {
         let n = try_v!(num_arg(c, a, 0));
@@ -148,7 +149,7 @@ pub const FNS: &[FnSpec] = &[
         if p == 0.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num((fv_ / p).powf(1.0 / n) - 1.0)
+        num((fv_ / p).mpow(1.0 / n) - 1.0)
     }),
     // 증권
     f("TBILLPRICE", 3, 3, V, |c, a| {
@@ -302,7 +303,7 @@ pub fn pv(r: f64, n: f64, p: f64, fv: f64, t: f64) -> f64 {
     if r == 0.0 {
         return -(fv + p * n);
     }
-    let g = (1.0 + r).powf(n);
+    let g = (1.0 + r).mpow(n);
     -(fv + p * (1.0 + r * t) * (g - 1.0) / r) / g
 }
 
@@ -310,7 +311,7 @@ pub fn fv(r: f64, n: f64, p: f64, pv: f64, t: f64) -> f64 {
     if r == 0.0 {
         return -(pv + p * n);
     }
-    let g = (1.0 + r).powf(n);
+    let g = (1.0 + r).mpow(n);
     -(pv * g + p * (1.0 + r * t) * (g - 1.0) / r)
 }
 
@@ -321,7 +322,7 @@ pub fn pmt(r: f64, n: f64, pv: f64, fv: f64, t: f64) -> Result<f64, ErrorKind> {
     if r == 0.0 {
         return Ok(-(pv + fv) / n);
     }
-    let g = (1.0 + r).powf(n);
+    let g = (1.0 + r).mpow(n);
     let den = (1.0 + r * t) * (g - 1.0);
     if den == 0.0 {
         return Err(ErrorKind::Num);
@@ -341,7 +342,7 @@ fn nper(r: f64, p: f64, pv: f64, fv: f64, t: f64) -> Result<f64, ErrorKind> {
     if b == 0.0 || a / b <= 0.0 || r <= -1.0 {
         return Err(ErrorKind::Num);
     }
-    Ok((a / b).ln() / (1.0 + r).ln())
+    Ok((a / b).mln() / (1.0 + r).mln())
 }
 
 /// 미지의 이율 (뉴턴 방법, 수렴할 때까지)
@@ -350,7 +351,7 @@ fn rate(n: f64, p: f64, pv: f64, fv: f64, t: f64, guess: f64) -> Result<f64, Err
         if r.abs() < 1e-12 {
             return pv + p * n + fv;
         }
-        let g = (1.0 + r).powf(n);
+        let g = (1.0 + r).mpow(n);
         pv * g + p * (1.0 + r * t) * (g - 1.0) / r + fv
     };
     let df = |r: f64| -> f64 {
@@ -430,7 +431,7 @@ fn cum(ctx: &mut Ctx, a: &[Value], interest: bool) -> Value {
 fn xnpv(r: f64, v: &[f64], d: &[f64]) -> f64 {
     v.iter()
         .zip(d)
-        .map(|(x, di)| x / (1.0 + r).powf((di - d[0]) / 365.0))
+        .map(|(x, di)| x / (1.0 + r).mpow((di - d[0]) / 365.0))
         .sum()
 }
 
@@ -477,11 +478,11 @@ fn irr(ctx: &mut Ctx, a: &[Value]) -> Value {
     if !(v.iter().any(|&x| x > 0.0) && v.iter().any(|&x| x < 0.0)) {
         return Value::Error(ErrorKind::Num);
     }
-    let npv = |r: f64| -> f64 { v.iter().enumerate().map(|(i, x)| x / (1.0 + r).powi(i as i32)).sum() };
+    let npv = |r: f64| -> f64 { v.iter().enumerate().map(|(i, x)| x / (1.0 + r).mpowi(i as i32)).sum() };
     let dnpv = |r: f64| -> f64 {
         v.iter()
             .enumerate()
-            .map(|(i, x)| -(i as f64) * x / (1.0 + r).powi(i as i32 + 1))
+            .map(|(i, x)| -(i as f64) * x / (1.0 + r).mpowi(i as i32 + 1))
             .sum()
     };
     num_r(newton(g, npv, dnpv))
@@ -518,7 +519,7 @@ fn xirr(ctx: &mut Ctx, a: &[Value]) -> Value {
             .zip(&d)
             .map(|(x, di)| {
                 let t = (di - d[0]) / 365.0;
-                -t * x / (1.0 + r).powf(t + 1.0)
+                -t * x / (1.0 + r).mpow(t + 1.0)
             })
             .sum()
     };
@@ -537,15 +538,15 @@ fn mirr(ctx: &mut Ctx, a: &[Value]) -> Value {
     let mut npv_neg = 0.0;
     for (i, x) in v.iter().enumerate() {
         if *x > 0.0 {
-            npv_pos += x / (1.0 + rr).powi(i as i32);
+            npv_pos += x / (1.0 + rr).mpowi(i as i32);
         } else {
-            npv_neg += x / (1.0 + fr).powi(i as i32);
+            npv_neg += x / (1.0 + fr).mpowi(i as i32);
         }
     }
     if npv_neg == 0.0 || npv_pos == 0.0 || n < 2.0 {
         return Value::Error(ErrorKind::Div0);
     }
-    num((-npv_pos * (1.0 + rr).powf(n - 1.0) / npv_neg).powf(1.0 / (n - 1.0)) - 1.0)
+    num((-npv_pos * (1.0 + rr).mpow(n - 1.0) / npv_neg).mpow(1.0 / (n - 1.0)) - 1.0)
 }
 
 fn db(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -560,7 +561,7 @@ fn db(ctx: &mut Ctx, a: &[Value]) -> Value {
     if cost == 0.0 {
         return Value::Number(0.0);
     }
-    let rate = super::math::round_digits(1.0 - (salv / cost).powf(1.0 / life), 3.0, super::math::Rounding::HalfAway);
+    let rate = super::math::round_digits(1.0 - (salv / cost).mpow(1.0 / life), 3.0, super::math::Rounding::HalfAway);
     let mut total = 0.0;
     let mut dep = cost * rate * month / 12.0;
     if per == 1.0 {
@@ -605,8 +606,8 @@ fn ddb(ctx: &mut Ctx, a: &[Value]) -> Value {
     if per.fract() != 0.0 {
         // 분수 기간: 정수 기간과 같은 꼴의 공식
         let rate = (factor / life).min(1.0);
-        let old = cost * (1.0 - rate).powf(per - 1.0);
-        let new = cost * (1.0 - rate).powf(per);
+        let old = cost * (1.0 - rate).mpow(per - 1.0);
+        let new = cost * (1.0 - rate).mpow(per);
         let d = if new < salv { (old - salv).max(0.0) } else { old - new };
         return num(d);
     }
@@ -675,7 +676,7 @@ fn dollar_frac(ctx: &mut Ctx, a: &[Value], de: bool) -> Value {
     }
     let int = x.trunc();
     let frac = x - int;
-    let p = 10f64.powf(f.log10().ceil());
+    let p = 10f64.mpow(f.mlog10().ceil());
     if de {
         num(int + frac * p / f)
     } else {
@@ -807,10 +808,10 @@ fn bond_price(s: f64, m: f64, rate: f64, yld: f64, red: f64, fr: f64, b: u8, d19
         return (red + c) / (1.0 + dsc / e * yld / fr) - c * a / e;
     }
     let v = 1.0 + yld / fr;
-    let mut p = red / v.powf(n - 1.0 + dsc / e);
+    let mut p = red / v.mpow(n - 1.0 + dsc / e);
     let mut k = 1.0;
     while k <= n {
-        p += c / v.powf(k - 1.0 + dsc / e);
+        p += c / v.mpow(k - 1.0 + dsc / e);
         k += 1.0;
     }
     p - c * a / e
@@ -898,7 +899,7 @@ fn duration_fn(ctx: &mut Ctx, a: &[Value], modified: bool) -> Value {
     while k <= n {
         let t = k - 1.0 + dsc / e;
         let cf = if k == n { c + 100.0 } else { c };
-        let d = cf / v.powf(t);
+        let d = cf / v.mpow(t);
         pv_ += d;
         w += t * d;
         k += 1.0;
@@ -1059,11 +1060,11 @@ fn odd_first(ctx: &mut Ctx, a: &[Value], yield_: bool) -> Value {
         let a_ = day_count(iss, s, b, d1904);
         let v = 1.0 + yld / fr;
         let c = 100.0 * rate / fr;
-        let mut p = red / v.powf(n + dsc / e);
-        p += c * dfc / e / v.powf(dsc / e);
+        let mut p = red / v.mpow(n + dsc / e);
+        p += c * dfc / e / v.mpow(dsc / e);
         let mut k = 1.0;
         while k <= n {
-            p += c / v.powf(k + dsc / e);
+            p += c / v.mpow(k + dsc / e);
             k += 1.0;
         }
         p - c * a_ / e

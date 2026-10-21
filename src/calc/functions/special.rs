@@ -8,6 +8,7 @@
 //! 급수와 연분수(Lentz 방법), 정규 분포 역함수는 Wichura 의 AS241 (유효숫자 약 16자리),
 //! 나머지 역함수는 이분법으로 좁힌 뒤 뉴턴 방법으로 다듬는다.
 
+use crate::calc::fm::Fm;
 use std::f64::consts::PI;
 
 const EPS: f64 = 1e-16;
@@ -26,7 +27,7 @@ pub fn ln_gamma(x: f64) -> f64 {
             prod *= y;
             y += 1.0;
         }
-        return stirling(y) - prod.ln();
+        return stirling(y) - prod.mln();
     }
     stirling(x)
 }
@@ -50,7 +51,7 @@ fn stirling(x: f64) -> f64 {
         s += c / p;
         p *= x2;
     }
-    (x - 0.5) * x.ln() - x + 0.5 * (2.0 * PI).ln() + s
+    (x - 0.5) * x.mln() - x + 0.5 * (2.0 * PI).mln() + s
 }
 
 /// Γ(x)
@@ -72,7 +73,7 @@ pub fn gamma(x: f64) -> f64 {
     }
     if x < 0.5 {
         // 반사 공식
-        return PI / ((PI * x).sin() * gamma(1.0 - x));
+        return PI / ((PI * x).msin() * gamma(1.0 - x));
     }
     if x > 171.7 {
         return f64::INFINITY;
@@ -84,7 +85,7 @@ pub fn gamma(x: f64) -> f64 {
         prod *= y;
         y += 1.0;
     }
-    stirling(y).exp() / prod
+    stirling(y).mexp() / prod
 }
 
 /// ln B(a, b)
@@ -138,7 +139,7 @@ fn erf_series(x: f64) -> f64 {
             break;
         }
     }
-    2.0 / PI.sqrt() * (-x2).exp() * sum
+    2.0 / PI.sqrt() * (-x2).mexp() * sum
 }
 
 /// erfc 연분수: e^{-x²}/√π · 1/(x + (1/2)/(x + 1/(x + (3/2)/(x + …))))
@@ -167,7 +168,7 @@ fn erfc_cf(x: f64) -> f64 {
             break;
         }
     }
-    (-x * x).exp() / PI.sqrt() / f
+    (-x * x).mexp() / PI.sqrt() / f
 }
 
 /// 표준 정규 누적 분포
@@ -177,7 +178,7 @@ pub fn norm_s_cdf(z: f64) -> f64 {
 
 /// 표준 정규 밀도
 pub fn norm_s_pdf(z: f64) -> f64 {
-    (-0.5 * z * z).exp() / (2.0 * PI).sqrt()
+    (-0.5 * z * z).mexp() / (2.0 * PI).sqrt()
 }
 
 /// 표준 정규 분포의 역함수 (Wichura AS241 PPND16)
@@ -215,7 +216,7 @@ pub fn norm_s_inv(p: f64) -> f64 {
                 + 1.0);
     }
     let mut r = if q < 0.0 { p } else { 1.0 - p };
-    r = (-r.ln()).sqrt();
+    r = (-r.mln()).sqrt();
     let val = if r <= 5.0 {
         r -= 1.6;
         (((((((r * 7.745_450_142_783_414_076_4e-4 + 0.022_723_844_989_269_184_583) * r
@@ -310,7 +311,7 @@ fn gamma_series(a: f64, x: f64) -> f64 {
             break;
         }
     }
-    sum * (-x + a * x.ln() - ln_gamma(a)).exp()
+    sum * (-x + a * x.mln() - ln_gamma(a)).mexp()
 }
 
 fn gamma_cf(a: f64, x: f64) -> f64 {
@@ -336,7 +337,7 @@ fn gamma_cf(a: f64, x: f64) -> f64 {
             break;
         }
     }
-    (-x + a * x.ln() - ln_gamma(a)).exp() * h
+    (-x + a * x.mln() - ln_gamma(a)).mexp() * h
 }
 
 /// 정규화한 불완전 베타 I_x(a, b)
@@ -347,7 +348,7 @@ pub fn beta_i(x: f64, a: f64, b: f64) -> f64 {
     if x >= 1.0 {
         return 1.0;
     }
-    let bt = (a * x.ln() + b * (1.0 - x).ln() - ln_beta(a, b)).exp();
+    let bt = (a * x.mln() + b * (1.0 - x).mln() - ln_beta(a, b)).mexp();
     if x < (a + 1.0) / (a + b + 2.0) {
         bt * beta_cf(x, a, b) / a
     } else {
@@ -459,7 +460,7 @@ pub fn gamma_p_inv(p: f64, a: f64) -> f64 {
     }
     let x = solve_increasing(|x| gamma_p(a, x), p, 0.0, hi);
     newton_refine(x, p, |x| gamma_p(a, x), |x| {
-        (-x + (a - 1.0) * x.ln() - ln_gamma(a)).exp()
+        (-x + (a - 1.0) * x.mln() - ln_gamma(a)).mexp()
     })
 }
 
@@ -474,7 +475,7 @@ pub fn beta_i_inv(p: f64, a: f64, b: f64) -> f64 {
     let x = solve_increasing(|x| beta_i(x, a, b), p, 0.0, 1.0);
     let lb = ln_beta(a, b);
     let r = newton_refine(x, p, |x| beta_i(x, a, b), |x| {
-        ((a - 1.0) * x.ln() + (b - 1.0) * (1.0 - x).ln() - lb).exp()
+        ((a - 1.0) * x.mln() + (b - 1.0) * (1.0 - x).mln() - lb).mexp()
     });
     r.clamp(0.0, 1.0)
 }
@@ -521,7 +522,7 @@ pub fn binom_coef(n: f64, k: f64) -> f64 {
         }
         return if r < 9.007_199_254_740_992e15 { r.round() } else { r };
     }
-    (ln_gamma(n + 1.0) - ln_gamma(k + 1.0) - ln_gamma(n - k + 1.0)).exp()
+    (ln_gamma(n + 1.0) - ln_gamma(k + 1.0) - ln_gamma(n - k + 1.0)).mexp()
 }
 
 /// 이항 확률 P(X = k)
@@ -533,12 +534,12 @@ pub fn binom_pmf(k: f64, n: f64, p: f64) -> f64 {
         return if k == n { 1.0 } else { 0.0 };
     }
     if n <= 1029.0 {
-        return binom_coef(n, k) * p.powf(k) * (1.0 - p).powf(n - k);
+        return binom_coef(n, k) * p.mpow(k) * (1.0 - p).mpow(n - k);
     }
     (ln_gamma(n + 1.0) - ln_gamma(k + 1.0) - ln_gamma(n - k + 1.0)
-        + k * p.ln()
-        + (n - k) * (1.0 - p).ln())
-    .exp()
+        + k * p.mln()
+        + (n - k) * (1.0 - p).mln())
+    .mexp()
 }
 
 /// t 분포 오른쪽 꼬리 P(T > t) (t ≥ 0)
@@ -558,9 +559,9 @@ pub fn t_cdf(t: f64, df: f64) -> f64 {
 
 /// t 분포 밀도
 pub fn t_pdf(t: f64, df: f64) -> f64 {
-    (ln_gamma((df + 1.0) / 2.0) - ln_gamma(df / 2.0) - 0.5 * (df * PI).ln()
-        - (df + 1.0) / 2.0 * (1.0 + t * t / df).ln())
-    .exp()
+    (ln_gamma((df + 1.0) / 2.0) - ln_gamma(df / 2.0) - 0.5 * (df * PI).mln()
+        - (df + 1.0) / 2.0 * (1.0 + t * t / df).mln())
+    .mexp()
 }
 
 /// P(T ≤ t) = p 인 t
@@ -604,10 +605,10 @@ pub fn f_pdf(x: f64, d1: f64, d2: f64) -> f64 {
             0.0
         };
     }
-    ((d1 / 2.0) * (d1 / d2).ln() + (d1 / 2.0 - 1.0) * x.ln()
-        - ((d1 + d2) / 2.0) * (1.0 + d1 * x / d2).ln()
+    ((d1 / 2.0) * (d1 / d2).mln() + (d1 / 2.0 - 1.0) * x.mln()
+        - ((d1 + d2) / 2.0) * (1.0 + d1 * x / d2).mln()
         - ln_beta(d1 / 2.0, d2 / 2.0))
-    .exp()
+    .mexp()
 }
 
 /// F 분포 역함수 (누적 확률 p)
@@ -639,7 +640,7 @@ pub fn chisq_pdf(x: f64, df: f64) -> f64 {
             0.0
         };
     }
-    ((df / 2.0 - 1.0) * x.ln() - x / 2.0 - (df / 2.0) * 2f64.ln() - ln_gamma(df / 2.0)).exp()
+    ((df / 2.0 - 1.0) * x.mln() - x / 2.0 - (df / 2.0) * 2f64.mln() - ln_gamma(df / 2.0)).mexp()
 }
 
 /// 감마 분포 밀도 (모양 a, 척도 b)
@@ -656,7 +657,7 @@ pub fn gamma_pdf(x: f64, a: f64, b: f64) -> f64 {
             0.0
         };
     }
-    ((a - 1.0) * x.ln() - x / b - ln_gamma(a) - a * b.ln()).exp()
+    ((a - 1.0) * x.mln() - x / b - ln_gamma(a) - a * b.mln()).mexp()
 }
 
 /// 베타 분포 밀도 (0..1)
@@ -669,12 +670,12 @@ pub fn beta_pdf(x: f64, a: f64, b: f64) -> f64 {
         return if e < 1.0 {
             f64::INFINITY
         } else if e == 1.0 {
-            (-ln_beta(a, b)).exp()
+            (-ln_beta(a, b)).mexp()
         } else {
             0.0
         };
     }
-    ((a - 1.0) * x.ln() + (b - 1.0) * (1.0 - x).ln() - ln_beta(a, b)).exp()
+    ((a - 1.0) * x.mln() + (b - 1.0) * (1.0 - x).mln() - ln_beta(a, b)).mexp()
 }
 
 #[cfg(test)]
@@ -689,7 +690,7 @@ mod tests {
     fn gamma_values() {
         assert!(close(gamma(5.0), 24.0, 1e-15));
         assert!(close(gamma(0.5), PI.sqrt(), 1e-14));
-        assert!(close(ln_gamma(10.0), 362_880f64.ln(), 1e-14));
+        assert!(close(ln_gamma(10.0), 362_880f64.mln(), 1e-14));
         assert!(close(gamma(4.5), 11.631_728_396_567_448, 1e-13));
     }
 

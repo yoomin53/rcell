@@ -673,7 +673,10 @@ fn diff(a: &Path, b: &Path, max: usize, opts: rcell::compare::Options) -> rcell:
 fn calc(file: &Path, show: bool, max: usize, output: Option<&Path>) -> rcell::Result<bool> {
     use rcell::calc::CellStatus;
     let mut wb = open_doc(file)?;
-    let opts = rcell::calc::CalcOptions::default();
+    let opts = rcell::calc::CalcOptions {
+        file_name: file.file_name().map(|n| n.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
     let (results, report) = rcell::calc::evaluate(&wb, &opts);
     let (mut same, mut differ, mut volatile_differ, mut no_cache) = (0usize, 0usize, 0usize, 0usize);
     let mut lines = Vec::new();

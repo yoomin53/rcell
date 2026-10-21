@@ -31,6 +31,9 @@ thiserror = "2.0.21"
 zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 # 레거시 메타파일 그림(EMF·WMF)의 압축 해제. zip 이 이미 쓰는 것과 같은 판·백엔드 (새 크레이트 없음)
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+# 수식 계산의 초월 함수: 플랫폼마다 C 라이브러리가 다르면 결과가 다르다 (windows-gnu 의 sin 은 x87 fsin 이라
+# SIN(PI()) 가 1.2246063538e-16 — 한셀·MSVC 는 1.2246467991e-16). 순수 Rust 구현으로 어디서나 같게 한다.
+libm = "0.2.16"
 
 [workspace]
 members = [".", "crates/rcell-wasm"]

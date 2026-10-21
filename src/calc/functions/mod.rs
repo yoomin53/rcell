@@ -58,8 +58,10 @@ pub struct FnSpec {
     pub min: u8,
     /// 255 = 제한 없음
     pub max: u8,
-    /// 앞쪽 인수의 분류. 남는 인수는 마지막 분류를 되풀이한다.
+    /// 앞쪽 인수의 분류. 남는 인수는 마지막 `repeat` 개의 분류를 차례로 되풀이한다.
     pub args: &'static [Arg],
+    /// 되풀이하는 분류 수 (SUMIFS 의 (범위, 조건) 쌍은 2)
+    pub repeat: u8,
     pub imp: Imp,
     /// 계산할 때마다 값이 바뀌는 함수 (NOW, TODAY, RAND, RANDBETWEEN)
     pub volatile: bool,
@@ -73,11 +75,16 @@ impl std::fmt::Debug for FnSpec {
 
 impl FnSpec {
     pub fn class(&self, i: usize) -> Arg {
-        self.args
-            .get(i)
-            .or(self.args.last())
-            .copied()
-            .unwrap_or(Arg::V)
+        let n = self.args.len();
+        if n == 0 {
+            return Arg::V;
+        }
+        if i < n {
+            return self.args[i];
+        }
+        let rep = (self.repeat as usize).clamp(1, n);
+        let base = n - rep;
+        self.args[base + (i - base) % rep]
     }
 }
 
@@ -94,6 +101,7 @@ pub const fn f(
         min,
         max,
         args,
+        repeat: 1,
         imp: Imp::Eager(imp),
         volatile: false,
     }
@@ -110,6 +118,7 @@ pub const fn lazy(
         min,
         max,
         args: &[],
+        repeat: 1,
         imp: Imp::Lazy(imp),
         volatile: false,
     }
@@ -117,6 +126,12 @@ pub const fn lazy(
 
 pub const fn volatile(mut s: FnSpec) -> FnSpec {
     s.volatile = true;
+    s
+}
+
+/// 남는 인수가 마지막 n 개 분류를 되풀이한다 (SUMIFS 의 (범위, 조건) 쌍)
+pub const fn pairs(mut s: FnSpec, n: u8) -> FnSpec {
+    s.repeat = n;
     s
 }
 
@@ -207,16 +222,38 @@ pub const NEWER_FUNCTIONS: &[&str] = &[
 ];
 
 /// 한셀 전용 함수 (관측: 레거시·바이너리 함수 대조 실험, `docs/format/calc.md`)
-pub const HANCOM_FUNCTIONS: &[&str] = &[
-    "WON", "JUNJA", "RANKAVG", "RANKEQ", "ERRORTYPE", "SUBTOTALA", "CONVERTK",
+pub const HANCOM_FUNCTIONS: &[&str] = &["SUBTOTALA", "CONVERTK"];
+
+/// 한셀 2024 가 모르는 함수: 함수 대조 실험에서 모든 경우가 #NAME? 이었다. 도움말에 있는 WON·JUNJA·RANKEQ·
+/// RANKAVG·ERRORTYPE·DATESTRING 도 수식으로 쓰면 #NAME? 이다 (COM 으로 넣어도 같다). 기본 설정은 한셀처럼
+/// #NAME? 을 내고, [`crate::calc::CalcOptions::excel_functions`] 면 구현한 것은 계산한다.
+pub const HCELL_UNKNOWN: &[&str] = &[
+    "AGGREGATE", "ARRAYTOTEXT", "BAHTTEXT", "CHOOSEROWS", "CUBEMEMBER", "CUBESETCOUNT", "CUBEVALUE",
+    "DATESTRING", "DROP", "ENCODEURL", "ERRORTYPE", "FILTERXML", "FORECAST.ETS", "FORECAST.LINEAR",
+    "HSTACK", "IMAGE", "ISOMITTED", "ISTHAIDIGIT", "JUNJA", "PDURATION", "RANKAVG", "RANKEQ",
+    "ROUNDBAHTDOWN", "ROUNDBAHTUP", "RRI", "RTD", "SINGLE", "SORTBY", "STOCKHISTORY", "TAKE",
+    "TEXTAFTER", "TEXTBEFORE", "TEXTSPLIT", "THAIDAYOFWEEK", "THAIDIGIT", "THAIMONTHOFYEAR",
+    "THAINUMSOUND", "THAINUMSTRING", "THAISTRINGLENGTH", "THAIYEAR", "TOCOL", "VALUETOTEXT", "VSTACK",
+    "WON", "XMATCH",
 ];
+
+/// 한셀이 모르는 함수인가
+pub fn hcell_unknown(name: &str) -> bool {
+    HCELL_UNKNOWN.binary_search(&name).is_ok()
+}
 
 // ---------------------------------------------------------------------------
 // 구현에서 함께 쓰는 도우미
 // ---------------------------------------------------------------------------
 
-/// 인수 i 가 생략(빈 값)이면 None
+/// 인수 i 가 없으면 None. 쉼표만 있고 비운 인수(`ERF(0.5,)`)는 빈 값으로 있다 — 한셀은 이것을 기본값이
+/// 아니라 0·""·FALSE 로 계산한다 (`ERF(0.5,)` = ERF(0.5,0), `CEILING.MATH(-5.5,,1)` = 0, 함수 대조 실험).
 pub fn opt(args: &[Value], i: usize) -> Option<&Value> {
+    args.get(i)
+}
+
+/// 인수 i 가 없거나 비웠으면 None (비운 인수를 생략으로 보는 함수용)
+pub fn given(args: &[Value], i: usize) -> Option<&Value> {
     match args.get(i) {
         None | Some(Value::Empty) => None,
         Some(v) => Some(v),

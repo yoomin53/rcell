@@ -5,10 +5,11 @@
 
 //! 수학·삼각 함수.
 
+use crate::calc::fm::Fm;
 use std::rc::Rc;
 
 use super::{
-    A, Agg, Arg, FnSpec, MANY, R, V, collect_numbers, f, first_area, num_arg, num_or, opt,
+    A, Agg, Arg, FnSpec, MANY, R, V, collect_numbers, f, first_area, num_arg, num_or, opt, pairs,
     to_array, volatile,
 };
 use crate::calc::criteria::Criterion;
@@ -26,50 +27,50 @@ pub const FNS: &[FnSpec] = &[
     f("PI", 0, 0, V, |_, _| Value::Number(std::f64::consts::PI)),
     f("SQRT", 1, 1, V, |c, a| un(c, a, |x| if x < 0.0 { Err(ErrorKind::Num) } else { Ok(x.sqrt()) })),
     f("SQRTPI", 1, 1, V, |c, a| un(c, a, |x| if x < 0.0 { Err(ErrorKind::Num) } else { Ok((x * std::f64::consts::PI).sqrt()) })),
-    f("EXP", 1, 1, V, |c, a| un(c, a, |x| Ok(x.exp()))),
-    f("LN", 1, 1, V, |c, a| un(c, a, |x| if x <= 0.0 { Err(ErrorKind::Num) } else { Ok(x.ln()) })),
-    f("LOG10", 1, 1, V, |c, a| un(c, a, |x| if x <= 0.0 { Err(ErrorKind::Num) } else { Ok(x.log10()) })),
+    f("EXP", 1, 1, V, |c, a| un(c, a, |x| Ok(x.mexp()))),
+    f("LN", 1, 1, V, |c, a| un(c, a, |x| if x <= 0.0 { Err(ErrorKind::Num) } else { Ok(x.mln()) })),
+    f("LOG10", 1, 1, V, |c, a| un(c, a, |x| if x <= 0.0 { Err(ErrorKind::Num) } else { Ok(x.mlog10()) })),
     f("LOG", 1, 2, V, log),
     f("POWER", 2, 2, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
         let y = try_v!(num_arg(c, a, 1));
         crate::calc::eval::power(x, y)
     }),
-    f("SIN", 1, 1, V, |c, a| un(c, a, |x| trig_arg(x).map(f64::sin))),
-    f("COS", 1, 1, V, |c, a| un(c, a, |x| trig_arg(x).map(f64::cos))),
-    f("TAN", 1, 1, V, |c, a| un(c, a, |x| trig_arg(x).map(f64::tan))),
-    f("ASIN", 1, 1, V, |c, a| un(c, a, |x| if x.abs() > 1.0 { Err(ErrorKind::Num) } else { Ok(x.asin()) })),
-    f("ACOS", 1, 1, V, |c, a| un(c, a, |x| if x.abs() > 1.0 { Err(ErrorKind::Num) } else { Ok(x.acos()) })),
-    f("ATAN", 1, 1, V, |c, a| un(c, a, |x| Ok(x.atan()))),
+    f("SIN", 1, 1, V, |c, a| un(c, a, |x| trig_arg(x).map(libm::sin))),
+    f("COS", 1, 1, V, |c, a| un(c, a, |x| trig_arg(x).map(libm::cos))),
+    f("TAN", 1, 1, V, |c, a| un(c, a, |x| trig_arg(x).map(libm::tan))),
+    f("ASIN", 1, 1, V, |c, a| un(c, a, |x| if x.abs() > 1.0 { Err(ErrorKind::Num) } else { Ok(x.masin()) })),
+    f("ACOS", 1, 1, V, |c, a| un(c, a, |x| if x.abs() > 1.0 { Err(ErrorKind::Num) } else { Ok(x.macos()) })),
+    f("ATAN", 1, 1, V, |c, a| un(c, a, |x| Ok(x.matan()))),
     f("ATAN2", 2, 2, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
         let y = try_v!(num_arg(c, a, 1));
         if x == 0.0 && y == 0.0 {
             return Value::Error(ErrorKind::Div0);
         }
-        num(y.atan2(x))
+        num(y.matan2(x))
     }),
-    f("SINH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.sinh()))),
-    f("COSH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.cosh()))),
-    f("TANH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.tanh()))),
-    f("ASINH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.asinh()))),
-    f("ACOSH", 1, 1, V, |c, a| un(c, a, |x| if x < 1.0 { Err(ErrorKind::Num) } else { Ok(x.acosh()) })),
-    f("ATANH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() >= 1.0 { Err(ErrorKind::Num) } else { Ok(x.atanh()) })),
+    f("SINH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.msinh()))),
+    f("COSH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.mcosh()))),
+    f("TANH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.mtanh()))),
+    f("ASINH", 1, 1, V, |c, a| un(c, a, |x| Ok(x.masinh()))),
+    f("ACOSH", 1, 1, V, |c, a| un(c, a, |x| if x < 1.0 { Err(ErrorKind::Num) } else { Ok(x.macosh()) })),
+    f("ATANH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() >= 1.0 { Err(ErrorKind::Num) } else { Ok(x.matanh()) })),
     f("COT", 1, 1, V, |c, a| un(c, a, |x| {
         let x = trig_arg(x)?;
-        let t = x.tan();
+        let t = x.mtan();
         if t == 0.0 { Err(ErrorKind::Div0) } else { Ok(1.0 / t) }
     })),
     f("CSC", 1, 1, V, |c, a| un(c, a, |x| {
-        let s = trig_arg(x)?.sin();
+        let s = trig_arg(x)?.msin();
         if s == 0.0 { Err(ErrorKind::Div0) } else { Ok(1.0 / s) }
     })),
-    f("SEC", 1, 1, V, |c, a| un(c, a, |x| Ok(1.0 / trig_arg(x)?.cos()))),
-    f("COTH", 1, 1, V, |c, a| un(c, a, |x| if x == 0.0 { Err(ErrorKind::Div0) } else if x.abs() >= 134_217_728.0 { Err(ErrorKind::Num) } else { Ok(1.0 / x.tanh()) })),
-    f("CSCH", 1, 1, V, |c, a| un(c, a, |x| if x == 0.0 { Err(ErrorKind::Div0) } else if x.abs() >= 134_217_728.0 { Err(ErrorKind::Num) } else { Ok(1.0 / x.sinh()) })),
-    f("SECH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() >= 134_217_728.0 { Err(ErrorKind::Num) } else { Ok(1.0 / x.cosh()) })),
-    f("ACOT", 1, 1, V, |c, a| un(c, a, |x| Ok(std::f64::consts::FRAC_PI_2 - x.atan()))),
-    f("ACOTH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() <= 1.0 { Err(ErrorKind::Num) } else { Ok(0.5 * ((x + 1.0) / (x - 1.0)).ln()) })),
+    f("SEC", 1, 1, V, |c, a| un(c, a, |x| Ok(1.0 / trig_arg(x)?.mcos()))),
+    f("COTH", 1, 1, V, |c, a| un(c, a, |x| if x == 0.0 { Err(ErrorKind::Div0) } else if x.abs() >= 134_217_728.0 { Err(ErrorKind::Num) } else { Ok(1.0 / x.mtanh()) })),
+    f("CSCH", 1, 1, V, |c, a| un(c, a, |x| if x == 0.0 { Err(ErrorKind::Div0) } else if x.abs() >= 134_217_728.0 { Err(ErrorKind::Num) } else { Ok(1.0 / x.msinh()) })),
+    f("SECH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() >= 134_217_728.0 { Err(ErrorKind::Num) } else { Ok(1.0 / x.mcosh()) })),
+    f("ACOT", 1, 1, V, |c, a| un(c, a, |x| Ok(std::f64::consts::FRAC_PI_2 - x.matan()))),
+    f("ACOTH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() <= 1.0 { Err(ErrorKind::Num) } else { Ok(0.5 * ((x + 1.0) / (x - 1.0)).mln()) })),
     f("DEGREES", 1, 1, V, |c, a| un(c, a, |x| Ok(x.to_degrees()))),
     f("RADIANS", 1, 1, V, |c, a| un(c, a, |x| Ok(x.to_radians()))),
     f("INT", 1, 1, V, |c, a| un(c, a, |x| Ok(x.floor()))),
@@ -139,7 +140,7 @@ pub const FNS: &[FnSpec] = &[
         num(v.iter().map(|x| x * x).sum())
     }),
     f("SUMIF", 2, 3, RVR, sumif),
-    f("SUMIFS", 3, MANY, RRV, sumifs),
+    pairs(f("SUMIFS", 3, MANY, RRV, sumifs), 2),
     f("SUMPRODUCT", 1, MANY, A, sumproduct),
     f("SUMX2MY2", 2, 2, A, |c, a| sum_xy(c, a, |x, y| x * x - y * y)),
     f("SUMX2PY2", 2, 2, A, |c, a| sum_xy(c, a, |x, y| x * x + y * y)),
@@ -204,7 +205,7 @@ fn log(ctx: &mut Ctx, a: &[Value]) -> Value {
     if b == 1.0 {
         return Value::Error(ErrorKind::Div0);
     }
-    num(x.ln() / b.ln())
+    num(x.mln() / b.mln())
 }
 
 #[derive(Clone, Copy)]
@@ -229,7 +230,7 @@ pub fn round_digits(x: f64, digits: f64, mode: Rounding) -> f64 {
         if d > 308 {
             return x;
         }
-        let f = 10f64.powi(d);
+        let f = 10f64.mpowi(d);
         let y = x * f;
         if !y.is_finite() || y.abs() >= 9.007_199_254_740_992e15 {
             return x;
@@ -237,7 +238,7 @@ pub fn round_digits(x: f64, digits: f64, mode: Rounding) -> f64 {
         let r = apply(round15(y)) / f;
         if r.is_finite() { r } else { x }
     } else {
-        let f = 10f64.powi(-d);
+        let f = 10f64.mpowi(-d);
         if !f.is_finite() {
             return 0.0;
         }
@@ -622,7 +623,7 @@ fn seriessum(ctx: &mut Ctx, a: &[Value]) -> Value {
             Value::Error(e) => return Value::Error(*e),
             _ => return Value::Error(ErrorKind::Value),
         };
-        s += c * x.powf(n + i as f64 * m);
+        s += c * x.mpow(n + i as f64 * m);
     }
     num(s)
 }

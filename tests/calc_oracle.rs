@@ -59,9 +59,10 @@ fn functions_match_hancell() {
         .collect();
     files.sort();
     assert!(!files.is_empty(), "대조 결과 문서가 없음");
-    let opts = CalcOptions::default();
     // 함수 → (경우 수, 일치 수, 1e-9 안)
     let mut by_fn: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
+    // 함수 → 한셀이 #NAME? 을 낸 경우 수 (모두 #NAME? 이면 한셀이 모르는 함수)
+    let mut hcell_name: BTreeMap<String, usize> = BTreeMap::new();
     let mut failures: Vec<(String, String)> = Vec::new();
     let (mut total, mut matched, mut near) = (0usize, 0usize, 0usize);
     let mut unsupported: BTreeMap<String, usize> = BTreeMap::new();
@@ -70,6 +71,18 @@ fn functions_match_hancell() {
         let wb = rcell::open(f).expect("대조 문서 읽기");
         let Some(t) = wb.sheets.iter().position(|s| s.name == "T") else {
             continue;
+        };
+        // 한셀은 대조 입력 폴더의 같은 이름 문서를 열었다 (CELL("address") 의 [파일 이름]).
+        // 계산 시각은 한셀이 저장한 시각 (연도 없는 날짜 글 `1/15` 의 해)
+        let saved = std::fs::metadata(f)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64() / 86_400.0 + 25_569.0 + 9.0 / 24.0);
+        let opts = CalcOptions {
+            now: saved,
+            file_name: f.file_name().map(|n| n.to_string_lossy().into_owned()),
+            ..Default::default()
         };
         let (results, report) = rcell::calc::evaluate(&wb, &opts);
         for (k, n) in report.unsupported_functions {
@@ -81,8 +94,14 @@ fn functions_match_hancell() {
             }
             total += 1;
             let func = case_function(&r.formula);
-            let ok = rcell::calc::matches_cached(&wb, r).unwrap_or(false);
+            // XML 은 글 안의 CR 을 LF 로 읽는다 (CHAR(13) 이 파일에서는 "\n") — 그 차이는 같다고 본다
+            let ok = rcell::calc::matches_cached(&wb, r).unwrap_or(false)
+                || matches!((&r.value, &r.cached), (CellValue::Text(a), CellValue::Text(b))
+                    if a.replace("\r\n", "\n").replace('\r', "\n") == *b);
             let nearly = ok || close(&r.value, &r.cached, 1e-9);
+            if matches!(&r.cached, CellValue::Error(e) if e == "#NAME?") {
+                *hcell_name.entry(func.clone()).or_default() += 1;
+            }
             let s = by_fn.entry(func.clone()).or_default();
             s.0 += 1;
             if ok {
@@ -118,6 +137,12 @@ fn functions_match_hancell() {
     if !unsupported.is_empty() {
         eprintln!("구현하지 않은 함수: {unsupported:?}");
     }
+    let unknown: Vec<&str> = by_fn
+        .iter()
+        .filter(|(k, s)| hcell_name.get(*k) == Some(&s.0))
+        .map(|(k, _)| k.as_str())
+        .collect();
+    eprintln!("한셀이 모르는 함수 (모든 경우가 #NAME?, {}개): {}", unknown.len(), unknown.join(" "));
     let partial: Vec<String> = by_fn
         .iter()
         .filter(|(_, s)| s.0 != s.1)
