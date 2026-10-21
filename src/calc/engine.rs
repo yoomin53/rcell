@@ -65,6 +65,8 @@ pub(crate) struct FormulaCell {
     pub array: Option<(u32, u32)>,
     pub state: State,
     pub cached: Value,
+    /// 배열 수식 범위 칸마다 파일에 있던 값 (행 우선, 기준 셀 포함)
+    pub array_cached: Vec<Value>,
     pub volatile: bool,
     pub unsupported: bool,
     pub cycle: bool,
@@ -180,6 +182,7 @@ impl Engine {
                     array,
                     state: State::Pending,
                     cached: values[k].clone(),
+                    array_cached: Vec::new(),
                     volatile: false,
                     unsupported: false,
                     cycle: false,
@@ -208,7 +211,7 @@ impl Engine {
                         sd.styles.insert(at, 0);
                     }
                 }
-                for (id, f) in formulas.iter().enumerate() {
+                for (id, f) in formulas.iter_mut().enumerate() {
                     if f.sheet != si as u32 {
                         continue;
                     }
@@ -217,6 +220,9 @@ impl Engine {
                             for c in f.col..f.col + w {
                                 if let Some(i) = sd.find(r, c) {
                                     sd.fid[i] = id as u32;
+                                    f.array_cached.push(sd.values[i].clone());
+                                } else {
+                                    f.array_cached.push(Value::Empty);
                                 }
                             }
                         }

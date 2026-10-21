@@ -156,17 +156,43 @@ fn collect(eng: &Engine) -> (Vec<FormulaResult>, CalcReport) {
         if matches!(status, CellStatus::Computed | CellStatus::Volatile | CellStatus::Cycle) {
             report.computed += 1;
         }
-        out.push(FormulaResult {
-            sheet: f.sheet as usize,
-            cell: CellRef {
-                row: f.row,
-                col: f.col,
-            },
-            formula: f.text.clone(),
-            value,
-            cached: f.cached.to_cell_or_empty(),
-            status,
-        });
+        match f.array {
+            // 배열 수식: 범위 칸마다 하나씩 (행 우선)
+            Some((h, w)) => {
+                for r in 0..h {
+                    for c in 0..w {
+                        let (row, col) = (f.row + r, f.col + c);
+                        let k = (r * w + c) as usize;
+                        out.push(FormulaResult {
+                            sheet: f.sheet as usize,
+                            cell: CellRef { row, col },
+                            formula: f.text.clone(),
+                            value: sd
+                                .find(row, col)
+                                .map(|i| sd.values[i].to_cell())
+                                .unwrap_or_default(),
+                            cached: f
+                                .array_cached
+                                .get(k)
+                                .map(Value::to_cell_or_empty)
+                                .unwrap_or_default(),
+                            status,
+                        });
+                    }
+                }
+            }
+            None => out.push(FormulaResult {
+                sheet: f.sheet as usize,
+                cell: CellRef {
+                    row: f.row,
+                    col: f.col,
+                },
+                formula: f.text.clone(),
+                value,
+                cached: f.cached.to_cell_or_empty(),
+                status,
+            }),
+        }
     }
     (out, report)
 }

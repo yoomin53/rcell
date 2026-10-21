@@ -100,9 +100,14 @@ pub const FNS: &[FnSpec] = &[
     f("FACTDOUBLE", 1, 1, V, |c, a| un(c, a, |x| {
         let n = x.trunc();
         if n < -1.0 { return Err(ErrorKind::Num); }
-        let mut r = 1.0;
+        let mut r = 1.0f64;
         let mut k = n;
-        while k > 1.0 { r *= k; k -= 2.0; }
+        // 300!! 이 f64 의 끝 근처 — 넘치면 #NUM!
+        while k > 1.0 {
+            r *= k;
+            if !r.is_finite() { return Err(ErrorKind::Num); }
+            k -= 2.0;
+        }
         Ok(r)
     })),
     f("COMBIN", 2, 2, V, |c, a| {

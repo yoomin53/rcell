@@ -19,8 +19,9 @@ use zip::write::{SimpleFileOptions, ZipWriter};
 
 use crate::error::Result;
 use crate::model::{
-    Border, BorderEdge, CellValue, Color, Fill, Font, HancomFontExt, HancomXfExt, PageLayout,
-    PageMargins, ParaShape, RichText, Sheet, SheetKind, SheetState, Styles, Workbook, Xf,
+    Border, BorderEdge, CellValue, Color, Fill, Font, FormulaKind, HancomFontExt, HancomXfExt,
+    PageLayout, PageMargins, ParaShape, RichText, Sheet, SheetKind, SheetState, Styles, Workbook,
+    Xf,
 };
 
 /// 저장 형식.
@@ -1185,7 +1186,13 @@ fn sheet_xml(
                 .formula
                 .as_ref()
                 .filter(|f| !f.text.is_empty())
-                .map(|f| format!("<x:f>{}</x:f>", esc(&f.text)))
+                .map(|f| match (f.kind, f.range.as_deref()) {
+                    // 배열 수식: 기준 셀에만 수식과 범위, 나머지 칸은 값만
+                    (FormulaKind::Array, Some(rg)) => {
+                        format!("<x:f t=\"array\" ref=\"{}\">{}</x:f>", esc(rg), esc(&f.text))
+                    }
+                    _ => format!("<x:f>{}</x:f>", esc(&f.text)),
+                })
                 .unwrap_or_default();
             match &c.value {
                 CellValue::Empty if f.is_empty() => s.push_str("/>"),
