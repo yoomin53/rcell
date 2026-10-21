@@ -547,7 +547,14 @@ impl Shape {
     }
 }
 
-/// 차트 (`c:chartSpace`). 그리기·비교·저장에 필요한 만큼만 담는다.
+/// 차트 (`c:chartSpace`).
+///
+/// `kind`·`three_d`·`bar_dir`·`grouping`·`vary_colors`·`series` 는 그림 영역의 첫 차트, `legend` 는 범례
+/// 위치다. `title`·`cat_axis_title`·`val_axis_title` 과 계열의 `name` … `color` 는 뷰어·비교용 요약으로
+/// 자세한 필드에서 뽑은 것이다 ([`Chart::refresh_summary`]). 나머지는 한셀이 쓰는 차트 파트를 그대로 다시
+/// 쓰기 위한 값이다 ([`crate::chart_xml`]): 한셀은 읽은 차트 요소의 있고 없음을 그대로 다시 쓰므로
+/// (`hs/*.hs.cell` 대조) 값이 `None` 이면 그 요소를 쓰지 않는다. 한셀이 레거시 차트를 읽어 채우는 값은
+/// `docs/format/cell-2024.md` 11절.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Chart {
     /// 첫 그림 영역 차트의 종류: `bar`, `line`, `pie`, `doughnut`, `area`, `scatter`, `radar`, `bubble` …
@@ -572,6 +579,67 @@ pub struct Chart {
     pub cat_axis_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub val_axis_title: Option<String>,
+
+    /// `c:date1904`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date1904: Option<bool>,
+    /// `c:roundedCorners`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rounded_corners: Option<bool>,
+    /// `c:style` (차트 스타일 번호). `c14_style` 이 있으면 `mc:Fallback` 안에 쓴다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<u32>,
+    /// `mc:AlternateContent` → `mc:Choice Requires="c14"` 의 `c14:style`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub c14_style: Option<u32>,
+    /// `c:title` 요소 전체. `title` 은 이 글을 이어 붙인 것이다 (`autoTitleDeleted` 면 `None`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_full: Option<ChartTitle>,
+    /// `c:autoTitleDeleted`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_title_deleted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view3d: Option<ChartView3D>,
+    /// `c:floor` / `c:sideWall` / `c:backWall`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub floor: Option<ChartSurface>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub side_wall: Option<ChartSurface>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub back_wall: Option<ChartSurface>,
+    /// 그림 영역의 `c:layout`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plot_layout: Option<ChartLayout>,
+    /// 첫 그림 영역 차트의 묶음 수준 값 (`kind`·`series` 와 같은 차트)
+    #[serde(skip_serializing_if = "ChartGroupProps::is_empty")]
+    pub group: ChartGroupProps,
+    /// 그림 영역의 둘째 이후 차트 (혼합 차트)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub more_groups: Vec<ChartGroup>,
+    /// 축 (그림 영역 순서)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub axes: Vec<ChartAxis>,
+    /// 그림 영역의 `c:spPr`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plot_sp_pr: Option<ChartShapeProps>,
+    /// 범례의 위치 밖 값. `legend` 가 있을 때만 쓴다
+    #[serde(skip_serializing_if = "ChartLegendProps::is_empty")]
+    pub legend_props: ChartLegendProps,
+    /// `c:plotVisOnly`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plot_vis_only: Option<bool>,
+    /// `c:dispBlanksAs` (`gap`/`zero`/`span`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disp_blanks_as: Option<String>,
+    /// 차트 공간의 `c:txPr` (기본 글꼴). 한셀은 `c:spPr` 앞에 쓴다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_pr: Option<ChartRich>,
+    /// 차트 공간의 `c:spPr` (차트 영역의 채우기·테두리)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+    /// `c:extLst` 의 한컴 확장 `ho:hncChartStyle`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hnc_chart_style: Option<HncChartStyle>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -590,6 +658,793 @@ pub struct ChartSeries {
     pub values: Vec<Option<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<DrawColor>,
+
+    /// `c:idx` / `c:order`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idx: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
+    /// `c:tx` — 이름 참조(`strRef` + 캐시) 또는 글(`c:v`). `name`·`name_ref` 는 여기서 뽑은 것
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx: Option<ChartTx>,
+    /// `c:spPr` (채우기·선)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+    /// `c:invertIfNegative` (막대·거품)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invert_if_negative: Option<bool>,
+    /// `c:marker` (꺾은선·분산형·방사형)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker: Option<ChartMarker>,
+    /// `c:explosion` (원형, %)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explosion: Option<u32>,
+    /// `c:dPt` — 요소 하나만 다르게 꾸민 것
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub d_pts: Vec<ChartDataPoint>,
+    /// `c:dLbls`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub d_lbls: Option<ChartDataLabels>,
+    /// 항목 `c:cat` (분산형·거품형은 `c:xVal`). `cat_ref`·`categories` 는 여기서 뽑은 것
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat: Option<ChartData>,
+    /// 값 `c:val` (분산형·거품형은 `c:yVal`). `val_ref`·`values` 는 여기서 뽑은 것
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val: Option<ChartData>,
+    /// `c:bubbleSize` (거품형)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bubble_size: Option<ChartData>,
+    /// `c:shape` (3차원 막대 계열)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    /// `c:bubble3D` (거품형 계열)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bubble3d: Option<bool>,
+    /// `c:smooth` (꺾은선·분산형 계열)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smooth: Option<bool>,
+}
+
+/// 그림 영역의 둘째 이후 차트 하나 (`c:barChart` …). 첫 차트는 [`Chart`] 의 앞 필드와 `group` 이다.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartGroup {
+    /// [`Chart::kind`] 와 같은 이름 (`ofPie` 는 `pie` + `props.of_pie_type`)
+    pub kind: String,
+    pub three_d: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bar_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grouping: Option<String>,
+    pub vary_colors: bool,
+    #[serde(skip_serializing_if = "ChartGroupProps::is_empty")]
+    pub props: ChartGroupProps,
+    pub series: Vec<ChartSeries>,
+}
+
+/// 차트 묶음(`c:barChart` 등) 수준의 값. 차트 종류에 맞는 것만 채운다.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartGroupProps {
+    /// `c:radarStyle` (`standard`/`marker`/`filled`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radar_style: Option<String>,
+    /// `c:scatterStyle` (`lineMarker`/`line`/`marker`/`smooth`/`smoothMarker`/`none`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scatter_style: Option<String>,
+    /// `c:ofPieType` (`pie`/`bar`) — 있으면 `c:ofPieChart`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub of_pie_type: Option<String>,
+    /// `c:wireframe` (표면형)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wireframe: Option<bool>,
+    /// 묶음 수준 `c:dLbls`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub d_lbls: Option<ChartDataLabels>,
+    /// `c:gapWidth` (%)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gap_width: Option<u32>,
+    /// `c:overlap` (%, −100..100)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<i32>,
+    /// `c:splitType` / `c:splitPos` / `c:secondPieSize` (원형 대 원형)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub split_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub split_pos: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub second_pie_size: Option<u32>,
+    /// `c:serLines` (계열 연결선)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ser_lines: Option<ChartLines>,
+    /// `c:dropLines` / `c:hiLowLines`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drop_lines: Option<ChartLines>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hi_low_lines: Option<ChartLines>,
+    /// `c:gapDepth` (3차원, %)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gap_depth: Option<u32>,
+    /// `c:shape` (3차원 막대: `box`/`cylinder`/`cone`/`pyramid` …)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    /// 꺾은선 묶음의 `c:marker val` / `c:smooth val`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smooth: Option<bool>,
+    /// `c:firstSliceAng` (원형·도넛, 도)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_slice_ang: Option<u32>,
+    /// `c:holeSize` (도넛, %)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hole_size: Option<u32>,
+    /// 거품형: `c:bubble3D`, `c:bubbleScale` (%), `c:showNegBubbles`, `c:sizeRepresents` (`area`/`w`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bubble3d: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bubble_scale: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_neg_bubbles: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_represents: Option<String>,
+    /// `c:axId` (이 묶음이 쓰는 축 번호, 순서대로)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ax_ids: Vec<u32>,
+}
+
+impl ChartGroupProps {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl Chart {
+    /// 요약 필드(`title`, 축 제목, 계열의 `name` … `color`)를 자세한 필드에서 다시 만든다.
+    /// 파서와 같은 규칙이다. 모델을 직접 만들 때(레거시 차트 변환) 쓴다.
+    pub fn refresh_summary(&mut self) {
+        let deleted = self.auto_title_deleted == Some(true);
+        self.title = self
+            .title_full
+            .as_ref()
+            .and_then(ChartTitle::plain_text)
+            .filter(|_| !deleted);
+        let axis_title = |kind: &str| {
+            self.axes
+                .iter()
+                .find(|a| a.kind == kind)
+                .and_then(|a| a.title.as_ref())
+                .and_then(ChartTitle::plain_text)
+        };
+        let cat = axis_title("catAx").or_else(|| axis_title("dateAx"));
+        let val = axis_title("valAx");
+        self.cat_axis_title = cat;
+        self.val_axis_title = val;
+        for s in self.series.iter_mut().chain(
+            self.more_groups
+                .iter_mut()
+                .flat_map(|g| g.series.iter_mut()),
+        ) {
+            s.refresh_summary();
+        }
+    }
+}
+
+impl ChartSeries {
+    /// `name`·`name_ref`·`cat_ref`·`val_ref`·`categories`·`values`·`color` 를 `tx`·`cat`·`val`·`sp_pr` 에서
+    /// 다시 만든다 (파서와 같은 규칙).
+    pub fn refresh_summary(&mut self) {
+        (self.name, self.name_ref) = match &self.tx {
+            Some(ChartTx::Ref(d)) => (d.dense().into_iter().flatten().next(), d.formula.clone()),
+            Some(ChartTx::Value(v)) => (Some(v.clone()), None),
+            _ => (None, None),
+        };
+        self.cat_ref = self.cat.as_ref().and_then(|d| d.formula.clone());
+        self.categories = self.cat.as_ref().map_or_else(Vec::new, |d| {
+            d.dense()
+                .into_iter()
+                .map(Option::unwrap_or_default)
+                .collect()
+        });
+        self.val_ref = self.val.as_ref().and_then(|d| d.formula.clone());
+        self.values = self.val.as_ref().map_or_else(Vec::new, |d| {
+            d.dense()
+                .into_iter()
+                .map(|x| x.and_then(|t| t.trim().parse().ok()))
+                .collect()
+        });
+        self.color = match self.sp_pr.as_ref().and_then(|p| p.fill.as_ref()) {
+            Some(ChartFill::Solid(c)) if !c.value.is_empty() => Some(c.to_draw()),
+            _ => None,
+        };
+    }
+}
+
+/// 축 (`c:catAx`/`c:valAx`/`c:serAx`/`c:dateAx`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartAxis {
+    /// 요소 이름 `catAx`/`valAx`/`serAx`/`dateAx`
+    pub kind: String,
+    /// `c:axId`
+    pub id: u32,
+    /// `c:scaling` (한셀은 늘 쓴다)
+    pub scaling: ChartScaling,
+    /// `c:delete` (축 숨김)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete: Option<bool>,
+    /// `c:axPos` (`b`/`l`/`r`/`t`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ax_pos: Option<String>,
+    /// `c:majorGridlines` / `c:minorGridlines` (주·보조 눈금선)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub major_gridlines: Option<ChartLines>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minor_gridlines: Option<ChartLines>,
+    /// 축 제목 `c:title`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<ChartTitle>,
+    /// `c:numFmt`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_fmt: Option<ChartNumFmt>,
+    /// `c:majorTickMark` / `c:minorTickMark` (`out`/`in`/`cross`/`none`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub major_tick_mark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minor_tick_mark: Option<String>,
+    /// `c:tickLblPos` (`nextTo`/`low`/`high`/`none`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_lbl_pos: Option<String>,
+    /// 축 선 `c:spPr`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+    /// 눈금 레이블 글꼴 `c:txPr`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_pr: Option<ChartRich>,
+    /// `c:crossAx` (교차하는 축의 번호)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_ax: Option<u32>,
+    /// `c:crosses` (`autoZero`/`min`/`max`) 또는 `c:crossesAt`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crosses: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crosses_at: Option<f64>,
+    /// 값 축 `c:crossBetween` (`between`/`midCat`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_between: Option<String>,
+    /// 항목 축: `c:auto`, `c:lblAlgn`, `c:lblOffset`, `c:tickLblSkip`, `c:tickMarkSkip`, `c:noMultiLvlLbl`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lbl_algn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lbl_offset: Option<u32>,
+    /// 날짜 축 `c:baseTimeUnit` / `c:majorTimeUnit` / `c:minorTimeUnit` (`days`/`months`/`years`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_time_unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_lbl_skip: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_mark_skip: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_multi_lvl_lbl: Option<bool>,
+    /// `c:majorUnit` / `c:minorUnit` (값·날짜 축 눈금 간격)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub major_unit: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub major_time_unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minor_unit: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minor_time_unit: Option<String>,
+}
+
+/// `c:scaling`
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartScaling {
+    /// `c:logBase` (로그 눈금의 밑)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_base: Option<f64>,
+    /// `c:orientation` (`minMax`/`maxMin` = 거꾸로)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orientation: Option<String>,
+    /// `c:max` / `c:min`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+}
+
+/// `c:numFmt` (축·데이터 레이블의 표시 형식)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartNumFmt {
+    pub format_code: String,
+    /// `sourceLinked` — 원본 셀의 표시 형식을 따른다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_linked: Option<bool>,
+}
+
+/// 선 요소 (`c:majorGridlines`, `c:dropLines`, `c:hiLowLines`, `c:serLines`). 비어 있으면 `<c:majorGridlines/>`
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartLines {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+}
+
+/// 차트·축 제목 (`c:title`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartTitle {
+    /// `c:tx` — 서식 있는 글(`c:rich`) 또는 셀 참조(`c:strRef`). 없으면 자동 제목
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx: Option<ChartTx>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<ChartLayout>,
+    /// `c:overlay` (그림 영역과 겹침)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_pr: Option<ChartRich>,
+}
+
+impl ChartTitle {
+    /// 제목 글 (문단은 줄 바꿈으로, 비었으면 없음). 참조면 저장된 첫 값.
+    pub fn plain_text(&self) -> Option<String> {
+        match self.tx.as_ref()? {
+            ChartTx::Rich(r) => Some(r.plain_text()).filter(|s| !s.is_empty()),
+            ChartTx::Ref(d) => d.dense().into_iter().flatten().next(),
+            ChartTx::Value(_) => None,
+        }
+    }
+}
+
+/// 범례의 위치 밖 값 (`c:legend`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartLegendProps {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<ChartLayout>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_pr: Option<ChartRich>,
+}
+
+impl ChartLegendProps {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `c:layout`. `manual` 이 없으면 `<c:layout/>` (자동 배치)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartLayout {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual: Option<ChartManualLayout>,
+}
+
+/// `c:manualLayout`. 위치·크기는 차트 크기에 대한 비율
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartManualLayout {
+    /// `c:layoutTarget` (`inner`/`outer`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout_target: Option<String>,
+    /// `c:xMode` … `c:hMode` (`edge`/`factor`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub w_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub w: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h: Option<f64>,
+}
+
+/// `c:view3D` (각도는 도)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartView3D {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r_ang_ax: Option<bool>,
+    /// `c:rotX` (−90..90)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rot_x: Option<i32>,
+    /// `c:hPercent` (%)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h_percent: Option<u32>,
+    /// `c:rotY` (0..360)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rot_y: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub perspective: Option<u32>,
+    /// `c:depthPercent` (%)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth_percent: Option<u32>,
+}
+
+/// `c:floor` / `c:sideWall` / `c:backWall`
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartSurface {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thickness: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+}
+
+/// 한컴 차트 스타일 (`c:extLst/c:ext/ho:hncChartStyle`, 번호 −1 = 지정 안 함)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct HncChartStyle {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout_index: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_index: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style_index: Option<i32>,
+}
+
+/// 계열 표식 (`c:marker`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartMarker {
+    /// `c:symbol` (`none`/`square`/`circle`/`diamond`/`triangle`/`x`/`star`/`dash`/`dot`/`plus`/`auto`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    /// `c:size` (2..72 pt)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+}
+
+/// 데이터 요소 하나의 서식 (`c:dPt`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartDataPoint {
+    pub idx: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invert_if_negative: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker: Option<ChartMarker>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bubble3d: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explosion: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+}
+
+/// 데이터 레이블 (`c:dLbls`). 한셀은 `c:delete` 와 표시 여부들을 함께 쓴다
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartDataLabels {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_fmt: Option<ChartNumFmt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_pr: Option<ChartRich>,
+    /// `c:dLblPos` (`outEnd`/`inEnd`/`ctr`/`inBase`/`t`/`b`/`l`/`r`/`bestFit`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub d_lbl_pos: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_legend_key: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_val: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_cat_name: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_ser_name: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_percent: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_bubble_size: Option<bool>,
+    /// `c:separator`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_leader_lines: Option<bool>,
+}
+
+/// 계열 이름·제목의 글 (`c:tx`)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum ChartTx {
+    /// `c:rich` (제목)
+    Rich(ChartRich),
+    /// `c:strRef` (셀 참조 + 캐시)
+    Ref(ChartData),
+    /// `c:v` (계열 이름 글자)
+    Value(String),
+}
+
+/// 계열의 데이터 원본 (`c:cat`, `c:val`, `c:xVal`, `c:yVal`, `c:bubbleSize` 안, `c:tx` 의 `c:strRef`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartData {
+    /// 요소 이름 `numRef`/`strRef`/`numLit`/`strLit`
+    pub kind: String,
+    /// `c:f` (참조일 때)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula: Option<String>,
+    /// 저장된 값 (`c:numCache`/`c:strCache`, 리터럴이면 그 내용)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<ChartCache>,
+}
+
+impl ChartData {
+    /// 저장된 값을 번호 자리에 (`ptCount` 만큼, 없는 점은 None). 참조·리터럴 네 종류만
+    pub fn dense(&self) -> Vec<Option<String>> {
+        let Some(c) = self.cache.as_ref().filter(|_| {
+            matches!(
+                self.kind.as_str(),
+                "numRef" | "strRef" | "numLit" | "strLit"
+            )
+        }) else {
+            return Vec::new();
+        };
+        let mut v = vec![None; c.pt_count.unwrap_or(0) as usize];
+        for p in &c.points {
+            let i = p.idx as usize;
+            if i >= v.len() {
+                v.resize(i + 1, None);
+            }
+            v[i] = Some(p.value.clone());
+        }
+        v
+    }
+}
+
+/// `c:numCache` / `c:strCache` (또는 `c:numLit`/`c:strLit` 의 내용)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartCache {
+    /// `c:formatCode` (숫자만)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pt_count: Option<u32>,
+    pub points: Vec<ChartPoint>,
+}
+
+/// 저장된 값 하나 (`c:pt`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartPoint {
+    pub idx: u32,
+    /// 점마다의 `formatCode` 속성 (한셀은 값 캐시의 점마다 쓴다)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format_code: Option<String>,
+    /// `c:v` 원문
+    pub value: String,
+}
+
+/// 도형 속성 (`c:spPr`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartShapeProps {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<ChartFill>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<ChartLine>,
+}
+
+/// 채우기 (`a:noFill`/`a:solidFill`, 그 밖은 원본 XML)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum ChartFill {
+    None,
+    Solid(ChartColor),
+    /// `a:gradFill`/`a:pattFill`/`a:blipFill`/`a:grpFill` 원본 XML
+    Other(String),
+}
+
+/// DrawingML 색. `value` 는 [`DrawColor::value`] 와 같은 꼴 (`srgb:RRGGBB` 대문자, `scheme:accent1`,
+/// `sys:windowText`, `prst:black`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartColor {
+    pub value: String,
+    /// `a:sysClr/@lastClr`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_clr: Option<String>,
+    /// 변형 (`lumMod` 등, 1/1000 %)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mods: Vec<(String, i64)>,
+}
+
+impl ChartColor {
+    /// `srgb:RRGGBB` (16진 6자리, 대소문자 무관)
+    pub fn srgb(hex: &str) -> Self {
+        ChartColor {
+            value: format!("srgb:{}", hex.to_ascii_uppercase()),
+            ..Default::default()
+        }
+    }
+
+    pub fn to_draw(&self) -> DrawColor {
+        DrawColor {
+            value: self.value.clone(),
+            mods: self.mods.clone(),
+        }
+    }
+}
+
+/// 선 (`a:ln`). 한셀이 레거시 차트를 읽어 쓰는 선은 끝 모양까지 모두 채운다 ([`ChartLine::hcell`])
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartLine {
+    /// `w` (EMU)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<i64>,
+    /// `cap` (`flat`/`rnd`/`sq`), `cmpd` (`sng` …), `algn` (`ctr`/`in`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmpd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<ChartFill>,
+    /// `a:prstDash/@val` (`solid`/`dash`/`sysDot` …)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dash: Option<String>,
+    /// 꺾임 모양 `round`/`bevel`/`miter` (요소 이름)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_end: Option<ChartLineEnd>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_end: Option<ChartLineEnd>,
+}
+
+impl ChartLine {
+    /// 한셀이 레거시 차트를 읽어 쓰는 꼴의 선: `cap="flat" cmpd="sng" algn="ctr"` + 실선, 둥근 꺾임,
+    /// 양 끝 `w="med" len="med"` (`*.legacy.as.cell` 77개의 a:ln 347개 모두, docs/format/cell-2024.md 11절)
+    pub fn hcell(width: i64, fill: ChartFill) -> Self {
+        let end = ChartLineEnd {
+            kind: None,
+            w: Some("med".into()),
+            len: Some("med".into()),
+        };
+        ChartLine {
+            width: Some(width),
+            cap: Some("flat".into()),
+            cmpd: Some("sng".into()),
+            algn: Some("ctr".into()),
+            fill: Some(fill),
+            dash: Some("solid".into()),
+            join: Some("round".into()),
+            head_end: Some(end.clone()),
+            tail_end: Some(end),
+        }
+    }
+}
+
+/// 선 끝 (`a:headEnd`/`a:tailEnd`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartLineEnd {
+    /// `type` (`none`/`triangle`/`arrow` …)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// `w` / `len` (`sm`/`med`/`lg`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub w: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub len: Option<String>,
+}
+
+/// 차트의 글 (`c:rich`, `c:txPr`). `a:bodyPr` 의 나머지 속성(`wrap="none"`, 안쪽 여백 0, `anchor="ctr"`,
+/// `anchorCtr="1"`)은 한셀이 늘 같은 값으로 쓰므로 담지 않는다
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartRich {
+    /// `a:bodyPr/@rot` (1/60000 도)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rot: Option<i64>,
+    /// `a:bodyPr/@vert` (`horz`/`vert`/`vert270` …)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vert: Option<String>,
+    pub paras: Vec<ChartPara>,
+}
+
+impl ChartRich {
+    /// 글 전체 (문단은 줄 바꿈으로)
+    pub fn plain_text(&self) -> String {
+        self.paras
+            .iter()
+            .map(|p| p.runs.iter().map(|r| r.text.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 한셀이 레거시 차트를 읽어 쓰는 꼴의 글 상자: `rot="0" vert="horz"` (세로 글은 `vert="vert270"` 만),
+    /// 왼쪽 맞춤(`algn="l"`) 문단 하나에 `defRPr` = 글꼴. 글이 있으면 같은 글꼴의 조각 하나
+    /// (`c:rich`), 없으면 글꼴만 (`c:txPr`). 근거: `*.legacy.as.cell` 의 제목·축·범례 글 전부
+    pub fn hcell(font: ChartFont, text: Option<&str>, vertical: bool) -> Self {
+        ChartRich {
+            rot: (!vertical).then_some(0),
+            vert: Some(if vertical { "vert270" } else { "horz" }.into()),
+            paras: vec![ChartPara {
+                align: Some("l".into()),
+                runs: text
+                    .map(|t| ChartRun {
+                        font: Some(font.clone()),
+                        text: t.to_string(),
+                    })
+                    .into_iter()
+                    .collect(),
+                def_font: Some(font),
+            }],
+        }
+    }
+}
+
+impl ChartFont {
+    /// 한셀이 레거시 차트를 읽어 쓰는 꼴의 글꼴: `sz b i u="none"`, 단색 RGB, `latin`·`ea`·`cs`·`sym` 이 같은 이름
+    pub fn hcell(size_pt100: u32, bold: bool, italic: bool, rgb: &str, face: &str) -> Self {
+        ChartFont {
+            size: Some(size_pt100),
+            bold: Some(bold),
+            italic: Some(italic),
+            underline: Some("none".into()),
+            fill: Some(ChartFill::Solid(ChartColor::srgb(rgb))),
+            latin: Some(face.into()),
+            ea: Some(face.into()),
+            cs: Some(face.into()),
+            sym: Some(face.into()),
+            ..Default::default()
+        }
+    }
+}
+
+/// 문단 (`a:p`). 한셀은 끝에 빈 `a:endParaRPr` 를 쓴다
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartPara {
+    /// `a:pPr/@algn`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
+    /// `a:pPr/a:defRPr`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub def_font: Option<ChartFont>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<ChartRun>,
+}
+
+/// 글 조각 (`a:r`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartRun {
+    /// `a:rPr`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font: Option<ChartFont>,
+    pub text: String,
+}
+
+/// 글꼴 (`a:defRPr`/`a:rPr`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartFont {
+    /// `sz` (1/100 pt)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    /// `u` (`none`/`sng`/`dbl` …)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underline: Option<String>,
+    /// `strike` (`noStrike`/`sngStrike`/`dblStrike`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strike: Option<String>,
+    /// `baseline` (1/1000 %, 위·아래 첨자)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<ChartFill>,
+    /// `a:latin`/`a:ea`/`a:cs`/`a:sym` 의 `typeface`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ea: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sym: Option<String>,
 }
 
 /// 원본 그대로 옮겨 쓰는 파트 (차트·그림 등, XML 원본에서만)

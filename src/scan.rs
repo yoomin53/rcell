@@ -66,6 +66,8 @@ const MODELED: &[&str] = &[
     "parashape/@abstractNumType",
     "xf/accountUnderline",
     "dxf/accountUnderline",
+    // 차트 파트 c:extLst/c:ext 의 한컴 차트 스타일 (model::HncChartStyle)
+    "ext/hncChartStyle",
 ];
 
 const MAX_VALUES: usize = 8;

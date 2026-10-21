@@ -307,12 +307,13 @@ pub fn read_sheet_drawings(
         };
         let drels = pkg.relationships(&d.target)?;
         let mut shapes = drawing::parse_drawing(&root, &drels);
-        // 차트 파트를 읽어 그리기·비교에 쓴다 (저장은 원본 파트 그대로)
+        // 차트 파트를 읽어 그리기·비교에 쓴다 (저장은 원본 파트 그대로).
+        // c14:style 을 읽도록 mc:AlternateContent 는 parse_chart 가 펼친다
         fn charts(pkg: &mut Package, list: &mut [crate::model::Shape]) -> Result<()> {
             for s in list {
                 if s.kind == crate::model::ShapeKind::Chart
                     && let Some(t) = s.target.clone()
-                    && let Some(e) = pkg.read_xml(&t)?
+                    && let Some(e) = pkg.read_xml_raw(&t)?
                 {
                     s.chart = Some(chart::parse_chart(&e));
                 }

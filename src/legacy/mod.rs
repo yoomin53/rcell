@@ -15,6 +15,7 @@ pub mod formula;
 pub mod ftab;
 pub mod props;
 pub mod reader;
+pub(crate) mod vtchart;
 
 use crate::container;
 use crate::error::{Error, Result};
