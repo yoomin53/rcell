@@ -112,6 +112,43 @@ fn tables_and_structured_references_roundtrip() {
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
+/// 매크로 프로젝트: 레거시처럼 스트림만 있는 모델도 `xl/vbsProject.bin` 복합 문서와 통합 문서 관계로 쓰고 다시 읽는다
+#[test]
+fn macro_project_roundtrips() {
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    // 패키지 파트 실험의 스트림 꼴: 머리 0x104 바이트 + 글자 수 + UTF-16 모듈 글
+    let mut stream = vec![0x01, 0x01, 0x01, 0x00, 0x00, 0x01, 0x20, 0x02];
+    stream.resize(0x104, 0);
+    let text: Vec<u16> = "CLASS CLS_GM_MODULE\r\nEnd Class".encode_utf16().collect();
+    stream.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    for u in text {
+        stream.extend_from_slice(&u.to_le_bytes());
+    }
+    a.hancom.vbs_project = Some(stream.clone());
+    let out = write_report(&a, &Options::default()).unwrap();
+    let ct =
+        String::from_utf8(rcell::container::read_entry(&out.bytes, "[Content_Types].xml").unwrap())
+            .unwrap();
+    assert!(
+        ct.contains(r#"<Override PartName="/xl/vbsProject.bin" ContentType="application/vnd.hancom-office.vbsProject"/>"#),
+        "{ct}"
+    );
+    let b = rcell::from_bytes(out.bytes).unwrap();
+    assert_eq!(b.hancom.vbs_project.as_deref(), Some(stream.as_slice()));
+    assert!(b.part_links.iter().any(|l| l.rel_type
+        == "http://schemas.hancom.com/office/relationships/vbsProject"
+        && l.part == "xl/vbsProject.bin"));
+    // 다시 바이너리로: 원본 그대로의 파트로 옮긴다 (관계는 하나)
+    let out2 = write_report(&b, &Options::default()).unwrap();
+    let rels = String::from_utf8(
+        rcell::container::read_entry(&out2.bytes, "xl/_rels/workbook.bin.rels").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rels.matches("vbsProject").count(), 2, "{rels}");
+    let c = rcell::from_bytes(out2.bytes).unwrap();
+    assert_eq!(c.hancom.vbs_project.as_deref(), Some(stream.as_slice()));
+}
+
 #[test]
 fn binary_is_detected_by_name() {
     use rcell::SaveFormat;

@@ -177,7 +177,9 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 | ZIP | 파트를 이름 순으로, Deflate, 날짜 1980-01-01 |
 | `[Content_Types].xml` | Default: `rels`, `xml`, 메모가 있으면 `vml`, 그림 확장자(`png`·`jpeg` …), **외부 연결 대상의 확장자**(`xls` → `application/vnd.ms-excel`). Override: 나머지 파트를 이름 순으로 (`xl/workbook.bin` = `…sheet.binary.macroEnabled.main`, 시트 `…ms-excel.worksheet`, `…styles`, `…sharedStrings`, `…comments`, `…externalLink`) |
 | 루트 관계 | rId1 officeDocument, rId2 core-properties, rId3 extended-properties |
-| 통합 문서 관계 | rId1 테마, rId2 styles.bin, rId3 sharedStrings.bin, rId4… 시트, 그 뒤 외부 연결 (`externalLinks/externalLinkN.bin`). 문자열이 하나도 없으면 sharedStrings.bin 과 그 관계·콘텐츠 타입이 없고 시트가 rId3 부터다 (3차원 참조 대조 실험의 숫자·수식만 있는 문서) |
+| 통합 문서 관계 | rId1 테마, rId2 styles.bin, rId3 sharedStrings.bin, rId4… 시트, 그 뒤 외부 연결 (`externalLinks/externalLinkN.bin`), 피벗 캐시, 매크로 프로젝트. 문자열이 하나도 없으면 sharedStrings.bin 과 그 관계·콘텐츠 타입이 없고 시트가 rId3 부터다 (3차원 참조 대조 실험의 숫자·수식만 있는 문서) |
+| 매크로 프로젝트 | `xl/vbsProject.bin` 은 XML 저장본과 같은 복합 문서 (스트림 바이트가 같고 복합 문서의 저장 시각만 저장할 때마다 다르다), 관계 `http://schemas.hancom.com/office/relationships/vbsProject`, 콘텐츠 타입 `application/vnd.hancom-office.vbsProject` (패키지 파트 실험의 vbs.bin.cell). rcell 은 XML·바이너리 원본의 파트를 그대로, 레거시의 `_VBS_PROJECT_W` 는 스트림 하나짜리 복합 문서로 싸서 쓴다 — 레코드 대조에서 콘텐츠 타입·관계·나머지 레코드가 한셀과 같다. 한셀은 매크로가 든 바이너리를 다시 열지 못한다 (한셀 자신의 것도 rcell 의 것도 `.xlsb` 로 열면 E_FAIL) |
+| 그 밖의 원본 파트 | 사용자 지정 XML 은 통합 문서 관계로, 프린터 설정은 시트 관계 `rIdP<n>` + `BrtPageSetup` 끝의 관계 ID 로 옮긴다 (한셀은 둘 다 세 형식에서 버린다). 연결·쿼리 표·XML 대응은 바이너리에서 레코드 파트라 옮기지 않는다 — 한셀도 버린다 |
 | 시트 관계 | 하이퍼링크(외부), 그리기, VML, 표, 피벗 표, 메모 순 (한 시트에 다 넣은 COM 문서). 대상은 상대 경로 (`../drawings/drawing1.xml`) |
 | 표 파트 | `xl/tables/tableN.bin` (`application/vnd.ms-excel.table`), N 은 문서 안 시트·표 순서로 1부터 (같은 세션의 XML 저장본과 같은 번호 — 세션 번호가 아니다). 레코드는 2절 표, 시트 끝의 `BrtBeginListParts`(660: 표 수) `BrtListPart`(661: 관계 ID)×n `BrtEndListParts`(662) |
 | 외부 연결 파트 | `BrtBeginSupBook`(360: `sbt 0`, 관계 ID `rId1`, 빈 문자열 0xFFFFFFFF), `BrtSupTabs`(359), `BrtEndSupBook`(588). 관계는 경로를 잃은 연결도 보통의 `externalLinkPath` |

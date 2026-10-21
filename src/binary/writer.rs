@@ -1541,7 +1541,20 @@ impl SheetCtx<'_, '_> {
             .exact
             .then(|| self.fonts.fonts.first().and_then(|f| f.name.clone()))
             .flatten();
-        page(&mut o, sheet, self.exact, hf_font.as_deref());
+        // 프린터 설정 파트(원본 그대로)는 BrtPageSetup 끝의 관계 ID 로 가리킨다 (시트 관계 rIdP<n>, XML 쓰기와 같다)
+        let printer = sheet
+            .part_links
+            .iter()
+            .filter(|l| binary_keeps(&l.rel_type))
+            .position(|l| l.rel_type.ends_with("/printerSettings"))
+            .map(|k| format!("rIdP{}", k + 1));
+        page(
+            &mut o,
+            sheet,
+            self.exact,
+            hf_font.as_deref(),
+            printer.as_deref(),
+        );
         let mut drawing = None;
         if let Some(name) = drawing_name {
             let id = format!("rId{}", rels.len() + 1);
@@ -1584,7 +1597,21 @@ impl SheetCtx<'_, '_> {
             tables.push((name, self.table_part(t, sheet)));
         }
         o.e(662);
-        // 시트 관계 순서: 하이퍼링크, 그리기, VML, 표, 피벗 표, 메모 (표·피벗·메모 실험의 COM 문서)
+        // 시트 관계 순서: 하이퍼링크, 그리기, VML, 표, 피벗 표, 메모 (표·피벗·메모 실험의 COM 문서). 원본 그대로의 프린터
+        // 설정은 rIdP<n> (한셀은 버리는 파트라 자리를 관측할 수 없다 — XML 쓰기와 같은 이름)
+        for (k, l) in sheet
+            .part_links
+            .iter()
+            .filter(|l| binary_keeps(&l.rel_type))
+            .enumerate()
+        {
+            rels.push((
+                format!("rIdP{}", k + 1),
+                l.rel_type.clone(),
+                l.part.clone(),
+                false,
+            ));
+        }
         if comments.is_some() {
             rels.push((
                 format!("rId{}", rels.len() + 1),
@@ -2634,7 +2661,7 @@ fn hf_with_font(s: &str, font: &str) -> String {
 }
 
 /// 인쇄: BrtPrintOptions, BrtMargins, BrtPageSetup, 머리글·바닥글, 페이지 나누기
-fn page(o: &mut Out, sheet: &Sheet, exact: bool, hf_font: Option<&str>) {
+fn page(o: &mut Out, sheet: &Sheet, exact: bool, hf_font: Option<&str>, printer: Option<&str>) {
     let p = &sheet.page;
     // 0x01 가로 가운데, 0x02 세로 가운데, 0x04 머리글, 0x08 눈금선. 0x10 은 한셀 내부 상태 —
     // printOptions 가 없는 시트 104/108, 있는 시트 2/51 에 켜져 있다 (관측)
@@ -2668,7 +2695,7 @@ fn page(o: &mut Out, sheet: &Sheet, exact: bool, hf_font: Option<&str>) {
     );
     // BrtPageSetup: 모델에 없으면 쓰지 않는다 (한셀 문서에는 늘 있다)
     if let Some(s) = &p.setup {
-        page_setup(o, s, exact);
+        page_setup(o, s, exact, printer);
     }
     // 머리글·바닥글은 글이 있을 때만 (한셀은 빈 headerFooter 를 쓰지 않는다, 관측)
     if let Some(h) = &p.header_footer {
@@ -2716,7 +2743,7 @@ fn page(o: &mut Out, sheet: &Sheet, exact: bool, hf_font: Option<&str>) {
     }
 }
 
-fn page_setup(o: &mut Out, s: &crate::model::PageSetup, exact: bool) {
+fn page_setup(o: &mut Out, s: &crate::model::PageSetup, exact: bool, printer: Option<&str>) {
     let mut flags = 0u16;
     if s.page_order.as_deref() == Some("overThenDown") {
         flags |= 0x0001;
@@ -2751,8 +2778,22 @@ fn page_setup(o: &mut Out, s: &crate::model::PageSetup, exact: bool) {
             .u32(s.fit_to_width.unwrap_or(1))
             .u32(s.fit_to_height.unwrap_or(1))
             .u16(flags)
-            .wstr(""),
+            .wstr(printer.unwrap_or("")),
     );
+}
+
+/// 원본 그대로 옮기는 파트 가운데 바이너리 패키지에도 같은 꼴로 들어가는 것: 매크로 프로젝트(한컴·VBA), 사용자 지정
+/// XML, 프린터 설정 (한셀의 바이너리 저장은 매크로 프로젝트만 지키고 나머지는 버린다 — 패키지 파트 실험). 연결·쿼리 표·
+/// XML 대응은 바이너리에서 레코드 파트라 옮기지 않는다 (한셀도 세 형식에서 버린다)
+fn binary_keeps(rel_type: &str) -> bool {
+    [
+        "/customXml",
+        "/vbaProject",
+        "/vbsProject",
+        "/printerSettings",
+    ]
+    .iter()
+    .any(|k| rel_type.ends_with(k))
 }
 
 // ---------------------------------------------------------------------------
@@ -2977,6 +3018,40 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
         ));
         link_ids.push(id);
     }
+    // 원본 그대로 옮기는 통합 문서 수준 파트 (매크로 프로젝트·사용자 지정 XML). 한셀의 매크로 프로젝트 관계는 시트
+    // 다음 (패키지 파트 실험의 vbs.bin.cell: rId4 = vbsProject, 콘텐츠 타입 application/vnd.hancom-office.vbsProject)
+    for l in wb.part_links.iter().filter(|l| binary_keeps(&l.rel_type)) {
+        wbrels.push((
+            format!("rId{}", wbrels.len() + 1),
+            l.rel_type.clone(),
+            l.part.clone(),
+            false,
+        ));
+    }
+    // 레거시 원본의 매크로 프로젝트: `_VBS_PROJECT_W` 스트림 하나짜리 복합 문서 (XML 쓰기와 같은 파트 — 세 형식에서 스트림
+    // 바이트가 같다. 복합 문서의 저장 시각은 한셀이 저장할 때마다 새로 쓴다)
+    let raw_has = |n: &str| wb.raw_parts.iter().any(|p| p.name == n);
+    let vbs_part = match &wb.hancom.vbs_project {
+        Some(st)
+            if !wb
+                .part_links
+                .iter()
+                .any(|l| l.rel_type == crate::ns::REL_HANCOM_VBS_PROJECT)
+                && !raw_has("xl/vbsProject.bin") =>
+        {
+            wbrels.push((
+                format!("rId{}", wbrels.len() + 1),
+                crate::ns::REL_HANCOM_VBS_PROJECT.into(),
+                "xl/vbsProject.bin".into(),
+                false,
+            ));
+            Some(crate::cfb_write::write_streams(&[(
+                crate::ns::VBS_PROJECT_STREAM.trim_start_matches('/'),
+                st,
+            )])?)
+        }
+        _ => None,
+    };
 
     let mut o = Out::default();
     o.e(131); // BrtBeginBook
@@ -3271,14 +3346,36 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
         ));
         parts.push((name, xml.into_bytes()));
     }
-    // XML 원본의 표 파트는 표 모델에서 레코드 파트로 새로 썼다 — XML 파트는 옮기지 않는다
-    let xml_tables: Vec<String> = worksheets
+    // XML 원본의 표 파트는 표 모델에서 레코드 파트로 새로 썼다 — XML 파트는 옮기지 않는다. 바이너리에 둘 수 없는 원본
+    // 파트([`binary_keeps`] 가 아닌 관계)도 관계가 가리키는 파트째 뺀다
+    let mut dropped: Vec<String> = worksheets
         .iter()
         .flat_map(|sh| sh.tables.iter().filter_map(|t| t.part.clone()))
         .flat_map(|p| [crate::package::rels_part_for(&p), p])
         .collect();
+    for l in wb
+        .part_links
+        .iter()
+        .chain(worksheets.iter().flat_map(|sh| sh.part_links.iter()))
+        .filter(|l| !binary_keeps(&l.rel_type))
+    {
+        let mut tree = Vec::new();
+        crate::package::raw_part_tree(&wb.raw_parts, &l.part, &mut tree);
+        for n in tree {
+            if !dropped.contains(&n) {
+                dropped.push(n);
+            }
+        }
+    }
+    if let Some(v) = vbs_part {
+        parts.push(("xl/vbsProject.bin".into(), v));
+        overrides.push((
+            "xl/vbsProject.bin".into(),
+            crate::ns::CT_HANCOM_VBS_PROJECT.into(),
+        ));
+    }
     for p in &wb.raw_parts {
-        if parts.iter().any(|(n, _)| *n == p.name) || xml_tables.contains(&p.name) {
+        if parts.iter().any(|(n, _)| *n == p.name) || dropped.contains(&p.name) {
             continue;
         }
         let data = match charts.get(&p.name) {
