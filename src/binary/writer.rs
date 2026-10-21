@@ -2349,6 +2349,40 @@ fn data_bars14(o: &mut Out, bars: &[DataBar14]) {
     o.e(36);
 }
 
+/// 상위/하위 필터의 기준값 — 한셀의 바이너리 저장이 기준값 없는 필터에 쓰는 값 (상위/하위 필터 기준값 실험: 시트 22개의
+/// 조작한 XML → 한셀 → 바이너리 BrtTop10Filter). 필터 범위의 머리글 아래 그 열의 숫자 값(글·빈 칸은 빼고, 숨은 행도
+/// 넣는다)을 늘어놓고 위(아래)에서 k번째 값이다. k 는 개수, 백분율이면 ⌊숫자 수 × 값 / 100⌋ (적어도 1, 11개의 20% → 2,
+/// 50% → 5, 5% → 1), 숫자 수보다 크면 끝 값. 같은 값도 하나씩 센다. 숫자가 없으면 0
+fn top10_value(sheet: &Sheet, range: CellRange, col_id: u32, top: bool, percent: bool, val: f64) -> f64 {
+    let col = range.start.col + col_id;
+    let mut nums: Vec<f64> = sheet
+        .cells
+        .iter()
+        .filter(|c| c.r.col == col && c.r.row > range.start.row && c.r.row <= range.end.row)
+        .filter_map(|c| match c.value {
+            CellValue::Number(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    if nums.is_empty() {
+        return 0.0;
+    }
+    let n = nums.len();
+    let k = if percent {
+        // 정수 백분율의 곱이 부동소수 오차로 정수 바로 아래가 되지 않게
+        ((n as f64 * val / 100.0) + 1e-9).floor().max(1.0) as usize
+    } else {
+        val.max(1.0) as usize
+    }
+    .min(n);
+    if top {
+        nums.sort_by(|a, b| b.total_cmp(a));
+    } else {
+        nums.sort_by(|a, b| a.total_cmp(b));
+    }
+    nums[k - 1]
+}
+
 fn auto_filter(o: &mut Out, sheet: &Sheet) {
     let Some(af) = &sheet.auto_filter else { return };
     let Some(range) = ranges(&af.range).first().copied() else {
@@ -2385,12 +2419,12 @@ fn auto_filter(o: &mut Out, sheet: &Sheet) {
             }
             o.e(173);
         } else if let Some((top, percent, val)) = c.top10 {
-            // 플래그: 0x01 위, 0x02 백분율, 0x04 (한셀이 늘 켠다), 개수, 기준값 (원본에 없으면 0)
+            // 플래그: 0x01 위, 0x02 백분율, 0x04 (한셀이 늘 켠다), 개수, 기준값 (원본에 없으면 한셀처럼 데이터로 셈한다)
             let f = 0x04 | u8::from(top) | (u8::from(percent) << 1);
-            o.p(
-                170,
-                P::new().u8(f).f64(val).f64(c.filter_val.unwrap_or(0.0)),
-            );
+            let fv = c
+                .filter_val
+                .unwrap_or_else(|| top10_value(sheet, range, c.col_id, top, percent, val));
+            o.p(170, P::new().u8(f).f64(val).f64(fv));
         } else if let Some(t) = &c.dynamic {
             let cft = crate::model::DYNAMIC_FILTER_TYPES
                 .iter()
@@ -3257,6 +3291,66 @@ mod tests {
             "&C&\"맑은 고딕,Regular\"&D &T"
         );
         assert_eq!(hf_with_font("&L&C&R", "X"), "&L&C&R");
+    }
+
+    #[test]
+    fn top10_filter_values_like_hancell() {
+        // 상위/하위 필터 기준값 실험의 한셀 바이너리 값 (머리글 + 값, A열)
+        let sheet_of = |vals: &[Option<f64>]| {
+            let mut s = Sheet::default();
+            s.cells.push(Cell {
+                r: CellRef { row: 0, col: 0 },
+                style: 0,
+                value: CellValue::Text("값".into()),
+                formula: None,
+            });
+            for (i, v) in vals.iter().enumerate() {
+                s.cells.push(Cell {
+                    r: CellRef {
+                        row: i as u32 + 1,
+                        col: 0,
+                    },
+                    style: 0,
+                    value: v.map_or(CellValue::Text("x".into()), CellValue::Number),
+                    formula: None,
+                });
+            }
+            let range = CellRange {
+                start: CellRef { row: 0, col: 0 },
+                end: CellRef {
+                    row: vals.len() as u32,
+                    col: 0,
+                },
+            };
+            (s, range)
+        };
+        let d1: Vec<Option<f64>> = (-4..=6).map(|v| Some(f64::from(v))).collect();
+        let (s, r) = sheet_of(&d1);
+        let v = |top, percent, val| top10_value(&s, r, 0, top, percent, val);
+        assert_eq!(v(false, true, 20.0), -3.0);
+        assert_eq!(v(true, true, 20.0), 5.0);
+        assert_eq!(v(false, true, 10.0), -4.0);
+        assert_eq!(v(false, true, 5.0), -4.0);
+        assert_eq!(v(true, true, 50.0), 2.0);
+        assert_eq!(v(true, true, 30.0), 4.0);
+        assert_eq!(v(false, false, 3.0), -2.0);
+        assert_eq!(v(true, false, 20.0), -4.0);
+        assert_eq!(v(false, false, 20.0), 6.0);
+        let ties: Vec<Option<f64>> = [5., 5., 5., 4., 4., 3., 2., 1., 1., 0.]
+            .iter()
+            .map(|v| Some(*v))
+            .collect();
+        let (s, r) = sheet_of(&ties);
+        assert_eq!(top10_value(&s, r, 0, true, false, 3.0), 5.0);
+        assert_eq!(top10_value(&s, r, 0, true, false, 4.0), 4.0);
+        assert_eq!(top10_value(&s, r, 0, false, false, 2.0), 1.0);
+        let mixed = [Some(10.), None, Some(30.), None, Some(20.), Some(50.), None, Some(40.)];
+        let (s, r) = sheet_of(&mixed);
+        assert_eq!(top10_value(&s, r, 0, true, false, 2.0), 40.0);
+        let d8: Vec<Option<f64>> = (1..=25).map(|v| Some(f64::from(v))).collect();
+        let (s, r) = sheet_of(&d8);
+        assert_eq!(top10_value(&s, r, 0, true, true, 10.0), 24.0);
+        assert_eq!(top10_value(&s, r, 0, false, true, 10.0), 2.0);
     }
 
     #[test]
