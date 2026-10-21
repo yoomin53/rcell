@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use super::writer::{Buf, Out, SheetCtx, units};
 use crate::error::Result;
-use crate::model::{Anchor, AnchorKind, Comment, DrawColor, Paint, Shape, ShapeKind, Workbook};
+use crate::model::{Anchor, Comment, DrawColor, Paint, Shape, ShapeKind, Workbook};
 
 // ---------------------------------------------------------------------------
 // MD4 (RFC 1320) — FBSE 의 rgbUid
@@ -40,23 +40,64 @@ fn md4(data: &[u8]) -> [u8; 16] {
         let (aa, bb, cc, dd) = (a, b, c, d);
         for &i in &[0usize, 4, 8, 12] {
             a = a.wrapping_add(f(b, c, d)).wrapping_add(x[i]).rotate_left(3);
-            d = d.wrapping_add(f(a, b, c)).wrapping_add(x[i + 1]).rotate_left(7);
-            c = c.wrapping_add(f(d, a, b)).wrapping_add(x[i + 2]).rotate_left(11);
-            b = b.wrapping_add(f(c, d, a)).wrapping_add(x[i + 3]).rotate_left(19);
+            d = d
+                .wrapping_add(f(a, b, c))
+                .wrapping_add(x[i + 1])
+                .rotate_left(7);
+            c = c
+                .wrapping_add(f(d, a, b))
+                .wrapping_add(x[i + 2])
+                .rotate_left(11);
+            b = b
+                .wrapping_add(f(c, d, a))
+                .wrapping_add(x[i + 3])
+                .rotate_left(19);
         }
         for &i in &[0usize, 1, 2, 3] {
             let k = 0x5A82_7999u32;
-            a = a.wrapping_add(g(b, c, d)).wrapping_add(x[i]).wrapping_add(k).rotate_left(3);
-            d = d.wrapping_add(g(a, b, c)).wrapping_add(x[i + 4]).wrapping_add(k).rotate_left(5);
-            c = c.wrapping_add(g(d, a, b)).wrapping_add(x[i + 8]).wrapping_add(k).rotate_left(9);
-            b = b.wrapping_add(g(c, d, a)).wrapping_add(x[i + 12]).wrapping_add(k).rotate_left(13);
+            a = a
+                .wrapping_add(g(b, c, d))
+                .wrapping_add(x[i])
+                .wrapping_add(k)
+                .rotate_left(3);
+            d = d
+                .wrapping_add(g(a, b, c))
+                .wrapping_add(x[i + 4])
+                .wrapping_add(k)
+                .rotate_left(5);
+            c = c
+                .wrapping_add(g(d, a, b))
+                .wrapping_add(x[i + 8])
+                .wrapping_add(k)
+                .rotate_left(9);
+            b = b
+                .wrapping_add(g(c, d, a))
+                .wrapping_add(x[i + 12])
+                .wrapping_add(k)
+                .rotate_left(13);
         }
         for &i in &[0usize, 2, 1, 3] {
             let k = 0x6ED9_EBA1u32;
-            a = a.wrapping_add(h(b, c, d)).wrapping_add(x[i]).wrapping_add(k).rotate_left(3);
-            d = d.wrapping_add(h(a, b, c)).wrapping_add(x[i + 8]).wrapping_add(k).rotate_left(9);
-            c = c.wrapping_add(h(d, a, b)).wrapping_add(x[i + 4]).wrapping_add(k).rotate_left(11);
-            b = b.wrapping_add(h(c, d, a)).wrapping_add(x[i + 12]).wrapping_add(k).rotate_left(15);
+            a = a
+                .wrapping_add(h(b, c, d))
+                .wrapping_add(x[i])
+                .wrapping_add(k)
+                .rotate_left(3);
+            d = d
+                .wrapping_add(h(a, b, c))
+                .wrapping_add(x[i + 8])
+                .wrapping_add(k)
+                .rotate_left(9);
+            c = c
+                .wrapping_add(h(d, a, b))
+                .wrapping_add(x[i + 4])
+                .wrapping_add(k)
+                .rotate_left(11);
+            b = b
+                .wrapping_add(h(c, d, a))
+                .wrapping_add(x[i + 12])
+                .wrapping_add(k)
+                .rotate_left(15);
         }
         a = a.wrapping_add(aa);
         b = b.wrapping_add(bb);
@@ -414,7 +455,12 @@ impl Art {
                     sp.extend(client_anchor(0, [*col, 0, *row, 0, col + 1, 0, row + 1, 0]));
                     sp.extend(rec(0, 0, 0xF011, &[]));
                     let mut obj = Buf::new();
-                    obj.u16(0x15).u16(0x12).u16(0x14).u16(obj_id).u16(0x0011).bytes(&[0; 12]);
+                    obj.u16(0x15)
+                        .u16(0x12)
+                        .u16(0x14)
+                        .u16(obj_id)
+                        .u16(0x0011)
+                        .bytes(&[0; 12]);
                     obj.u16(0x0C)
                         .u16(0x14)
                         .bytes(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
@@ -429,9 +475,14 @@ impl Art {
                     });
                 }
                 Obj::Shape(s) => {
-                    self.shape_parts(s, ctx, &mut spid, &mut obj_id, false, &mut |sp, obj, txo| {
-                        parts.push(Part { sp, obj, txo })
-                    });
+                    self.shape_parts(
+                        s,
+                        ctx,
+                        &mut spid,
+                        &mut obj_id,
+                        false,
+                        &mut |sp, obj, txo| parts.push(Part { sp, obj, txo }),
+                    );
                 }
                 Obj::Note(i, c) => {
                     spid += 1;
@@ -455,11 +506,25 @@ impl Art {
                     let col = c.cell.col;
                     sp.extend(client_anchor(
                         3,
-                        [col + 1, 0x0F00, r.saturating_sub(1), 0x0F00, col + 3, 0x0F00, r + 3, 0x0400],
+                        [
+                            col + 1,
+                            0x0F00,
+                            r.saturating_sub(1),
+                            0x0F00,
+                            col + 3,
+                            0x0F00,
+                            r + 3,
+                            0x0400,
+                        ],
                     ));
                     sp.extend(rec(0, 0, 0xF011, &[]));
                     let mut obj = Buf::new();
-                    obj.u16(0x15).u16(0x12).u16(0x19).u16(obj_id).u16(0x4011).bytes(&[0; 12]);
+                    obj.u16(0x15)
+                        .u16(0x12)
+                        .u16(0x19)
+                        .u16(obj_id)
+                        .u16(0x4011)
+                        .bytes(&[0; 12]);
                     obj.u16(0x0D).u16(0x16).bytes(&[0; 22]);
                     obj.u32(0);
                     let font = c
@@ -484,10 +549,10 @@ impl Art {
         patriarch.extend(rec(2, 0, 0xF00A, &fsp.0));
         let patriarch = rec(0xF, 0, 0xF004, &patriarch);
         let textbox = rec(0, 0, 0xF00D, &[]);
-        // SpContainer 길이에는 글 상자(다음 MSODRAWING)도 든다
+        // SpContainer 길이에는 글 상자(다음 MSODRAWING)도 든다; 머리 8바이트씩
         let sp_total: usize = parts
             .iter()
-            .map(|p| p.sp.len() + if p.txo.is_some() { textbox.len() } else { 0 })
+            .map(|p| 8 + p.sp.len() + if p.txo.is_some() { textbox.len() } else { 0 })
             .sum();
         let spgr_len = patriarch.len() + sp_total;
         let mut fdg = Buf::new();
@@ -541,13 +606,7 @@ impl Art {
             ShapeKind::Connector => (20, 0x01),
             _ => (
                 match s.geometry.as_deref() {
-                    Some("rect") => {
-                        if s.text.is_some() && s.fill.is_none() {
-                            1
-                        } else {
-                            1
-                        }
-                    }
+                    Some("rect") => 1,
                     Some("roundRect") => 2,
                     Some("ellipse") => 3,
                     Some("diamond") => 4,
@@ -582,7 +641,8 @@ impl Art {
         }
         sp.extend(rec(2, shape_type, 0xF00A, &fsp.0));
         let mut p = Props(Vec::new());
-        let has_text = s.text.as_ref().is_some_and(|t| !t.paragraphs.is_empty()) && !s.plain_text().is_empty();
+        let has_text =
+            s.text.as_ref().is_some_and(|t| !t.paragraphs.is_empty()) && !s.plain_text().is_empty();
         p.set(
             0x007F,
             if s.kind == ShapeKind::Picture {
@@ -613,7 +673,20 @@ impl Art {
         {
             p.set(0x4104, *pib);
         }
-        if s.kind != ShapeKind::Group {
+        if s.kind == ShapeKind::Picture {
+            // 그림: 채우기·선 없음 (한셀: 0x01BF = 0x00100000, 0x01FF = 0x00080000, 0x033F = 0x00100010)
+            if !matches!(s.fill, Some(Paint::Solid(_))) {
+                p.set(0x01BF, 0x0010_0000);
+            }
+            if s.line
+                .as_ref()
+                .is_none_or(|l| !matches!(l.fill, Some(Paint::Solid(_))))
+            {
+                p.set(0x01FF, 0x0008_0000);
+            }
+            p.set(0x033F, 0x0010_0010);
+        }
+        if s.kind != ShapeKind::Group && s.kind != ShapeKind::Picture {
             match &s.fill {
                 Some(Paint::Solid(c)) => {
                     if let Some(rgb) = draw_rgb(c) {
@@ -624,33 +697,30 @@ impl Art {
                 Some(Paint::None) => p.set(0x01BF, 0x0010_0000),
                 _ => {}
             }
-            match &s.line {
-                Some(l) => {
-                    match &l.fill {
-                        Some(Paint::Solid(c)) => {
-                            if let Some(rgb) = draw_rgb(c).filter(|&v| v != 0) {
-                                p.set(0x01C0, super::writer::colorref_of(rgb));
-                            }
-                            if let Some(w) = l.width.filter(|&w| w != 9525) {
-                                p.set(0x01CB, w as u32);
-                            }
-                            let dash = match l.dash.as_deref() {
-                                Some("dash") => 1,
-                                Some("sysDot") => 2,
-                                Some("dashDot") => 3,
-                                Some("lgDashDotDot") => 4,
-                                Some("lgDash") => 6,
-                                _ => 0,
-                            };
-                            if dash != 0 {
-                                p.set(0x01CE, dash);
-                            }
-                            p.set(0x01FF, 0x0008_0008);
-                        }
-                        _ => p.set(0x01FF, 0x0008_0000),
-                    }
+            if let Some(l) = &s.line {
+                if let Some(w) = l.width.filter(|&w| w != 9525) {
+                    p.set(0x01CB, w as u32);
                 }
-                None => {}
+                match &l.fill {
+                    Some(Paint::Solid(c)) => {
+                        if let Some(rgb) = draw_rgb(c).filter(|&v| v != 0) {
+                            p.set(0x01C0, super::writer::colorref_of(rgb));
+                        }
+                        let dash = match l.dash.as_deref() {
+                            Some("dash") => 1,
+                            Some("sysDot") => 2,
+                            Some("dashDot") => 3,
+                            Some("lgDashDotDot") => 4,
+                            Some("lgDash") => 6,
+                            _ => 0,
+                        };
+                        if dash != 0 {
+                            p.set(0x01CE, dash);
+                        }
+                        p.set(0x01FF, 0x0008_0008);
+                    }
+                    _ => p.set(0x01FF, 0x0008_0000),
+                }
             }
         }
         if !s.name.is_empty() {
@@ -668,15 +738,16 @@ impl Art {
             Some("absolute") => 3,
             _ => 0,
         };
-        let anchor = if s.anchor.kind == AnchorKind::TwoCell || s.anchor.to.is_some() {
-            legacy_anchor(&s.anchor, ctx)
-        } else {
-            legacy_anchor(&s.anchor, ctx)
-        };
+        let anchor = legacy_anchor(&s.anchor, ctx);
         sp.extend(client_anchor(flag, anchor));
         sp.extend(rec(0, 0, 0xF011, &[]));
         let mut obj = Buf::new();
-        obj.u16(0x15).u16(0x12).u16(ot).u16(*obj_id).u16(0x0011).bytes(&[0; 12]);
+        obj.u16(0x15)
+            .u16(0x12)
+            .u16(ot)
+            .u16(*obj_id)
+            .u16(0x0011)
+            .bytes(&[0; 12]);
         obj.u32(0);
         let txo = has_text.then(|| {
             let run = s
@@ -696,7 +767,10 @@ impl Art {
                     .fonts
                     .iter()
                     .position(|x| {
-                        x.name == f.name && x.size == f.size && x.bold == f.bold && x.italic == f.italic
+                        x.name == f.name
+                            && x.size == f.size
+                            && x.bold == f.bold
+                            && x.italic == f.italic
                     })
                     .map_or(0, |i| ctx.font(i as u32))
             });
@@ -757,7 +831,9 @@ mod tests {
         assert_eq!(hex(md4(b"")), "31d6cfe0d16ae931b73c59d7e0c089c0");
         assert_eq!(hex(md4(b"abc")), "a448017aaf21d8525fc10ae87aa6729d");
         assert_eq!(
-            hex(md4(b"12345678901234567890123456789012345678901234567890123456789012345678901234567890")),
+            hex(md4(
+                b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"
+            )),
             "e33b4ddc9c38f2199c3e7b164fcc0536"
         );
     }

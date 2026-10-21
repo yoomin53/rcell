@@ -44,10 +44,13 @@ pub(crate) fn feat_header(out: &mut Out, sheet: &Sheet) {
         return;
     }
     let mut allow = 0u32;
-    for (i, (k, _)) in crate::model::SHEET_PROTECTION_FLAGS.iter().enumerate().skip(1) {
+    for (i, (k, _)) in crate::model::SHEET_PROTECTION_FLAGS
+        .iter()
+        .enumerate()
+        .skip(1)
+    {
         // 잠기지 않은 셀 선택을 막으면 잠긴 셀 선택도 막는다 (6.4절, Excel 과 같은 규칙)
-        let blocked =
-            p.flag(k) || (*k == "selectLockedCells" && p.flag("selectUnlockedCells"));
+        let blocked = p.flag(k) || (*k == "selectLockedCells" && p.flag("selectUnlockedCells"));
         if !blocked {
             allow |= 1 << (i - 1);
         }
@@ -88,7 +91,7 @@ pub(crate) fn col_infos(out: &mut Out, ctx: &SheetCtx) {
         if c.collapsed {
             grbit |= 0x1000;
         }
-        let mut rec = |a: u32, z: u32, into: &mut Vec<Vec<u8>>| {
+        let rec = |a: u32, z: u32, into: &mut Vec<Vec<u8>>| {
             let mut b = Buf::new();
             b.u16(a as u16)
                 .u16(z as u16)
@@ -136,6 +139,9 @@ fn doper(op: &str, val: &str) -> ([u8; 10], Option<String>) {
     (d, Some(val.to_string()))
 }
 
+/// AUTOFILTER12 로 쓸 조건: (cft, DOPER 들, 값 문자열들)
+type Filter12 = (u32, Vec<[u8; 10]>, Vec<Option<String>>);
+
 /// 자동 필터: FILTERMODE, AUTOFILTERINFO, 열마다 AUTOFILTER (+ 0x009F 값, AUTOFILTER12 + CONTINUEFRT12)
 pub(crate) fn auto_filter(out: &mut Out, ctx: &SheetCtx) {
     let Some(af) = &ctx.sheet.auto_filter else {
@@ -164,7 +170,7 @@ pub(crate) fn auto_filter(out: &mut Out, ctx: &SheetCtx) {
         let mut b = Buf::new();
         b.u16(entry);
         let mut strings: Vec<String> = Vec::new();
-        let mut af12: Option<(u32, Vec<[u8; 10]>, Vec<Option<String>>)> = None;
+        let mut af12: Option<Filter12> = None;
         if let Some((top, percent, n)) = fc.top10 {
             let mut g = 0x10u16;
             if top {
@@ -257,7 +263,8 @@ pub(crate) fn auto_filter(out: &mut Out, ctx: &SheetCtx) {
             let mut ds = Vec::new();
             for (i, (op, v)) in fc.custom.iter().enumerate().take(2) {
                 let (d, s) = doper(op, v);
-                if fc.custom.len() == 2 && d[0] == 0x06 && op == "equal" && !v.contains(['*', '?']) {
+                if fc.custom.len() == 2 && d[0] == 0x06 && op == "equal" && !v.contains(['*', '?'])
+                {
                     g |= if i == 0 { 0x04 } else { 0x08 };
                 }
                 ds.push(d);
@@ -311,7 +318,11 @@ pub(crate) fn auto_filter(out: &mut Out, ctx: &SheetCtx) {
 }
 
 /// 셀 뒤의 레코드들
-pub(crate) fn after_cells(out: &mut Out, ctx: &SheetCtx, sst: &mut super::writer::SstRef) -> Result<()> {
+pub(crate) fn after_cells(
+    out: &mut Out,
+    ctx: &SheetCtx,
+    sst: &mut super::writer::SstRef,
+) -> Result<()> {
     let sheet = ctx.sheet;
     let wb = ctx.wb;
     let _ = sst;
@@ -347,7 +358,10 @@ pub(crate) fn after_cells(out: &mut Out, ctx: &SheetCtx, sst: &mut super::writer
     data_validations(out, ctx);
     super::cf::conditional_formats(out, ctx);
     window(out, ctx);
-    let code = sheet.code_name.clone().unwrap_or_else(|| sheet.name.clone());
+    let code = sheet
+        .code_name
+        .clone()
+        .unwrap_or_else(|| sheet.name.clone());
     out.rec_buf(0x01BA, Buf::new().str16(&code));
     feat_header(out, sheet);
     out.rec(0x000A, &[]);
@@ -500,7 +514,8 @@ fn window(out: &mut Out, ctx: &SheetCtx) {
     let sheet = ctx.sheet;
     let v = &sheet.view;
     let pane = v.pane.as_ref();
-    let frozen = pane.is_some_and(|p| matches!(p.state.as_deref(), Some("frozen") | Some("frozenSplit")));
+    let frozen =
+        pane.is_some_and(|p| matches!(p.state.as_deref(), Some("frozen") | Some("frozenSplit")));
     let no_split = pane.is_some_and(|p| p.state.as_deref() == Some("frozen"));
     let mut g = 0x0020u16 | 0x0080;
     if v.show_formulas {
@@ -576,10 +591,7 @@ fn window(out: &mut Out, ctx: &SheetCtx) {
     let sel = |pnn: u8| {
         let mut b = Buf::new();
         b.u8(pnn).u32(ac.row).u16(ac.col as u16);
-        let iref = refs
-            .iter()
-            .position(|r| r.contains(ac))
-            .unwrap_or(0) as u16;
+        let iref = refs.iter().position(|r| r.contains(ac)).unwrap_or(0) as u16;
         b.u16(iref).u16(refs.len() as u16);
         for r in &refs {
             range_ref8(&mut b, r);

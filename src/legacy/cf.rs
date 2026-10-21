@@ -115,7 +115,12 @@ fn dxfn(d: Option<&Dxf>) -> Vec<u8> {
         flags |= 0x0200_0000;
         flags &= !(1 << 19);
         flags2 |= 0x0001;
-        let code: Vec<u8> = n.code.chars().map(|c| c as u32).map(|c| c.min(0xFF) as u8).collect();
+        let code: Vec<u8> = n
+            .code
+            .chars()
+            .map(|c| c as u32)
+            .map(|c| c.min(0xFF) as u8)
+            .collect();
         let wide = n.code.chars().any(|c| c as u32 > 0xFF);
         let mut s = Buf::new();
         s.u16(n.code.encode_utf16().count() as u16);
@@ -201,7 +206,13 @@ fn gradient_ext(d: &Dxf, ctx: &SheetCtx) -> Option<Vec<u8>> {
     }
     let v = v.take();
     let mut b = Buf::new();
-    b.u16(0).u16(0xFFFF).u16(0).u16(1).u16(6).u16((v.len() + 4) as u16).bytes(&v);
+    b.u16(0)
+        .u16(0xFFFF)
+        .u16(0)
+        .u16(1)
+        .u16(6)
+        .u16((v.len() + 4) as u16)
+        .bytes(&v);
     Some(b.take())
 }
 
@@ -440,7 +451,12 @@ pub(crate) fn conditional_formats(out: &mut Out, ctx: &SheetCtx) {
                 continue;
             }
             let (_, cp, tmpl, params) = template(r);
-            b.u32(0).u16(g.nid).u16(icf).u8(cp).u8(tmpl).u16(r.priority as u16);
+            b.u32(0)
+                .u16(g.nid)
+                .u16(icf)
+                .u8(cp)
+                .u8(tmpl)
+                .u16(r.priority as u16);
             let mut flags = 0x01u8;
             if r.stop_if_true {
                 flags |= 0x02;

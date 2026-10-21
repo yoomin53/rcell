@@ -206,12 +206,7 @@ fn main() -> ExitCode {
             output,
             format,
         } => convert(&input, &output, format.as_deref()),
-        Cmd::RecDiff {
-            a,
-            b,
-            max,
-            summary,
-        } => rec_diff(&a, &b, max, summary),
+        Cmd::RecDiff { a, b, max, summary } => rec_diff(&a, &b, max, summary),
         Cmd::Diff {
             a,
             b,
@@ -672,11 +667,17 @@ fn convert(input: &Path, output: &Path, format: Option<&str>) -> rcell::Result<(
             Ok(())
         }
         Some("cell") => {
-            std::fs::write(output, rcell::writer::write(&wb, rcell::writer::Flavor::Cell)?)?;
+            std::fs::write(
+                output,
+                rcell::writer::write(&wb, rcell::writer::Flavor::Cell)?,
+            )?;
             Ok(())
         }
         Some("xlsx") => {
-            std::fs::write(output, rcell::writer::write(&wb, rcell::writer::Flavor::Xlsx)?)?;
+            std::fs::write(
+                output,
+                rcell::writer::write(&wb, rcell::writer::Flavor::Xlsx)?,
+            )?;
             Ok(())
         }
         Some(other) => Err(rcell::Error::InvalidValue {

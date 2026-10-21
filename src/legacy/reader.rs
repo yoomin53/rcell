@@ -1436,7 +1436,7 @@ fn attach_charts(wb: &mut Workbook, pending: &[(usize, Vec<Vec<u8>>)]) {
 
 /// 한셀은 레거시 문서를 열 때 어떤 수식·이름도 쓰지 않는 외부 연결(SUPBOOK)을 버리고
 /// 남은 연결 번호를 앞으로 당긴다 (관측). 수식의 `[n]` 도 같이 고친다.
-fn prune_external_links(wb: &mut Workbook) {
+pub(crate) fn prune_external_links(wb: &mut Workbook) {
     use crate::formula_text::map_external_books;
     if wb.external_links.is_empty() {
         return;

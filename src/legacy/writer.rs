@@ -16,8 +16,8 @@ use super::encode::{self, Class, EncodeError, Resolve};
 use super::reader::{BORDER_STYLES, DEFAULT_PALETTE, H_ALIGN, PATTERNS, V_ALIGN};
 use crate::error::{Error, Result};
 use crate::model::{
-    Border, BorderEdge, Cell, CellRange, CellRef, CellValue, Color, DefinedName, Fill, Font,
-    FormulaKind, ParaShape, RichText, Sheet, SheetKind, SheetState, Workbook, Xf,
+    Border, BorderEdge, Cell, CellRange, CellRef, CellValue, Color, DefinedName, Font, FormulaKind,
+    ParaShape, RichText, Sheet, SheetKind, SheetState, Workbook, Xf,
 };
 use crate::vocab;
 
@@ -91,7 +91,8 @@ impl Out {
         } else {
             self.buf
                 .extend_from_slice(&(((n & 0x7FFF) | 0x8000) as u16).to_le_bytes());
-            self.buf.extend_from_slice(&((n >> 15) as u16).to_le_bytes());
+            self.buf
+                .extend_from_slice(&((n >> 15) as u16).to_le_bytes());
         }
         self.buf.extend_from_slice(data);
     }
@@ -195,9 +196,17 @@ fn apply_tint(rgb: u32, tint: f64) -> u32 {
     let (r, g, b) = if s == 0.0 {
         (l, l, l)
     } else {
-        let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+        let q = if l < 0.5 {
+            l * (1.0 + s)
+        } else {
+            l + s - l * s
+        };
         let p = 2.0 * l - q;
-        (hue(p, q, h + 1.0 / 3.0), hue(p, q, h), hue(p, q, h - 1.0 / 3.0))
+        (
+            hue(p, q, h + 1.0 / 3.0),
+            hue(p, q, h),
+            hue(p, q, h - 1.0 / 3.0),
+        )
     };
     let c = |v: f64| ((v * 255.0).round().clamp(0.0, 255.0)) as u32;
     (c(r) << 16) | (c(g) << 8) | c(b)
@@ -210,10 +219,18 @@ pub(crate) fn colorref_of(rgb: u32) -> u32 {
 
 /// 기본 팔레트(8–63)에서 가장 가까운 색 번호 (RGB 유클리드 거리, 같으면 앞 번호 — 관측)
 pub(crate) fn nearest_icv(rgb: u32) -> u16 {
-    let (r, g, b) = ((rgb >> 16) as i32 & 0xFF, (rgb >> 8) as i32 & 0xFF, rgb as i32 & 0xFF);
+    let (r, g, b) = (
+        (rgb >> 16) as i32 & 0xFF,
+        (rgb >> 8) as i32 & 0xFF,
+        rgb as i32 & 0xFF,
+    );
     let mut best = (i32::MAX, 8u16);
     for (i, p) in DEFAULT_PALETTE.iter().enumerate() {
-        let (pr, pg, pb) = ((p >> 16) as i32 & 0xFF, (p >> 8) as i32 & 0xFF, *p as i32 & 0xFF);
+        let (pr, pg, pb) = (
+            (p >> 16) as i32 & 0xFF,
+            (p >> 8) as i32 & 0xFF,
+            *p as i32 & 0xFF,
+        );
         let d = (r - pr).pow(2) + (g - pg).pow(2) + (b - pb).pow(2);
         if d < best.0 {
             best = (d, i as u16 + 8);
@@ -265,7 +282,11 @@ pub(crate) fn filetime(s: &str) -> Option<u64> {
     let (y, m, day) = (d.next()??, d.next()??, d.next()??);
     let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
     let mut t = hms.split(':').map(|x| x.parse::<i64>().ok());
-    let (hh, mm, ss) = (t.next()??, t.next().flatten().unwrap_or(0), t.next().flatten().unwrap_or(0));
+    let (hh, mm, ss) = (
+        t.next()??,
+        t.next().flatten().unwrap_or(0),
+        t.next().flatten().unwrap_or(0),
+    );
     // 그레고리력 → 1970-01-01 부터의 날 수 (Howard Hinnant 의 days_from_civil)
     let yy = if m <= 2 { y - 1 } else { y };
     let era = yy.div_euclid(400);
@@ -276,7 +297,11 @@ pub(crate) fn filetime(s: &str) -> Option<u64> {
     let days = era * 146_097 + doe - 719_468;
     let secs = days * 86_400 + hh * 3600 + mm * 60 + ss + 11_644_473_600;
     let mut frac_100ns: i64 = 0;
-    let digits: String = frac.chars().take_while(|c| c.is_ascii_digit()).take(7).collect();
+    let digits: String = frac
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .take(7)
+        .collect();
     if !digits.is_empty() {
         frac_100ns = digits.parse::<i64>().ok()? * 10i64.pow(7 - digits.len() as u32);
     }
@@ -301,7 +326,10 @@ struct StyleLayout {
 #[derive(Clone, Copy)]
 enum XfSlot {
     /// 상용구 스타일 XF: 표준 XF 의 복사 + used 바이트, 표시 형식 번호
-    Boiler { used: u8, fmt: u16 },
+    Boiler {
+        used: u8,
+        fmt: u16,
+    },
     Style(usize),
     Cell(usize),
 }
@@ -370,9 +398,9 @@ fn layout_styles(wb: &Workbook) -> StyleLayout {
         });
     }
     let mut next = 21u16;
-    for i in 0..nstyle {
-        if style[i].is_none() && (named.contains(&i) || used.contains(&i)) {
-            style[i] = Some(next);
+    for (i, slot) in style.iter_mut().enumerate().take(nstyle) {
+        if slot.is_none() && (named.contains(&i) || used.contains(&i)) {
+            *slot = Some(next);
             order.push(XfSlot::Style(i));
             next += 1;
         }
@@ -383,11 +411,7 @@ fn layout_styles(wb: &Workbook) -> StyleLayout {
         order.push(XfSlot::Cell(i));
         next += 1;
     }
-    StyleLayout {
-        style,
-        cell,
-        order,
-    }
+    StyleLayout { style, cell, order }
 }
 
 /// 글꼴 배치: 레거시 글꼴 번호 4 는 비워 둔다 (BIFF 규칙). 모델의 4번이 0번의 사본이고 아무도 쓰지 않으면
@@ -536,8 +560,14 @@ fn font_record(f: &Font, wb: &Workbook, legacy_index: usize) -> Vec<u8> {
         .i32(h.and_then(|h| h.shadow_offset_x).unwrap_or(10))
         .i32(h.and_then(|h| h.shadow_offset_y).unwrap_or(10))
         .u32(so_type)
-        .u32(pick(vocab::DIACSYM_MARK, h.and_then(|h| h.diacsym_mark.as_ref())))
-        .u32(pick(vocab::LINE_SHAPE, h.and_then(|h| h.strikeout_shape.as_ref())))
+        .u32(pick(
+            vocab::DIACSYM_MARK,
+            h.and_then(|h| h.diacsym_mark.as_ref()),
+        ))
+        .u32(pick(
+            vocab::LINE_SHAPE,
+            h.and_then(|h| h.strikeout_shape.as_ref()),
+        ))
         .u32(text)
         // 밑줄·취소선 색: 지정이 없으면 밑줄(취소선)이 있을 때 글자 색, 없으면 0 (관측: 서식 파일 글꼴 390개)
         .u32(cref_of(
@@ -657,12 +687,7 @@ fn xf_record(
     let st = &wb.styles;
     let fill = st.fills.get(xf.fill_id as usize);
     let border = st.borders.get(xf.border_id as usize);
-    let font = ctx
-        .fonts
-        .map
-        .get(xf.font_id as usize)
-        .copied()
-        .unwrap_or(0);
+    let font = ctx.fonts.map.get(xf.font_id as usize).copied().unwrap_or(0);
     let mut b = Buf::new();
     let prot = xf.protection.as_ref();
     let mut p: u16 = 0;
@@ -693,7 +718,12 @@ fn xf_record(
     let trot = a.and_then(|a| a.text_rotation).unwrap_or(0).clamp(0, 255) as u8;
     let shrink = a.is_some_and(|a| a.shrink_to_fit) as u8;
     // 한셀은 들여쓰기 칸을 쓰지 않는다 — 문단 모양의 여백으로 들여쓴다 (5.6절)
-    let indent = if xf.hancom.as_ref().and_then(|h| h.parashape.as_ref()).is_some() {
+    let indent = if xf
+        .hancom
+        .as_ref()
+        .and_then(|h| h.parashape.as_ref())
+        .is_some()
+    {
         0
     } else {
         a.and_then(|a| a.indent).unwrap_or(0).min(15) as u8
@@ -745,7 +775,7 @@ fn xf_record(
         None | Some("none") => 0,
         Some(p) => PATTERNS.iter().position(|x| *x == p).unwrap_or(0) as u32,
     };
-    let diag_dg = if grbit_diag != 0 { edge_dg(diag) } else { edge_dg(diag) };
+    let diag_dg = edge_dg(diag);
     let border2 = edge_icv(top)
         | (edge_icv(bottom) << 7)
         | (edge_icv(diag) << 14)
@@ -785,7 +815,12 @@ fn xf_record(
         if edge_dg(x) == 0 {
             0xFFFF_FFFF
         } else {
-            cref_of(x.and_then(|e| e.color.as_ref()), wb, 0xDFFF_FFFF, 0xDFFF_FFFF)
+            cref_of(
+                x.and_then(|e| e.color.as_ref()),
+                wb,
+                0xDFFF_FFFF,
+                0xDFFF_FFFF,
+            )
         }
     };
     let (bgc, fgc) = if fls == 0 {
@@ -813,10 +848,13 @@ fn in_palette(rgb: u32) -> bool {
     DEFAULT_PALETTE.contains(&rgb)
 }
 
+/// XFEXT 의 ExtProp 하나: (종류, 내용)
+type ExtProp = (u16, Vec<u8>);
+
 /// XFEXT (0x087D) 의 ExtProp 목록. 팔레트로 나타낼 수 없는 채우기·테두리 색은 FullColorExt (종류 4 채우기, 5 무늬 배경,
 /// 9 왼쪽, 0x0A 오른쪽, 7 위, 8 아래, 0x0B 대각선 — 이 순서, 관측) 로, 그라데이션은 종류 6 으로. 한셀은 테마에서 온 색에도
 /// 쓰지만 XML 에는 그 출처가 남지 않는다
-fn xf_exts(xf: &Xf, wb: &Workbook) -> Vec<(u16, Vec<u8>)> {
+fn xf_exts(xf: &Xf, wb: &Workbook) -> Vec<ExtProp> {
     let st = &wb.styles;
     let mut v = Vec::new();
     let full = |c: Option<&Color>| -> Option<Vec<u8>> {
@@ -1047,9 +1085,9 @@ impl Resolve for Tables<'_> {
             .and_then(|s| find(Some(s as u32)))
             .or_else(|| find(None))
             .or_else(|| {
-                self.names.iter().position(|n| {
-                    !n.func && n.name.to_lowercase() == name.to_lowercase()
-                })
+                self.names
+                    .iter()
+                    .position(|n| !n.func && n.name.to_lowercase() == name.to_lowercase())
             });
         // 정의되지 않은 이름(`=XYZ`)은 수식 없는 NAME 으로 둔다 (관측: values 의 XYZ)
         let i = found.unwrap_or_else(|| {
@@ -1102,7 +1140,9 @@ fn encode_virtual_path(target: &str, path_missing: bool) -> String {
         let mut i = 0;
         while i < b.len() {
             if b[i] == b'%'
-                && let Some(v) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
+                && let Some(v) = s
+                    .get(i + 1..i + 3)
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
             {
                 out.push(v);
                 i += 3;
@@ -1477,7 +1517,7 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
     }
     // XF
     let normal_xf = slot_xf(styles.order[0]).cloned().unwrap_or_default();
-    let mut xfexts: Vec<(u16, Vec<(u16, Vec<u8>)>)> = Vec::new();
+    let mut xfexts: Vec<(u16, Vec<ExtProp>)> = Vec::new();
     for (k, &slot) in styles.order.iter().enumerate() {
         let (xf, style) = match slot {
             XfSlot::Boiler { used, fmt } => {
@@ -1617,10 +1657,7 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
         bound_at.push(out.buf.len() + 4);
         out.rec_buf(0x0085, &mut b);
     }
-    out.rec(
-        0xA101,
-        &wb.hancom.calc_id.unwrap_or(1).to_le_bytes(),
-    );
+    out.rec(0xA101, &wb.hancom.calc_id.unwrap_or(1).to_le_bytes());
     // 그림 저장소
     let art = super::art::Art::new(wb);
     if let Some(dgg) = art.drawing_group() {
@@ -1698,7 +1735,6 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
             styles: &styles,
             fonts: &fonts,
             enc: &encs[si],
-            tables: &tables,
             art: &art,
         };
         write_sheet(&mut so, &ctx, &mut sst)?;
@@ -1736,7 +1772,10 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
     for c in &sheet.cells {
         let Some(f) = &c.formula else { continue };
         if f.kind == FormulaKind::Shared
-            && let (Some(si), Some(range)) = (f.shared_index, f.range.as_deref().and_then(CellRange::parse))
+            && let (Some(si), Some(range)) = (
+                f.shared_index,
+                f.range.as_deref().and_then(CellRange::parse),
+            )
         {
             masters.insert(si, (c.r, range));
         }
@@ -1825,9 +1864,10 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                 match encode::encode(t, opts, tables) {
                     Ok(v) => v,
                     Err(err) => {
-                        report
-                            .warnings
-                            .push(enc_err(&format!("{} 조건부 서식 {}", sheet.name, cf.sqref), err));
+                        report.warnings.push(enc_err(
+                            &format!("{} 조건부 서식 {}", sheet.name, cf.sqref),
+                            err,
+                        ));
                         Vec::new()
                     }
                 }
@@ -1850,7 +1890,11 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
             let Some(t) = t.filter(|t| !t.is_empty()) else {
                 return Vec::new();
             };
-            let root = if dv.kind == "list" { Class::Ref } else { Class::Val };
+            let root = if dv.kind == "list" {
+                Class::Ref
+            } else {
+                Class::Val
+            };
             let opts = encode::Options {
                 base,
                 sheet: Some(si),
@@ -1887,17 +1931,12 @@ pub(crate) struct SheetCtx<'a> {
     styles: &'a StyleLayout,
     fonts: &'a FontLayout,
     enc: &'a SheetEnc,
-    tables: &'a Tables<'a>,
     pub art: &'a super::art::Art,
 }
 
 impl SheetCtx<'_> {
     pub fn xf(&self, style: u32) -> u16 {
-        self.styles
-            .cell
-            .get(style as usize)
-            .copied()
-            .unwrap_or(15)
+        self.styles.cell.get(style as usize).copied().unwrap_or(15)
     }
     pub fn font(&self, i: u32) -> u16 {
         self.fonts.map.get(i as usize).copied().unwrap_or(0)
@@ -1996,7 +2035,12 @@ fn write_sheet(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
         out.rec_buf(0x0225, &mut b);
     }
     // WSBOOL: 한셀은 요약 위치·자동 나누기를 쓰지 않고 0x04C1 을 쓴다 (6.4절)
-    let wsbool = 0x04C1u16 | if sheet.page.fit_to_page == Some(true) { 0x0100 } else { 0 };
+    let wsbool = 0x04C1u16
+        | if sheet.page.fit_to_page == Some(true) {
+            0x0100
+        } else {
+            0
+        };
     out.rec(0x0081, &wsbool.to_le_bytes());
     if !sheet.page.row_breaks.is_empty() {
         let mut b = Buf::new();
@@ -2015,25 +2059,41 @@ fn write_sheet(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
         out.rec_buf(0x001A, &mut b);
     }
     let hf = sheet.page.header_footer.as_ref();
+    // 한셀은 글꼴 코드가 없는 구역에 기본 글꼴 코드를 넣고, HEADER·FOOTER 에는 모양을 대문자 + 공백으로 쓴다 (6.1절)
+    let font0 = wb
+        .styles
+        .fonts
+        .first()
+        .and_then(|f| f.name.clone())
+        .unwrap_or_else(|| "맑은 고딕".into());
     for (rt, text) in [
         (0x0014u16, hf.and_then(|h| h.odd_header.as_deref())),
         (0x0015, hf.and_then(|h| h.odd_footer.as_deref())),
     ] {
         match text.filter(|t| !t.is_empty()) {
-            Some(t) => out.rec_buf(rt, Buf::new().str16(&legacy_hf_fonts(t))),
+            Some(t) => out.rec_buf(
+                rt,
+                Buf::new().str16(&legacy_hf_fonts(&super::lossy::with_default_fonts(
+                    t, &font0,
+                ))),
+            ),
             None => out.rec(rt, &[]),
         }
     }
     out.rec(0x0083, &(po.horizontal_centered as u16).to_le_bytes());
     out.rec(0x0084, &(po.vertical_centered as u16).to_le_bytes());
-    let m = sheet.page.margins.clone().unwrap_or(crate::model::PageMargins {
-        left: 0.7,
-        right: 0.7,
-        top: 0.75,
-        bottom: 0.75,
-        header: 0.3,
-        footer: 0.3,
-    });
+    let m = sheet
+        .page
+        .margins
+        .clone()
+        .unwrap_or(crate::model::PageMargins {
+            left: 0.7,
+            right: 0.7,
+            top: 0.75,
+            bottom: 0.75,
+            header: 0.3,
+            footer: 0.3,
+        });
     for (rt, v) in [
         (0x0026u16, m.left),
         (0x0027, m.right),
@@ -2059,9 +2119,7 @@ fn write_sheet(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
         if s.black_and_white {
             g |= 0x08;
         }
-        if s.draft {
-            g |= 0x10;
-        }
+        // 간단히 인쇄(0x10)는 한셀이 저장하지 않는다 (6.1절)
         if s.use_first_page_number {
             g |= 0x80;
         }
@@ -2099,10 +2157,20 @@ fn write_sheet(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
         if h.align_with_margins {
             flags |= 0x08;
         }
-        let texts: Vec<String> = [&h.even_header, &h.even_footer, &h.first_header, &h.first_footer]
-            .iter()
-            .map(|t| t.as_deref().map(legacy_hf_fonts).unwrap_or_default())
-            .collect();
+        let texts: Vec<String> = [
+            &h.even_header,
+            &h.even_footer,
+            &h.first_header,
+            &h.first_footer,
+        ]
+        .iter()
+        .map(|t| {
+            t.as_deref()
+                .filter(|t| !t.is_empty())
+                .map(|t| super::lossy::with_default_fonts(t, &font0))
+                .unwrap_or_default()
+        })
+        .collect();
         let mut b = Buf::new();
         b.bytes(&[0; 12]).bytes(&[0; 16]).u16(flags);
         for t in &texts {
@@ -2135,7 +2203,11 @@ fn write_cells(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
             let r1 = sheet.cells.iter().map(|c| c.r.row).max().unwrap_or(0);
             let c0 = sheet.cells.iter().map(|c| c.r.col).min().unwrap_or(0);
             let c1 = sheet.cells.iter().map(|c| c.r.col).max().unwrap_or(0);
-            b.u32(r0).u32(r1 + 1).u16(c0 as u16).u16(c1 as u16 + 1).u16(0);
+            b.u32(r0)
+                .u32(r1 + 1)
+                .u16(c0 as u16)
+                .u16(c1 as u16 + 1)
+                .u16(0);
         }
         out.rec_buf(0x0200, &mut b);
     }
@@ -2258,10 +2330,7 @@ fn write_cells(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
             let (col, ref r) = recs[i];
             let run = |pred: &dyn Fn(&CellRec) -> bool| -> usize {
                 let mut j = i;
-                while j + 1 < recs.len()
-                    && recs[j + 1].0 == recs[j].0 + 1
-                    && pred(&recs[j + 1].1)
-                {
+                while j + 1 < recs.len() && recs[j + 1].0 == recs[j].0 + 1 && pred(&recs[j + 1].1) {
                     j += 1;
                 }
                 j - i + 1
@@ -2319,11 +2388,7 @@ fn write_cells(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
                 }
                 CellRec::BoolErr(xf, v, is_err) => {
                     let mut b = Buf::new();
-                    b.u32(row)
-                        .u16(col as u16)
-                        .u16(*xf)
-                        .u8(*v)
-                        .u8(*is_err as u8);
+                    b.u32(row).u16(col as u16).u16(*xf).u8(*v).u8(*is_err as u8);
                     out.rec_buf(0x0205, &mut b);
                 }
                 CellRec::Formula(xf, ci) => {
@@ -2399,7 +2464,10 @@ fn write_formula(out: &mut Out, ctx: &SheetCtx, c: &Cell, xf: u16) -> Result<()>
     if enc.rgce.starts_with(&[0x19, 0x01]) || enc.rel.starts_with(&[0x19, 0x01]) {
         grbit |= 0x0001;
     }
-    b.u16(grbit).u32(0).u16(enc.rgce.len() as u16).bytes(&enc.rgce);
+    b.u16(grbit)
+        .u32(0)
+        .u16(enc.rgce.len() as u16)
+        .bytes(&enc.rgce);
     out.rec_buf(0x0006, &mut b);
     if let Some((range, tokens)) = &enc.shared {
         let mut s = Buf::new();
@@ -2419,8 +2487,14 @@ mod tests {
 
     #[test]
     fn filetime_from_w3cdtf() {
-        assert_eq!(filetime("1997-03-01T10:49:08.000"), Some(0x01BC_262E_3049_6A00));
-        assert_eq!(filetime("1997-05-05T14:10:37Z"), Some(0x01BC_595E_1ABE_2C80));
+        assert_eq!(
+            filetime("1997-03-01T10:49:08.000"),
+            Some(0x01BC_262E_3049_6A00)
+        );
+        assert_eq!(
+            filetime("1997-05-05T14:10:37Z"),
+            Some(0x01BC_595E_1ABE_2C80)
+        );
         assert_eq!(
             super::super::props::filetime_text(filetime("2026-10-19T07:23:02.367").unwrap()),
             "2026-10-19T07:23:02Z"

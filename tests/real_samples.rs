@@ -187,6 +187,104 @@ fn binary_reading_matches_xml_twin() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// 레거시 쓰기 왕복: rcell(X) → 레거시 → rcell 이 다시 읽은 것이, X 에 레거시의 손실(`legacy::lossy::legacy_view`:
+/// 창 잠금, 요약 위치, 외부 값 캐시, 줄 간격 atLeast, HWPUNIT 여백, 머리글 기본 글꼴 코드, 도형 선 기본값,
+/// 차트 내용)을 적용한 것과 같아야 한다. 입력은 말뭉치의 XML 원본(X.cell)과 한셀의 레거시(X.legacy.cell) 둘 다.
+#[test]
+fn legacy_writer_round_trip() {
+    let Some(dir) = std::env::var_os("RCELL_CORPUS").map(PathBuf::from) else {
+        eprintln!("RCELL_CORPUS 미설정 — 건너뜀");
+        return;
+    };
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for base in [
+        dir.clone(),
+        dir.join("craft"),
+        dir.join("templates"),
+        dir.join("craft-charts"),
+        dir.join("craft-charts2"),
+    ] {
+        if !base.is_dir() {
+            continue;
+        }
+        for legacy in files_with_suffix(&base, ".legacy.cell") {
+            let name = legacy.file_name().unwrap().to_string_lossy().into_owned();
+            let xml = legacy.with_file_name(name.replace(".legacy.cell", ".cell"));
+            for input in [xml, legacy] {
+                if !input.exists() {
+                    continue;
+                }
+                let a = rcell::open(&input).expect("원본 읽기");
+                let bytes = rcell::legacy::write(&a).expect("레거시 쓰기");
+                let b = rcell::from_bytes(bytes).expect("쓴 레거시 다시 읽기");
+                let expected = rcell::legacy::lossy::legacy_view(&a);
+                let diffs = rcell::compare::compare(&expected, &b, Default::default());
+                checked += 1;
+                eprintln!("{:>4} 차이  {}", diffs.len(), input.display());
+                if !diffs.is_empty() {
+                    failures.push(format!("{}:\n{}", input.display(), diffs.join("\n")));
+                }
+            }
+        }
+    }
+    eprintln!("왕복한 문서: {checked}");
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// rcell 이 쓴 레거시를 한셀이 열어 XML 로 다시 저장한 것(HCell(rcell(X)))이 한셀이 자기 레거시를 읽은 것
+/// (X.legacy.as.cell = HCell(HCell 레거시))과 같아야 한다. 한셀이 레거시에서 못 읽는 것은 레거시 판정과 같은
+/// 옵션으로 뺀다. 차트 내용은 아직 쓰지 않으므로 정답에서 차트를 뺀다.
+///
+/// `RCELL_LEGACY_ORACLE` = rcell 이 쓴 `폴더_X.legacy.cell` 을 한셀로 다시 저장한 `폴더_X.legacy.as.cell` 이 있는 폴더
+/// (`rcell convert X.cell 폴더_X.legacy.cell --format legacy` 뒤 `tools/probe/resave.ps1 -Filter *.legacy.cell`).
+#[test]
+fn legacy_writer_output_is_read_identically_by_hancell() {
+    let (Some(dir), Some(oracle)) = (
+        std::env::var_os("RCELL_CORPUS").map(PathBuf::from),
+        std::env::var_os("RCELL_LEGACY_ORACLE").map(PathBuf::from),
+    ) else {
+        eprintln!("RCELL_CORPUS·RCELL_LEGACY_ORACLE 미설정 — 건너뜀");
+        return;
+    };
+    let opts = rcell::compare::Options {
+        ignore_font_scale: true,
+        ignore_shape_detail: true,
+        ignore_cf: true,
+        ignore_filter: true,
+        ignore_table_styles: true,
+        ..Default::default()
+    };
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for resaved in files_with_suffix(&oracle, ".legacy.as.cell") {
+        let name = resaved.file_name().unwrap().to_string_lossy().into_owned();
+        let stem = name.trim_end_matches(".legacy.as.cell");
+        let (sub, x) = ["craft-charts2_", "craft-charts_", "craft_", "templates_"]
+            .iter()
+            .find_map(|p| stem.strip_prefix(p).map(|x| (p.trim_end_matches('_'), x)))
+            .unwrap_or(("", stem));
+        let truth = dir.join(sub).join(format!("{x}.legacy.as.cell"));
+        if !truth.exists() {
+            continue;
+        }
+        let mut a = rcell::open(&truth).expect("한셀이 읽은 한셀 레거시");
+        let b = rcell::open(&resaved).expect("한셀이 읽은 rcell 레거시");
+        for s in &mut a.sheets {
+            s.shapes
+                .retain(|x| x.kind != rcell::model::ShapeKind::Chart);
+        }
+        let diffs = rcell::compare::compare(&a, &b, opts);
+        checked += 1;
+        eprintln!("{:>4} 차이  {}", diffs.len(), resaved.display());
+        if !diffs.is_empty() {
+            failures.push(format!("{}:\n{}", resaved.display(), diffs.join("\n")));
+        }
+    }
+    eprintln!("비교한 쌍: {checked}");
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 #[test]
 fn writer_output_is_read_identically_by_hancell() {
     let Some(dir) = std::env::var_os("RCELL_CORPUS").map(PathBuf::from) else {

@@ -61,10 +61,8 @@ fn normalized(rtype: u16, data: &[u8]) -> Vec<u8> {
     match rtype {
         0x0085 if d.len() >= 4 => d[0..4].fill(0),
         // FRT 머리 (rt, grbitFrt, 예약 8): 예약을 지운다. grbitFrt 1 이면 Ref8U 라 그대로 둔다
-        0x0850..=0x08FF if d.len() >= 12 && d[0..2] == rtype.to_le_bytes() => {
-            if d[2] & 1 == 0 {
-                d[4..12].fill(0);
-            }
+        0x0850..=0x08FF if d.len() >= 12 && d[0..2] == rtype.to_le_bytes() && d[2] & 1 == 0 => {
+            d[4..12].fill(0)
         }
         _ => {}
     }
@@ -121,12 +119,18 @@ fn myers(a: &[u64], b: &[u64], max_d: usize) -> Option<Vec<(usize, usize)>> {
                 for dd in (0..=d).rev() {
                     let vv = &trace[dd as usize];
                     let k = x - y;
-                    let prev_k = if k == -dd || (k != dd && vv[(k - 1 + off) as usize] < vv[(k + 1 + off) as usize]) {
+                    let prev_k = if k == -dd
+                        || (k != dd && vv[(k - 1 + off) as usize] < vv[(k + 1 + off) as usize])
+                    {
                         k + 1
                     } else {
                         k - 1
                     };
-                    let prev_x = if dd == 0 { 0 } else { vv[(prev_k + off) as usize] };
+                    let prev_x = if dd == 0 {
+                        0
+                    } else {
+                        vv[(prev_k + off) as usize]
+                    };
                     let prev_y = prev_x - prev_k;
                     while x > prev_x.max(0) && y > prev_y.max(0) && x > 0 && y > 0 {
                         if a[(x - 1) as usize] != b[(y - 1) as usize] {
@@ -275,7 +279,12 @@ mod tests {
 
     #[test]
     fn finds_changed_missing_and_extra_records() {
-        let a = stream(&[(0x0809, &[1]), (0x0031, &[1, 2]), (0x0022, &[0]), (0x000A, &[])]);
+        let a = stream(&[
+            (0x0809, &[1]),
+            (0x0031, &[1, 2]),
+            (0x0022, &[0]),
+            (0x000A, &[]),
+        ]);
         let b = stream(&[
             (0x0809, &[1]),
             (0x0031, &[1, 3]),

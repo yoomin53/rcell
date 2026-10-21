@@ -237,21 +237,21 @@ pub fn write(streams: &[Stream], modified: u64) -> Vec<u8> {
             put_u32(h, 0x4C + k * 4, v);
         }
     }
-    let sector = |out: &mut Vec<u8>, n: usize| -> std::ops::Range<usize> {
+    let sector = |n: usize| -> std::ops::Range<usize> {
         let a = SECTOR * (n + 1);
         a..a + SECTOR
     };
     // 흔적 FAT (섹터 0) 과 흔적 디렉터리 (섹터 1)
     {
-        let r = sector(&mut out, 0);
+        let r = sector(0);
         let s = &mut out[r];
         s.fill(0xFF);
         put_u32(s, 0, FAT_SECT);
         put_u32(s, 4, END_OF_CHAIN);
     }
     {
-        let r = sector(&mut out, 1);
-        let mut root = Entry {
+        let r = sector(1);
+        let root = Entry {
             name: "Root Entry".into(),
             kind: 5,
             color: 0,
@@ -263,7 +263,6 @@ pub fn write(streams: &[Stream], modified: u64) -> Vec<u8> {
             modified: 0,
         };
         let mut d = dir_entry(&root).to_vec();
-        root.kind = 0;
         for _ in 1..4 {
             d.extend_from_slice(&dir_entry(&empty_entry()));
         }
@@ -280,14 +279,14 @@ pub fn write(streams: &[Stream], modified: u64) -> Vec<u8> {
     out[SECTOR * (dir_start + 1)..SECTOR * (dir_start + 1 + dir_sectors)].copy_from_slice(&dir);
     // FAT
     for (k, &loc) in fat_locs.iter().enumerate() {
-        let r = sector(&mut out, loc);
+        let r = sector(loc);
         for (i, v) in fat[k * 128..(k + 1) * 128].iter().enumerate() {
             put_u32(&mut out[r.clone()], i * 4, *v);
         }
     }
     // DIFAT (FAT 섹터가 109개를 넘을 때)
     for (k, &loc) in difat_locs.iter().enumerate() {
-        let r = sector(&mut out, loc);
+        let r = sector(loc);
         let s = &mut out[r];
         for i in 0..127 {
             let v = fat_locs.get(109 + k * 127 + i).map_or(FREE, |&x| x as u32);

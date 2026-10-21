@@ -23,7 +23,10 @@ pub(crate) fn prop_color(b: &mut Buf, c: Option<&Color>, wb: &Workbook, icv: u8)
         }
         Some(c) => {
             let rgb = rgb_of(c, wb).unwrap_or(0);
-            b.u8((rgb >> 16) as u8).u8((rgb >> 8) as u8).u8(rgb as u8).u8(0);
+            b.u8((rgb >> 16) as u8)
+                .u8((rgb >> 8) as u8)
+                .u8(rgb as u8)
+                .u8(0);
         }
         None => {
             b.bytes(&[0xFF, 0xFF, 0xFF, 0xDF]);

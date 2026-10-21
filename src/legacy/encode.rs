@@ -122,9 +122,20 @@ fn class_of(c: u8) -> Class {
 /// BIFF8 함수의 반환·인자 클래스. 표에 없는 함수는 값 → 값.
 fn classes(index: u16) -> (u8, &'static [u8]) {
     match index {
-        0 | 4..=7 | 12 | 36 | 37 | 46 | 169 | 183 | 193 | 194 | 227 | 269 | 318..=323 | 361..=367 => {
-            (b'V', b"R")
-        }
+        0
+        | 4..=7
+        | 12
+        | 36
+        | 37
+        | 46
+        | 169
+        | 183
+        | 193
+        | 194
+        | 227
+        | 269
+        | 318..=323
+        | 361..=367 => (b'V', b"R"),
         1 => (b'R', b"VO"),
         100 => (b'R', b"VO"),
         8 | 9 | 75..=77 | 105 | 130 | 131 | 347 | 360 => (b'V', b"R"),
@@ -214,12 +225,6 @@ struct Prefix {
     book: Option<usize>,
     first: Option<String>,
     last: Option<String>,
-}
-
-impl Prefix {
-    fn is_empty(&self) -> bool {
-        self.book.is_none() && self.first.is_none()
-    }
 }
 
 /// 한 축: 번호 (0부터), 절대 여부
@@ -414,7 +419,10 @@ impl Lexer {
     }
 
     fn next(&mut self) -> Result<Option<Tok>, EncodeError> {
-        while self.peek().is_some_and(|c| c == ' ' || c == '\n' || c == '\r' || c == '\t') {
+        while self
+            .peek()
+            .is_some_and(|c| c == ' ' || c == '\n' || c == '\r' || c == '\t')
+        {
             self.i += 1;
         }
         let Some(c) = self.peek() else {
@@ -520,11 +528,12 @@ impl Lexer {
                 self.i = e + 1;
                 if self.peek() == Some('!') {
                     self.i += 1;
-                    return self.after_prefix(Prefix {
-                        book: Some(book),
-                        ..Default::default()
-                    })
-                    .map(Some);
+                    return self
+                        .after_prefix(Prefix {
+                            book: Some(book),
+                            ..Default::default()
+                        })
+                        .map(Some);
                 }
                 let s = self.i;
                 let w = self.word_from(s);
@@ -541,7 +550,9 @@ impl Lexer {
                 })
                 .map(Some)
             }
-            c if c.is_ascii_digit() || (c == '.' && self.at(1).is_some_and(|d| d.is_ascii_digit())) => {
+            c if c.is_ascii_digit()
+                || (c == '.' && self.at(1).is_some_and(|d| d.is_ascii_digit())) =>
+            {
                 // 행 전체 (1:3) 이거나 숫자
                 let s = self.i;
                 let e = self.word_from(s);
@@ -590,12 +601,13 @@ impl Lexer {
                     Some('(') => return Ok(Some(Tok::Func(w))),
                     Some('!') => {
                         self.i += 1;
-                        return self.after_prefix(Prefix {
-                            book: None,
-                            first: Some(w),
-                            last: None,
-                        })
-                        .map(Some);
+                        return self
+                            .after_prefix(Prefix {
+                                book: None,
+                                first: Some(w),
+                                last: None,
+                            })
+                            .map(Some);
                     }
                     Some(':') => {
                         // 3차원 시트 범위 `Sheet1:Sheet3!A1` 또는 범위 `A1:B2`
@@ -1055,7 +1067,7 @@ impl Emitter<'_> {
     }
 
     fn number(&mut self, v: f64) {
-        if v >= 0.0 && v <= 65535.0 && v.fract() == 0.0 && !(v == 0.0 && v.is_sign_negative()) {
+        if (0.0..=65535.0).contains(&v) && v.fract() == 0.0 && !(v == 0.0 && v.is_sign_negative()) {
             self.u8(0x1E);
             self.u16(v as u16);
         } else {
@@ -1387,7 +1399,9 @@ mod tests {
 
     impl Resolve for Fake {
         fn sheet(&self, name: &str) -> Option<usize> {
-            ["Sheet1", "Sheet2", "첫 시트"].iter().position(|s| *s == name)
+            ["Sheet1", "Sheet2", "첫 시트"]
+                .iter()
+                .position(|s| *s == name)
         }
         fn ext_sheet(&self, _book: usize, name: &str) -> Option<usize> {
             (name == "Intro").then_some(0)
@@ -1449,10 +1463,7 @@ mod tests {
             enc("CONCATENATE(B1,\"-\",B2)"),
             "44 00 00 00 00 01 c0 17 01 00 00 2d 44 01 00 00 00 01 c0 42 03 50 01"
         );
-        assert_eq!(
-            enc("TODAY()-TODAY()"),
-            "19 01 00 00 41 dd 00 41 dd 00 04"
-        );
+        assert_eq!(enc("TODAY()-TODAY()"), "19 01 00 00 41 dd 00 41 dd 00 04");
         assert_eq!(
             enc("SUM(A1,A2,A3)"),
             "24 00 00 00 00 00 c0 24 01 00 00 00 00 c0 24 02 00 00 00 00 c0 42 03 04 00"
@@ -1476,7 +1487,7 @@ mod tests {
 
     #[test]
     fn decodes_back_to_the_same_text() {
-        let sheets = vec![
+        let sheets = [
             Some("Sheet1".to_string()),
             Some("Sheet2".to_string()),
             Some("'첫 시트'".to_string()),

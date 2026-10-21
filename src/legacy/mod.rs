@@ -17,6 +17,7 @@ pub mod encode;
 pub mod escher;
 pub mod formula;
 pub mod ftab;
+pub mod lossy;
 pub mod props;
 pub mod reader;
 pub mod recdiff;
