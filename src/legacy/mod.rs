@@ -9,14 +9,28 @@
 //! 행 번호 32비트화, UTF-16 문자열, 글꼴/셀 서식 확장 영역, 한셀 전용 레코드를 더했다.
 //! 형식 분석: `docs/format/cell-legacy.md`.
 
+mod art;
 pub mod biff;
+mod cf;
+mod dxf;
+pub mod encode;
 pub mod escher;
 pub mod formula;
 pub mod ftab;
 pub mod props;
 pub mod reader;
+pub mod recdiff;
+mod sheetx;
 pub(crate) mod vtchart;
 pub(crate) mod vtchart_map;
+pub mod writer;
+
+pub use writer::{Report, write_with_report};
+
+/// 통합 문서를 레거시 OLE2 바이트로 쓴다 (한셀 `xlCell8`, -2005 와 같은 꼴).
+pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
+    writer::write(wb)
+}
 
 use crate::container;
 use crate::error::{Error, Result};

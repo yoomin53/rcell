@@ -81,8 +81,26 @@ enum Cmd {
         #[arg(long)]
         sheet: Option<String>,
     },
-    /// 형식 변환: XML/바이너리/레거시 .cell → XML .cell (출력 확장자가 .xlsx 면 Excel 형식)
-    Convert { input: PathBuf, output: PathBuf },
+    /// 형식 변환: XML/바이너리/레거시 .cell → XML .cell (출력 확장자가 .xlsx 면 Excel 형식,
+    /// `--format legacy` 면 레거시 바이너리 .cell)
+    Convert {
+        input: PathBuf,
+        output: PathBuf,
+        /// 출력 형식: cell (XML, 기본), xlsx, legacy (한셀 레거시 바이너리). 생략하면 확장자로 정한다
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// 두 레거시 .cell 의 레코드 비교 (종류·순서·내용) — 레거시 쓰기 검증용
+    RecDiff {
+        a: PathBuf,
+        b: PathBuf,
+        /// 출력할 최대 차이 수
+        #[arg(long, default_value_t = 40)]
+        max: usize,
+        /// 요약 한 줄만
+        #[arg(long)]
+        summary: bool,
+    },
     /// 두 문서의 의미 비교 (저장 형식이 달라도 됨). 차이가 있으면 종료 코드 1
     Diff {
         a: PathBuf,
@@ -183,7 +201,17 @@ fn main() -> ExitCode {
             output,
             sheet,
         } => html(&file, output.as_deref(), sheet.as_deref()),
-        Cmd::Convert { input, output } => open_doc(&input).and_then(|wb| rcell::save(&wb, &output)),
+        Cmd::Convert {
+            input,
+            output,
+            format,
+        } => convert(&input, &output, format.as_deref()),
+        Cmd::RecDiff {
+            a,
+            b,
+            max,
+            summary,
+        } => rec_diff(&a, &b, max, summary),
         Cmd::Diff {
             a,
             b,
@@ -628,6 +656,51 @@ fn patch(input: &Path, output: &Path, parts: &[String]) -> rcell::Result<()> {
     }
     let out = rcell::container::replace_zip_parts(&std::fs::read(input)?, &reps)?;
     std::fs::write(output, out)?;
+    Ok(())
+}
+
+fn convert(input: &Path, output: &Path, format: Option<&str>) -> rcell::Result<()> {
+    let wb = open_doc(input)?;
+    match format.map(str::to_ascii_lowercase).as_deref() {
+        None => rcell::save(&wb, output),
+        Some("legacy") => {
+            let (bytes, report) = rcell::legacy::write_with_report(&wb)?;
+            for w in &report.warnings {
+                eprintln!("경고: {w}");
+            }
+            std::fs::write(output, bytes)?;
+            Ok(())
+        }
+        Some("cell") => {
+            std::fs::write(output, rcell::writer::write(&wb, rcell::writer::Flavor::Cell)?)?;
+            Ok(())
+        }
+        Some("xlsx") => {
+            std::fs::write(output, rcell::writer::write(&wb, rcell::writer::Flavor::Xlsx)?)?;
+            Ok(())
+        }
+        Some(other) => Err(rcell::Error::InvalidValue {
+            context: "--format".into(),
+            value: other.into(),
+        }),
+    }
+}
+
+fn rec_diff(a: &Path, b: &Path, max: usize, summary: bool) -> rcell::Result<()> {
+    let sa = rcell::container::read_entry(&std::fs::read(a)?, "/Workbook")?;
+    let sb = rcell::container::read_entry(&std::fs::read(b)?, "/Workbook")?;
+    let r = rcell::legacy::recdiff::compare(&sa, &sb);
+    if summary {
+        println!("{}", r.summary());
+        return Ok(());
+    }
+    for line in r.lines.iter().take(max) {
+        println!("{line}");
+    }
+    if r.lines.len() > max {
+        println!("… 외 {}개", r.lines.len() - max);
+    }
+    println!("{}", r.summary());
     Ok(())
 }
 

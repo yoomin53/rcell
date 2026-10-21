@@ -408,7 +408,7 @@ fn logical_records(stream: &[u8]) -> Vec<Logical> {
 // ---------------------------------------------------------------------------
 
 /// BIFF8 기본 팔레트 (색 번호 8–63), [MS-XLS] 2.5.161.
-const DEFAULT_PALETTE: [u32; 56] = [
+pub(crate) const DEFAULT_PALETTE: [u32; 56] = [
     0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0xFF00FF, 0x00FFFF, 0x800000,
     0x008000, 0x000080, 0x808000, 0x800080, 0x008080, 0xC0C0C0, 0x808080, 0x9999FF, 0x993366,
     0xFFFFCC, 0xCCFFFF, 0x660066, 0xFF8080, 0x0066CC, 0xCCCCFF, 0x000080, 0xFF00FF, 0xFFFF00,
@@ -596,7 +596,7 @@ struct RawXf {
     xf: Xf,
 }
 
-const BORDER_STYLES: [&str; 14] = [
+pub(crate) const BORDER_STYLES: [&str; 14] = [
     "none",
     "thin",
     "medium",
@@ -613,7 +613,7 @@ const BORDER_STYLES: [&str; 14] = [
     "slantDashDot",
 ];
 
-const PATTERNS: [&str; 19] = [
+pub(crate) const PATTERNS: [&str; 19] = [
     "none",
     "solid",
     "mediumGray",
@@ -635,7 +635,7 @@ const PATTERNS: [&str; 19] = [
     "gray0625",
 ];
 
-const H_ALIGN: [&str; 8] = [
+pub(crate) const H_ALIGN: [&str; 8] = [
     "general",
     "left",
     "center",
@@ -645,7 +645,7 @@ const H_ALIGN: [&str; 8] = [
     "centerContinuous",
     "distributed",
 ];
-const V_ALIGN: [&str; 5] = ["top", "center", "bottom", "justify", "distributed"];
+pub(crate) const V_ALIGN: [&str; 5] = ["top", "center", "bottom", "justify", "distributed"];
 
 struct XfParts {
     raw: RawXf,
@@ -1503,7 +1503,7 @@ fn builtin_style_name(id: u8) -> String {
     .to_string()
 }
 
-fn builtin_name(code: u32) -> String {
+pub(crate) fn builtin_name(code: u32) -> String {
     match code {
         0x00 => "_xlnm.Consolidate_Area",
         0x01 => "_xlnm.Auto_Open",

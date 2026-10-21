@@ -132,6 +132,76 @@ pub fn parse_summary(d: &[u8]) -> DocProperties {
     p
 }
 
+/// 문서 속성 → `\x05SummaryInformation` 스트림. 한셀이 쓰는 꼴 그대로 (관측, 말뭉치 117개):
+/// 머리의 CLSID 자리에 FMTID, 시스템 번호 0x0D, 속성 18개를 이 순서로 — 코드 페이지(1200), 제목, 주제, 만든 이,
+/// 키워드, 설명, 마지막 수정자, 프로그램 이름, 수정 번호, 한컴 PID 0xFF·0xFE (판 문자열), 서식 파일, 만든 날짜,
+/// 저장 날짜, 마지막 인쇄, 편집 시간, 0xFD (운영 체제), 사전(PID 0). 문자열은 모두 VT_LPWSTR (끝 NUL 포함,
+/// 4바이트 맞춤), 날짜는 VT_FILETIME, 사전은 13바이트 (`1, 0, 1, 00`). 속성 집합 크기는 맞춤 없이 끝까지.
+pub fn write_summary(p: &DocProperties) -> Vec<u8> {
+    let wstr = |s: &str| -> Vec<u8> {
+        let w: Vec<u16> = s.encode_utf16().chain([0]).collect();
+        let mut v = vec![0x1F, 0, 0, 0];
+        v.extend_from_slice(&(w.len() as u32).to_le_bytes());
+        v.extend(w.iter().flat_map(|c| c.to_le_bytes()));
+        while v.len() % 4 != 0 {
+            v.push(0);
+        }
+        v
+    };
+    let time = |s: Option<&String>| -> Vec<u8> {
+        let mut v = vec![0x40, 0, 0, 0];
+        let ft = s
+            .and_then(|t| crate::legacy::writer::filetime(t))
+            .unwrap_or(0);
+        v.extend_from_slice(&ft.to_le_bytes());
+        v
+    };
+    let text = |s: &Option<String>| wstr(s.as_deref().unwrap_or(""));
+    let props: Vec<(u32, Vec<u8>)> = vec![
+        (1, vec![0x02, 0, 0, 0, 0xB0, 0x04, 0, 0]),
+        (2, text(&p.title)),
+        (3, text(&p.subject)),
+        (4, text(&p.creator)),
+        (5, text(&p.keywords)),
+        (6, text(&p.description)),
+        (8, text(&p.last_modified_by)),
+        // 프로그램 이름: 한셀의 글자 그대로 (U+F53A U+C140)
+        (0x12, wstr("\u{F53A}\u{C140}")),
+        (9, text(&p.revision)),
+        (0xFF, wstr("13.0.1.0.1")),
+        (0xFE, wstr("13.0.0.711")),
+        (7, wstr("")),
+        (0x0C, time(p.created.as_ref())),
+        (0x0D, time(p.modified.as_ref())),
+        (0x0B, time(p.last_printed.as_ref())),
+        (0x0A, time(None)),
+        (0xFD, wstr("Windows_10")),
+        (0, vec![1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]),
+    ];
+    let head = 8 + props.len() * 8;
+    let mut set = Vec::new();
+    set.extend_from_slice(&0u32.to_le_bytes());
+    set.extend_from_slice(&(props.len() as u32).to_le_bytes());
+    let mut off = head;
+    for (pid, v) in &props {
+        set.extend_from_slice(&pid.to_le_bytes());
+        set.extend_from_slice(&(off as u32).to_le_bytes());
+        off += v.len();
+    }
+    for (_, v) in &props {
+        set.extend_from_slice(v);
+    }
+    let size = set.len() as u32;
+    set[0..4].copy_from_slice(&size.to_le_bytes());
+    let mut d = vec![0xFE, 0xFF, 0, 0, 0x0D, 0, 0, 0];
+    d.extend_from_slice(&FMTID_SUMMARY);
+    d.extend_from_slice(&1u32.to_le_bytes());
+    d.extend_from_slice(&FMTID_SUMMARY);
+    d.extend_from_slice(&48u32.to_le_bytes());
+    d.extend(set);
+    d
+}
+
 /// FILETIME (1601-01-01 UTC 부터 100ns) → `YYYY-MM-DDTHH:MM:SSZ`
 pub fn filetime_text(ft: u64) -> String {
     let secs = (ft / 10_000_000) as i64 - 11_644_473_600;

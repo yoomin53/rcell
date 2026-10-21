@@ -24,6 +24,7 @@
 pub mod binary;
 pub mod cf_eval;
 pub mod cfb;
+pub mod cfb_writer;
 pub mod chart_svg;
 pub mod chart_xml;
 pub mod compare;
@@ -123,6 +124,12 @@ pub fn save(wb: &Workbook, path: impl AsRef<Path>) -> Result<()> {
         _ => writer::Flavor::Cell,
     };
     std::fs::write(path, writer::write(wb, flavor)?)?;
+    Ok(())
+}
+
+/// 통합 문서를 레거시 바이너리 `.cell` (OLE2 + BIFF 계열, 한셀 `xlCell8` -2005) 로 저장한다.
+pub fn save_legacy(wb: &Workbook, path: impl AsRef<Path>) -> Result<()> {
+    std::fs::write(path, legacy::write(wb)?)?;
     Ok(())
 }
 
