@@ -670,16 +670,28 @@ fn parse_cell(c: &Element, r: CellRef, shared: &[RichText]) -> Cell {
             .map(CellValue::Number)
             .unwrap_or(CellValue::Text(v)),
     };
-    let formula = c.sml_child("f").map(|f| Formula {
-        text: f.text(),
-        kind: match f.attr("t") {
+    let formula = c.sml_child("f").map(|f| {
+        let kind = match f.attr("t") {
             Some("shared") => FormulaKind::Shared,
             Some("array") => FormulaKind::Array,
             Some("dataTable") => FormulaKind::DataTable,
             _ => FormulaKind::Normal,
-        },
-        shared_index: f.attr_u32("si"),
-        range: f.attr("ref").map(str::to_string),
+        };
+        let flag = |n: &str| f.attr_bool(n).unwrap_or(false);
+        Formula {
+            text: f.text(),
+            kind,
+            shared_index: f.attr_u32("si"),
+            range: f.attr("ref").map(str::to_string),
+            data_table: (kind == FormulaKind::DataTable).then(|| crate::model::DataTableInput {
+                two_d: flag("dt2D"),
+                row_input: flag("dtr"),
+                r1: f.attr("r1").map(str::to_string),
+                r2: f.attr("r2").map(str::to_string),
+                del1: flag("del1"),
+                del2: flag("del2"),
+            }),
+        }
     });
     Cell {
         r,

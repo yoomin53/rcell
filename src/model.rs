@@ -2177,6 +2177,8 @@ pub enum FormulaKind {
     DataTable,
 }
 
+/// 수식. 배열 수식(`t="array"`)과 데이터 표(`t="dataTable"`)는 범위의 왼쪽 위 셀에만 있고, 범위 안 다른 셀은 값만 갖는다
+/// (레거시 ARRAY 0x0221·TABLE 0x0236, 바이너리 BrtArrFmla·BrtTable 도 같은 모델로 읽는다)
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Formula {
     /// `=` 없는 수식 원문. 공유 수식의 종속 셀도 읽을 때 기준 셀 원문을 옮겨 채운다.
@@ -2184,8 +2186,28 @@ pub struct Formula {
     pub kind: FormulaKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shared_index: Option<u32>,
+    /// 공유·배열 수식, 데이터 표의 범위 (`ref`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<String>,
+    /// 데이터 표의 입력 (`t="dataTable"`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_table: Option<DataTableInput>,
+}
+
+/// 데이터 표 (What-If 분석)의 입력: `dt2D`, `dtr`, `r1`, `r2`, `del1`, `del2`
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct DataTableInput {
+    /// 2변수 표 (`dt2D`) — 이때 `r1` 은 행 입력, `r2` 는 열 입력이다
+    pub two_d: bool,
+    /// 1변수 표의 입력이 행 입력 셀 (`dtr`). 한셀은 2변수 표에는 쓰지 않는다
+    pub row_input: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r2: Option<String>,
+    /// 입력 셀이 지워짐 (`del1`, `del2`) — 한셀은 버린다 (수식 대조 실험)
+    pub del1: bool,
+    pub del2: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -2205,9 +2227,13 @@ pub struct TextRun {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DefinedName {
     pub name: String,
+    /// 시트 범위 이름이면 그 시트 번호 (0부터)
     pub local_sheet_id: Option<u32>,
     pub hidden: bool,
     pub formula: String,
+    /// 설명 (`comment`, 레거시 NAME 의 설명 글, 바이너리 BrtName 의 comment)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

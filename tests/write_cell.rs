@@ -50,6 +50,7 @@ fn external_links_roundtrip() {
         local_sheet_id: None,
         hidden: false,
         formula: "'[1]첫 시트'!$A$1".into(),
+        comment: None,
     });
     let b = rcell::from_bytes(write(&a, Flavor::Cell).unwrap()).unwrap();
     assert_eq!(b.external_links.len(), 1);
@@ -733,4 +734,70 @@ fn x14_conditional_formats_roundtrip() {
             .ext
     );
     assert!(b.sheets[0].conditional_formats[1].rules[0].x14);
+}
+
+#[test]
+fn array_formulas_data_tables_and_names_roundtrip() {
+    use rcell::model::{
+        Cell, CellRef, CellValue, DataTableInput, DefinedName, Formula, FormulaKind,
+    };
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    let s = &mut a.sheets[0];
+    s.cells.retain(|c| c.r.row > 4 || c.r.col > 4);
+    let cell = |row, col, formula| Cell {
+        r: CellRef { row, col },
+        style: 0,
+        value: CellValue::Number(1.0),
+        formula,
+    };
+    s.cells.push(cell(
+        0,
+        0,
+        Some(Formula {
+            text: "B1:B2*2".into(),
+            kind: FormulaKind::Array,
+            range: Some("A1:A2".into()),
+            ..Default::default()
+        }),
+    ));
+    s.cells.push(cell(1, 0, None));
+    s.cells.push(cell(
+        2,
+        3,
+        Some(Formula {
+            kind: FormulaKind::DataTable,
+            range: Some("D3:E4".into()),
+            data_table: Some(DataTableInput {
+                two_d: true,
+                row_input: true,
+                r1: Some("A1".into()),
+                r2: Some("B1".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    ));
+    s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    a.defined_names.push(DefinedName {
+        name: "Hidden".into(),
+        local_sheet_id: Some(0),
+        hidden: true,
+        formula: "'데이터'!$A$1".into(),
+        comment: Some("설명 글".into()),
+    });
+    let out = write(&a, Flavor::Cell).unwrap();
+    let mut pkg = rcell::open_package(out.clone()).unwrap();
+    let sheet = pkg
+        .read_string("xl/worksheets/sheet1.xml")
+        .unwrap()
+        .unwrap();
+    assert!(sheet.contains("<x:f t=\"array\" ref=\"A1:A2\">B1:B2*2</x:f>"));
+    // 한셀처럼 2변수 표에는 dtr 을 쓰지 않는다
+    assert!(sheet.contains("<x:f t=\"dataTable\" ref=\"D3:E4\" dt2D=\"1\" r1=\"A1\" r2=\"B1\"/>"));
+    let b = rcell::from_bytes(out).unwrap();
+    let diffs = compare(&a, &b, Options::default());
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    let n = b.defined_names.iter().find(|n| n.name == "Hidden").unwrap();
+    assert!(n.hidden);
+    assert_eq!(n.comment.as_deref(), Some("설명 글"));
 }

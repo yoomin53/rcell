@@ -135,6 +135,7 @@ pub fn record_name(t: u32) -> &'static str {
         391 => "BrtEndColInfos",
         426 => "BrtArrFmla",
         427 => "BrtShrFmla",
+        428 => "BrtTable",
         461 => "BrtBeginConditionalFormatting",
         462 => "BrtEndConditionalFormatting",
         463 => "BrtBeginCFRule",

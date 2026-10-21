@@ -843,6 +843,8 @@ struct PendingName {
     local: Option<u32>,
     hidden: bool,
     rgce: Vec<u8>,
+    /// 설명 글 (XML `comment`)
+    comment: Option<String>,
 }
 
 /// 레거시 `/Workbook` 스트림을 통합 문서 모델로 읽는다.
@@ -1174,7 +1176,8 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 let cce = r.u16().unwrap_or(0) as usize;
                 let _res = r.u16();
                 let itab = r.u16().unwrap_or(0);
-                r.take(4);
+                // 사용자 메뉴·설명·도움말·상태 표시줄 글의 길이 (u8 × 4) — 글은 수식 뒤에 (flag u8 + UTF-16)
+                let lens: Vec<usize> = (0..4).map(|_| r.u8().unwrap_or(0) as usize).collect();
                 let _flag = r.u8();
                 let mut name = r.utf16(cch).unwrap_or_default();
                 if grbit & 0x0020 != 0 {
@@ -1182,11 +1185,21 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                     name = builtin_name(name.chars().next().map(|c| c as u32).unwrap_or(0));
                 }
                 let rgce = r.take(cce).map(<[u8]>::to_vec).unwrap_or_default();
+                let mut texts = lens.iter().map(|&n| {
+                    (n > 0)
+                        .then(|| {
+                            r.u8()?;
+                            r.utf16(n)
+                        })
+                        .flatten()
+                });
+                let comment = texts.nth(1).flatten();
                 pending_names.push(PendingName {
                     name,
                     local: (itab != 0).then(|| itab as u32 - 1),
                     hidden: grbit & 0x0001 != 0,
                     rgce,
+                    comment,
                 });
             }
             _ => {}
@@ -1331,7 +1344,7 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
             };
             let formula = match formula::decode(&n.rgce, &ctx) {
                 Ok(Decoded::Text(t)) => t,
-                Ok(Decoded::SharedRef(_)) => String::new(),
+                Ok(Decoded::SharedRef(_) | Decoded::TableRef(_)) => String::new(),
                 Err(e) => format!("#ERR({})", e.0),
             };
             DefinedName {
@@ -1339,6 +1352,7 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 local_sheet_id: n.local,
                 hidden: n.hidden,
                 formula,
+                comment: n.comment.clone(),
             }
         })
         .collect();
@@ -1355,7 +1369,9 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         }
     }
 
-    // 시트
+    // 시트. 다른 시트 범위의 이름은 시트 이름을 붙여 읽는다
+    let name_scopes: Vec<Option<u32>> = pending_names.iter().map(|n| n.local).collect();
+    let sheet_names: Vec<String> = sheets.iter().map(|s| s.name.clone()).collect();
     for bs in sheets {
         let mut sheet = Sheet {
             name: bs.name.clone(),
@@ -1371,7 +1387,9 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
                 .iter()
                 .position(|r| r.offset == bs.offset as usize)
                 .ok_or_else(|| bad("BOUNDSHEET 위치에 BOF 가 없습니다"))?;
-            let ctx_sheets = (&xti_sheets, &name_list, &xti_names);
+            let local_names =
+                formula::names_for_sheet(&name_list, &name_scopes, &sheet_names, wb.sheets.len());
+            let ctx_sheets = (&xti_sheets, &local_names, &xti_names);
             read_sheet(
                 &recs[start..],
                 &mut sheet,
@@ -1561,6 +1579,8 @@ fn read_sheet(
     let mut cf_rules: HashMap<(u16, u16), (usize, usize)> = HashMap::new();
     let mut cf_current: Option<(u16, u16)> = None;
     let mut cf12_target: Option<usize> = None;
+    // 배열 수식의 왼쪽 위 셀 (범위 안 다른 셀의 PtgExp 가 가리킨다)
+    let mut array_masters: std::collections::HashSet<(u32, u32)> = Default::default();
     // 수식 셀의 토큰열 (공유 수식은 기준 셀의 토큰) — 행 반복(0xB002) 때 다시 해석한다
     let mut tokens_at: HashMap<(u32, u32), Vec<u8>> = HashMap::new();
     // 시트 보호: PROTECT, OBJPROTECT, SCENPROTECT, PASSWORD, FEATHDR 의 EnhancedProtection
@@ -1822,11 +1842,20 @@ fn read_sheet(
                 let formula = match formula::decode(rgce, &ctx) {
                     Ok(Decoded::Text(t)) => {
                         tokens_at.insert((row, col as u32), rgce.to_vec());
-                        Formula {
+                        Some(Formula {
                             text: t,
                             ..Default::default()
-                        }
+                        })
                     }
+                    // 배열 수식·데이터 표 범위 안의 다른 셀: 수식은 왼쪽 위 셀에만 둔다 (XML 과 같다)
+                    Ok(Decoded::SharedRef(master))
+                        if master != at && array_masters.contains(&(master.row, master.col)) =>
+                    {
+                        None
+                    }
+                    Ok(Decoded::TableRef(master)) if master != at => None,
+                    // 데이터 표의 왼쪽 위: 뒤따르는 TABLE 이 채운다
+                    Ok(Decoded::TableRef(_)) => Some(Formula::default()),
                     Ok(Decoded::SharedRef(master)) => {
                         let text = shared
                             .get(&(master.row, master.col))
@@ -1846,24 +1875,119 @@ fn read_sheet(
                                 }
                             })
                             .unwrap_or_default();
-                        Formula {
+                        Some(Formula {
                             text,
                             ..Default::default()
-                        }
+                        })
                     }
-                    Err(e) => Formula {
+                    Err(e) => Some(Formula {
                         text: format!("#ERR({})", e.0),
                         ..Default::default()
-                    },
+                    }),
                 };
                 let is_string = val[6] == 0xFF && val[7] == 0xFF && val[0] == 0;
                 sheet.cells.push(Cell {
                     r: at,
                     style: style(ixfe),
                     value,
-                    formula: Some(formula),
+                    formula,
                 });
                 pending_string_cell = is_string.then(|| sheet.cells.len() - 1);
+            }
+            0x0221 => {
+                // ARRAY: rwFirst u32, rwLast u32, colFirst u16, colLast u16, grbit u16, chn u32, cce u16 + 토큰.
+                // 직전 FORMULA(PtgExp 가 자기 자신)가 왼쪽 위 셀이다 (수식 대조 실험)
+                let (Some(r1), Some(r2), Some(c1), Some(c2)) = (r.u32(), r.u32(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                r.take(6);
+                let cce = r.u16().unwrap_or(0) as usize;
+                let Some(tokens) = r.take(cce) else { continue };
+                let start = CellRef {
+                    row: r1,
+                    col: c1 as u32,
+                };
+                let ctx = Context {
+                    xti_sheets,
+                    names,
+                    xti_names,
+                    base: start,
+                    xlsb: false,
+                    row_shift: 0,
+                };
+                if let Some(cell) = sheet.cells.last_mut()
+                    && cell.r == start
+                    && let Ok(Decoded::Text(t)) = formula::decode(tokens, &ctx)
+                {
+                    array_masters.insert((r1, c1 as u32));
+                    cell.formula = Some(Formula {
+                        text: t,
+                        kind: FormulaKind::Array,
+                        range: Some(
+                            CellRange {
+                                start,
+                                end: CellRef {
+                                    row: r2,
+                                    col: c2 as u32,
+                                },
+                            }
+                            .to_string(),
+                        ),
+                        ..Default::default()
+                    });
+                }
+            }
+            0x0236 => {
+                // TABLE (한컴 변형): rwFirst u32, rwLast u32, colFirst u16, colLast u16, grbit u16 (0x04 행 입력,
+                // 0x08 2변수), 입력 1 (rw u32, col u16), 입력 2 (rw u32, col u16 — 없으면 FF) — 직전 FORMULA
+                // (PtgTbl 이 자기 자신)가 왼쪽 위 셀이다 (수식 대조 실험)
+                let (Some(r1), Some(r2), Some(c1), Some(c2), Some(grbit)) =
+                    (r.u32(), r.u32(), r.u16(), r.u16(), r.u16())
+                else {
+                    continue;
+                };
+                let mut input = || -> Option<String> {
+                    let (row, col) = (r.u32()?, r.u16()?);
+                    (row != u32::MAX && col != u16::MAX).then(|| {
+                        CellRef {
+                            row,
+                            col: col as u32,
+                        }
+                        .to_string()
+                    })
+                };
+                let (in1, in2) = (input(), input());
+                let start = CellRef {
+                    row: r1,
+                    col: c1 as u32,
+                };
+                if let Some(cell) = sheet.cells.last_mut()
+                    && cell.r == start
+                {
+                    cell.formula = Some(Formula {
+                        kind: FormulaKind::DataTable,
+                        range: Some(
+                            CellRange {
+                                start,
+                                end: CellRef {
+                                    row: r2,
+                                    col: c2 as u32,
+                                },
+                            }
+                            .to_string(),
+                        ),
+                        data_table: Some(crate::model::DataTableInput {
+                            two_d: grbit & 0x08 != 0,
+                            row_input: grbit & 0x04 != 0,
+                            r1: in1,
+                            r2: in2,
+                            del1: grbit & 0x10 != 0,
+                            del2: grbit & 0x20 != 0,
+                        }),
+                        ..Default::default()
+                    });
+                }
             }
             0x04BC => {
                 // SHRFMLA: 범위 + 공유 토큰열. 직전 FORMULA 가 기준 셀이다.

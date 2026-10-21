@@ -33,7 +33,9 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
 | 표 스타일 | `BrtBeginTableStyles`(508: `cts u32` (사용자 정의 수), 기본 표·피벗 스타일 이름 XLWideString), `BrtBeginTableStyle`(510: 플래그 u16 — 0x02 피벗, 0x04 표, `ctse u32`, 이름), `BrtTableStyleElement`(512: `tseType u32, size u32, dxfId u32`), 끝 511·509 |
 | 함수 번호 | `PtgFunc`/`PtgFuncVar` 는 [MS-XLSB] Ftab 그대로 (368–484 Excel 2007 함수, 150 CALL). 한컴 함수는 1904 SUBTOTALA (가변), 1907 CONVERTK (인자 4) — 함수 대조 실험 |
 | 공유 수식 | `BrtShrFmla`(**427**, `RfX` + 수식)가 기준 셀 수식 레코드 **뒤에** 온다. 셀의 `PtgExp` 는 **행 u32 만** 담고 열은 `rgcb` 의 `PtgExtraCol`(u32)에 있다 ([MS-XLSB]) |
-| 이름 | `BrtName` 의 `fBuiltin`(0x20) 이면 `Print_Area` 같은 내장 이름 → XML 의 `_xlnm.Print_Area` |
+| 이름 | `BrtName` 의 `fBuiltin`(0x20) 이면 `Print_Area` 같은 내장 이름 → XML 의 `_xlnm.Print_Area`. `itab` 은 시트 범위(0xFFFFFFFF 통합 문서), 수식 뒤 `comment`(XLNullableWideString)가 XML `comment` |
+| 배열 수식 | 왼쪽 위 셀의 `BrtFmla*` 뒤에 `BrtArrFmla`(426: RfX, 플래그 u8, 수식). 범위 안 셀은 모두 `PtgExp`(왼쪽 위의 행 + PtgExtraCol 열) 수식 셀이다 (수식 대조 실험) |
+| 데이터 표 | `BrtTable`(428: RfX, 입력 1 행·열 u32, 입력 2 행·열 u32, 플래그 u8 — 0x01 행 입력, 0x02 2변수)이 왼쪽 위 셀 **앞에** 온다. 표의 셀은 수식 없이 값 셀이다. 1변수 표의 입력 2 는 0 |
 | 외부 연결 | `workbook.bin` 의 `BrtSupBookSrc`(355) = 관계 ID → `xl/externalLinks/externalLinkN.bin`: `BrtBeginSupBook`(360, `sbt u16` 0 = 외부 + 관계 ID → `externalLinkPath`), `BrtSupTabs`(359, `cTab u32` + 시트 이름들) |
 | 통합 문서 | `BrtWbProp`(153): `플래그 u32 (0x01 1904 날짜 체계), dwThemeVersion u32, 코드 이름 XLWideString` (`workbookPr/@codeName`). `BrtBookView`(158, 29바이트): `xWn i32, yWn i32, dxWn u32, dyWn u32 (1/20 pt), iTabRatio u32, itabFirst u32, itabCur u32, 플래그 u8` — 0x08 가로 스크롤, 0x10 세로 스크롤, 0x20 시트 탭 ([MS-XLSB] 그대로, 통합 문서 창 대조 실험) |
 | 시트 속성 | `BrtWsProp`(147): 플래그 3바이트(0x000001 자동 페이지 나누기, 0x000040 요약 행 아래, 0x000080 요약 열 오른쪽, 0x000100 페이지에 맞추기, 0x010000 필터 적용 중), `BrtColor` 탭 색(자동 = 없음), `rwSync`, `colSync`, 코드 이름 (없으면 한셀이 채운다) |

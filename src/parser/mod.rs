@@ -144,6 +144,7 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
                 local_sheet_id: d.attr_u32("localSheetId"),
                 hidden: d.attr_bool("hidden").unwrap_or(false),
                 formula: d.text(),
+                comment: d.attr("comment").map(str::to_string),
             })
             .collect();
     }

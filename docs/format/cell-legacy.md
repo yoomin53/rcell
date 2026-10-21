@@ -200,7 +200,7 @@ flags & 0x01 이면: cRun u16, (ich u16, ifnt u16) × cRun
 | TABLESTYLEELEMENT (0x0890) | FRT 머리 12, `tseType u32` (ST_TableStyleType 순서: 0 wholeTable, 1 headerRow … 26 pageFieldLabels, 27 pageFieldValues), `size u32` (줄무늬 폭), `index u32` (DXF 0x088D 순서) | [MS-XLS] + 관측 |
 | SUPBOOK (0x01AE) | `ctab u16, cch u16` — `cch` 가 `0x0401` 이면 이 통합 문서, `0x3A01` 이면 추가 기능, 그 밖이면 외부 문서: `flag u8, 가상 경로 UTF-16[cch], (cch u16, flag u8, 시트 이름 UTF-16) × ctab` | BIFF8 + 관측 |
 | EXTERNSHEET (0x0017) | BIFF8 과 같다: `n u16, (iSupBook u16, itabFirst u16, itabLast u16) × n` | BIFF8 |
-| NAME (0x0018) | BIFF8 Lbl + 이름 UTF-16. 수식이 없는 NAME 은 정의되지 않은 이름(`=XYZ`)이나 `_xlfn.` 자리 | 관측 |
+| NAME (0x0018) | BIFF8 Lbl + 이름 UTF-16: `grbit u16 (0x01 숨김, 0x20 내장), chKey u8, cch u8, cce u16, 예약 u16, itab u16 (시트 범위, 1부터), 사용자 메뉴·설명·도움말·상태 글 길이 u8 × 4, flag u8, 이름, 토큰`, 그 뒤에 길이가 0 이 아닌 글들 (`flag u8 + UTF-16`) — 설명이 XML `comment`. 수식이 없는 NAME 은 정의되지 않은 이름(`=XYZ`)이나 `_xlfn.` 자리 | 관측 |
 | XFEXT (0x087D) | FRT 머리 12, `예약 u16, ixfe u16, 예약 u16, cexts u16`, ExtProp(`종류 u16, cb u16 (머리 포함), 값`) × cexts. 한셀은 그라데이션 채우기(종류 6)만 쓴다: `종류 u32 (0 직선, 1 경로), 각도·왼쪽·오른쪽·위·아래 f64, 정지점 수 u32, (색 종류 u16 — 2 RGB, 값 u32, 위치 f64, 밝기 f64) × n`. 다른 색은 XF 의 한컴 확장에 있다 | [MS-XLS] + 관측 (그라데이션 대조 실험) |
 
 ## 6. 워크시트 레코드
@@ -216,6 +216,8 @@ flags & 0x01 이면: cRun u16, (ich u16, ifnt u16) × cRun
 | BOOLERR (10) | 머리 + 값 u8 + 오류 여부 u8 | 관측 |
 | FORMULA | 머리 + 결과 8 + grbit u16 + chn u32 + cce u16 + 토큰 | 관측 |
 | STRING (0x0207) | `cch u16, flag u8, UTF-16` — 직전 수식의 문자열 결과 | 관측 |
+| ARRAY (0x0221) | `rwFirst u32, rwLast u32, colFirst u16, colLast u16, grbit u16, chn u32, cce u16 + 토큰` — 배열 수식. 왼쪽 위 셀의 FORMULA(`PtgExp` 가 자기 자신) 뒤에 오고, 범위 안 다른 셀은 `PtgExp` 로 왼쪽 위를 가리키는 FORMULA 다 | 관측 (수식 대조 실험) |
+| TABLE (0x0236, 26) | `rwFirst u32, rwLast u32, colFirst u16, colLast u16, grbit u16 (0x04 행 입력, 0x08 2변수, 0x10·0x20 입력 지움), 입력 1 (rw u32, col u16), 입력 2 (rw u32, col u16 — 없으면 FF)` — 데이터 표. 왼쪽 위 셀의 FORMULA(`PtgTbl 0x02`: rw u32, col u16 = 자기 자신) 뒤에 오고, 표의 다른 셀도 `PtgTbl` 로 왼쪽 위를 가리킨다. 2변수 표는 입력 1 이 행 입력(r1), 입력 2 가 열 입력(r2) | 관측 (수식 대조 실험) |
 | COLINFO (12) | `colFirst u16, colLast u16, coldx u16 (1/256 문자), ixfe u16 (열 기본 서식), grbit u16, 예약 u16` | BIFF8 |
 | **0xB00E** (12) | COLINFO 와 같은 배치, 257번째 열(0x0100)부터 16384번째 열까지 — 한컴 전용 | 관측 |
 | **0xB002** (8) | **행 반복**: `rwFirst u32, rwLast u32`. `rwFirst` 행(ROW 속성과 셀 전부)을 `rwFirst+1 ..= rwLast` 행에 그대로 되풀이한다. 반복된 행의 수식은 행 상대 참조가 옮긴 행 수만큼 움직인다. 같은 행이 이어지는 서식 파일에서 자주 쓴다 | 관측 (한셀 해석과 대조) |
@@ -392,7 +394,8 @@ BIFF8 Ptg 와 같고 다음만 다르다 (관측, `src/legacy/formula.rs`):
 | PtgArea3d | 14 | |
 | PtgStr | 3 + 문자 | `cch u16, flag u8` |
 | PtgFunc / PtgFuncVar | BIFF8 | 함수 번호 0–367 은 BIFF8 Ftab, **IFERROR = 480** (한셀 확장). 그 밖의 Excel 2007 함수와 한컴 함수는 사용자 함수(PtgFuncVar 255)로 쓰고 첫 인자가 이름이다 (아래) |
-| PtgName | 4 | NAME 순서 번호 u32 (1부터) |
+| PtgName | 4 | NAME 순서 번호 u32 (1부터). 다른 시트 범위의 NAME 을 가리키면 XML 은 `Sheet1!L` 이다 (수식 대조 실험) |
+| PtgTbl | 6 | `rw u32, col u16` — 데이터 표(TABLE)의 왼쪽 위 셀 |
 | PtgNameX | 6 | `ixti u16, 이름 번호 u32` — XTI 의 SUPBOOK 아래 EXTERNNAME (1부터) |
 | PtgExp | 6 | `rw u32, col u16` — 공유 수식(SHRFMLA, 범위 행 u32)의 기준 셀 |
 

@@ -573,3 +573,105 @@ fn outline_auto_filter_and_protection() {
     );
     assert!(c[3].custom_and);
 }
+
+/// 수식 대조 실험에서 한셀이 쓴 배치: 배열 수식(ARRAY 0x0221), 데이터 표(TABLE 0x0236 + PtgTbl), 시트 범위 이름
+fn formula_stream() -> Vec<u8> {
+    let mut b = Biff::default();
+    b.rec(0x0809, &bof(0x0005));
+    let mut bs_at = Vec::new();
+    for name in ["Sheet1", "Sheet2"] {
+        let mut bs = vec![0, 0, 0, 0, 0, 0, name.len() as u8, 0];
+        bs.extend(utf16(name));
+        bs_at.push(b.rec(0x0085, &bs));
+    }
+    b.rec(0x01AE, &[2, 0, 0x01, 0x04]);
+    b.rec(0x0017, &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0]);
+    // NAME: L (Sheet1 범위) = Sheet1!$B$1, L (Sheet2 범위) = Sheet2!$A$1, Note (설명 "설명") = 3
+    let name = |itab: u8, n: &str, rgce: &[u8], desc: &str| {
+        let mut d = vec![0, 0, 0, n.len() as u8];
+        d.extend_from_slice(&(rgce.len() as u16).to_le_bytes());
+        d.extend_from_slice(&[0, 0, itab, 0, 0, desc.chars().count() as u8, 0, 0, 0]);
+        d.extend(utf16(n));
+        d.extend_from_slice(rgce);
+        if !desc.is_empty() {
+            d.push(0);
+            d.extend(utf16(desc));
+        }
+        d
+    };
+    b.rec(0x0018, &name(1, "L", &[0x3a, 0, 0, 0, 0, 0, 0, 1, 0], ""));
+    b.rec(0x0018, &name(2, "L", &[0x3a, 1, 0, 0, 0, 0, 0, 0, 0], ""));
+    b.rec(0x0018, &name(0, "Note", &[0x1e, 3, 0], "설명"));
+    b.rec(0x000A, &[]);
+
+    let formula = |row: u32, col: u16, tokens: &[u8]| {
+        let mut fm = cell_head(row, col);
+        fm.extend_from_slice(&2.0f64.to_le_bytes());
+        fm.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        fm.extend_from_slice(&(tokens.len() as u16).to_le_bytes());
+        fm.extend_from_slice(tokens);
+        fm
+    };
+    let mut at = vec![b.rec(0x0809, &bof(0x0010)) as u32];
+    // A1:A2 = {B1:B2*2}: A1 의 PtgExp 는 자기 자신, 뒤에 ARRAY, A2 의 PtgExp 는 A1
+    b.rec(0x0006, &formula(0, 0, &[0x01, 0, 0, 0, 0, 0, 0]));
+    let mut arr = vec![0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tokens = [
+        0x45, 0, 0, 0, 0, 1, 0, 0, 0, 0x01, 0xc0, 0x01, 0xc0, 0x1e, 2, 0, 0x05,
+    ];
+    arr.extend_from_slice(&(tokens.len() as u16).to_le_bytes());
+    arr.extend_from_slice(&tokens);
+    b.rec(0x0221, &arr);
+    b.rec(0x0006, &formula(1, 0, &[0x01, 0, 0, 0, 0, 0, 0]));
+    // F3:F4 = 데이터 표 (열 입력 D1): F3 의 PtgTbl 은 자기 자신, 뒤에 TABLE, F4 의 PtgTbl 은 F3
+    b.rec(0x0006, &formula(2, 5, &[0x02, 2, 0, 0, 0, 5, 0]));
+    b.rec(
+        0x0236,
+        &[
+            2, 0, 0, 0, 3, 0, 0, 0, 5, 0, 5, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff,
+        ],
+    );
+    b.rec(0x0006, &formula(3, 5, &[0x02, 2, 0, 0, 0, 5, 0]));
+    b.rec(0x000A, &[]);
+    // Sheet2: A1 = Sheet1 범위의 L (이름 1), B1 = 자기 시트의 L (이름 2)
+    at.push(b.rec(0x0809, &bof(0x0010)) as u32);
+    b.rec(0x0006, &formula(0, 0, &[0x43, 1, 0, 0, 0]));
+    b.rec(0x0006, &formula(0, 1, &[0x43, 2, 0, 0, 0]));
+    b.rec(0x000A, &[]);
+    for (bs, sheet) in bs_at.into_iter().zip(at) {
+        b.0[bs + 4..bs + 8].copy_from_slice(&sheet.to_le_bytes());
+    }
+    b.0
+}
+
+#[test]
+fn array_formulas_data_tables_and_local_names() {
+    use rcell::model::FormulaKind;
+    let wb = read_workbook_stream(&formula_stream()).unwrap();
+    let s = &wb.sheets[0];
+    let f = |sh: &rcell::model::Sheet, row, col| {
+        sh.cell(CellRef { row, col })
+            .and_then(|c| c.formula.clone())
+    };
+    let a1 = f(s, 0, 0).unwrap();
+    assert_eq!(a1.kind, FormulaKind::Array);
+    assert_eq!(a1.text, "B1:B2*2");
+    assert_eq!(a1.range.as_deref(), Some("A1:A2"));
+    // 범위 안 다른 셀은 수식 없이 값만 (XML 과 같다)
+    assert!(f(s, 1, 0).is_none());
+    let t = f(s, 2, 5).unwrap();
+    assert_eq!(t.kind, FormulaKind::DataTable);
+    assert_eq!(t.range.as_deref(), Some("F3:F4"));
+    let d = t.data_table.unwrap();
+    assert!(!d.two_d && !d.row_input);
+    assert_eq!((d.r1.as_deref(), d.r2.as_deref()), (Some("D1"), None));
+    assert!(f(s, 3, 5).is_none());
+    // 다른 시트 범위의 이름은 시트 이름을 붙인다
+    let s2 = &wb.sheets[1];
+    assert_eq!(f(s2, 0, 0).unwrap().text, "Sheet1!L");
+    assert_eq!(f(s2, 0, 1).unwrap().text, "L");
+    let note = wb.defined_names.iter().find(|n| n.name == "Note").unwrap();
+    assert_eq!(note.comment.as_deref(), Some("설명"));
+    assert_eq!(wb.defined_names.iter().filter(|n| n.name == "L").count(), 2);
+}

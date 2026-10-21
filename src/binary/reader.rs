@@ -1214,7 +1214,9 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
     let data = read_part(pkg, wb_part)?;
     let rels = pkg.relationships(wb_part)?;
     let mut bundles: Vec<BundleSheet> = Vec::new();
-    let mut names: Vec<(String, Option<u32>, bool, Vec<u8>)> = Vec::new();
+    // 이름: (이름, 시트 범위, 숨김, 토큰열, 설명)
+    type PendingName = (String, Option<u32>, bool, Vec<u8>, Option<String>);
+    let mut names: Vec<PendingName> = Vec::new();
     // None = 이 통합 문서, Some(관계 ID) = 외부 통합 문서
     let mut supbooks: Vec<Option<String>> = Vec::new();
     let mut xti: Vec<(u32, i32, i32)> = Vec::new();
@@ -1318,11 +1320,14 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
                     name = format!("_xlnm.{name}");
                 }
                 let rgce = parsed_formula(&mut r).unwrap_or_default().to_vec();
+                // 수식 뒤 comment (XLNullableWideString)
+                let comment = r.nwstr().flatten().filter(|s| !s.is_empty());
                 names.push((
                     name,
                     (itab != 0xFFFF_FFFF).then_some(itab),
                     flags & 0x01 != 0,
                     rgce,
+                    comment,
                 ));
             }
             _ => {}
@@ -1421,7 +1426,7 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
     wb.defined_names = names
         .iter()
         .filter(|n| !n.3.is_empty() && !n.0.starts_with("_xlfn."))
-        .map(|(name, local, hidden, rgce)| {
+        .map(|(name, local, hidden, rgce, comment)| {
             let ctx = Context {
                 xti_sheets: &xti_sheets,
                 names: &name_list,
@@ -1432,7 +1437,7 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
             };
             let formula = match formula::decode(rgce, &ctx) {
                 Ok(Decoded::Text(t)) => t,
-                Ok(Decoded::SharedRef(_)) => String::new(),
+                Ok(Decoded::SharedRef(_) | Decoded::TableRef(_)) => String::new(),
                 Err(e) => format!("#ERR({})", e.0),
             };
             DefinedName {
@@ -1440,10 +1445,14 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
                 local_sheet_id: *local,
                 hidden: *hidden,
                 formula,
+                comment: comment.clone(),
             }
         })
         .collect();
 
+    // 다른 시트 범위의 이름은 시트 이름을 붙여 읽는다
+    let name_scopes: Vec<Option<u32>> = names.iter().map(|n| n.1).collect();
+    let sheet_names: Vec<String> = bundles.iter().map(|b| b.name.clone()).collect();
     for b in bundles {
         let Some(rel) = rels.iter().find(|r| r.id == b.rel_id).cloned() else {
             continue;
@@ -1466,7 +1475,9 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
         if sheet.kind == SheetKind::Worksheet {
             let data = read_part(pkg, &rel.target)?;
             let srels = pkg.relationships(&rel.target)?;
-            read_sheet(&data, &mut sheet, &wb, &srels, (&xti_sheets, &name_list))?;
+            let local_names =
+                formula::names_for_sheet(&name_list, &name_scopes, &sheet_names, wb.sheets.len());
+            read_sheet(&data, &mut sheet, &wb, &srels, (&xti_sheets, &local_names))?;
             read_comments(pkg, &srels, &wb.styles.fonts, &mut sheet)?;
             crate::parser::read_sheet_drawings(pkg, &srels, &mut wb.raw_parts, &mut sheet)?;
         }
@@ -1521,6 +1532,9 @@ fn read_sheet(
             _ => None,
         }
     };
+    // 배열 수식의 범위, 데이터 표 (왼쪽 위 셀, 수식) — 표는 셀을 다 읽은 뒤 붙인다
+    let mut arrays: Vec<CellRange> = Vec::new();
+    let mut tables: Vec<(CellRef, Formula)> = Vec::new();
     // x14 조건부 서식: 본 규칙의 GUID(BrtCFRuleExt) → (서식, 규칙) 위치, x14 구역의 규칙들과 지금 범위
     let mut cf_guids: HashMap<[u8; 16], (usize, usize)> = HashMap::new();
     let mut x14_rules: Vec<X14Rule> = Vec::new();
@@ -2200,25 +2214,93 @@ fn read_sheet(
                     xlsb: true,
                     row_shift: 0,
                 };
+                // 배열 수식 범위 안의 다른 셀 (PtgExp 가 왼쪽 위의 행을 가리킨다): 수식은 왼쪽 위에만 둔다
+                let in_array = |m: CellRef| {
+                    arrays.iter().any(|rg: &CellRange| {
+                        rg.start.row == m.row && rg.start != at && rg.contains(at)
+                    })
+                };
                 let text = match formula::decode(rgce, &ctx) {
-                    Ok(Decoded::Text(t)) => t,
-                    Ok(Decoded::SharedRef(m)) => find_shared(&shared, m.row, at)
-                        .and_then(|tok| match formula::decode(&tok, &ctx) {
-                            Ok(Decoded::Text(t)) => Some(t),
-                            _ => None,
-                        })
-                        .unwrap_or_default(),
-                    Err(e) => format!("#ERR({})", e.0),
+                    Ok(Decoded::Text(t)) => Some(t),
+                    Ok(Decoded::SharedRef(m)) if in_array(m) => None,
+                    Ok(Decoded::SharedRef(m)) => Some(
+                        find_shared(&shared, m.row, at)
+                            .and_then(|tok| match formula::decode(&tok, &ctx) {
+                                Ok(Decoded::Text(t)) => Some(t),
+                                _ => None,
+                            })
+                            .unwrap_or_default(),
+                    ),
+                    Ok(Decoded::TableRef(_)) => Some(String::new()),
+                    Err(e) => Some(format!("#ERR({})", e.0)),
                 };
                 sheet.cells.push(Cell {
                     r: at,
                     style,
                     value,
-                    formula: Some(Formula {
+                    formula: text.map(|text| Formula {
                         text,
                         ..Default::default()
                     }),
                 });
+            }
+            426 => {
+                // BrtArrFmla: RfX, 플래그 u8, 수식 — 직전 수식 셀(왼쪽 위)의 배열 수식 (수식 대조 실험)
+                let (Some(r1), Some(r2), Some(c1), Some(c2)) = (r.u32(), r.u32(), r.u32(), r.u32())
+                else {
+                    continue;
+                };
+                r.u8();
+                let rg = CellRange {
+                    start: CellRef { row: r1, col: c1 },
+                    end: CellRef { row: r2, col: c2 },
+                };
+                if let Some(tokens) = parsed_formula(&mut r)
+                    && let Some(cell) = sheet.cells.last_mut()
+                    && cell.r == rg.start
+                    && let Some(t) = decode_at(tokens, rg.start)
+                {
+                    cell.formula = Some(Formula {
+                        text: t,
+                        kind: crate::model::FormulaKind::Array,
+                        range: Some(rg.to_string()),
+                        ..Default::default()
+                    });
+                    arrays.push(rg);
+                }
+            }
+            428 => {
+                // BrtTable: RfX, 입력 1 (rw u32, col u32), 입력 2 (rw u32, col u32), 플래그 u8 (0x01 행 입력,
+                // 0x02 2변수). 표의 셀은 값만 쓰고, 이 레코드가 왼쪽 위 셀 앞에 온다 (수식 대조 실험)
+                let v: Vec<u32> = (0..8).map(|_| r.u32().unwrap_or(0)).collect();
+                let f = r.u8().unwrap_or(0);
+                let rg = CellRange {
+                    start: CellRef {
+                        row: v[0],
+                        col: v[2],
+                    },
+                    end: CellRef {
+                        row: v[1],
+                        col: v[3],
+                    },
+                };
+                let input = |row: u32, col: u32| CellRef { row, col }.to_string();
+                tables.push((
+                    rg.start,
+                    Formula {
+                        kind: crate::model::FormulaKind::DataTable,
+                        range: Some(rg.to_string()),
+                        data_table: Some(crate::model::DataTableInput {
+                            two_d: f & 0x02 != 0,
+                            row_input: f & 0x01 != 0,
+                            r1: Some(input(v[4], v[5])),
+                            r2: (f & 0x02 != 0).then(|| input(v[6], v[7])),
+                            del1: f & 0x04 != 0,
+                            del2: f & 0x08 != 0,
+                        }),
+                        ..Default::default()
+                    },
+                ));
             }
             427 => {
                 // BrtShrFmla: RfX + formula
@@ -2292,6 +2374,17 @@ fn read_sheet(
     }
     let _ = bad;
     merge_x14_rules(sheet, x14_rules, &cf_guids);
+    for (at, f) in tables {
+        match sheet.cells.iter_mut().find(|c| c.r == at) {
+            Some(c) => c.formula = Some(f),
+            None => sheet.cells.push(Cell {
+                r: at,
+                style: 0,
+                value: CellValue::Empty,
+                formula: Some(f),
+            }),
+        }
+    }
     sheet.cells.sort_by_key(|c| (c.r.row, c.r.col));
     Ok(())
 }
@@ -2546,6 +2639,60 @@ mod tests {
                 ("3Stars".into(), 2)
             ]
         );
+    }
+
+    /// 수식 대조 실험에서 한셀이 쓴 배치: 배열 수식(BrtArrFmla 426)과 데이터 표(BrtTable 428, 셀은 값만)
+    #[test]
+    fn array_formula_and_data_table() {
+        let row = |rw: u32| [le(&[rw, 0]), vec![0x48, 1, 0, 1], vec![0; 13]].concat();
+        // BrtFmlaNum: 열, 스타일, 값, grbit, PtgExp(행) + PtgExtraCol(열)
+        let exp = |col: u32, master_row: u32, master_col: u32| {
+            let mut b = le(&[col, 0]);
+            b.extend_from_slice(&2.0f64.to_le_bytes());
+            b.extend_from_slice(&[0, 0]);
+            b.extend(le(&[5]));
+            b.push(0x01);
+            b.extend(le(&[master_row, 4, master_col]));
+            b
+        };
+        let mut s = Vec::new();
+        s.extend(rec(0, &row(0)));
+        s.extend(rec(9, &exp(0, 0, 0)));
+        let mut arr = le(&[0, 1, 0, 0]);
+        arr.push(0);
+        let tokens = [
+            0x45, 0, 0, 0, 0, 1, 0, 0, 0, 0x01, 0xc0, 0x01, 0xc0, 0x1e, 2, 0, 0x05,
+        ];
+        arr.extend(le(&[tokens.len() as u32]));
+        arr.extend_from_slice(&tokens);
+        arr.extend(le(&[0]));
+        s.extend(rec(426, &arr));
+        s.extend(rec(0, &row(1)));
+        s.extend(rec(9, &exp(0, 0, 0)));
+        // F3:F4 데이터 표 (2변수, 입력 D2·D1): 레코드가 왼쪽 위 셀 앞에 온다
+        s.extend(rec(0, &row(2)));
+        let mut t = le(&[2, 3, 5, 5, 1, 3, 0, 3]);
+        t.push(0x03);
+        s.extend(rec(428, &t));
+        s.extend(rec(2, &le(&[5, 0, 0])));
+        let mut sheet = Sheet::default();
+        let wb = Workbook::default();
+        read_sheet(&s, &mut sheet, &wb, &[], (&Vec::new(), &Vec::new())).unwrap();
+        let f = |row, col| {
+            sheet
+                .cell(CellRef { row, col })
+                .and_then(|c| c.formula.clone())
+        };
+        let a1 = f(0, 0).unwrap();
+        assert_eq!(a1.kind, crate::model::FormulaKind::Array);
+        assert_eq!(a1.text, "B1:B2*2");
+        assert_eq!(a1.range.as_deref(), Some("A1:A2"));
+        assert!(f(1, 0).is_none());
+        let t = f(2, 5).unwrap();
+        assert_eq!(t.range.as_deref(), Some("F3:F4"));
+        let d = t.data_table.unwrap();
+        assert!(d.two_d && d.row_input);
+        assert_eq!((d.r1.as_deref(), d.r2.as_deref()), (Some("D2"), Some("D1")));
     }
 
     /// 색 조합 실험: 종류 없이 쓰인 색을 플래그로 자리에 놓는다

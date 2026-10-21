@@ -1361,12 +1361,7 @@ fn sheet_xml(
             if c.style != 0 {
                 let _ = write!(s, " s=\"{}\"", c.style);
             }
-            let f = c
-                .formula
-                .as_ref()
-                .filter(|f| !f.text.is_empty())
-                .map(|f| format!("<x:f>{}</x:f>", esc(&f.text)))
-                .unwrap_or_default();
+            let f = c.formula.as_ref().map(formula_xml).unwrap_or_default();
             match &c.value {
                 CellValue::Empty if f.is_empty() => s.push_str("/>"),
                 CellValue::Empty => {
@@ -1444,6 +1439,42 @@ fn sheet_xml(
     }
     s.push_str("</x:worksheet>");
     s
+}
+
+/// 셀 수식 (`x:f`). 공유 수식은 셀마다 펼쳐 쓴다. 배열 수식은 `t="array" ref`, 데이터 표는 `t="dataTable"` 과
+/// 입력 — 한셀이 쓰는 속성 순서(ref, dt2D, dtr, r1, r2)로, 2변수 표에는 `dtr` 을 쓰지 않는다 (수식 대조 실험)
+fn formula_xml(f: &crate::model::Formula) -> String {
+    use crate::model::FormulaKind;
+    let range = f
+        .range
+        .as_deref()
+        .map(|r| format!(" ref=\"{}\"", esc(r)))
+        .unwrap_or_default();
+    match (f.kind, &f.data_table) {
+        (FormulaKind::Array, _) => format!("<x:f t=\"array\"{range}>{}</x:f>", esc(&f.text)),
+        (FormulaKind::DataTable, Some(d)) => {
+            let mut s = format!("<x:f t=\"dataTable\"{range}");
+            if d.two_d {
+                s.push_str(" dt2D=\"1\"");
+            } else if d.row_input {
+                s.push_str(" dtr=\"1\"");
+            }
+            for (name, v) in [("r1", &d.r1), ("r2", &d.r2)] {
+                if let Some(v) = v {
+                    let _ = write!(s, " {name}=\"{}\"", esc(v));
+                }
+            }
+            for (name, on) in [("del1", d.del1), ("del2", d.del2)] {
+                if on {
+                    let _ = write!(s, " {name}=\"1\"");
+                }
+            }
+            s.push_str("/>");
+            s
+        }
+        _ if f.text.is_empty() => String::new(),
+        _ => format!("<x:f>{}</x:f>", esc(&f.text)),
+    }
 }
 
 /// `sheetProtection` (CT_Worksheet 에서 sheetData 다음)
@@ -2048,6 +2079,9 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
             }
             if d.hidden {
                 wbx.push_str(" hidden=\"1\"");
+            }
+            if let Some(c) = &d.comment {
+                let _ = write!(wbx, " comment=\"{}\"", esc(c));
             }
             let _ = write!(wbx, ">{}</x:definedName>", esc(&d.formula));
         }

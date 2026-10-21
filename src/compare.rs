@@ -342,6 +342,37 @@ pub fn style_key(styles: &Styles, xf_index: u32, opts: Options) -> String {
     )
 }
 
+/// 셀 수식: 원문, 배열 수식은 범위, 데이터 표는 범위와 입력 (2변수 표의 행 입력 표시는 뜻이 없어 뺀다 — 한셀은
+/// 쓰지 않는다). 공유 수식은 저장 방식일 뿐이라 원문만 본다
+fn formula_key(f: &crate::model::Formula) -> String {
+    use crate::model::FormulaKind;
+    match (f.kind, &f.data_table) {
+        (FormulaKind::Array, _) => {
+            format!("{{{}}} 배열 {}", f.text, norm_ranges(f.range.as_deref()))
+        }
+        (FormulaKind::DataTable, Some(d)) => format!(
+            "데이터 표 {} {}{}{}{}{}",
+            norm_ranges(f.range.as_deref()),
+            if d.two_d {
+                "2변수"
+            } else if d.row_input {
+                "행 입력"
+            } else {
+                "열 입력"
+            },
+            d.r1.as_deref()
+                .map(|r| format!(" r1={r}"))
+                .unwrap_or_default(),
+            d.r2.as_deref()
+                .map(|r| format!(" r2={r}"))
+                .unwrap_or_default(),
+            if d.del1 { " del1" } else { "" },
+            if d.del2 { " del2" } else { "" }
+        ),
+        _ => f.text.clone(),
+    }
+}
+
 fn value_key(v: &CellValue) -> String {
     match v {
         CellValue::Empty => "∅".into(),
@@ -1095,10 +1126,15 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             .filter(|d| !d.name.starts_with("_xlnm._FilterDatabase"))
             .map(|d| {
                 format!(
-                    "{}@{:?}={}",
+                    "{}@{:?}{}={}{}",
                     d.name,
                     d.local_sheet_id,
-                    unquote_external(&d.formula)
+                    if d.hidden { "(숨김)" } else { "" },
+                    unquote_external(&d.formula),
+                    d.comment
+                        .as_deref()
+                        .map(|c| format!(" //{c:?}"))
+                        .unwrap_or_default()
                 )
             })
             .collect();
@@ -1243,11 +1279,7 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
                     } else {
                         style_key(&w.styles, c.style, opts)
                     };
-                    let f = c
-                        .formula
-                        .as_ref()
-                        .map(|f| f.text.clone())
-                        .unwrap_or_default();
+                    let f = c.formula.as_ref().map(formula_key).unwrap_or_default();
                     ((c.r.row, c.r.col), (value_key(&c.value), f, style))
                 })
                 .collect()

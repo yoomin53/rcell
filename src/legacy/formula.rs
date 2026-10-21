@@ -142,6 +142,28 @@ fn with_flags(col: u16, col_rel: bool, row_rel: bool) -> u16 {
 }
 
 /// 시트 이름을 수식에 쓸 꼴로 (공백·기호가 있으면 작은따옴표).
+/// PtgName 이 가리키는 이름 목록을 시트 하나에 맞춘다: 다른 시트 범위의 이름은 `시트!이름` 으로 쓴다 — 그 시트에서
+/// 이름만 쓰면 자기 시트의 같은 이름이 되기 때문이다 (수식 대조 실험: Sheet2 의 `=Sheet1!L`, 두 시트에 범위 이름 L).
+/// `scopes[i]` 는 i 번째 이름의 시트 번호(0부터, 없으면 통합 문서 범위)
+pub fn names_for_sheet(
+    names: &[String],
+    scopes: &[Option<u32>],
+    sheet_names: &[String],
+    sheet: usize,
+) -> Vec<String> {
+    names
+        .iter()
+        .zip(scopes.iter().chain(std::iter::repeat(&None)))
+        .map(|(n, scope)| match scope.map(|s| s as usize) {
+            Some(s) if s != sheet => match sheet_names.get(s) {
+                Some(sh) => format!("{}!{n}", quote_sheet(sh)),
+                None => n.clone(),
+            },
+            _ => n.clone(),
+        })
+        .collect()
+}
+
 pub fn quote_sheet(name: &str) -> String {
     let plain = !name.is_empty()
         && !name.starts_with(|c: char| c.is_ascii_digit())
@@ -246,6 +268,8 @@ pub enum Decoded {
     Text(String),
     /// PtgExp — 공유 수식/배열 수식의 기준 셀
     SharedRef(CellRef),
+    /// PtgTbl — 데이터 표의 왼쪽 위 셀 (레거시 TABLE 0x0236 이 뜻을 담는다)
+    TableRef(CellRef),
 }
 
 /// 수식 토큰열을 원문으로 바꾼다.
@@ -270,6 +294,12 @@ pub fn decode(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
                     r.u16()? as u32
                 };
                 return Ok(Decoded::SharedRef(CellRef { row, col }));
+            }
+            0x02 => {
+                // PtgTbl: 행 u32 + 열 u16 (레거시. 바이너리의 데이터 표 셀은 수식 없이 값만 쓴다)
+                let row = r.u32()?;
+                let col = r.u16()? as u32;
+                return Ok(Decoded::TableRef(CellRef { row, col }));
             }
             0x03..=0x11 => {
                 let b = pop(&mut stack)?;
