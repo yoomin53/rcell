@@ -2219,18 +2219,46 @@ fn read_sheet(
                     priority: pri as u32,
                     ..Default::default()
                 };
+                // 기준 값의 수식 (기준 셀 = 범위의 왼쪽 위)
+                let base = CellRange::parse(
+                    sheet.conditional_formats[fi]
+                        .sqref
+                        .split(' ')
+                        .next()
+                        .unwrap_or(""),
+                )
+                .map(|x| x.start)
+                .unwrap_or_default();
+                let dec = |t: &[u8]| {
+                    let ctx = Context {
+                        xti_sheets,
+                        names,
+                        xti_names,
+                        base,
+                        xlsb: false,
+                        row_shift: 0,
+                    };
+                    match formula::decode(t, &ctx) {
+                        Ok(Decoded::Text(x)) => Some(x),
+                        _ => None,
+                    }
+                };
                 match ct {
                     3 => {
                         rule.kind = "colorScale".into();
-                        rule.color_scale = legacy_color_scale(&mut r);
+                        rule.color_scale = legacy_color_scale(&mut r, &dec);
                     }
                     4 => {
                         rule.kind = "dataBar".into();
-                        rule.data_bar = legacy_data_bar(&mut r);
+                        rule.data_bar = legacy_data_bar(&mut r, &dec);
                     }
                     6 => {
                         rule.kind = "iconSet".into();
-                        rule.icon_set = legacy_icon_set(&mut r);
+                        rule.icon_set = legacy_icon_set(&mut r, &dec);
+                        // Excel 2010 아이콘 집합은 x14 구역의 규칙이다
+                        rule.x14 = rule.icon_set.as_ref().is_some_and(|i| {
+                            crate::model::X14_ONLY_ICON_SETS.contains(&i.set.as_str())
+                        });
                     }
                     _ => {
                         rule.kind = "expression".into();
@@ -2928,35 +2956,48 @@ fn apply_cf_template(rule: &mut CfRule, tmpl: u32, params: &[u8]) {
     }
 }
 
-/// CFVO (레거시): 종류 u8, 수식 cce u16 + 토큰, 숫자 f64 (최소·최대 말고)
-fn legacy_cfvo(r: &mut Rd) -> Option<Cfvo> {
+/// 기준 값 수식의 토큰열 → 글
+type CfvoDecoder<'a> = dyn Fn(&[u8]) -> Option<String> + 'a;
+
+/// CFVO (레거시): 종류 u8 (1 num, 2 min, 3 max, 4 percent, 5 percentile, 7 formula), 수식 cce u16 + 토큰,
+/// 수식이 없고 최소·최대가 아니면 숫자 f64. 한셀은 x14 구역에서 읽은 값(`xm:f`)을 수식(PtgInt 등)으로 쓴다
+/// (x14 조건부 서식 실험 — 3Stars 의 `percent` 값 0·33·67 이 `1e 00 00` …)
+fn legacy_cfvo(r: &mut Rd, dec: &CfvoDecoder) -> Option<Cfvo> {
     let ty = r.u8()?;
     let cce = r.u16()? as usize;
-    r.take(cce);
-    let num = if matches!(ty, 2 | 3) { None } else { r.f64() };
+    let tokens = r.take(cce)?;
+    let num = if cce > 0 || matches!(ty, 2 | 3) {
+        None
+    } else {
+        r.f64()
+    };
     let kind = match ty {
         1 => "num",
         2 => "min",
         3 => "max",
         4 => "percent",
         5 => "percentile",
-        6 => "formula",
+        6 | 7 => "formula",
         _ => "num",
     };
     Some(Cfvo {
         kind: kind.into(),
-        val: num
-            .filter(|_| matches!(ty, 1 | 4 | 5))
-            .map(formula::number_text),
+        val: if cce > 0 {
+            dec(tokens)
+        } else {
+            num.filter(|_| matches!(ty, 1 | 4 | 5))
+                .map(formula::number_text)
+        },
         gte: true,
     })
 }
 
-/// CFColor: 종류 u32 (2 = RGB), 값 4바이트, 밝기 f64
+/// CFColor: 종류 u32 (2 = RGB, 3 = 테마), 값 4바이트, 밝기 f64. 레거시는 테마 색을 테마 번호 + 밝기로 지킨다
+/// (XML 은 한셀이 RGB 로 바꿔 쓴다: 테마 5, 밝기 -0.25 → `ffeb5800` — x14 조건부 서식 실험)
 fn legacy_cf_color(r: &mut Rd) -> Option<Color> {
     let ty = r.u32()?;
     let v = r.take(4)?;
-    r.take(8);
+    let tint = r.f64().filter(|t| *t != 0.0);
     match ty {
         2 => Some(Color {
             rgb: Some(format!("ff{:02x}{:02x}{:02x}", v[0], v[1], v[2])),
@@ -2964,6 +3005,7 @@ fn legacy_cf_color(r: &mut Rd) -> Option<Color> {
         }),
         3 => Some(Color {
             theme: Some(v[0] as u32),
+            tint,
             ..Default::default()
         }),
         _ => Some(Color {
@@ -2974,12 +3016,12 @@ fn legacy_cf_color(r: &mut Rd) -> Option<Color> {
 }
 
 /// CFGradient: 예약 u8, 보간 수 u8, 색 수 u8, 플래그 u8, (CFVO + 영역 f64) × n, (위치 f64 + CFColor) × m
-fn legacy_color_scale(r: &mut Rd) -> Option<ColorScale> {
+fn legacy_color_scale(r: &mut Rd, dec: &CfvoDecoder) -> Option<ColorScale> {
     r.take(1);
     let (ni, nc, _f) = (r.u8()?, r.u8()?, r.u8()?);
     let mut cs = ColorScale::default();
     for _ in 0..ni {
-        cs.cfvos.push(legacy_cfvo(r)?);
+        cs.cfvos.push(legacy_cfvo(r, dec)?);
         r.take(8);
     }
     for _ in 0..nc {
@@ -2989,32 +3031,41 @@ fn legacy_color_scale(r: &mut Rd) -> Option<ColorScale> {
     Some(cs)
 }
 
-/// CFDatabar: 예약 u8, 플래그 u8 (0x02 값 숨김 — 한컴), 최소·최대 길이 u8, CFColor, CFVO × 2
-fn legacy_data_bar(r: &mut Rd) -> Option<DataBar> {
+/// CFDatabar: 예약 u8, 플래그 u8 (0x01 오른쪽에서 왼쪽, 0x02 값 숨김), 최소·최대 길이 u8, CFColor, CFVO × 2.
+/// x14 확장 가운데 레거시에 남는 것은 길이와 방향(오른쪽에서 왼쪽만)뿐이다 — 테두리·음수 색·축은 저장되지 않는다
+/// (x14 조건부 서식 실험. 한셀은 다시 읽을 때 방향도 버리고 `negativeBarColorSameAsPositive="1"
+/// axisPosition="none"` 을 채운다)
+fn legacy_data_bar(r: &mut Rd, dec: &CfvoDecoder) -> Option<DataBar> {
     r.take(1);
     let (flags, min, max) = (r.u8()?, r.u8()?, r.u8()?);
     let color = legacy_cf_color(r);
     let mut cfvos = Vec::new();
     for _ in 0..2 {
-        cfvos.extend(legacy_cfvo(r));
+        cfvos.extend(legacy_cfvo(r, dec));
     }
+    let ext = (flags & 0x01 != 0).then(|| crate::model::DataBarExt {
+        cfvos: cfvos.clone(),
+        direction: Some("rightToLeft".into()),
+        ..Default::default()
+    });
     Some(DataBar {
         cfvos,
         color,
         show_value: flags & 0x02 == 0,
         min_length: Some(min as u32).filter(|&v| v != 10),
         max_length: Some(max as u32).filter(|&v| v != 90),
+        ext,
     })
 }
 
 /// CFMultistate: 예약 u8, 아이콘 수 u8, 집합 번호 u8, 플래그 u8 (0x01 아이콘만, 0x04 거꾸로),
-/// (CFVO + fEqual u8 + 예약 u32) × n
-fn legacy_icon_set(r: &mut Rd) -> Option<IconSet> {
+/// (CFVO + fEqual u8 + 예약 u32) × n. 사용자 지정 아이콘은 저장되지 않는다 (x14 조건부 서식 실험)
+fn legacy_icon_set(r: &mut Rd, dec: &CfvoDecoder) -> Option<IconSet> {
     r.take(1);
     let (n, set, flags) = (r.u8()?, r.u8()?, r.u8()?);
     let mut cfvos = Vec::new();
     for _ in 0..n {
-        let mut c = legacy_cfvo(r)?;
+        let mut c = legacy_cfvo(r, dec)?;
         c.gte = r.u8()? != 0;
         r.take(4);
         cfvos.push(c);
@@ -3050,6 +3101,7 @@ fn legacy_icon_set(r: &mut Rd) -> Option<IconSet> {
         show_value: flags & 0x01 == 0,
         reverse: flags & 0x04 != 0,
         percent: true,
+        custom_icons: Vec::new(),
     })
 }
 
@@ -3493,6 +3545,39 @@ mod tests {
         let f = d.len();
         d.extend_from_slice(&[0x1D, 1]);
         assert_eq!(cf_dxf_id(&d, f, true, &t), Some(1));
+    }
+
+    /// x14 조건부 서식 실험에서 한셀이 쓴 CF12 의 기준 값: 수식으로 쓴 값(PtgInt), 종류 7 = 수식, 숫자 f64
+    #[test]
+    fn legacy_cfvo_values() {
+        let dec = |t: &[u8]| match t {
+            [0x1e, v, 0] => Some(v.to_string()),
+            [0x44, ..] => Some("$H$12".to_string()),
+            _ => None,
+        };
+        let mut b = vec![4, 3, 0, 0x1e, 33, 0];
+        b.extend_from_slice(&[7, 7, 0, 0x44, 0x0b, 0, 0, 0, 7, 0]);
+        b.push(5);
+        b.extend_from_slice(&[0, 0]);
+        b.extend_from_slice(&10.0f64.to_le_bytes());
+        b.extend_from_slice(&[2, 0, 0]);
+        let mut r = Rd::new(&b);
+        let v: Vec<_> = (0..4)
+            .map(|_| {
+                let c = legacy_cfvo(&mut r, &dec).unwrap();
+                (c.kind, c.val)
+            })
+            .collect();
+        assert_eq!(
+            v,
+            [
+                ("percent".into(), Some("33".into())),
+                ("formula".into(), Some("$H$12".into())),
+                ("percentile".into(), Some("10".into())),
+                ("min".into(), None)
+            ]
+        );
+        assert_eq!(r.left(), 0);
     }
 
     #[test]

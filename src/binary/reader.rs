@@ -146,6 +146,226 @@ fn sqrfx(r: &mut Rd) -> String {
     v.join(" ")
 }
 
+/// FRTHeader: 플래그 u32 (0x01 fRef, 0x02 fSqref, 0x04 fFormula, 0x08 fRelID) 뒤에 그 목록들 ([MS-XLSB]).
+/// 첫 범위 목록과 수식 토큰열들을 돌려준다. 수식은 `플래그 u32, cce u32, cb u32, rgce, rgcb` (관측: BrtCFVO14)
+fn frt_header<'a>(r: &mut Rd<'a>) -> Option<(Option<String>, Vec<&'a [u8]>)> {
+    let flags = r.u32()?;
+    if flags & 0x01 != 0 {
+        let n = r.u32()? as usize;
+        r.take(n.checked_mul(20)?)?;
+    }
+    let mut sqref = None;
+    if flags & 0x02 != 0 {
+        for i in 0..r.u32()? {
+            r.u32()?;
+            let s = sqrfx(r);
+            if i == 0 {
+                sqref = Some(s);
+            }
+        }
+    }
+    let mut formulas = Vec::new();
+    if flags & 0x04 != 0 {
+        for _ in 0..r.u32()? {
+            r.u32()?;
+            let cce = r.u32()? as usize;
+            let cb = r.u32()? as usize;
+            formulas.push(r.take(cce)?);
+            r.take(cb)?;
+        }
+    }
+    if flags & 0x08 != 0 {
+        r.nwstr()?;
+    }
+    Some((sqref, formulas))
+}
+
+/// x14 구역의 색 (BrtColor14 의 BrtColor). 한셀은 RGB 색의 색인 바이트에 빨강 값을 넣고, 색인 색은 RGB 종류에
+/// 색인 바이트만 채워(RGB 0) 쓴다 (x14 조건부 서식 실험: `indexed="10"` → `05 0a 00 00 00 00 00 ff`).
+/// 자동 색도 검정과 같은 바이트로 쓰므로 둘은 구별할 수 없다
+fn x14_color(b: &[u8]) -> Option<Color> {
+    let (kind, index, rgb) = (b[0] >> 1, b[1], &b[4..7]);
+    Some(match kind {
+        0 => Color {
+            auto: true,
+            ..Default::default()
+        },
+        1 => Color {
+            indexed: Some(index as u32),
+            ..Default::default()
+        },
+        3 => Color {
+            theme: Some(index as u32),
+            ..Default::default()
+        },
+        _ if index != rgb[0] && rgb == [0, 0, 0] => Color {
+            indexed: Some(index as u32),
+            ..Default::default()
+        },
+        _ => Color {
+            rgb: Some(format!("ff{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])),
+            ..Default::default()
+        },
+    })
+}
+
+/// BrtColor14 들을 데이터 막대의 색 자리(테두리, 음수 채우기, 음수 테두리, 축)에 놓는다. 한셀은 모델에 있는 색만
+/// 이 순서로 쓰고 종류를 적지 않는다 (색 조합 실험: 색 조합이 달라도 BrtBeginDatabar14 는 같다) — 넷이면 모두,
+/// 아니면 플래그로 쓰임새가 있는 자리(테두리 켬, 음수 색 다름, 테두리 켬 + 음수 테두리 다름, 축 있음)를 고르고,
+/// 수가 맞지 않으면 음수 채우기 → 축 → 테두리 → 음수 테두리 순으로 넣고 뺀다 (Excel·한셀이 흔히 쓰는 조합:
+/// 넷, 테두리·음수 채우기·축, 음수 채우기·축)
+fn assign_bar_colors(colors: Vec<Color>, ext: &mut crate::model::DataBarExt) {
+    let n = colors.len().min(4);
+    let expected = [
+        ext.border,
+        !ext.negative_same_as_positive,
+        ext.border && !ext.negative_border_same_as_positive,
+        ext.axis_position.as_deref() != Some("none"),
+    ];
+    let mut on = expected;
+    const PRIORITY: [usize; 4] = [1, 3, 0, 2];
+    while on.iter().filter(|&&x| x).count() > n {
+        if let Some(&k) = PRIORITY.iter().rev().find(|&&k| on[k]) {
+            on[k] = false;
+        }
+    }
+    while on.iter().filter(|&&x| x).count() < n {
+        if let Some(&k) = PRIORITY.iter().find(|&&k| !on[k]) {
+            on[k] = true;
+        }
+    }
+    let mut it = colors.into_iter();
+    for (k, slot) in [
+        &mut ext.border_color,
+        &mut ext.negative_fill_color,
+        &mut ext.negative_border_color,
+        &mut ext.axis_color,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if on[k] {
+            *slot = it.next();
+        }
+    }
+}
+
+/// x14 구역의 규칙 하나 (BrtBeginCFRule14 … BrtEndCFRule14)
+#[derive(Default)]
+struct X14Rule {
+    sqref: String,
+    kind: u32,
+    priority: u32,
+    guid: [u8; 16],
+    /// BrtBeginDatabar14: 길이 최소·최대, 값 표시, 방향, 축 위치, 플래그
+    bar: Option<[u8; 6]>,
+    /// BrtBeginIconSet14: 집합 번호, 플래그
+    icons: Option<(i32, u16)>,
+    cfvos: Vec<Cfvo>,
+    colors: Vec<Color>,
+    custom_icons: Vec<(String, u32)>,
+}
+
+/// x14 아이콘 집합 번호 (-1 은 아이콘 없음 `NoIcons`)
+fn icon_set_name(v: i32) -> String {
+    usize::try_from(v)
+        .ok()
+        .and_then(|i| ICON_SETS.get(i))
+        .unwrap_or(&"NoIcons")
+        .to_string()
+}
+
+/// x14 구역 규칙을 본 규칙(BrtCFRuleExt 의 GUID 로 이어진 것)에 더하거나 x14 구역 규칙으로 더한다.
+/// 데이터 막대·아이콘 집합만 — 한셀은 x14 구역 수식 규칙의 수식을 바이너리에 쓰지 않는다 (x14 조건부 서식 실험)
+fn merge_x14_rules(
+    sheet: &mut Sheet,
+    rules: Vec<X14Rule>,
+    guids: &HashMap<[u8; 16], (usize, usize)>,
+) {
+    for x in rules {
+        let target = guids.get(&x.guid).copied();
+        let mut rule_icons = x.icons.map(|(set, f)| IconSet {
+            set: icon_set_name(set),
+            cfvos: x.cfvos.clone(),
+            show_value: f & 0x02 == 0,
+            reverse: f & 0x04 != 0,
+            percent: true,
+            custom_icons: x.custom_icons.clone(),
+        });
+        let ext = x.bar.map(|[_, _, _, dir, axis, f]| {
+            let mut e = crate::model::DataBarExt {
+                cfvos: x.cfvos.clone(),
+                border: f & 0x01 != 0,
+                gradient: f & 0x02 != 0,
+                direction: match dir {
+                    1 => Some("leftToRight".into()),
+                    2 => Some("rightToLeft".into()),
+                    _ => None,
+                },
+                negative_same_as_positive: f & 0x04 == 0,
+                negative_border_same_as_positive: f & 0x08 == 0,
+                axis_position: match axis {
+                    1 => Some("middle".into()),
+                    2 => Some("none".into()),
+                    _ => None,
+                },
+                ..Default::default()
+            };
+            assign_bar_colors(x.colors.clone(), &mut e);
+            e
+        });
+        let apply_bar = |bar: &mut DataBar| {
+            if let (Some([min, max, show, ..]), Some(e)) = (x.bar, ext.clone()) {
+                bar.min_length = Some(min as u32).filter(|&v| v != 10);
+                bar.max_length = Some(max as u32).filter(|&v| v != 90);
+                bar.show_value = show != 0;
+                bar.ext = Some(e);
+            }
+        };
+        let main = target.and_then(|(i, j)| {
+            sheet
+                .conditional_formats
+                .get_mut(i)
+                .and_then(|c| c.rules.get_mut(j))
+        });
+        match (x.kind, main) {
+            (4, Some(rule)) => {
+                if let Some(bar) = rule.data_bar.as_mut() {
+                    apply_bar(bar);
+                }
+            }
+            (6, Some(rule)) => {
+                if let Some(i) = rule_icons.take() {
+                    rule.icon_set = Some(i);
+                }
+            }
+            (4 | 6, None) => {
+                let mut rule = CfRule {
+                    kind: if x.kind == 4 { "dataBar" } else { "iconSet" }.into(),
+                    priority: x.priority,
+                    x14: true,
+                    icon_set: rule_icons.take(),
+                    ..Default::default()
+                };
+                if x.kind == 4 {
+                    let mut bar = DataBar {
+                        cfvos: x.cfvos.clone(),
+                        show_value: true,
+                        ..Default::default()
+                    };
+                    apply_bar(&mut bar);
+                    rule.data_bar = Some(bar);
+                }
+                sheet.conditional_formats.push(ConditionalFormat {
+                    sqref: x.sqref.clone(),
+                    rules: vec![rule],
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
 /// 아이콘 집합 번호 → 이름 ([MS-XLSB] 2.5.75 IconSet)
 const ICON_SETS: [&str; 20] = [
     "3Arrows",
@@ -1286,10 +1506,127 @@ fn read_sheet(
             })
             .map(|(_, t)| t.clone())
     };
+    // 조건부 서식 수식·값의 토큰열 → 글 (기준 셀 = 범위의 왼쪽 위)
+    let decode_at = |t: &[u8], base: CellRef| -> Option<String> {
+        let ctx = Context {
+            xti_sheets,
+            names,
+            xti_names: &[],
+            base,
+            xlsb: true,
+            row_shift: 0,
+        };
+        match formula::decode(t, &ctx) {
+            Ok(Decoded::Text(s)) => Some(s),
+            _ => None,
+        }
+    };
+    // x14 조건부 서식: 본 규칙의 GUID(BrtCFRuleExt) → (서식, 규칙) 위치, x14 구역의 규칙들과 지금 범위
+    let mut cf_guids: HashMap<[u8; 16], (usize, usize)> = HashMap::new();
+    let mut x14_rules: Vec<X14Rule> = Vec::new();
+    let mut x14_sqref = String::new();
     let recs: Vec<Record> = biff12::records(data);
     for rec in &recs {
         let mut r = Rd::new(rec.data);
         match rec.rtype {
+            1146 => {
+                // BrtCFRuleExt: FRTHeader + GUID — 바로 앞 본 규칙을 x14 구역의 같은 GUID 규칙과 잇는다
+                if frt_header(&mut r).is_some()
+                    && let Some(g) = r.take(16)
+                    && let Some(i) = sheet.conditional_formats.len().checked_sub(1)
+                    && let Some(j) = sheet.conditional_formats[i].rules.len().checked_sub(1)
+                {
+                    let mut guid = [0u8; 16];
+                    guid.copy_from_slice(g);
+                    cf_guids.insert(guid, (i, j));
+                }
+            }
+            1046 => {
+                // BrtBeginConditionalFormatting14: FRTHeader (범위), ccf u32, fPivot u32
+                if let Some((Some(sq), _)) = frt_header(&mut r) {
+                    x14_sqref = sq;
+                }
+            }
+            1048 => {
+                // BrtBeginCFRule14: FRTHeader, iType, iTemplate, dxfId, iPri (본 규칙과 이어지면 -1), iParam,
+                // 예약 ×2 (u32), 플래그 u16, cbFmla ×3 (u32), strParam, GUID
+                if frt_header(&mut r).is_none() {
+                    continue;
+                }
+                let v: Vec<u32> = (0..7).map(|_| r.u32().unwrap_or(0)).collect();
+                r.take(2 + 12);
+                let _ = r.nwstr();
+                let mut x = X14Rule {
+                    sqref: x14_sqref.clone(),
+                    kind: v[0],
+                    priority: v[3],
+                    ..Default::default()
+                };
+                if let Some(g) = r.take(16) {
+                    x.guid.copy_from_slice(g);
+                }
+                x14_rules.push(x);
+            }
+            1051 => {
+                // BrtBeginDatabar14: FRTHeader, 길이 최소 u8, 최대 u8, 값 표시 u8, 방향 u8 (0 context,
+                // 1 leftToRight, 2 rightToLeft), 축 u8 (0 automatic, 1 middle, 2 none), 플래그 u8 (0x01 테두리,
+                // 0x02 그라데이션, 0x04 음수 색 다름, 0x08 음수 테두리 색 다름) — x14 조건부 서식 실험
+                if let (Some(_), Some(x)) = (frt_header(&mut r), x14_rules.last_mut())
+                    && let Some(b) = r.take(6)
+                {
+                    let mut v = [0u8; 6];
+                    v.copy_from_slice(b);
+                    x.bar = Some(v);
+                }
+            }
+            1052 => {
+                // BrtBeginIconSet14: FRTHeader, 집합 i32, 플래그 u16 (0x01 사용자 지정, 0x02 아이콘만, 0x04 거꾸로)
+                if let (Some(_), Some(x)) = (frt_header(&mut r), x14_rules.last_mut())
+                    && let (Some(set), Some(f)) = (r.u32(), r.u16())
+                {
+                    x.icons = Some((set as i32, f));
+                }
+            }
+            1050 => {
+                // BrtCFVO14: FRTHeader (값의 수식), iType u32, numParam f64, fSaveGTE u32, fGTE u32, cce u32.
+                // 한셀은 xm:f 로 받은 값을 수식(PtgInt 등)으로 쓴다
+                let base = sqref_base(&x14_sqref);
+                let Some((_, fmls)) = frt_header(&mut r) else {
+                    continue;
+                };
+                let (Some(ty), Some(num), Some(save_gte), Some(gte)) =
+                    (r.u32(), r.f64(), r.u32(), r.u32())
+                else {
+                    continue;
+                };
+                let val = fmls
+                    .first()
+                    .and_then(|t| decode_at(t, base))
+                    .or_else(|| matches!(ty, 1 | 4 | 5).then(|| formula::number_text(num)));
+                if let Some(x) = x14_rules.last_mut() {
+                    x.cfvos.push(Cfvo {
+                        kind: cfvo_kind(ty).into(),
+                        val,
+                        gte: save_gte == 0 || gte != 0,
+                    });
+                }
+            }
+            1055 => {
+                // BrtColor14: FRTHeader + BrtColor
+                if let (Some(_), Some(x)) = (frt_header(&mut r), x14_rules.last_mut())
+                    && let Some(c) = r.take(8).and_then(x14_color)
+                {
+                    x.colors.push(c);
+                }
+            }
+            1112 => {
+                // BrtCFIcon: FRTHeader, 집합 i32 (-1 = 아이콘 없음), 번호 u32
+                if let (Some(_), Some(x)) = (frt_header(&mut r), x14_rules.last_mut())
+                    && let (Some(set), Some(id)) = (r.u32(), r.u32())
+                {
+                    x.custom_icons.push((icon_set_name(set as i32), id));
+                }
+            }
             148 => {
                 if let (Some(r1), Some(r2), Some(c1), Some(c2)) =
                     (r.u32(), r.u32(), r.u32(), r.u32())
@@ -1477,12 +1814,18 @@ fn read_sheet(
                             show_value: f & 0x02 == 0,
                             reverse: f & 0x04 != 0,
                             percent: true,
+                            custom_icons: Vec::new(),
                         });
                     }
                 }
             }
             471 | 564 => {
                 // BrtCFVO (iType u32, numParam f64, fSaveGTE u32, fGTE u32, cbFmla u32 + 수식) / BrtColor
+                let base = sheet
+                    .conditional_formats
+                    .last()
+                    .map(|c| sqref_base(&c.sqref))
+                    .unwrap_or_default();
                 let Some(rule) = sheet
                     .conditional_formats
                     .last_mut()
@@ -1494,20 +1837,15 @@ fn read_sheet(
                     let ty = r.u32().unwrap_or(0);
                     let num = r.f64().unwrap_or(0.0);
                     let (save_gte, gte) = (r.u32().unwrap_or(0), r.u32().unwrap_or(1));
-                    let kind = match ty {
-                        1 => "num",
-                        2 => "min",
-                        3 => "max",
-                        4 => "percent",
-                        5 => "percentile",
-                        6 => "formula",
-                        7 => "autoMin",
-                        8 => "autoMax",
-                        _ => "num",
-                    };
+                    // cbFmla u32 뒤에 CFParsedFormula — 값이 수식이면(x14 의 xm:f 에서 온 값 포함) 그 글이 값이다
+                    let fml = (r.u32().unwrap_or(0) > 0)
+                        .then(|| parsed_formula(&mut r))
+                        .flatten()
+                        .and_then(|t| decode_at(t, base));
                     let cfvo = Cfvo {
-                        kind: kind.into(),
-                        val: matches!(ty, 1 | 4 | 5).then(|| formula::number_text(num)),
+                        kind: cfvo_kind(ty).into(),
+                        val: fml
+                            .or_else(|| matches!(ty, 1 | 4 | 5).then(|| formula::number_text(num))),
                         gte: save_gte == 0 || gte != 0,
                     };
                     if let Some(c) = rule.color_scale.as_mut() {
@@ -1953,8 +2291,31 @@ fn read_sheet(
         }
     }
     let _ = bad;
+    merge_x14_rules(sheet, x14_rules, &cf_guids);
     sheet.cells.sort_by_key(|c| (c.r.row, c.r.col));
     Ok(())
+}
+
+/// 범위 목록의 첫 범위의 왼쪽 위 (조건부 서식 수식의 기준 셀)
+fn sqref_base(sqref: &str) -> CellRef {
+    CellRange::parse(sqref.split(' ').next().unwrap_or(""))
+        .map(|r| r.start)
+        .unwrap_or_default()
+}
+
+/// BrtCFVO / BrtCFVO14 의 iType: 1 num, 2 min, 3 max, 4 percent, 5 percentile, 7 formula, 8 autoMin,
+/// 9 autoMax (x14 조건부 서식 실험. 6 은 관측되지 않았다)
+fn cfvo_kind(ty: u32) -> &'static str {
+    match ty {
+        2 => "min",
+        3 => "max",
+        4 => "percent",
+        5 => "percentile",
+        6 | 7 => "formula",
+        8 => "autoMin",
+        9 => "autoMax",
+        _ => "num",
+    }
 }
 
 #[cfg(test)]
@@ -2045,5 +2406,187 @@ mod tests {
             "pageFieldLabels"
         );
         assert!(table_style_element(99, 1, 0).is_none());
+    }
+
+    /// BIFF12 레코드: 종류·길이 7비트 가변 길이 + 내용
+    fn rec(t: u32, data: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        for (mut v, max) in [(t, 2), (data.len() as u32, 4)] {
+            for _ in 0..max {
+                let byte = (v & 0x7F) as u8;
+                v >>= 7;
+                if v == 0 {
+                    b.push(byte);
+                    break;
+                }
+                b.push(byte | 0x80);
+            }
+        }
+        b.extend_from_slice(data);
+        b
+    }
+
+    fn le(v: &[u32]) -> Vec<u8> {
+        v.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    /// x14 조건부 서식 실험에서 한셀이 쓴 바이트 그대로 (데이터 막대 A1:A12, 사용자 지정 아이콘 D1:D12)
+    #[test]
+    fn x14_conditional_formats() {
+        let guid = |n: u8| {
+            let mut g = vec![0u8; 16];
+            g[7] = 0x40;
+            g[8] = 0x80;
+            g[15] = n;
+            g
+        };
+        let sq = |c: u32| le(&[1, 0, 11, c, c]);
+        let mut s = Vec::new();
+        // 본 규칙: BrtBeginConditionalFormatting, BrtBeginCFRule (데이터 막대, 우선순위 1), BrtBeginDatabar (10/90),
+        // BrtCFVO 최소·최대, BrtColor, BrtEndDatabar, BrtCFRuleExt(GUID 1)
+        s.extend(rec(461, &[le(&[1, 0]), sq(0)].concat()));
+        let mut cf = le(&[4, 3, u32::MAX, 1, 0, 0, 0]);
+        cf.extend_from_slice(&[0, 0]);
+        cf.extend(le(&[0, 0, 0, u32::MAX]));
+        s.extend(rec(463, &cf));
+        s.extend(rec(467, &[10, 90, 1]));
+        s.extend(rec(471, &[le(&[2]), vec![0; 20]].concat()));
+        s.extend(rec(471, &[le(&[3]), vec![0; 20]].concat()));
+        s.extend(rec(564, &[5, 0x63, 0, 0, 0x63, 0x8e, 0xc6, 0xff]));
+        s.extend(rec(468, &[]));
+        s.extend(rec(1146, &[vec![0; 4], guid(1)].concat()));
+        s.extend(rec(464, &[]));
+        s.extend(rec(462, &[]));
+        // x14 구역: 범위, 규칙(GUID 1), BrtBeginDatabar14 (5/95, 오른쪽에서 왼쪽, 축 가운데, 테두리·음수 색 다름),
+        // autoMin·autoMax, 색 넷
+        let frt_sq = |c: u32| [le(&[2, 1, 2]), sq(c), le(&[1, 0])].concat();
+        let rule14 = |kind: u32, tmpl: u32, pri: u32, n: u8| {
+            let mut b = le(&[0, kind, tmpl, u32::MAX, pri, 0, 0, 0]);
+            b.extend_from_slice(&[0, 0]);
+            b.extend(le(&[0, 0, 0, 0]));
+            b.extend(guid(n));
+            b.extend(le(&[1]));
+            b
+        };
+        s.extend(rec(1046, &frt_sq(0)));
+        s.extend(rec(1048, &rule14(4, 3, u32::MAX, 1)));
+        s.extend(rec(1051, &[0, 0, 0, 0, 5, 95, 1, 2, 1, 0x0d, 0]));
+        for t in [8, 9] {
+            s.extend(rec(1050, &[le(&[0, t]), vec![0; 20]].concat()));
+        }
+        for c in [
+            [5, 0x1f, 0, 0, 0x1f, 0x4e, 0x79, 0xff],
+            [5, 0xff, 0, 0, 0xff, 0, 0, 0xff],
+            [5, 0x70, 0, 0, 0x70, 0x30, 0xa0, 0xff],
+            [5, 0x40, 0, 0, 0, 0, 0, 0xff],
+        ] {
+            s.extend(rec(1055, &[vec![0; 4], c.to_vec()].concat()));
+        }
+        s.extend(rec(1156, &[]));
+        s.extend(rec(1049, &[]));
+        s.extend(rec(1047, &[]));
+        // x14 구역에만 있는 아이콘 집합 (3Arrows, 사용자 지정, 우선순위 5): 값은 수식 (PtgInt)
+        s.extend(rec(1046, &frt_sq(3)));
+        s.extend(rec(1048, &rule14(6, 4, 5, 5)));
+        s.extend(rec(1052, &[le(&[0, 0]), vec![1, 0]].concat()));
+        for (v, ty, gte) in [(0u8, 4u32, 1u32), (0, 1, 0), (67, 4, 1)] {
+            let mut b = le(&[4, 1, 2, 3, 0]);
+            b.extend_from_slice(&[0x1e, v, 0]);
+            b.extend(le(&[ty]));
+            b.extend_from_slice(&[0; 8]);
+            b.extend(le(&[1, gte, 3]));
+            s.extend(rec(1050, &b));
+        }
+        for (set, id) in [(2u32, 0u32), (u32::MAX, 0), (17, 2)] {
+            s.extend(rec(1112, &le(&[0, set, id])));
+        }
+        s.extend(rec(1155, &[]));
+        s.extend(rec(1049, &[]));
+        s.extend(rec(1047, &[]));
+
+        let mut sheet = Sheet::default();
+        let wb = Workbook::default();
+        read_sheet(&s, &mut sheet, &wb, &[], (&Vec::new(), &Vec::new())).unwrap();
+        let bar_rule = &sheet.conditional_formats[0].rules[0];
+        let bar = bar_rule.data_bar.as_ref().unwrap();
+        assert_eq!((bar.min_length, bar.max_length), (Some(5), Some(95)));
+        let e = bar.ext.as_ref().unwrap();
+        assert_eq!(e.cfvos[0].kind, "autoMin");
+        assert_eq!(e.cfvos[1].kind, "autoMax");
+        assert!(e.border && !e.gradient && !e.negative_same_as_positive);
+        assert!(!e.negative_border_same_as_positive);
+        assert_eq!(e.direction.as_deref(), Some("rightToLeft"));
+        assert_eq!(e.axis_position.as_deref(), Some("middle"));
+        assert_eq!(
+            e.border_color.as_ref().unwrap().rgb.as_deref(),
+            Some("ff1f4e79")
+        );
+        assert_eq!(e.axis_color.as_ref().unwrap().indexed, Some(64));
+        let icons = &sheet.conditional_formats[1];
+        assert_eq!(icons.sqref, "D1:D12");
+        let r = &icons.rules[0];
+        assert!(r.x14);
+        assert_eq!(r.priority, 5);
+        let i = r.icon_set.as_ref().unwrap();
+        assert_eq!(i.set, "3Arrows");
+        let vals: Vec<_> = i.cfvos.iter().map(|c| (c.val.clone(), c.gte)).collect();
+        assert_eq!(
+            vals,
+            [
+                (Some("0".into()), true),
+                (Some("0".into()), false),
+                (Some("67".into()), true)
+            ]
+        );
+        assert_eq!(
+            i.custom_icons,
+            [
+                ("3Flags".into(), 0),
+                ("NoIcons".into(), 0),
+                ("3Stars".into(), 2)
+            ]
+        );
+    }
+
+    /// 색 조합 실험: 종류 없이 쓰인 색을 플래그로 자리에 놓는다
+    #[test]
+    fn data_bar_color_slots() {
+        let c = |v: u8| Color {
+            rgb: Some(format!("ff{v:02x}{v:02x}{v:02x}")),
+            ..Default::default()
+        };
+        let slots = |e: &crate::model::DataBarExt| {
+            [
+                &e.border_color,
+                &e.negative_fill_color,
+                &e.negative_border_color,
+                &e.axis_color,
+            ]
+            .map(|x| x.is_some())
+        };
+        // 테두리 켬·음수 색 다름·음수 테두리 같음·축 자동 → 셋은 테두리·음수 채우기·축
+        let mut e = crate::model::DataBarExt {
+            border: true,
+            ..Default::default()
+        };
+        assign_bar_colors(vec![c(1), c(2), c(3)], &mut e);
+        assert_eq!(slots(&e), [true, true, false, true]);
+        // 테두리 없음 → 둘은 음수 채우기·축 (한셀 COM 이 만드는 막대)
+        let mut e = crate::model::DataBarExt {
+            negative_border_same_as_positive: false,
+            ..Default::default()
+        };
+        assign_bar_colors(vec![c(1), c(2)], &mut e);
+        assert_eq!(slots(&e), [false, true, false, true]);
+        // 테두리 켬인데 둘뿐 → 테두리를 먼저 뺀다
+        let mut e = crate::model::DataBarExt {
+            border: true,
+            ..Default::default()
+        };
+        assign_bar_colors(vec![c(1), c(2)], &mut e);
+        assert_eq!(slots(&e), [false, true, false, true]);
+        let mut e = crate::model::DataBarExt::default();
+        assign_bar_colors(vec![c(1), c(2), c(3), c(4)], &mut e);
+        assert_eq!(slots(&e), [true; 4]);
     }
 }

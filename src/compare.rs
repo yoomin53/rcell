@@ -680,9 +680,11 @@ fn cf_key(styles: &Styles, sh: &Sheet) -> String {
                 let v: Vec<String> = d.cfvos.iter().map(cfvo).collect();
                 let _ = write!(
                     k,
-                    " bar={v:?}{} show={}",
+                    " bar={v:?}{} show={} len={}-{}",
                     color_key(d.color.as_ref()),
-                    d.show_value
+                    d.show_value,
+                    d.min_length.unwrap_or(10),
+                    d.max_length.unwrap_or(90)
                 );
             }
             if let Some(i) = &r.icon_set {
@@ -701,6 +703,77 @@ fn cf_key(styles: &Styles, sh: &Sheet) -> String {
             }
             let _ = write!(k, " {}", dxf_key(styles, r.dxf_id));
             rules.push((sq.clone(), r.priority, k));
+        }
+    }
+    rules.sort();
+    rules
+        .iter()
+        .map(|(sq, p, k)| format!("{sq}#{p} {k}"))
+        .collect::<Vec<_>>()
+        .join("\n      ")
+}
+
+/// 조건부 서식의 x14 확장 (레거시에 남지 않는 정보): 데이터 막대의 확장 — 없으면 한셀이 저장할 때 만드는 값
+/// ([`crate::model::DataBarExt::implied`]) — 과 아이콘 집합의 사용자 지정 아이콘.
+/// 색은 자동과 검정을 같게 본다: 한셀은 바이너리에 둘을 같은 바이트로 쓴다 (x14 조건부 서식 실험)
+fn x14_key(sh: &Sheet) -> String {
+    let color = |c: &Option<Color>| match color_key(c.as_ref()).as_str() {
+        "auto" => "000000".to_string(),
+        k => k.to_string(),
+    };
+    let mut rules: Vec<(String, u32, String)> = Vec::new();
+    for cf in &sh.conditional_formats {
+        let sq = norm_ranges(Some(&cf.sqref));
+        for r in &cf.rules {
+            if let Some(d) = &r.data_bar {
+                let e = d
+                    .ext
+                    .clone()
+                    .unwrap_or_else(|| crate::model::DataBarExt::implied(d));
+                let v: Vec<String> = e
+                    .cfvos
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "{}{}",
+                            c.kind,
+                            c.val
+                                .as_deref()
+                                .map(|v| format!("={v}"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect();
+                let colors: Vec<String> = [
+                    &e.border_color,
+                    &e.negative_fill_color,
+                    &e.negative_border_color,
+                    &e.axis_color,
+                ]
+                .into_iter()
+                .map(color)
+                .collect();
+                rules.push((
+                    sq.clone(),
+                    r.priority,
+                    format!(
+                        "bar {v:?} border={} gradient={} dir={} negSame={} negBorderSame={} axis={} colors={colors:?}",
+                        e.border,
+                        e.gradient,
+                        e.direction.as_deref().unwrap_or("context"),
+                        e.negative_same_as_positive,
+                        e.negative_border_same_as_positive,
+                        e.axis_position.as_deref().unwrap_or("automatic")
+                    ),
+                ));
+            }
+            if let Some(i) = r.icon_set.as_ref().filter(|i| !i.custom_icons.is_empty()) {
+                rules.push((
+                    sq.clone(),
+                    r.priority,
+                    format!("icons={:?}", i.custom_icons),
+                ));
+            }
         }
     }
     rules.sort();
@@ -1250,6 +1323,7 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
                 cf_key(&a.styles, sa),
                 cf_key(&b.styles, sb),
             );
+            diff(format!("{s} x14 확장"), x14_key(sa), x14_key(sb));
         }
         diff(format!("{s} 유효성"), dv_key(sa), dv_key(sb));
         diff(format!("{s} 보기"), view_key(sa), view_key(sb));

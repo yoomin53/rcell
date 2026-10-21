@@ -96,6 +96,41 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
 XFPropColor 는 `fValidRGB 1비트 + 종류 7비트 (0 자동, 1 색인, 2 RGB, 3 테마), icv u8, 밝기 i16, RGBA`. 종류 0, 또는 값
 `FF FF FF DF`(한셀의 자동 색 표지, 레거시는 RGB 종류로 쓴다)이면 자동이다. 한셀은 테마·색인 색을 RGB 로 바꿔 쓴다.
 
+### 2.3 조건부 서식의 x14 확장 (x14 조건부 서식 실험)
+
+본 규칙(`BrtBeginCFRule` 463 …)의 데이터 막대 뒤에 `BrtFRTBegin`(35) + `BrtCFRuleExt`(1146: FRTHeader u32 + GUID 16) +
+`BrtFRTEnd` 가 오고, 시트 끝(인쇄 설정 뒤)의 `BrtFRTBegin` 안에 x14 구역이 있다:
+
+```
+BrtBeginConditionalFormattings 1135
+  BrtBeginConditionalFormatting14 1046   FRTHeader (0x02 범위: cSqref u32, 플래그 u32, UncheckedSqRfX), ccf u32, fPivot u32
+    BrtBeginCFRule14 1048                FRTHeader, iType, iTemplate, dxfId, iPri (본 규칙과 이어지면 -1), iParam, 예약 ×2 (u32),
+                                         플래그 u16, cbFmla ×3 (u32), strParam, GUID 16, u32
+      BrtBeginDatabar14 1051             FRTHeader, 최소 u8, 최대 u8, 값 표시 u8, 방향 u8 (0 context, 1 leftToRight, 2 rightToLeft),
+                                         축 u8 (0 automatic, 1 middle, 2 none), 플래그 u8 (0x01 테두리, 0x02 그라데이션,
+                                         0x04 음수 색 다름, 0x08 음수 테두리 색 다름), 예약 u8
+        BrtCFVO14 1050 × 2               FRTHeader (0x04 수식: cFormula u32, (플래그 u32, cce u32, cb u32, rgce, rgcb) × n),
+                                         iType u32, numParam f64, fSaveGTE u32, fGTE u32, cce u32
+        BrtColor14 1055 × n              FRTHeader + BrtColor
+      BrtEndDatabar14 1156
+      BrtBeginIconSet14 1052             FRTHeader, 집합 i32, 플래그 u16 (0x01 사용자 지정, 0x02 아이콘만, 0x04 거꾸로)
+        BrtCFVO14 1050 × n, BrtCFIcon 1112 × n (FRTHeader, 집합 i32 — -1 아이콘 없음, 번호 u32)
+      BrtEndIconSet14 1155
+    BrtEndCFRule14 1049
+  BrtEndConditionalFormatting14 1047
+BrtEndConditionalFormattings 1136
+```
+
+- 기준 값 종류(`BrtCFVO` 471, `BrtCFVO14`): 1 num, 2 min, 3 max, 4 percent, 5 percentile, 7 formula, 8 autoMin, 9 autoMax.
+  `xm:f` 로 받은 값은 수식(PtgInt 등)으로 쓴다 — 본 규칙의 `BrtCFVO` 도 `cbFmla` 뒤 CFParsedFormula 에 담는다.
+- 본 규칙의 `BrtBeginDatabar`(467)는 x14 확장이 있으면 늘 `0a 5a 01`(10/90)이다. 길이는 1051 에 있다.
+- **색의 종류가 없다**: 한셀은 모델에 있는 색만 테두리·음수 채우기·음수 테두리·축 순서로 쓰고, 색 조합이 달라도 1051 이 같다
+  (색 조합 실험: 같은 속성에 색 0–3개를 바꾼 막대 9개). rcell 은 넷이면 모두, 아니면 플래그로 쓰임새가 있는 자리를 고른다
+  (`assign_bar_colors`). 한셀의 `.xlsb` 읽기는 셋을 테두리·음수 채우기·음수 테두리로 읽는다 — 저장본과 다르다.
+- BrtColor14 의 RGB 색은 색인 바이트에 빨강 값이 들어 있고, 색인 색은 RGB 종류에 색인 바이트만 채운다 (`indexed="10"` →
+  `05 0a 00 00 00 00 00 ff`). 자동 색은 검정과 같은 바이트다.
+- 수식 규칙의 x14 규칙(1048 iType 2)은 수식도 서식도 쓰지 않는다 — 한셀의 바이너리 저장이 잃는다.
+
 ## 3. 검증
 
 같은 문서를 XML 형식과 이 형식으로 함께 저장해(`tools/probe/make-corpus.ps1`) 비교한다.

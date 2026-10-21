@@ -380,6 +380,7 @@ fn conditional_formats_and_validations_roundtrip() {
                         show_value: false,
                         reverse: false,
                         percent: true,
+                        custom_icons: Vec::new(),
                     }),
                     ..Default::default()
                 },
@@ -619,4 +620,97 @@ fn margins_survive_truncation_to_hwpunit() {
     assert_eq!((m.header as f32 as f64 * 7200.0).trunc(), 3683.0);
     assert!((m.header - v).abs() < 1e-5);
     assert_eq!(m.left, 0.75);
+}
+
+#[test]
+fn x14_conditional_formats_roundtrip() {
+    use rcell::model::{CfRule, Cfvo, Color, ConditionalFormat, DataBar, DataBarExt, IconSet};
+    let rgb = |v: &str| Color {
+        rgb: Some(v.into()),
+        ..Default::default()
+    };
+    let cfvo = |kind: &str, val: Option<&str>| Cfvo {
+        kind: kind.into(),
+        val: val.map(str::to_string),
+        gte: true,
+    };
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    a.sheets[0].conditional_formats = vec![
+        ConditionalFormat {
+            sqref: "B1:B3".into(),
+            rules: vec![CfRule {
+                kind: "dataBar".into(),
+                priority: 1,
+                data_bar: Some(DataBar {
+                    cfvos: vec![cfvo("min", None), cfvo("max", None)],
+                    color: Some(rgb("ff638ec6")),
+                    show_value: false,
+                    min_length: Some(5),
+                    max_length: Some(95),
+                    ext: Some(DataBarExt {
+                        cfvos: vec![cfvo("autoMin", None), cfvo("num", Some("40"))],
+                        border: true,
+                        gradient: false,
+                        direction: Some("rightToLeft".into()),
+                        negative_border_same_as_positive: false,
+                        axis_position: Some("middle".into()),
+                        border_color: Some(rgb("ff1f4e79")),
+                        negative_fill_color: Some(rgb("ffff0000")),
+                        axis_color: Some(Color {
+                            indexed: Some(64),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                }),
+                ..Default::default()
+            }],
+        },
+        ConditionalFormat {
+            sqref: "C1:C3".into(),
+            rules: vec![CfRule {
+                kind: "iconSet".into(),
+                priority: 2,
+                icon_set: Some(IconSet {
+                    set: "3Arrows".into(),
+                    cfvos: vec![
+                        cfvo("percent", Some("0")),
+                        cfvo("num", Some("2")),
+                        cfvo("percentile", Some("70")),
+                    ],
+                    show_value: true,
+                    reverse: true,
+                    percent: true,
+                    custom_icons: vec![("3Flags".into(), 0), ("NoIcons".into(), 0)],
+                }),
+                ..Default::default()
+            }],
+        },
+    ];
+    let out = write(&a, Flavor::Cell).unwrap();
+    let mut pkg = rcell::open_package(out.clone()).unwrap();
+    let sheet = pkg
+        .read_string("xl/worksheets/sheet1.xml")
+        .unwrap()
+        .unwrap();
+    assert!(sheet.contains("<x14:dataBar minLength=\"5\" maxLength=\"95\" showValue=\"0\" border=\"1\" gradient=\"0\" direction=\"rightToLeft\" negativeBarBorderColorSameAsPositive=\"0\" axisPosition=\"middle\">"));
+    assert!(sheet.contains("<x14:cfIcon iconSet=\"NoIcons\" iconId=\"0\"/>"));
+    // 사용자 지정 아이콘이 있는 규칙은 x14 구역에만 쓴다
+    assert!(!sheet.contains("<x:iconSet"));
+    let b = rcell::from_bytes(out).unwrap();
+    let diffs = compare(&a, &b, Options::default());
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    let bar = b.sheets[0].conditional_formats[0].rules[0]
+        .data_bar
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        bar.ext,
+        a.sheets[0].conditional_formats[0].rules[0]
+            .data_bar
+            .as_ref()
+            .unwrap()
+            .ext
+    );
+    assert!(b.sheets[0].conditional_formats[1].rules[0].x14);
 }

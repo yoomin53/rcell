@@ -769,9 +769,115 @@ fn dxf_children(d: &crate::model::Dxf, hs: bool) -> String {
     s
 }
 
-/// `conditionalFormatting` 들 (CT_Worksheet 에서 mergeCells 다음)
-fn conditional_formats_xml(sheet: &Sheet) -> String {
+const X14: &str = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main";
+const XM: &str = "http://schemas.microsoft.com/office/excel/2006/main";
+
+/// x14 구역에 쓰는 규칙: x14 구역에서 읽은 것, Excel 2010 아이콘 집합, 사용자 지정 아이콘
+/// (한셀은 본 규칙의 3Stars 도 x14 구역으로 옮겨 쓴다 — x14 조건부 서식 실험)
+fn x14_only(r: &crate::model::CfRule) -> bool {
+    r.x14
+        || r.icon_set.as_ref().is_some_and(|i| {
+            !i.custom_icons.is_empty() || crate::model::X14_ONLY_ICON_SETS.contains(&i.set.as_str())
+        })
+}
+
+/// x14 구역의 기준 값: 값은 `xm:f` 로 쓴다
+fn x14_cfvo_xml(c: &crate::model::Cfvo) -> String {
+    let mut x = format!("<x14:cfvo type=\"{}\"", esc(&c.kind));
+    if !c.gte {
+        x.push_str(" gte=\"0\"");
+    }
+    match &c.val {
+        Some(v) => {
+            let _ = write!(x, "><xm:f>{}</xm:f></x14:cfvo>", esc(v));
+        }
+        None => x.push_str("/>"),
+    }
+    x
+}
+
+/// `x14:dataBar`: 한셀이 쓰는 속성 순서, 기본값은 생략. 색은 테두리·음수 채우기·음수 테두리·축 순서
+fn x14_data_bar_xml(bar: &crate::model::DataBar, ext: &crate::model::DataBarExt) -> String {
+    let mut s = String::from("<x14:dataBar");
+    if let Some(v) = bar.min_length {
+        let _ = write!(s, " minLength=\"{v}\"");
+    }
+    if let Some(v) = bar.max_length {
+        let _ = write!(s, " maxLength=\"{v}\"");
+    }
+    if !bar.show_value {
+        s.push_str(" showValue=\"0\"");
+    }
+    if ext.border {
+        s.push_str(" border=\"1\"");
+    }
+    if !ext.gradient {
+        s.push_str(" gradient=\"0\"");
+    }
+    if let Some(d) = &ext.direction {
+        let _ = write!(s, " direction=\"{}\"", esc(d));
+    }
+    if ext.negative_same_as_positive {
+        s.push_str(" negativeBarColorSameAsPositive=\"1\"");
+    }
+    if !ext.negative_border_same_as_positive {
+        s.push_str(" negativeBarBorderColorSameAsPositive=\"0\"");
+    }
+    if let Some(a) = &ext.axis_position {
+        let _ = write!(s, " axisPosition=\"{}\"", esc(a));
+    }
+    s.push('>');
+    for c in &ext.cfvos {
+        s.push_str(&x14_cfvo_xml(c));
+    }
+    for (name, c) in [
+        ("x14:borderColor", &ext.border_color),
+        ("x14:negativeFillColor", &ext.negative_fill_color),
+        ("x14:negativeBorderColor", &ext.negative_border_color),
+        ("x14:axisColor", &ext.axis_color),
+    ] {
+        if let Some(c) = c {
+            s.push_str(&color_el(name, c));
+        }
+    }
+    s.push_str("</x14:dataBar>");
+    s
+}
+
+/// `x14:iconSet`. 한셀은 x14 구역의 아이콘 집합에 늘 `custom="1"` 을 쓴다
+fn x14_icon_set_xml(i: &crate::model::IconSet) -> String {
+    let mut s = format!("<x14:iconSet iconSet=\"{}\"", esc(&i.set));
+    if !i.show_value {
+        s.push_str(" showValue=\"0\"");
+    }
+    if !i.percent {
+        s.push_str(" percent=\"0\"");
+    }
+    if i.reverse {
+        s.push_str(" reverse=\"1\"");
+    }
+    s.push_str(" custom=\"1\">");
+    for c in &i.cfvos {
+        s.push_str(&x14_cfvo_xml(c));
+    }
+    for (set, id) in &i.custom_icons {
+        let _ = write!(s, "<x14:cfIcon iconSet=\"{}\" iconId=\"{id}\"/>", esc(set));
+    }
+    s.push_str("</x14:iconSet>");
+    s
+}
+
+/// `conditionalFormatting` 들 (CT_Worksheet 에서 mergeCells 다음)과 시트 `extLst` 에 들어갈
+/// `x14:conditionalFormattings` 확장. 데이터 막대의 x14 확장은 본 규칙의 `x14:id` 로 잇는다
+/// (id 는 시트 번호와 규칙 순번으로 만든다 — 한셀은 읽은 id 를 그대로 다시 쓴다)
+fn conditional_formats_xml(sheet: &Sheet, sheet_no: usize) -> (String, String) {
     let mut s = String::new();
+    let mut x14 = String::new();
+    let mut next_id = 0usize;
+    let mut guid = || {
+        next_id += 1;
+        format!("{{{sheet_no:08X}-0000-4000-8000-{next_id:012X}}}")
+    };
     let cfvo = |c: &crate::model::Cfvo| {
         let mut x = format!("<x:cfvo type=\"{}\"", esc(&c.kind));
         if let Some(v) = &c.val {
@@ -784,8 +890,34 @@ fn conditional_formats_xml(sheet: &Sheet) -> String {
         x
     };
     for cf in &sheet.conditional_formats {
+        // x14 구역에만 쓰는 규칙
+        for r in cf.rules.iter().filter(|r| x14_only(r)) {
+            let body = if let Some(i) = &r.icon_set {
+                x14_icon_set_xml(i)
+            } else if let Some(bar) = &r.data_bar {
+                x14_data_bar_xml(
+                    bar,
+                    &bar.ext
+                        .clone()
+                        .unwrap_or_else(|| crate::model::DataBarExt::implied(bar)),
+                )
+            } else {
+                continue;
+            };
+            let _ = write!(
+                x14,
+                "<x14:conditionalFormatting xmlns:xm=\"{XM}\"><x14:cfRule type=\"{}\" priority=\"{}\" id=\"{}\">{body}</x14:cfRule><xm:sqref>{}</xm:sqref></x14:conditionalFormatting>",
+                esc(&r.kind),
+                r.priority,
+                guid(),
+                esc(&cf.sqref)
+            );
+        }
+        if cf.rules.iter().all(x14_only) {
+            continue;
+        }
         let _ = write!(s, "<x:conditionalFormatting sqref=\"{}\">", esc(&cf.sqref));
-        for r in &cf.rules {
+        for r in cf.rules.iter().filter(|r| !x14_only(r)) {
             let _ = write!(s, "<x:cfRule type=\"{}\"", esc(&r.kind));
             if let Some(d) = r.dxf_id {
                 let _ = write!(s, " dxfId=\"{d}\"");
@@ -854,6 +986,19 @@ fn conditional_formats_xml(sheet: &Sheet) -> String {
                     s.push_str(&color_el("x:color", col));
                 }
                 s.push_str("</x:dataBar>");
+                if let Some(ext) = &d.ext {
+                    let id = guid();
+                    let _ = write!(
+                        s,
+                        "<x:extLst><x:ext uri=\"{{B025F937-C7B1-47D3-B67F-A62EFF666E3E}}\" xmlns:x14=\"{X14}\"><x14:id>{id}</x14:id></x:ext></x:extLst>"
+                    );
+                    let _ = write!(
+                        x14,
+                        "<x14:conditionalFormatting xmlns:xm=\"{XM}\"><x14:cfRule type=\"dataBar\" id=\"{id}\">{}</x14:cfRule><xm:sqref>{}</xm:sqref></x14:conditionalFormatting>",
+                        x14_data_bar_xml(d, ext),
+                        esc(&cf.sqref)
+                    );
+                }
             }
             if let Some(i) = &r.icon_set {
                 let _ = write!(s, "<x:iconSet iconSet=\"{}\"", esc(&i.set));
@@ -876,7 +1021,12 @@ fn conditional_formats_xml(sheet: &Sheet) -> String {
         }
         s.push_str("</x:conditionalFormatting>");
     }
-    s
+    if !x14.is_empty() {
+        x14 = format!(
+            "<x:ext uri=\"{{78C0D931-6437-407d-A8EE-F0AAD7539E65}}\" xmlns:x14=\"{X14}\"><x14:conditionalFormattings>{x14}</x14:conditionalFormattings></x:ext>"
+        );
+    }
+    (s, x14)
 }
 
 /// `dataValidations` (CT_Worksheet 에서 conditionalFormatting 다음)
@@ -1067,6 +1217,7 @@ fn num(v: f64) -> String {
 
 fn sheet_xml(
     sheet: &Sheet,
+    sheet_no: usize,
     selected: bool,
     sst: &mut Sst,
     rich: &HashMap<&str, &RichText>,
@@ -1226,7 +1377,8 @@ fn sheet_xml(
         }
         s.push_str("</x:mergeCells>");
     }
-    s.push_str(&conditional_formats_xml(sheet));
+    let (cf, cf14) = conditional_formats_xml(sheet, sheet_no);
+    s.push_str(&cf);
     s.push_str(&data_validations_xml(sheet));
     if !sheet.hyperlinks.is_empty() {
         s.push_str("<x:hyperlinks>");
@@ -1256,6 +1408,10 @@ fn sheet_xml(
     }
     if !sheet.comments.is_empty() {
         s.push_str("<x:legacyDrawing r:id=\"rIdVml\"/>");
+    }
+    // 시트 확장 (CT_Worksheet 의 마지막 자식)
+    if !cf14.is_empty() {
+        let _ = write!(s, "<x:extLst>{cf14}</x:extLst>");
     }
     s.push_str("</x:worksheet>");
     s
@@ -1675,7 +1831,7 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
         .unwrap_or(0);
     for (i, sh) in worksheets.iter().enumerate() {
         let mut links = Vec::new();
-        let xml = sheet_xml(sh, i == first_visible, &mut sst, &rich, &mut links);
+        let xml = sheet_xml(sh, i + 1, i == first_visible, &mut sst, &rich, &mut links);
         sheet_parts.push((xml, links));
     }
     // 그리기 파트 이름: 원본 그대로 옮기는 파트(차트의 userShapes 등)와 겹치지 않게

@@ -257,7 +257,13 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
             && let Some(ws) = pkg.read_xml(&rel.target)?
         {
             let rels = pkg.relationships(&rel.target)?;
-            sheet::parse_worksheet(&ws, &mut sheet, &wb.shared_strings, &rels);
+            sheet::parse_worksheet(
+                &ws,
+                &mut sheet,
+                &wb.shared_strings,
+                &rels,
+                &mut wb.styles.dxfs,
+            );
             read_sheet_comments(pkg, &ws, &rels, &mut sheet)?;
             read_sheet_drawings(pkg, &rels, &mut wb.raw_parts, &mut sheet)?;
         }

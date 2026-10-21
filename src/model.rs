@@ -288,12 +288,18 @@ pub struct CfRule {
     pub data_bar: Option<DataBar>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon_set: Option<IconSet>,
+    /// x14 확장 구역(`x:extLst` 의 `x14:conditionalFormatting`)에만 있는 규칙. 한셀은 Excel 2010 아이콘 집합
+    /// (3Stars·3Triangles·5Boxes)과 x14 구역에서 읽은 아이콘 집합을 이 구역에 쓴다 (x14 조건부 서식 실험)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub x14: bool,
 }
 
-/// 조건부 서식의 기준 값 (`cfvo`): `min`/`max`/`num`/`percent`/`percentile`/`formula`
+/// 조건부 서식의 기준 값 (`cfvo`): `min`/`max`/`num`/`percent`/`percentile`/`formula`,
+/// x14 데이터 막대는 `autoMin`/`autoMax` 도
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Cfvo {
     pub kind: String,
+    /// 값 또는 수식 (`=` 없이). x14 구역은 `xm:f` 의 글
     #[serde(skip_serializing_if = "Option::is_none")]
     pub val: Option<String>,
     /// 아이콘 기준: 이상(기본)/초과
@@ -309,13 +315,76 @@ pub struct ColorScale {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct DataBar {
     pub cfvos: Vec<Cfvo>,
+    /// 막대 색 (x14 의 `fillColor` 는 한셀이 쓰지 않고 이 색을 쓴다)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<Color>,
     pub show_value: bool,
+    /// 가장 짧은·긴 막대 (%, 없으면 10·90). x14 확장이 있으면 그 값이다 (한셀은 본 규칙에도 같은 값을 쓴다)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_length: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_length: Option<u32>,
+    /// x14 확장 (`x14:dataBar`). 없으면 한셀이 저장할 때 기본값으로 만든다 ([`DataBarExt::implied`])
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ext: Option<DataBarExt>,
+}
+
+/// 데이터 막대의 x14 확장 (`x14:dataBar`, XLSB BrtBeginDatabar14 1051). 기본값은 x14 스키마 그대로다
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DataBarExt {
+    /// x14 기준 값 (`autoMin`/`autoMax` 를 쓸 수 있다). 값은 `xm:f`
+    pub cfvos: Vec<Cfvo>,
+    /// 막대 테두리 (기본 거짓)
+    pub border: bool,
+    /// 그라데이션 채우기 (기본 참)
+    pub gradient: bool,
+    /// `leftToRight` / `rightToLeft` (없으면 `context`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    /// 음수 막대 색이 양수와 같음 (기본 거짓), 음수 테두리 색이 양수와 같음 (기본 참)
+    pub negative_same_as_positive: bool,
+    pub negative_border_same_as_positive: bool,
+    /// `middle` / `none` (없으면 `automatic`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub axis_position: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negative_fill_color: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negative_border_color: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub axis_color: Option<Color>,
+}
+
+impl Default for DataBarExt {
+    fn default() -> Self {
+        DataBarExt {
+            cfvos: Vec::new(),
+            border: false,
+            gradient: true,
+            direction: None,
+            negative_same_as_positive: false,
+            negative_border_same_as_positive: true,
+            axis_position: None,
+            border_color: None,
+            negative_fill_color: None,
+            negative_border_color: None,
+            axis_color: None,
+        }
+    }
+}
+
+impl DataBarExt {
+    /// x14 확장이 없는 데이터 막대를 한셀이 저장할 때 만드는 확장: 기준 값은 본 규칙 것, 방향 `leftToRight`
+    /// (x14 조건부 서식 실험 — rcell 이 확장 없이 쓴 막대, 본 규칙만 있는 막대)
+    pub fn implied(bar: &DataBar) -> DataBarExt {
+        DataBarExt {
+            cfvos: bar.cfvos.clone(),
+            direction: Some("leftToRight".into()),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -326,7 +395,13 @@ pub struct IconSet {
     pub show_value: bool,
     pub reverse: bool,
     pub percent: bool,
+    /// 사용자 지정 아이콘 (`x14:cfIcon`): 단계마다 (아이콘 집합, 번호). 집합 `NoIcons` 는 아이콘 없음
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub custom_icons: Vec<(String, u32)>,
 }
+
+/// x14 아이콘 집합만 있는 이름 (Excel 2010) — 한셀은 본 규칙에 있어도 x14 구역으로 옮겨 쓴다
+pub const X14_ONLY_ICON_SETS: [&str; 3] = ["3Stars", "3Triangles", "5Boxes"];
 
 /// 데이터 유효성 (`dataValidation`)
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
