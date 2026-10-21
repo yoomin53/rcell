@@ -406,9 +406,22 @@ fn layout_styles(wb: &Workbook) -> StyleLayout {
     }
     let mut next = 21u16;
     let mut cell0_parent = None;
+    // 셀 서식 0 을 쓰는 셀이 없고 사용자 표 스타일이 있으면 한셀은 사본을 쓰지 않고 XF 15 의 부모를 XF 표 끝 다음
+    // 번호로 남긴다 (관측: 말뭉치 XML 117개 중 13개, 모두 이 조건 — 117/117 이 규칙과 맞는다)
+    let mut dangling = false;
     if !st.from_legacy {
         let p = st.cell_xfs.first().and_then(|x| x.xf_id).unwrap_or(0) as usize;
-        if p < nstyle {
+        let uses0 = wb
+            .sheets
+            .iter()
+            .any(|s| s.cells.iter().any(|c| c.style == 0));
+        let custom_ts = st
+            .table_styles
+            .as_ref()
+            .is_some_and(|t| !t.styles.is_empty());
+        if !uses0 && custom_ts {
+            dangling = true;
+        } else if p < nstyle {
             order.push(XfSlot::StyleCopy(p));
             cell0_parent = Some(next);
             next += 1;
@@ -426,6 +439,9 @@ fn layout_styles(wb: &Workbook) -> StyleLayout {
         *slot = next;
         order.push(XfSlot::Cell(i));
         next += 1;
+    }
+    if dangling {
+        cell0_parent = Some(order.len() as u16);
     }
     StyleLayout {
         style,
@@ -709,6 +725,8 @@ struct XfOpts {
     extra_used: u8,
     /// 선 없는 가장자리의 색을 쓰지 않는다 (한셀이 XML 을 열 때의 표준·내장 스타일 XF)
     plain_edges: bool,
+    /// 병합한 셀이 쓰는 서식 (fMergeCell, 바이트 8 의 0x20)
+    merge_cell: bool,
 }
 
 /// 정렬 비교용: XML 의 생략값을 채운다
@@ -852,7 +870,7 @@ fn xf_record(xf: &Xf, o: &XfOpts, ctx: &XfCtx) -> Vec<u8> {
         .u16(p)
         .u8(alc | (wrap << 3) | (alcv << 4))
         .u8(0)
-        .u8(indent | (shrink << 4) | (ro << 6))
+        .u8(indent | (shrink << 4) | ((o.merge_cell as u8) << 5) | (ro << 6))
         .u8(used)
         .u32(border1)
         .u32(border2)
@@ -913,13 +931,15 @@ type ExtProp = (u16, Vec<u8>);
 fn xf_exts(xf: &Xf, wb: &Workbook) -> Vec<ExtProp> {
     let st = &wb.styles;
     let mut v = Vec::new();
-    let full = |c: Option<&Color>| -> Option<Vec<u8>> {
+    // `always`: 팔레트에 있는 색이어도 쓴다 (오른쪽 테두리 — 관측: 말뭉치 XML 을 한셀이 레거시로 저장하면 선이 있는
+    // 오른쪽 테두리는 검정·회색·흰색도 0x000A 로 쓴다. 왼쪽·위·아래는 팔레트 밖의 색만)
+    let full_with = |c: Option<&Color>, always: bool| -> Option<Vec<u8>> {
         let c = c?;
         if c.auto || c.indexed.is_some() && c.rgb.is_none() {
             return None;
         }
         let rgb = rgb_of(c, wb)?;
-        if in_palette(rgb) {
+        if in_palette(rgb) && !always {
             return None;
         }
         let mut b = Buf::new();
@@ -932,6 +952,15 @@ fn xf_exts(xf: &Xf, wb: &Workbook) -> Vec<ExtProp> {
             .bytes(&[0; 8]);
         Some(b.take())
     };
+    let full = |c: Option<&Color>| full_with(c, false);
+    // 글자 색 (0x000D): 팔레트 밖의 색이면 맨 앞에 (관측 차례 0x0D, 4, 5, 9, 0x0A, 7, 8)
+    if let Some(x) = full(
+        st.fonts
+            .get(xf.font_id as usize)
+            .and_then(|f| f.color.as_ref()),
+    ) {
+        v.push((0x0D, x));
+    }
     if let Some(f) = st.fills.get(xf.fill_id as usize) {
         if let Some(g) = &f.gradient {
             v.push((6, gradient_ext(g, wb)));
@@ -954,7 +983,7 @@ fn xf_exts(xf: &Xf, wb: &Workbook) -> Vec<ExtProp> {
         ] {
             if let Some(e) = e
                 && edge_dg(Some(e)) != 0
-                && let Some(x) = full(e.color.as_ref())
+                && let Some(x) = full_with(e.color.as_ref(), ty == 0x0A)
             {
                 v.push((ty, x));
             }
@@ -1573,6 +1602,18 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
     }
     // XF
     let normal_xf = slot_xf(styles.order[0]).cloned().unwrap_or_default();
+    // 병합 범위 안의 셀이 쓰는 셀 서식: 한셀은 이 XF 에 fMergeCell 을 켠다 (관측: 말뭉치의 병합 문서 19개에서
+    // 한셀 레거시·XML→레거시 모두 켜진 XF 수가 같다)
+    let merged_xfs: std::collections::HashSet<u32> = wb
+        .sheets
+        .iter()
+        .flat_map(|s| {
+            s.cells
+                .iter()
+                .filter(|c| s.merges.iter().any(|m| m.contains(c.r)))
+                .map(|c| c.style)
+        })
+        .collect();
     let mut xfexts: Vec<(u16, Vec<ExtProp>)> = Vec::new();
     for (k, &slot) in styles.order.iter().enumerate() {
         let (xf, style) = match slot {
@@ -1628,7 +1669,40 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
             has_ext,
             extra_used,
             plain_edges,
+            merge_cell: matches!(slot, XfSlot::Cell(i) if merged_xfs.contains(&(i as u32))),
         };
+        if std::env::var_os("RCELL_XF_DEBUG").is_some() {
+            let b = wb.styles.borders.get(xf.border_id as usize);
+            let e = |x: Option<&BorderEdge>| {
+                x.map_or("-".to_string(), |e| {
+                    format!(
+                        "{}:{}",
+                        e.style.as_deref().unwrap_or("none"),
+                        e.color.as_ref().map_or("nocolor".into(), |c| format!(
+                            "{:?}/{:?}/{}",
+                            c.rgb, c.indexed, c.auto
+                        ))
+                    )
+                })
+            };
+            let fc = wb
+                .styles
+                .fonts
+                .get(xf.font_id as usize)
+                .and_then(|f| f.color.as_ref())
+                .map_or("-".into(), |c| {
+                    format!("{:?}/{:?}/{:?}", c.rgb, c.theme, c.indexed)
+                });
+            eprintln!(
+                "XF {k} font={} fc={fc} L={} R={} T={} B={} D={}",
+                xf.font_id,
+                e(b.and_then(|b| b.left.as_ref())),
+                e(b.and_then(|b| b.right.as_ref())),
+                e(b.and_then(|b| b.top.as_ref())),
+                e(b.and_then(|b| b.bottom.as_ref())),
+                e(b.and_then(|b| b.diagonal.as_ref())),
+            );
+        }
         out.rec(0x00E0, &xf_record(&xf, &opts, &xf_ctx));
     }
     for (ixfe, exts) in xfexts {
