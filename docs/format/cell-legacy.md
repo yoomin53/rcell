@@ -292,7 +292,9 @@ DIB 는 BITMAPFILEHEADER 를 붙여 BMP 로 꺼낸다. 한셀은 그림을 저�
 - ROW 레코드의 높이는 지정(0x40)이 아니어도 그 행의 높이다 (앵커 계산에 쓰인다).
 
 **한컴 차트 0x7EF0** (+ 끝 표시 0x7EF8 `ff ff ff ff`): `u32, u16, 차트 번호 u16` 다음에 ClientAnchor 와 같은 22바이트 앵커,
-그 뒤에 차트 내용("VtChart" 컨트롤 저장 형식, 미해석). 한셀은 차트를 다른 그리기 개체보다 먼저 둔다.
+그 뒤에 원본 범위 수식, 차트 내용("Vt" 객체 저장, 뿌리 VtChart), 항목·계열 수식 — [`cell-legacy-chart.md`](cell-legacy-chart.md)
+(`src/legacy/vtchart.rs` 가 읽고 `src/legacy/vtchart_map.rs` 가 한셀의 읽기와 같은 차트 모델로 바꾼다 — 같은 문서 9절).
+한셀은 차트를 다른 그리기 개체보다 먼저 둔다.
 
 ## 6.3 조건부 서식·데이터 유효성 — 조작한 XML 원본과 대조
 

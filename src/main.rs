@@ -81,8 +81,29 @@ enum Cmd {
         #[arg(long)]
         sheet: Option<String>,
     },
-    /// 형식 변환: XML/바이너리/레거시 .cell → XML .cell (출력 확장자가 .xlsx 면 Excel 형식)
-    Convert { input: PathBuf, output: PathBuf },
+    /// 형식 변환: XML/바이너리/레거시 .cell → XML .cell. 출력 이름이 .xlsx 면 Excel, .bin.cell·.xlsb 면
+    /// 바이너리 .cell (한셀 xlCellb)
+    Convert {
+        input: PathBuf,
+        output: PathBuf,
+        /// 저장 형식 (cell, xlsx, bin) — 생략하면 출력 이름으로 정한다
+        #[arg(long)]
+        format: Option<String>,
+        /// 바이너리 저장의 BrtAbsPath15 에 쓸 폴더 (한셀은 저장한 폴더를 쓴다; 생략하면 빈 문자열)
+        #[arg(long)]
+        abs_path: Option<String>,
+        /// 바이너리 저장에서 한셀이 잃는 값도 똑같이 잃는다 (한셀과 같은 결과를 볼 때)
+        #[arg(long)]
+        exact: bool,
+    },
+    /// 바이너리 .cell 두 개를 레코드 단위로 비교 (A: rcell 이 쓴 것, B: 한셀이 쓴 것) — 리버스 엔지니어링용
+    Bindiff {
+        a: PathBuf,
+        b: PathBuf,
+        /// 파트마다 보여 줄 차이 수
+        #[arg(long, default_value_t = 6)]
+        samples: usize,
+    },
     /// 두 문서의 의미 비교 (저장 형식이 달라도 됨). 차이가 있으면 종료 코드 1
     Diff {
         a: PathBuf,
@@ -102,7 +123,7 @@ enum Cmd {
         /// 도형의 글·사용자 정의 모양 비교 생략 (한셀은 레거시 도형에서 이 둘을 읽지 못한다)
         #[arg(long)]
         ignore_shape_detail: bool,
-        /// 차트 내용 비교 생략 (rcell 은 레거시 VtChart 를 아직 해석하지 못한다)
+        /// 차트 내용(종류·축·계열·제목·범례 …) 비교 생략 — 차트 도형의 위치는 그래도 비교한다
         #[arg(long)]
         ignore_chart: bool,
         /// 조건부 서식 비교 생략 (한셀은 레거시의 조건부 서식을 잘못 읽는다)
@@ -183,7 +204,14 @@ fn main() -> ExitCode {
             output,
             sheet,
         } => html(&file, output.as_deref(), sheet.as_deref()),
-        Cmd::Convert { input, output } => open_doc(&input).and_then(|wb| rcell::save(&wb, &output)),
+        Cmd::Convert {
+            input,
+            output,
+            format,
+            abs_path,
+            exact,
+        } => convert(&input, &output, format.as_deref(), abs_path, exact),
+        Cmd::Bindiff { a, b, samples } => bindiff(&a, &b, samples),
         Cmd::Diff {
             a,
             b,
@@ -628,6 +656,46 @@ fn patch(input: &Path, output: &Path, parts: &[String]) -> rcell::Result<()> {
     }
     let out = rcell::container::replace_zip_parts(&std::fs::read(input)?, &reps)?;
     std::fs::write(output, out)?;
+    Ok(())
+}
+
+fn convert(
+    input: &Path,
+    output: &Path,
+    format: Option<&str>,
+    abs_path: Option<String>,
+    exact: bool,
+) -> rcell::Result<()> {
+    let format = match format.map(str::to_ascii_lowercase).as_deref() {
+        None => rcell::SaveFormat::from_path(output),
+        Some("cell" | "xml") => rcell::SaveFormat::Cell,
+        Some("xlsx") => rcell::SaveFormat::Xlsx,
+        Some("bin" | "binary" | "xlsb") => rcell::SaveFormat::Binary,
+        Some(other) => {
+            return Err(rcell::Error::InvalidValue {
+                context: "--format (cell, xlsx, bin)".into(),
+                value: other.into(),
+            });
+        }
+    };
+    let wb = open_doc(input)?;
+    if format == rcell::SaveFormat::Binary {
+        let out = rcell::binary::writer::write_report(
+            &wb,
+            &rcell::binary::writer::Options { abs_path, exact },
+        )?;
+        for w in &out.warnings {
+            eprintln!("경고: {w}");
+        }
+        std::fs::write(output, out.bytes)?;
+        return Ok(());
+    }
+    rcell::save_as(&wb, output, format)
+}
+
+fn bindiff(a: &Path, b: &Path, samples: usize) -> rcell::Result<()> {
+    let rep = rcell::binary::parity::compare(&std::fs::read(a)?, &std::fs::read(b)?)?;
+    print!("{}", rcell::binary::parity::format(&rep, samples));
     Ok(())
 }
 

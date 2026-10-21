@@ -89,6 +89,7 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
         };
         wb.application = field("Application");
         wb.app_version = field("AppVersion");
+        wb.total_time = field("TotalTime");
     }
     wb.properties = read_core_properties(pkg, &root_rels)?;
 
@@ -107,6 +108,21 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
     }
     if let Some(pr) = root.sml_child("workbookPr") {
         wb.date1904 = pr.attr_bool("date1904").unwrap_or(false);
+    }
+    if let Some(v) = root
+        .sml_child("bookViews")
+        .and_then(|b| b.sml_child("workbookView"))
+    {
+        let n = |k: &str| v.attr(k).and_then(|s| s.trim().parse::<i64>().ok());
+        wb.book_view = Some(crate::model::BookView {
+            x_window: n("xWindow").unwrap_or(0) as i32,
+            y_window: n("yWindow").unwrap_or(0) as i32,
+            window_width: n("windowWidth").unwrap_or(0).max(0) as u32,
+            window_height: n("windowHeight").unwrap_or(0).max(0) as u32,
+            tab_ratio: n("tabRatio").unwrap_or(600).max(0) as u32,
+            first_sheet: n("firstSheet").unwrap_or(0).max(0) as u32,
+            active_tab: n("activeTab").unwrap_or(0).max(0) as u32,
+        });
     }
     if let Some(p) = root.sml_child("workbookProtection") {
         wb.protection = Some(crate::model::WorkbookProtection {
@@ -204,6 +220,7 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
         && let Some(e) = pkg.read_xml(&sst.target)?
     {
         wb.shared_strings = shared_strings::parse_shared_strings(&e);
+        wb.shared_strings_count = e.attr_u32("count");
     }
     if let Some(th) = wb_rels.iter().find(|r| rel_is(r, "/theme"))
         && let Some(e) = pkg.read_xml(&th.target)?
@@ -301,12 +318,13 @@ pub fn read_sheet_drawings(
         };
         let drels = pkg.relationships(&d.target)?;
         let mut shapes = drawing::parse_drawing(&root, &drels);
-        // 차트 파트를 읽어 그리기·비교에 쓴다 (저장은 원본 파트 그대로)
+        // 차트 파트를 읽어 그리기·비교에 쓴다 (저장은 원본 파트 그대로).
+        // c14:style 을 읽도록 mc:AlternateContent 는 parse_chart 가 펼친다
         fn charts(pkg: &mut Package, list: &mut [crate::model::Shape]) -> Result<()> {
             for s in list {
                 if s.kind == crate::model::ShapeKind::Chart
                     && let Some(t) = s.target.clone()
-                    && let Some(e) = pkg.read_xml(&t)?
+                    && let Some(e) = pkg.read_xml_raw(&t)?
                 {
                     s.chart = Some(chart::parse_chart(&e));
                 }

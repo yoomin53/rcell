@@ -33,7 +33,7 @@ pub struct Options {
     /// 도형의 글·사용자 정의 모양 비교 생략. 한셀은 레거시 도형(OfficeArt + TXO)에서 이 둘을
     /// 읽지 못한다 (docs/format/cell-legacy.md).
     pub ignore_shape_detail: bool,
-    /// 차트 내용 비교 생략. rcell 은 레거시 차트(한컴 VtChart)의 내용을 아직 해석하지 못한다.
+    /// 차트 내용(종류·축·계열·제목·범례·3차원·영역) 비교 생략. 차트 도형의 앵커는 그래도 비교한다.
     pub ignore_chart: bool,
     /// 조건부 서식 비교 생략. 한셀은 레거시의 조건부 서식을 잘못 읽는다 (글 규칙 수식이 #N/A,
     /// CONDFMT12 범위가 깨짐, 차등 서식 표시 형식이 깨짐 — docs/format/cell-legacy.md).
@@ -446,27 +446,8 @@ fn shape_key(
     }
 }
 
-/// 차트를 한 줄로: 종류·방향·묶음·제목·범례·계열(이름, 참조, 값)
+/// 차트를 한 줄로 (그리기 목록용 요약): 종류·방향·묶음·제목·범례·계열 수. 자세한 비교는 [`chart_key::aspects`]
 fn chart_key(c: &crate::model::Chart) -> String {
-    let series: Vec<String> = c
-        .series
-        .iter()
-        .map(|s| {
-            let vals: Vec<String> = s
-                .values
-                .iter()
-                .map(|v| v.map_or("-".into(), |x| format!("{x}")))
-                .collect();
-            format!(
-                "{:?}@{}|{}|{}=[{}]",
-                s.name.as_deref().unwrap_or(""),
-                s.name_ref.as_deref().unwrap_or("-"),
-                s.cat_ref.as_deref().unwrap_or("-"),
-                s.val_ref.as_deref().unwrap_or("-"),
-                vals.join(",")
-            )
-        })
-        .collect();
     format!(
         "{}{} {}/{} title={:?} legend={} series={}",
         c.kind,
@@ -475,8 +456,531 @@ fn chart_key(c: &crate::model::Chart) -> String {
         c.grouping.as_deref().unwrap_or("-"),
         c.title.as_deref().unwrap_or(""),
         c.legend.as_deref().unwrap_or("-"),
-        series.join(";")
+        c.series.len() + c.more_groups.iter().map(|g| g.series.len()).sum::<usize>()
     )
+}
+
+/// 시트의 차트 도형 (그룹 안까지, 그리기 순서)
+fn sheet_charts(sh: &Sheet) -> Vec<Option<&crate::model::Chart>> {
+    fn walk<'a>(list: &'a [crate::model::Shape], out: &mut Vec<Option<&'a crate::model::Chart>>) {
+        for s in list {
+            if s.kind == crate::model::ShapeKind::Chart {
+                out.push(s.chart.as_ref());
+            }
+            walk(&s.children, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&sh.shapes, &mut out);
+    out
+}
+
+/// 차트의 자세한 비교: 항목(종류·제목·범례·축·계열·3차원·영역·기타)마다 한 줄.
+///
+/// 한셀이 그리는 결과가 달라지는 차이는 보이고, 표현만 다른 것은 같게 본다: 없는 요소 = 스키마·한셀 기본값
+/// (`overlay`·`invertIfNegative`·`smooth` 없음 = 0, `orientation` 없음 = `minMax` …), 16진 색의 대소문자,
+/// 캐시 숫자의 표기 (`20` = `20.0`), 축 번호 (XML 원본은 임의 번호 — 교차 축은 순서로 본다), 위치 없는
+/// `manualLayout` = 자동 배치, 보이지 않는 데이터 레이블의 위치·형식 (한셀은 XML 을 읽을 때 꺾은선 계열의 숨은
+/// 레이블에 `dLblPos r` 를 넣는다 — docs/format/cell-2024.md 11.2절).
+mod chart_key {
+    use crate::model::{
+        Chart, ChartAxis, ChartColor, ChartData, ChartDataLabels, ChartFill, ChartFont,
+        ChartGroupProps, ChartLayout, ChartLine, ChartLines, ChartMarker, ChartNumFmt, ChartRich,
+        ChartSeries, ChartShapeProps, ChartSurface, ChartTitle, ChartTx,
+    };
+
+    fn b(v: Option<bool>, default: bool) -> &'static str {
+        if v.unwrap_or(default) { "1" } else { "0" }
+    }
+
+    fn o<T: std::fmt::Display>(v: &Option<T>) -> String {
+        v.as_ref().map_or_else(|| "-".into(), |x| x.to_string())
+    }
+
+    /// 숫자 글은 값으로 (`20` = `20.0` = `2E1`)
+    fn num(s: &str) -> String {
+        match s.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() => format!("{v}"),
+            _ => s.to_string(),
+        }
+    }
+
+    fn color(c: &ChartColor) -> String {
+        let mut s = match c.value.split_once(':') {
+            Some(("srgb", h)) => format!("srgb:{}", h.to_ascii_uppercase()),
+            _ => c.value.clone(),
+        };
+        for (k, m) in &c.mods {
+            s.push_str(&format!("[{k}={m}]"));
+        }
+        s
+    }
+
+    fn fill(f: &Option<ChartFill>) -> String {
+        match f {
+            None => "-".into(),
+            Some(ChartFill::None) => "none".into(),
+            Some(ChartFill::Solid(c)) => color(c),
+            Some(ChartFill::Other(x)) => format!("other:{x}"),
+        }
+    }
+
+    /// 선: 두께·채우기·점선 (없는 점선 = 실선). 끝 모양·꺾임은 차트 선에서 보이지 않는다
+    fn line(l: &Option<ChartLine>) -> String {
+        l.as_ref().map_or_else(
+            || "-".into(),
+            |l| {
+                format!(
+                    "{}/{}/{}",
+                    o(&l.width),
+                    fill(&l.fill),
+                    l.dash.as_deref().unwrap_or("solid")
+                )
+            },
+        )
+    }
+
+    fn sp(p: &Option<ChartShapeProps>) -> String {
+        p.as_ref().map_or_else(
+            || "-".into(),
+            |p| format!("fill={} ln={}", fill(&p.fill), line(&p.line)),
+        )
+    }
+
+    fn font(f: Option<&ChartFont>) -> String {
+        f.map_or_else(
+            || "-".into(),
+            |f| {
+                format!(
+                    "sz={} b={} i={} u={} strike={} base={} color={} face={}",
+                    o(&f.size),
+                    b(f.bold, false),
+                    b(f.italic, false),
+                    f.underline.as_deref().unwrap_or("none"),
+                    f.strike.as_deref().unwrap_or("noStrike"),
+                    f.baseline.unwrap_or(0),
+                    fill(&f.fill),
+                    f.latin.as_deref().unwrap_or("-")
+                )
+            },
+        )
+    }
+
+    /// 글 상자: 방향, 문단마다 조각(글 + 글꼴) — 조각이 없으면 문단 기본 글꼴
+    fn rich(r: &ChartRich) -> String {
+        let paras: Vec<String> = r
+            .paras
+            .iter()
+            .map(|p| {
+                if p.runs.is_empty() {
+                    format!("[{}]", font(p.def_font.as_ref()))
+                } else {
+                    p.runs
+                        .iter()
+                        .map(|x| {
+                            format!(
+                                "{:?}[{}]",
+                                x.text,
+                                font(x.font.as_ref().or(p.def_font.as_ref()))
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("")
+                }
+            })
+            .collect();
+        format!(
+            "vert={} rot={} {}",
+            r.vert.as_deref().unwrap_or("horz"),
+            r.rot.unwrap_or(0),
+            paras.join(" / ")
+        )
+    }
+
+    fn opt_rich(r: &Option<ChartRich>) -> String {
+        r.as_ref().map_or_else(|| "-".into(), rich)
+    }
+
+    fn data(d: Option<&ChartData>) -> String {
+        let Some(d) = d else { return "-".into() };
+        let cache = d.cache.as_ref().map_or_else(
+            || "-".into(),
+            |c| {
+                let pts: Vec<String> = c
+                    .points
+                    .iter()
+                    .map(|p| match &p.format_code {
+                        Some(f) => format!("{}={}@{f}", p.idx, num(&p.value)),
+                        None => format!("{}={}", p.idx, num(&p.value)),
+                    })
+                    .collect();
+                format!(
+                    "n={} fmt={} [{}]",
+                    o(&c.pt_count),
+                    c.format_code.as_deref().unwrap_or("-"),
+                    pts.join(" ")
+                )
+            },
+        );
+        format!(
+            "{} {} {}",
+            d.kind,
+            d.formula.as_deref().unwrap_or("-"),
+            cache
+        )
+    }
+
+    fn tx(t: &Option<ChartTx>) -> String {
+        match t {
+            None => "-".into(),
+            Some(ChartTx::Rich(r)) => format!("rich {}", rich(r)),
+            Some(ChartTx::Ref(d)) => format!("ref {}", data(Some(d))),
+            Some(ChartTx::Value(v)) => format!("v {v:?}"),
+        }
+    }
+
+    /// 배치: 위치·크기가 없으면 자동 배치와 같다
+    fn layout(l: &Option<ChartLayout>) -> String {
+        match l.as_ref().and_then(|l| l.manual.as_ref()) {
+            Some(m) if m.x.is_some() || m.y.is_some() || m.w.is_some() || m.h.is_some() => {
+                let r =
+                    |v: Option<f64>| v.map_or_else(|| "-".into(), |v| format!("{:.6}", v as f32));
+                format!(
+                    "manual {}/{}/{}/{} {}/{}/{}/{} {}",
+                    o(&m.x_mode),
+                    o(&m.y_mode),
+                    o(&m.w_mode),
+                    o(&m.h_mode),
+                    r(m.x),
+                    r(m.y),
+                    r(m.w),
+                    r(m.h),
+                    o(&m.layout_target)
+                )
+            }
+            _ => "auto".into(),
+        }
+    }
+
+    fn title(t: &Option<ChartTitle>) -> String {
+        t.as_ref().map_or_else(
+            || "-".into(),
+            |t| {
+                format!(
+                    "{} overlay={} layout={} sp={} txPr={}",
+                    tx(&t.tx),
+                    b(t.overlay, false),
+                    layout(&t.layout),
+                    sp(&t.sp_pr),
+                    opt_rich(&t.tx_pr)
+                )
+            },
+        )
+    }
+
+    fn num_fmt(n: &Option<ChartNumFmt>) -> String {
+        n.as_ref().map_or_else(
+            || "-".into(),
+            |n| format!("{:?}/linked={}", n.format_code, b(n.source_linked, false)),
+        )
+    }
+
+    fn lines(l: &Option<ChartLines>) -> String {
+        l.as_ref()
+            .map_or_else(|| "-".into(), |l| format!("on sp={}", sp(&l.sp_pr)))
+    }
+
+    /// 데이터 레이블. 보이는 것이 없으면(없음, 삭제, 표시가 모두 0) 같은 "hidden"
+    fn labels(d: &Option<ChartDataLabels>) -> String {
+        let Some(d) = d else { return "hidden".into() };
+        let shown = [
+            d.show_legend_key,
+            d.show_val,
+            d.show_cat_name,
+            d.show_ser_name,
+            d.show_percent,
+            d.show_bubble_size,
+        ]
+        .contains(&Some(true));
+        if d.delete == Some(true) || !shown {
+            return "hidden".into();
+        }
+        format!(
+            "pos={} key={} val={} cat={} ser={} pct={} bubble={} sep={:?} leader={} numFmt={} sp={} txPr={}",
+            o(&d.d_lbl_pos),
+            b(d.show_legend_key, false),
+            b(d.show_val, false),
+            b(d.show_cat_name, false),
+            b(d.show_ser_name, false),
+            b(d.show_percent, false),
+            b(d.show_bubble_size, false),
+            d.separator,
+            b(d.show_leader_lines, false),
+            num_fmt(&d.num_fmt),
+            sp(&d.sp_pr),
+            opt_rich(&d.tx_pr)
+        )
+    }
+
+    fn marker(m: &Option<ChartMarker>) -> String {
+        m.as_ref().map_or_else(
+            || "-".into(),
+            |m| format!("{}/{} sp={}", o(&m.symbol), o(&m.size), sp(&m.sp_pr)),
+        )
+    }
+
+    fn series(s: &ChartSeries) -> String {
+        let pts: Vec<String> = s
+            .d_pts
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}:inv={} marker={} bubble3D={} explosion={} sp={}",
+                    p.idx,
+                    b(p.invert_if_negative, false),
+                    marker(&p.marker),
+                    b(p.bubble3d, false),
+                    p.explosion.unwrap_or(0),
+                    sp(&p.sp_pr)
+                )
+            })
+            .collect();
+        format!(
+            "idx={} order={} tx={} sp={} invertIfNegative={} marker={} explosion={} dPt=[{}] dLbls={} cat={} val={} bubbleSize={} shape={} bubble3D={} smooth={}",
+            o(&s.idx),
+            o(&s.order),
+            tx(&s.tx),
+            sp(&s.sp_pr),
+            b(s.invert_if_negative, false),
+            marker(&s.marker),
+            s.explosion.unwrap_or(0),
+            pts.join("; "),
+            labels(&s.d_lbls),
+            data(s.cat.as_ref()),
+            data(s.val.as_ref()),
+            data(s.bubble_size.as_ref()),
+            o(&s.shape),
+            b(s.bubble3d, false),
+            b(s.smooth, false)
+        )
+    }
+
+    /// 묶음 (`c:barChart` …): 종류와 묶음 수준 값, 쓰는 축은 축 목록의 순서로
+    fn group(
+        name: String,
+        bar_dir: &Option<String>,
+        grouping: &Option<String>,
+        vary_colors: bool,
+        g: &ChartGroupProps,
+        axis_index: &dyn Fn(u32) -> String,
+    ) -> String {
+        let axes: Vec<String> = g.ax_ids.iter().map(|&i| axis_index(i)).collect();
+        format!(
+            "{name} barDir={} grouping={} varyColors={} gapWidth={} overlap={} gapDepth={} shape={} marker={} smooth={} radarStyle={} scatterStyle={} ofPie={} wireframe={} firstSliceAng={} holeSize={} split={}/{}/{} bubble={}/{}/{}/{} dLbls={} serLines={} dropLines={} hiLowLines={} axes=[{}]",
+            o(bar_dir),
+            o(grouping),
+            u8::from(vary_colors),
+            o(&g.gap_width),
+            o(&g.overlap),
+            o(&g.gap_depth),
+            o(&g.shape),
+            o(&g.marker.map(u8::from)),
+            b(g.smooth, false),
+            o(&g.radar_style),
+            o(&g.scatter_style),
+            o(&g.of_pie_type),
+            b(g.wireframe, false),
+            o(&g.first_slice_ang),
+            o(&g.hole_size),
+            o(&g.split_type),
+            o(&g.split_pos),
+            o(&g.second_pie_size),
+            b(g.bubble3d, false),
+            o(&g.bubble_scale),
+            o(&g.show_neg_bubbles.map(u8::from)),
+            o(&g.size_represents),
+            labels(&g.d_lbls),
+            lines(&g.ser_lines),
+            lines(&g.drop_lines),
+            lines(&g.hi_low_lines),
+            axes.join(",")
+        )
+    }
+
+    fn axis(a: &ChartAxis, axis_index: &dyn Fn(u32) -> String) -> String {
+        let s = &a.scaling;
+        format!(
+            "{} delete={} pos={} scaling={}/{}/{}/{} crossAx={} crosses={} crossesAt={} crossBetween={} major={} minor={} title={} numFmt={} tick={}/{} tickLblPos={} sp={} txPr={} unit={}/{} auto={} lblAlgn={} lblOffset={} skip={}/{} noMultiLvlLbl={} time={}/{}/{}",
+            a.kind,
+            b(a.delete, false),
+            o(&a.ax_pos),
+            s.orientation.as_deref().unwrap_or("minMax"),
+            o(&s.min),
+            o(&s.max),
+            o(&s.log_base),
+            a.cross_ax.map_or_else(|| "-".into(), axis_index),
+            if a.crosses_at.is_some() {
+                "-"
+            } else {
+                a.crosses.as_deref().unwrap_or("autoZero")
+            },
+            o(&a.crosses_at),
+            o(&a.cross_between),
+            lines(&a.major_gridlines),
+            lines(&a.minor_gridlines),
+            title(&a.title),
+            num_fmt(&a.num_fmt),
+            a.major_tick_mark.as_deref().unwrap_or("cross"),
+            a.minor_tick_mark.as_deref().unwrap_or("cross"),
+            a.tick_lbl_pos.as_deref().unwrap_or("nextTo"),
+            sp(&a.sp_pr),
+            opt_rich(&a.tx_pr),
+            o(&a.major_unit),
+            o(&a.minor_unit),
+            o(&a.auto.map(u8::from)),
+            o(&a.lbl_algn),
+            o(&a.lbl_offset),
+            o(&a.tick_lbl_skip),
+            o(&a.tick_mark_skip),
+            o(&a.no_multi_lvl_lbl.map(u8::from)),
+            o(&a.base_time_unit),
+            o(&a.major_time_unit),
+            o(&a.minor_time_unit)
+        )
+    }
+
+    fn surface(x: &Option<ChartSurface>) -> String {
+        x.as_ref().map_or_else(
+            || "-".into(),
+            |x| format!("{}/{}", o(&x.thickness), sp(&x.sp_pr)),
+        )
+    }
+
+    /// (항목, 값) — 두 차트에서 같은 이름의 항목끼리 비교한다
+    pub(super) fn aspects(c: &Chart) -> Vec<(String, String)> {
+        // 축 번호 → 축 목록의 순서 (XML 원본의 번호는 임의다)
+        let ids: Vec<u32> = c.axes.iter().map(|a| a.id).collect();
+        let axis_index = move |id: u32| {
+            ids.iter()
+                .position(|&x| x == id)
+                .map_or_else(|| format!("?{id}"), |p| (p + 1).to_string())
+        };
+        let mut out = Vec::new();
+        let kind = |k: &str, three_d: bool| format!("{k}{}", if three_d { "3D" } else { "" });
+        if !c.kind.is_empty() {
+            out.push((
+                "묶음 1".to_string(),
+                group(
+                    kind(&c.kind, c.three_d),
+                    &c.bar_dir,
+                    &c.grouping,
+                    c.vary_colors,
+                    &c.group,
+                    &axis_index,
+                ),
+            ));
+            for (k, s) in c.series.iter().enumerate() {
+                out.push((format!("계열 1.{}", k + 1), series(s)));
+            }
+        }
+        for (g, x) in c.more_groups.iter().enumerate() {
+            out.push((
+                format!("묶음 {}", g + 2),
+                group(
+                    kind(&x.kind, x.three_d),
+                    &x.bar_dir,
+                    &x.grouping,
+                    x.vary_colors,
+                    &x.props,
+                    &axis_index,
+                ),
+            ));
+            for (k, s) in x.series.iter().enumerate() {
+                out.push((format!("계열 {}.{}", g + 2, k + 1), series(s)));
+            }
+        }
+        for (i, a) in c.axes.iter().enumerate() {
+            out.push((format!("축 {}", i + 1), axis(a, &axis_index)));
+        }
+        out.push((
+            "제목".into(),
+            format!(
+                "{} autoTitleDeleted={}",
+                title(&c.title_full),
+                b(c.auto_title_deleted, false)
+            ),
+        ));
+        out.push((
+            "범례".into(),
+            match &c.legend {
+                None => "-".into(),
+                Some(pos) => {
+                    let l = &c.legend_props;
+                    format!(
+                        "{pos} overlay={} layout={} sp={} txPr={}",
+                        b(l.overlay, false),
+                        layout(&l.layout),
+                        sp(&l.sp_pr),
+                        opt_rich(&l.tx_pr)
+                    )
+                }
+            },
+        ));
+        let v = c.view3d.as_ref();
+        out.push((
+            "3차원".into(),
+            format!(
+                "{} floor={} side={} back={}",
+                v.map_or_else(
+                    || "-".into(),
+                    |v| format!(
+                        "rAngAx={} rotX={} rotY={} perspective={} depth={} height={}",
+                        b(v.r_ang_ax, true),
+                        v.rot_x.unwrap_or(0),
+                        v.rot_y.unwrap_or(0),
+                        v.perspective.unwrap_or(30),
+                        v.depth_percent.unwrap_or(100),
+                        v.h_percent.unwrap_or(100)
+                    )
+                ),
+                surface(&c.floor),
+                surface(&c.side_wall),
+                surface(&c.back_wall)
+            ),
+        ));
+        out.push((
+            "영역".into(),
+            format!(
+                "chart={} plot={} plotLayout={} roundedCorners={}",
+                sp(&c.sp_pr),
+                sp(&c.plot_sp_pr),
+                layout(&c.plot_layout),
+                o(&c.rounded_corners.map(u8::from))
+            ),
+        ));
+        out.push((
+            "기타".into(),
+            format!(
+                "date1904={} plotVisOnly={} dispBlanksAs={} style={}/{} hnc={} txPr={}",
+                b(c.date1904, false),
+                b(c.plot_vis_only, true),
+                c.disp_blanks_as.as_deref().unwrap_or("zero"),
+                o(&c.style),
+                o(&c.c14_style),
+                c.hnc_chart_style.as_ref().map_or_else(
+                    || "-".into(),
+                    |h| format!(
+                        "{}/{}/{}",
+                        o(&h.layout_index),
+                        o(&h.color_index),
+                        o(&h.style_index)
+                    )
+                ),
+                opt_rich(&c.tx_pr)
+            ),
+        ));
+        out
+    }
 }
 
 /// 차등 서식(dxf)을 한 줄로
@@ -812,35 +1316,75 @@ fn protection_key(p: Option<&crate::model::SheetProtection>) -> String {
     )
 }
 
-/// 외부 참조 `'[n]시트'!` 의 따옴표가 시트 이름 때문에 필요한 것이 아니면 뗀다.
-/// 한셀은 외부 연결의 상태(경로 없음, 갱신 오류)에 따라 이 따옴표를 붙이기도 떼기도 한다 — 같은 참조다.
+/// 시트 참조 `'시트'!`·`'[n]시트'!` 의 따옴표가 시트 이름 때문에 필요한 것이 아니면 뗀다 (문자열 안은 그대로).
+/// 한셀은 외부 연결의 상태(경로 없음, 갱신 오류)에 따라 외부 참조의 따옴표를 붙이기도 떼기도 하고, 바이너리를 거친
+/// 수식은 필요한 따옴표만 남는다 — 같은 참조다.
 fn unquote_external(f: &str) -> String {
+    let c: Vec<char> = f.chars().collect();
     let mut out = String::with_capacity(f.len());
-    let mut rest = f;
-    while let Some(i) = rest.find("'[") {
-        out.push_str(&rest[..i]);
-        let tail = &rest[i + 1..];
-        let end = tail.find("'!");
-        let inner = end.map(|e| &tail[..e]);
-        match inner.and_then(|s| s.split_once(']').map(|(n, sh)| (s, n, sh))) {
-            Some((s, n, sheet))
-                if n[1..].chars().all(|c| c.is_ascii_digit())
-                    && !sheet.is_empty()
-                    && sheet
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '.') =>
-            {
-                out.push_str(s);
-                out.push('!');
-                rest = &tail[s.len() + 2..];
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            '"' => {
+                // 문자열: 닫는 따옴표까지 그대로 ("" 는 따옴표 하나)
+                out.push('"');
+                i += 1;
+                while i < c.len() {
+                    out.push(c[i]);
+                    i += 1;
+                    if c[i - 1] == '"' {
+                        if c.get(i) == Some(&'"') {
+                            out.push('"');
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                }
             }
-            _ => {
-                out.push('\'');
-                rest = tail;
+            '\'' => {
+                // 따옴표 시트 이름: 닫는 ' 뒤에 ! 가 와야 참조다
+                let mut j = i + 1;
+                let mut inner = String::new();
+                while j < c.len() {
+                    if c[j] == '\'' {
+                        if c.get(j + 1) == Some(&'\'') {
+                            inner.push('\'');
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    inner.push(c[j]);
+                    j += 1;
+                }
+                if j < c.len() && c.get(j + 1) == Some(&'!') {
+                    let sheet = match inner.strip_prefix('[').and_then(|r| r.split_once(']')) {
+                        Some((n, sh)) if n.chars().all(|d| d.is_ascii_digit()) => sh,
+                        _ => inner.as_str(),
+                    };
+                    let plain = !sheet.is_empty()
+                        && !sheet.contains(':')
+                        && crate::legacy::formula::quote_sheet(sheet) == sheet;
+                    if plain {
+                        out.push_str(&inner);
+                    } else {
+                        out.push('\'');
+                        out.push_str(&inner.replace('\'', "''"));
+                        out.push('\'');
+                    }
+                    i = j + 1;
+                } else {
+                    out.push(c[i]);
+                    i += 1;
+                }
+            }
+            ch => {
+                out.push(ch);
+                i += 1;
             }
         }
     }
-    out.push_str(rest);
     out
 }
 
@@ -1118,7 +1662,7 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
                     let f = c
                         .formula
                         .as_ref()
-                        .map(|f| f.text.clone())
+                        .map(|f| unquote_external(&f.text))
                         .unwrap_or_default();
                     ((c.r.row, c.r.col), (value_key(&c.value), f, style))
                 })
@@ -1189,6 +1733,38 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
                 .join("\n      ")
         };
         diff(format!("{s} 그리기"), shapes(a, sa), shapes(b, sb));
+        if !opts.ignore_chart {
+            // 차트는 그리기 순서로 짝짓고 항목마다 비교한다
+            let (ca, cb) = (sheet_charts(sa), sheet_charts(sb));
+            for i in 0..ca.len().max(cb.len()) {
+                let get = |v: &[Option<&crate::model::Chart>]| {
+                    v.get(i)
+                        .copied()
+                        .flatten()
+                        .map(chart_key::aspects)
+                        .unwrap_or_default()
+                };
+                let (xa, xb) = (get(&ca), get(&cb));
+                let mut names: Vec<&String> = xa.iter().map(|(k, _)| k).collect();
+                for (k, _) in &xb {
+                    if !names.contains(&k) {
+                        names.push(k);
+                    }
+                }
+                let find = |x: &[(String, String)], k: &str| {
+                    x.iter()
+                        .find(|(n, _)| n == k)
+                        .map_or_else(|| "-".to_string(), |(_, v)| v.clone())
+                };
+                for k in names {
+                    diff(
+                        format!("{s} 차트 {} {k}", i + 1),
+                        find(&xa, k),
+                        find(&xb, k),
+                    );
+                }
+            }
+        }
         if !opts.ignore_cf {
             diff(
                 format!("{s} 조건부 서식"),

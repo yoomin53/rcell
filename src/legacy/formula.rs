@@ -250,6 +250,18 @@ pub enum Decoded {
 
 /// 수식 토큰열을 원문으로 바꾼다.
 pub fn decode(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
+    decode_with(rgce, ctx, false)
+}
+
+/// 상대 위치 수식(XLSB 의 공유 수식·조건부 서식·유효성)의 토큰열을 원문으로 바꾼다. 3차원 참조
+/// (PtgRef3d/PtgArea3d)도 상대 플래그가 선 축은 [`Context::base`] 에서의 오프셋이다 (RgceLocRel —
+/// 한셀 바이너리 대조 실험: 공유 수식 D1:D6 `Sheet2!C1+1` → 열 0x3FFF = -1, E2:E6 `SUM(Sheet2!B1:C2)` → 행
+/// 0xFFFFF = -1, 조건부 서식 B3 의 `Sheet2!B3` → 0, 0).
+pub fn decode_relative(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
+    decode_with(rgce, ctx, true)
+}
+
+fn decode_with(rgce: &[u8], ctx: &Context, rel3d: bool) -> Result<Decoded, DecodeError> {
     let mut r = Reader { b: rgce, pos: 0 };
     let mut stack: Vec<String> = Vec::new();
     while r.pos < rgce.len() {
@@ -462,6 +474,37 @@ pub fn decode(rgce: &[u8], ctx: &Context) -> Result<Decoded, DecodeError> {
                     .cloned()
                     .unwrap_or_else(|| format!("#NAMEX{idx}"));
                 stack.push(name);
+            }
+            0x3A if rel3d => {
+                let ixti = r.u16()?;
+                let row = r.u32()?;
+                let colf = r.u16()?;
+                let (_, col_rel, row_rel) = split_col(colf);
+                let rr = rel_row(ctx.base.row, row, row_rel);
+                let cc = rel_col(ctx.base.col, colf & 0x3FFF, col_rel);
+                stack.push(format!(
+                    "{}{}",
+                    sheet_prefix(ctx, ixti),
+                    ref_text(rr, with_flags(cc, col_rel, row_rel))
+                ));
+            }
+            0x3B if rel3d => {
+                let ixti = r.u16()?;
+                let r1 = r.u32()?;
+                let r2 = r.u32()?;
+                let c1f = r.u16()?;
+                let c2f = r.u16()?;
+                let (_, c1r, r1r) = split_col(c1f);
+                let (_, c2r, r2r) = split_col(c2f);
+                let a = rel_row(ctx.base.row, r1, r1r);
+                let b = rel_row(ctx.base.row, r2, r2r);
+                let c = rel_col(ctx.base.col, c1f & 0x3FFF, c1r);
+                let d = rel_col(ctx.base.col, c2f & 0x3FFF, c2r);
+                stack.push(format!(
+                    "{}{}",
+                    sheet_prefix(ctx, ixti),
+                    area_text(a, b, with_flags(c, c1r, r1r), with_flags(d, c2r, r2r))
+                ));
             }
             0x3A => {
                 let ixti = r.u16()?;
