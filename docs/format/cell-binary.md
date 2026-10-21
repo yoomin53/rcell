@@ -19,6 +19,9 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
 | `xl/styles.bin` | `application/vnd.ms-excel.styles` |
 | `xl/sharedStrings.bin` | `application/vnd.ms-excel.sharedStrings` |
 | `xl/theme/theme1.xml` | 테마 (XML 그대로) |
+| `xl/vbsProject.bin` | 한컴 매크로 프로젝트 — XML 과 같은 복합 문서 파트 (`application/vnd.hancom-office.vbsProject`, [cell-2024.md](cell-2024.md) 7.10절) |
+| `xl/tables/tableN.bin` | 표 — 레코드 파트 (2절 표) |
+| `xl/pivotTables/pivotTableN.bin`, `xl/pivotCache/pivotCacheDefinitionN.bin`·`pivotCacheRecordsN.bin` | 피벗 — 레코드 파트. rcell 은 아직 읽지 않는다 |
 
 ## 2. 한셀 고유 사항 (관측)
 
@@ -34,13 +37,19 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
 | 함수 번호 | `PtgFunc`/`PtgFuncVar` 는 [MS-XLSB] Ftab 그대로 (368–484 Excel 2007 함수, 150 CALL). 한컴 함수는 1904 SUBTOTALA (가변), 1907 CONVERTK (인자 4) — 함수 대조 실험 |
 | 공유 수식 | `BrtShrFmla`(**427**, `RfX` + 수식)가 기준 셀 수식 레코드 **뒤에** 온다. 셀의 `PtgExp` 는 **행 u32 만** 담고 열은 `rgcb` 의 `PtgExtraCol`(u32)에 있다 ([MS-XLSB]) |
 | 상대 3차원 참조 | 상대 위치 수식(공유 수식·조건부 서식·유효성)에서는 `PtgRef3d`/`PtgArea3d` 도 상대 플래그가 선 축을 기준 셀에서의 **오프셋**으로 쓴다 (RgceLocRel). 3차원 참조 대조 실험 (공유 수식을 넣어 만든 XML → 한셀 → 바이너리): D1:D6 `Sheet2!C1+1` → `5A 0000 00000000 FFFF`(열 −1), E2:E6 `SUM(Sheet2!B1:C2)` → 행 `FFFFF`(−1)·0, 열 −3·−2, 조건부 서식 B3:B8 `Sheet2!B3` → 0·0, 유효성 G4:G8 `Sheet2!B4` → 열 −5. 이름 정의는 A1 기준이라 오프셋과 좌표가 같다 |
-| 이름 | `BrtName` 의 `fBuiltin`(0x20) 이면 `Print_Area` 같은 내장 이름 → XML 의 `_xlnm.Print_Area` |
+| 이름 | `BrtName` 의 `fBuiltin`(0x20) 이면 `Print_Area` 같은 내장 이름 → XML 의 `_xlnm.Print_Area`. `itab` 은 시트 범위(0xFFFFFFFF 통합 문서), 수식 뒤 `comment`(XLNullableWideString)가 XML `comment` |
+| 배열 수식 | 왼쪽 위 셀의 `BrtFmla*` 뒤에 `BrtArrFmla`(426: RfX, 플래그 u8, 수식). 범위 안 셀은 모두 `PtgExp`(왼쪽 위의 행 + PtgExtraCol 열) 수식 셀이다 (수식 대조 실험) |
+| 하이퍼링크 | `BrtHLink`(494: RfX, 관계 ID XLNullableWideString, 위치·화면 설명·표시 글 XLWideString). 한셀은 관계 ID·위치가 없는 링크에 **앞 레코드의 값을 그대로 남긴다** (하이퍼링크 대조 실험: 위치만 있는 링크에 앞 링크의 `rId1`, 주소만 있는 링크에 앞 링크의 위치) — rcell 은 앞 레코드와 한쪽만 같은 값을 남은 값으로 보고 버린다 (주소·위치가 함께 바뀌는 링크는 그대로) |
+| 표 | 표 파트 (시트 관계 `table`, 시트 끝 `BrtBeginListParts`(660) 안 `BrtListPart`(661: 관계 ID) 순서): `BrtBeginList`(343: RfX, 종류 u32 (0 worksheet, 1 xml, 2 queryTable), 표 번호, 머리글 행 수, 요약 행 수, 플래그 u32 (0x01 요약 행을 보인 적 있음), 차등 서식 6개 (머리글·데이터·요약·표 테두리·머리글 테두리·요약 테두리, 없으면 0xFFFFFFFF), 연결 번호, 이름·표시 이름·설명·셀 스타일 3개 XLNullableWideString), 시트와 같은 자동 필터 레코드(161…), `BrtBeginListCols`(345: 열 수), 열마다 `BrtBeginListCol`(347: 열 번호, 요약 함수 (0 없음, 1 average, 2 count, 3 countNums, 4 max, 5 min, 6 sum, 7 stdDev, 8 var, 9 custom), 차등 서식 3개 (머리글·데이터·요약), 쿼리 표 필드, 고유 이름·이름·요약 글·셀 스타일 3개)와 요약 행 사용자 수식 `BrtListTrFmla`(352: fArray u8 + CellParsedFormula), `BrtTableStyleClient`(513: 플래그 u16 — 0x01 첫 열, 0x02 끝 열, 0x04 행 줄무늬, 0x08 열 줄무늬 — 와 이름), `BrtEndList`(344). 한셀은 `totalsRowBorderDxfId` 를 늘 0 으로 쓴다 (표 대조 실험) |
+| 구조적 참조 | `PtgList`(0x18 0x19): `ixti u16, 플래그 u16, 표 번호 u32, 첫 열 u16, 끝 열 u16`. 플래그 비트 0–1 열 (0 없음, 1 하나, 2 범위), 비트 2–6 행 종류 (0 기본(데이터), 0x01 `#All`, 0x02 `#Headers`, 0x04 `#Data`, 0x08 `#Totals`, 0x10 `#This Row`, 겹치면 합), 비트 10–11 토큰 클래스. `ixti` 는 표가 있는 시트의 XTI. 한셀이 XML 에 쓰는 글: `Table1[수량]`, `Table1[]`(열 없음), `Table1[[수량]:[단가]]`, `Table1[#All]`, `Table1[[#This Row],[수량]]`, 겹친 행 종류는 `#Data`·`#Headers`·`#Totals` 순 (`[[#Headers],[#Data],[수량]]` → `[[#Data],[#Headers],[수량]]`) |
+| 데이터 표 | `BrtTable`(428: RfX, 입력 1 행·열 u32, 입력 2 행·열 u32, 플래그 u8 — 0x01 행 입력, 0x02 2변수)이 왼쪽 위 셀 **앞에** 온다. 표의 셀은 수식 없이 값 셀이다. 1변수 표의 입력 2 는 0 |
 | 외부 연결 | `workbook.bin` 의 `BrtSupBookSrc`(355) = 관계 ID → `xl/externalLinks/externalLinkN.bin`: `BrtBeginSupBook`(360, `sbt u16` 0 = 외부 + 관계 ID → `externalLinkPath`), `BrtSupTabs`(359, `cTab u32` + 시트 이름들) |
+| 통합 문서 | `BrtWbProp`(153): `플래그 u32 (0x01 1904 날짜 체계), dwThemeVersion u32, 코드 이름 XLWideString` (`workbookPr/@codeName`). `BrtBookView`(158, 29바이트): `xWn i32, yWn i32, dxWn u32, dyWn u32 (1/20 pt), iTabRatio u32, itabFirst u32, itabCur u32, 플래그 u8` — 0x08 가로 스크롤, 0x10 세로 스크롤, 0x20 시트 탭 ([MS-XLSB] 그대로, 통합 문서 창 대조 실험) |
 | 시트 속성 | `BrtWsProp`(147): 플래그 3바이트(0x000001 자동 페이지 나누기, 0x000040 요약 행 아래, 0x000080 요약 열 오른쪽, 0x000100 페이지에 맞추기, 0x010000 필터 적용 중), `BrtColor` 탭 색(자동 = 없음), `rwSync`, `colSync`, 코드 이름 (없으면 한셀이 채운다) |
 | 행 높이 | `BrtRowHdr` 의 `miyRw` 는 지정 높이(`fUnsynced` 0x2000)가 아니어도 그 행의 실제 높이다 — XML 의 `ht` (customHeight 없이). 버리면 한셀이 높이를 다시 계산해 그리기 앵커가 어긋난다 |
 | 개요 | `BrtRowHdr` 플래그 비트 8–10 수준, 0x0800 접힘. `BrtColInfo` 플래그 비트 8–10 수준, 접힘은 [MS-XLSB] 의 0x1000 이 아니라 **0x2000** 에 쓴다 (rcell 은 둘 다 받는다) |
 | 보호 | `BrtBookProtection`(534: `protpwdBook u16, protpwdRev u16, 플래그 u16` — 1 구조, 2 창), `BrtSheetProtection`(535: `protpwd u16` + u32 × 16 — `fLocked` 다음 15개는 **허용** 여부라 OOXML 속성과 반대) |
-| 자동 필터 | `BrtBeginAFilter`(161: RfX) 안에 `BrtBeginFilterColumn`(163: `dwCol u32, 플래그 u16`) 마다: 값 목록 `BrtBeginFilters`(165: `fBlank u32, 달력 u32`) + `BrtFilter`(167: 문자열); 사용자 지정 `BrtBeginCustomFilters`(172: `fAnd u32`) + `BrtCustomFilter`(174: `vts u8` (4 수, 6 문자열), `grbitSign u8`, 값 8바이트, 문자열이면 이어서 XLWideString); 상위/하위 `BrtTop10Filter`(170: 플래그 u8 (1 위, 2 백분율, 4 기준값), 개수 f64, 기준값 f64); 동적 `BrtDynamicFilter`(171: `cft u32` — 레거시 AUTOFILTER12 와 같은 번호, 플래그 u8, 값 f64, 최댓값 f64) |
+| 자동 필터 | `BrtBeginAFilter`(161: RfX) 안에 `BrtBeginFilterColumn`(163: `dwCol u32, 플래그 u16`) 마다: 값 목록 `BrtBeginFilters`(165: `fBlank u32, 달력 u32`) + `BrtFilter`(167: 문자열); 사용자 지정 `BrtBeginCustomFilters`(172: `fAnd u32`) + `BrtCustomFilter`(174: `vts u8` (4 수, 6 문자열), `grbitSign u8`, 값 8바이트, 문자열이면 이어서 XLWideString); 상위/하위 `BrtTop10Filter`(170: 플래그 u8 (1 위, 2 백분율, 4 기준값), 개수 f64, 기준값 f64); 동적 `BrtDynamicFilter`(171: `cft u32` — 레거시 AUTOFILTER12 와 같은 번호, 플래그 u8, `val` f64, `maxVal` f64 — 한셀은 플래그 바이트를 채우지 않고 쓰므로(같은 종류에 0x03·0x63·0xCC) 값이 0 이 아니면 있는 것으로 본다; 필터 값 대조 실험) |
 | 시트 보기 | `BrtBeginWsView`(137) 는 **30바이트**: `flags u16, xlView u32, rwTop u32, colLeft u32, icvHdr u8, 예약 u8, ? u16, 현재 확대율 u16 (18), u16 (20), u16 (22), u16 (24), iWbkView u32`. flags: 0x02 수식, 0x04 눈금선, 0x08 머리글, 0x10 0 표시, 0x40 선택 |
 | 틀·선택 | `BrtPane`(151): `x f64, y f64, rwTop u32, colLeft u32, pnnAct u32, flags u8 (0x01 고정, 0x02 나누기 없음)`. `BrtSel`(152): `pnn u32, rwAct u32, colAct u32, iRfx u32, crfx u32 + RfX × crfx` |
 | 인쇄 | `BrtPrintOptions`(477, 0x01 가로 가운데, 0x02 세로 가운데, 0x04 머리글, 0x08 눈금선), `BrtMargins`(476, f64 × 6), `BrtPageSetup`(478, `paper, scale, res, vres, copies, pageStart, fitW, fitH u32, flags u16` — 0x02 가로), `BrtBeginHeaderFooter`(479, `flags u16` + 머리글·바닥글 6개), `BrtBeginRwBrks`(392)/`BrtBeginColBrks`(394) 안의 `BrtBrk`(396: `id, min, max, fMan, fPivot`) |
@@ -63,6 +72,8 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
   경로를 잃은 연결의 표시(관계 종류 `xlPathMissing` → 보통의 `externalLinkPath`). 한셀은 이 둘에 따라 이름 참조의
   따옴표를 정하므로, 바이너리를 거친 문서는 이름의 표기가 달라질 수 있다.
 
+- 글꼴 없는 글 조각만 있는 메모(`<x:text><x:t>…</x:t></x:text>`, `<x:r>` 에 `x:rPr` 가 없는 것)는 `BrtCommentText` 를
+  쓰지 않아 내용을 잃는다 (메모 대조 실험). 메모 상자는 XML 과 같은 VML 파트라 그대로다.
 - 캐시 값(`<v>`)이 없는 수식 셀이 있으면 바이너리 저장이 실패한다 (COM `RPC_E_SERVERFAULT`). 한셀이 저장한 문서는
   늘 캐시 값이 있으므로 조작한 문서에서만 생긴다.
 - `draft`, `autoPageBreaks="0"` 이 저장되지 않는다.
@@ -100,6 +111,41 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
 
 XFPropColor 는 `fValidRGB 1비트 + 종류 7비트 (0 자동, 1 색인, 2 RGB, 3 테마), icv u8, 밝기 i16, RGBA`. 종류 0, 또는 값
 `FF FF FF DF`(한셀의 자동 색 표지, 레거시는 RGB 종류로 쓴다)이면 자동이다. 한셀은 테마·색인 색을 RGB 로 바꿔 쓴다.
+
+### 2.3 조건부 서식의 x14 확장 (x14 조건부 서식 실험)
+
+본 규칙(`BrtBeginCFRule` 463 …)의 데이터 막대 뒤에 `BrtFRTBegin`(35) + `BrtCFRuleExt`(1146: FRTHeader u32 + GUID 16) +
+`BrtFRTEnd` 가 오고, 시트 끝(인쇄 설정 뒤)의 `BrtFRTBegin` 안에 x14 구역이 있다:
+
+```
+BrtBeginConditionalFormattings 1135
+  BrtBeginConditionalFormatting14 1046   FRTHeader (0x02 범위: cSqref u32, 플래그 u32, UncheckedSqRfX), ccf u32, fPivot u32
+    BrtBeginCFRule14 1048                FRTHeader, iType, iTemplate, dxfId, iPri (본 규칙과 이어지면 -1), iParam, 예약 ×2 (u32),
+                                         플래그 u16, cbFmla ×3 (u32), strParam, GUID 16, u32
+      BrtBeginDatabar14 1051             FRTHeader, 최소 u8, 최대 u8, 값 표시 u8, 방향 u8 (0 context, 1 leftToRight, 2 rightToLeft),
+                                         축 u8 (0 automatic, 1 middle, 2 none), 플래그 u8 (0x01 테두리, 0x02 그라데이션,
+                                         0x04 음수 색 다름, 0x08 음수 테두리 색 다름), 예약 u8
+        BrtCFVO14 1050 × 2               FRTHeader (0x04 수식: cFormula u32, (플래그 u32, cce u32, cb u32, rgce, rgcb) × n),
+                                         iType u32, numParam f64, fSaveGTE u32, fGTE u32, cce u32
+        BrtColor14 1055 × n              FRTHeader + BrtColor
+      BrtEndDatabar14 1156
+      BrtBeginIconSet14 1052             FRTHeader, 집합 i32, 플래그 u16 (0x01 사용자 지정, 0x02 아이콘만, 0x04 거꾸로)
+        BrtCFVO14 1050 × n, BrtCFIcon 1112 × n (FRTHeader, 집합 i32 — -1 아이콘 없음, 번호 u32)
+      BrtEndIconSet14 1155
+    BrtEndCFRule14 1049
+  BrtEndConditionalFormatting14 1047
+BrtEndConditionalFormattings 1136
+```
+
+- 기준 값 종류(`BrtCFVO` 471, `BrtCFVO14`): 1 num, 2 min, 3 max, 4 percent, 5 percentile, 7 formula, 8 autoMin, 9 autoMax.
+  `xm:f` 로 받은 값은 수식(PtgInt 등)으로 쓴다 — 본 규칙의 `BrtCFVO` 도 `cbFmla` 뒤 CFParsedFormula 에 담는다.
+- 본 규칙의 `BrtBeginDatabar`(467)는 x14 확장이 있으면 늘 `0a 5a 01`(10/90)이다. 길이는 1051 에 있다.
+- **색의 종류가 없다**: 한셀은 모델에 있는 색만 테두리·음수 채우기·음수 테두리·축 순서로 쓰고, 색 조합이 달라도 1051 이 같다
+  (색 조합 실험: 같은 속성에 색 0–3개를 바꾼 막대 9개). rcell 은 넷이면 모두, 아니면 플래그로 쓰임새가 있는 자리를 고른다
+  (`assign_bar_colors`). 한셀의 `.xlsb` 읽기는 셋을 테두리·음수 채우기·음수 테두리로 읽는다 — 저장본과 다르다.
+- BrtColor14 의 RGB 색은 색인 바이트에 빨강 값이 들어 있고, 색인 색은 RGB 종류에 색인 바이트만 채운다 (`indexed="10"` →
+  `05 0a 00 00 00 00 00 ff`). 자동 색은 검정과 같은 바이트다.
+- 수식 규칙의 x14 규칙(1048 iType 2)은 수식도 서식도 쓰지 않는다 — 한셀의 바이너리 저장이 잃는다.
 
 ## 3. 검증
 
@@ -189,7 +235,7 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 |---|---|
 | 글꼴 | 계열·문자 집합이 없으면 2·0x81, 색은 RGB `05 00 00 00 R G B FF` |
 | 채우기 | 무늬 색이 없으면 `05 40 00 00 00 00 00 FF`, 배경색이 없으면 `01 41 00 00 FF FF FF FF`, RGB 는 icv 칸에 0x40(무늬)·0x41(배경), 색인 64 는 `03 40 00 00 FF FF FF DF`. 그라데이션은 두 색 칸에 `01 40 … DF`·`01 41 … FF` |
-| 테두리 | 선의 자동 색은 `01 00 00 00 FF FF FF DF` (서식 파일 683·조작 문서 33 선; 새 문서 15 선은 `FF` — 숨은 상태), 선 없음은 RGB 색 그대로, 자동·없음이면 검정 RGB |
+| 테두리 | 선 종류가 없는 선(dg 0)에도 색이 있다 (한셀은 검정 RGB) — rcell 은 남겨 XML 에 쓴다 ([cell-2024.md](cell-2024.md) 7.10절의 `dataDxfId`). 선의 자동 색은 `01 00 00 00 FF FF FF DF` (서식 파일 683·조작 문서 33 선; 새 문서 15 선은 `FF` — 숨은 상태), 선 없음은 RGB 색 그대로, 자동·없음이면 검정 RGB |
 | XF | 맞춤이 없으면 세로 아래(2), 보호가 없으면 잠금. 적용 비트는 XML 의 `apply*` 그대로 |
 | 스타일 | 모두 `fBuiltIn`, 사용자 정의 스타일은 앞 스타일의 내장 번호, 수준 없음 0xFF |
 | 차등 서식 | XFProp 은 채우기 → 글꼴 → 테두리 순, 묶음 안은 번호 순. `fNewBorder`(0x8000)는 위·아래·왼쪽·오른쪽을 모두 지정한 테두리. 속성 없는 글꼴은 0x18(이름)으로 자리를 남긴다 |
@@ -226,7 +272,7 @@ XML 의 공유 문자열 순서를 지킨다 (서식 파일 28개 모두; 조작
   35, 1135, (1046 범위·규칙 수, 1048 종류 4·틀 3·GUID·1, 1051, 1050×n, 1156, 1049, 1047)×막대, 1136, 36. XML 에 x14
   확장이 없으면 한셀이 새 GUID 와 기본값(1051 뒷부분 `01 00 06 00`)으로 만든다.
 - x14 데이터 막대 확장의 칸 (x14 대조 실험: 열마다 `x14:dataBar` 속성 하나씩 바꾼 조작 XML 13개 규칙 → 한셀 → 바이너리,
-  한셀은 자기 바이너리에서 모두 되읽는다). rcell 모델에는 아직 없다 (4.9절):
+  한셀은 자기 바이너리에서 모두 되읽는다). rcell 은 모델(`DataBar::ext`, 없으면 한셀이 만드는 기본 확장)에서 쓴다:
   - `BrtBeginDatabar14`(1051): FRT 머리 4, `minLength` u8, `maxLength` u8 (x14 기본 10·90), `showValue` u8,
     `direction` u8 (0 context, 1 leftToRight, 2 rightToLeft), `axisPosition` u8 (0 automatic, 1 middle, 2 none),
     플래그 u16 (0x01 `border`, 0x02 `gradient`, 0x04 `negativeBarColorSameAsPositive="0"`, 0x08
@@ -241,6 +287,7 @@ XML 의 공유 문자열 순서를 지킨다 (서식 파일 28개 모두; 조작
   0x40000 입력 메시지 | 0x80000 오류 메시지 | 연산자<<20. 수식 기준은 첫 범위의 왼쪽 위 셀.
 - 자동 필터: 사용자 지정 문자열 조건은 `vts 6`, 값 칸 `00 00 cch 00 00 00 00 00` + 문자열. 상위/하위는 플래그에 0x04 를
   늘 켜고, 기준값(한셀이 데이터로 계산한 값)을 끝에 쓴다. 동적 필터의 5번째 바이트와 값(평균 등)도 한셀이 계산한다.
+  rcell 은 원본에 있는 기준값·값을 쓰고 없으면 0 을 쓴다.
 
 ### 4.8 한셀의 바이너리 저장이 잃는 것과 rcell
 
@@ -258,13 +305,11 @@ rcell 은 `BrtFmt` 에서 형식을 찾아 다시 읽는다.
 XML 이 같은데 바이너리가 다른 칸 — rcell 은 가장 흔한 값을 쓴다: `BrtWsProp` 2바이트째 0x02, `BrtBeginWsView` 의
 (22)·(24), `BrtPrintOptions` 0x10, 테두리 자동 색의 `DF`/`FF`, 머리글·바닥글 여백의 HWPUNIT 하나, 병합과 공유 문자열의
 순서, 몇몇 서식 파일의 XTI 순서와 쓰이지 않는 XTI, XF 의 순서가 바뀐 문서 하나, 쓰이지 않는 글꼴 하나, 차등 서식의
-이중 회계 밑줄(XML 은 단일 회계로 쓴다), 데이터 막대의 GUID 와 XML x14 확장의 세부(rcell 모델에 없다), 상위/하위·동적
-필터가 데이터로 계산한 값, `BrtAbsPath15` 의 폴더. rcell 모델에 없어 다른 것: 메모 VML 도형 (4.1절), 다시 부호화한
-그림과 조작한 XML 의 그림 앵커 정규화 (2.1절), 데이터 막대의 x14 확장 (`x14:dataBar` 의 `gradient`·`border`·`direction`·
-`axisPosition`·음수 막대 색 같음 여부, `x14:cfvo` 의 autoMin/autoMax, 막대·테두리·음수·축 색 — `BrtBeginDatabar14`(1051)
-뒷부분, `BrtCFVO14`(1050) 종류, `BrtColor14`(1055)). rcell 은 확장이 없는 문서에 한셀이 쓰는 기본값(1051 `01 01 00 06 00`,
-cfvo 2·3)을 쓰므로, 확장이 있는 문서(cf_dv: 단색 막대, autoMin/autoMax, 음수 빨강)를 한셀이 rcell 바이너리로 읽으면
-그라데이션 막대·cfvo min/max·음수 색 없음이 된다. `rcell diff` 는 x14 확장을 비교하지 않아 한셀 읽기 대조에 드러나지 않는다.
+이중 회계 밑줄(XML 은 단일 회계로 쓴다), 데이터 막대의 GUID, 상위/하위·동적 필터가 데이터로 계산한 값(원본에 없을 때),
+`BrtAbsPath15` 의 폴더. rcell 모델에 없어 다른 것: 메모 VML 도형 (4.1절), 다시 부호화한 그림과 조작한 XML 의 그림 앵커
+정규화 (2.1절). 데이터 막대의 x14 확장(방향·축·플래그·x14 기준 값·색)은 모델(`DataBar::ext`)에서 쓰고 `rcell diff` 가
+비교한다 (x14 조건부 서식 실험). 표·피벗·매크로 프로젝트는 바이너리 쓰기가 아직 쓰지 않는다 (XML 쓰기는 쓴다 —
+[cell-2024.md](cell-2024.md) 7.10절).
 
 ### 4.10 구조 잠금 문서의 암호화 컨테이너 (`src/binary/encrypt.rs`)
 

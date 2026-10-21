@@ -126,7 +126,7 @@ enum Cmd {
         /// 한컴 확장(글꼴 hs:*, 문단 모양) 비교 생략 (바이너리 .cell 과 비교할 때)
         #[arg(long)]
         ignore_hancom: bool,
-        /// 도형의 글·사용자 정의 모양 비교 생략 (한셀은 레거시 도형에서 이 둘을 읽지 못한다)
+        /// 도형의 글·사용자 정의 모양, 묶기 잠금 도형, 메모의 선 색 비교 생략 (한셀은 레거시에서 이것들을 읽지 못한다)
         #[arg(long)]
         ignore_shape_detail: bool,
         /// 차트 내용(종류·축·계열·제목·범례 …) 비교 생략 — 차트 도형의 위치는 그래도 비교한다
@@ -548,7 +548,7 @@ fn escher(file: &Path) -> rcell::Result<()> {
                 })
                 .collect();
             println!(
-                "{}type={} spid={:#x} flags={:#x} obj={:?} name={:?} anchor={:?} child={:?} tb={}\n{}  {}",
+                "{}type={} spid={:#x} flags={:#x} obj={:?} name={:?} anchor={:?} (flag {}) child={:?} tb={}\n{}  {}",
                 "  ".repeat(depth),
                 s.shape_type,
                 s.spid,
@@ -556,6 +556,7 @@ fn escher(file: &Path) -> rcell::Result<()> {
                 obj,
                 s.string(0x0380),
                 s.anchor,
+                s.anchor_flag,
                 s.child_anchor,
                 s.has_textbox,
                 "  ".repeat(depth),

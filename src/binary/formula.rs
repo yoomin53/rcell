@@ -1483,6 +1483,7 @@ mod tests {
                 base,
                 xlsb: true,
                 row_shift: 0,
+                tables: &[],
             };
             assert_eq!(
                 decode_relative(&e.rgce, &ctx),
@@ -1523,6 +1524,7 @@ mod tests {
             base: CellRef::default(),
             xlsb: true,
             row_shift: 0,
+            tables: &[],
         };
         for f in [
             "SUM(A1:B2,C3)*-A1",

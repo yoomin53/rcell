@@ -22,15 +22,19 @@ enum Value {
     Time(u64),
 }
 
-/// `\x05SummaryInformation` 스트림 → 문서 속성
-pub fn parse_summary(d: &[u8]) -> DocProperties {
+/// `\x05SummaryInformation` 스트림 → 문서 속성과 편집 시간(분, PID 0x0A).
+///
+/// 편집 시간은 [MS-OLEPS] 로는 100ns 단위 FILETIME 길이지만, 한셀은 분 수를 낮은 u32 에 넣는다
+/// (관측: app.xml `TotalTime` 1234 → `40 00 00 00 d2 04 00 00 00 00 00 00`). 높은 u32 가 0 이 아니면 100ns 로 본다.
+pub fn parse_summary(d: &[u8]) -> (DocProperties, Option<u32>) {
     let mut p = DocProperties::default();
+    let mut total_time = None;
     let u32_at = |i: usize| {
         d.get(i..i + 4)
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     };
     if d.get(0..2) != Some(&[0xFE, 0xFF]) {
-        return p;
+        return (p, total_time);
     }
     let sets = u32_at(24).unwrap_or(0) as usize;
     let Some(base) = (0..sets.min(8)).find_map(|k| {
@@ -39,7 +43,7 @@ pub fn parse_summary(d: &[u8]) -> DocProperties {
             .then(|| u32_at(at + 16))
             .flatten()
     }) else {
-        return p;
+        return (p, total_time);
     };
     let base = base as usize;
     let n = u32_at(base + 4).unwrap_or(0) as usize;
@@ -126,10 +130,19 @@ pub fn parse_summary(d: &[u8]) -> DocProperties {
             0x0B => p.last_printed = time(),
             0x0C => p.created = time(),
             0x0D => p.modified = time(),
+            0x0A => {
+                if let Some(Value::Time(t)) = value(at) {
+                    total_time = Some(if t >> 32 == 0 {
+                        t as u32
+                    } else {
+                        (t / 600_000_000).min(u32::MAX as u64) as u32
+                    });
+                }
+            }
             _ => {}
         }
     }
-    p
+    (p, total_time)
 }
 
 /// FILETIME (1601-01-01 UTC 부터 100ns) → `YYYY-MM-DDTHH:MM:SSZ`
@@ -189,6 +202,10 @@ mod tests {
         let mut t = vec![0x40, 0, 0, 0];
         t.extend_from_slice(&0x01BC_262E_3049_6A00u64.to_le_bytes());
         vals.push((0x0C, t));
+        // 편집 시간: 한셀은 분 수를 FILETIME 의 낮은 u32 에 넣는다
+        let mut e = vec![0x40, 0, 0, 0];
+        e.extend_from_slice(&1234u64.to_le_bytes());
+        vals.push((0x0A, e));
         let head = 8 + vals.len() * 8;
         let mut off = head;
         let mut body = Vec::new();
@@ -210,7 +227,8 @@ mod tests {
         d.extend_from_slice(&48u32.to_le_bytes());
         d.extend(set);
 
-        let p = parse_summary(&d);
+        let (p, total_time) = parse_summary(&d);
+        assert_eq!(total_time, Some(1234));
         assert_eq!(p.title.as_deref(), Some("자동차 경비 보고서"));
         assert_eq!(p.creator.as_deref(), Some("yoomin53"));
         assert_eq!(p.created.as_deref(), Some("1997-03-01T10:49:08Z"));

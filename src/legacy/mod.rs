@@ -37,7 +37,11 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
     // 문서 속성: 목록은 이름의 제어 문자를  로 표기한다 (container::display_path)
     if has("/\\x05SummaryInformation") {
         let s = container::read_entry(bytes, "/\u{5}SummaryInformation")?;
-        wb.properties = props::parse_summary(&s);
+        (wb.properties, wb.total_time) = props::parse_summary(&s);
+    }
+    // 한컴 매크로 프로젝트: XML 의 `xl/vbsProject.bin` 안 스트림과 바이트가 같다 (패키지 파트 실험)
+    if has(crate::ns::VBS_PROJECT_STREAM) {
+        wb.hancom.vbs_project = Some(container::read_entry(bytes, crate::ns::VBS_PROJECT_STREAM)?);
     }
     Ok(wb)
 }

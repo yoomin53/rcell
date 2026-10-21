@@ -1339,8 +1339,8 @@ fn cfvo_record(c: &Cfvo, icon: bool) -> P {
         "percent" => 4,
         "percentile" => 5,
         "formula" => 6,
-        "autoMin" => 7,
-        "autoMax" => 8,
+        "autoMin" => 8,
+        "autoMax" => 9,
         _ => 1,
     };
     let num = c
@@ -2287,6 +2287,28 @@ fn data_bars14(o: &mut Out, bars: &[DataBar14]) {
             .raw(&b.guid)
             .u32(1);
         o.p(1048, &p);
+        // BrtBeginDatabar14: 길이, 값 표시, 방향 (0 context, 1 leftToRight, 2 rightToLeft), 축 (0 automatic, 1 middle,
+        // 2 none), 플래그 u16 (0x01 테두리, 0x02 그라데이션, 0x04 음수 색 다름, 0x08 음수 테두리 색 다름). 확장이 없는
+        // 막대는 한셀이 만드는 기본 확장 (방향 leftToRight, 플래그 0x06)
+        let ext = b
+            .bar
+            .ext
+            .clone()
+            .unwrap_or_else(|| crate::model::DataBarExt::implied(&b.bar));
+        let dir = match ext.direction.as_deref() {
+            Some("leftToRight") => 1,
+            Some("rightToLeft") => 2,
+            _ => 0,
+        };
+        let axis = match ext.axis_position.as_deref() {
+            Some("middle") => 1,
+            Some("none") => 2,
+            _ => 0,
+        };
+        let flags = u16::from(ext.border)
+            | (u16::from(ext.gradient) << 1)
+            | (u16::from(!ext.negative_same_as_positive) << 2)
+            | (u16::from(!ext.negative_border_same_as_positive) << 3);
         o.p(
             1051,
             P::new()
@@ -2294,14 +2316,30 @@ fn data_bars14(o: &mut Out, bars: &[DataBar14]) {
                 .u8(b.bar.min_length.unwrap_or(10) as u8)
                 .u8(b.bar.max_length.unwrap_or(90) as u8)
                 .u8(u8::from(b.bar.show_value))
-                .u16(1)
-                .u16(6),
+                .u8(dir)
+                .u8(axis)
+                .u16(flags),
         );
-        for v in &b.bar.cfvos {
+        for v in &ext.cfvos {
             let mut p = P::new();
             p.u32(0);
             p.raw(&cfvo_record(v, false).0);
             o.p(1050, &p);
+        }
+        // BrtColor14: 있는 색만 테두리 → 음수 막대 → 음수 테두리 → 축 순서로 (관측: cf_dv)
+        for c in [
+            &ext.border_color,
+            &ext.negative_fill_color,
+            &ext.negative_border_color,
+            &ext.axis_color,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut p = P::new();
+            p.u32(0);
+            p.raw(&cf_color(c));
+            o.p(1055, &p);
         }
         o.e(1156);
         o.e(1049);
@@ -2347,15 +2385,25 @@ fn auto_filter(o: &mut Out, sheet: &Sheet) {
             }
             o.e(173);
         } else if let Some((top, percent, val)) = c.top10 {
-            // 플래그: 0x01 위, 0x02 백분율, 0x04 (한셀이 늘 켠다), 개수, 기준값 (rcell 은 모른다 → 0)
+            // 플래그: 0x01 위, 0x02 백분율, 0x04 (한셀이 늘 켠다), 개수, 기준값 (원본에 없으면 0)
             let f = 0x04 | u8::from(top) | (u8::from(percent) << 1);
-            o.p(170, P::new().u8(f).f64(val).f64(0.0));
+            o.p(
+                170,
+                P::new().u8(f).f64(val).f64(c.filter_val.unwrap_or(0.0)),
+            );
         } else if let Some(t) = &c.dynamic {
             let cft = crate::model::DYNAMIC_FILTER_TYPES
                 .iter()
                 .position(|x| *x == t.as_str())
                 .unwrap_or(0) as u32;
-            o.p(171, P::new().u32(cft).u8(0).f64(0.0).f64(0.0));
+            o.p(
+                171,
+                P::new()
+                    .u32(cft)
+                    .u8(0)
+                    .f64(c.dynamic_val.unwrap_or(0.0))
+                    .f64(c.dynamic_max_val.unwrap_or(0.0)),
+            );
         }
         o.e(164);
     }
@@ -2773,10 +2821,12 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
     o.p(2071, P::new().wstr(opts.abs_path.as_deref().unwrap_or("")));
     o.e(38);
     o.e(135);
-    let bv = wb.book_view.clone().unwrap_or(crate::model::BookView {
-        tab_ratio: 500,
-        ..Default::default()
-    });
+    // 창이 없는 문서는 OOXML 기본값 (XML 쓰기와 같게: tabRatio 600)
+    let bv = wb.view.clone().unwrap_or_default();
+    // 플래그: 0x08 가로 스크롤, 0x10 세로 스크롤, 0x20 시트 탭 (통합 문서 창 대조 실험)
+    let bv_flags = (u8::from(bv.show_horizontal_scroll) << 3)
+        | (u8::from(bv.show_vertical_scroll) << 4)
+        | (u8::from(bv.show_sheet_tabs) << 5);
     o.p(
         158,
         P::new()
@@ -2787,7 +2837,7 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
             .u32(bv.tab_ratio)
             .u32(bv.first_sheet)
             .u32(selected as u32)
-            .u8(0x38),
+            .u8(bv_flags),
     );
     o.e(136);
     o.e(143);
@@ -2915,7 +2965,7 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
     ));
     parts.push((
         "docProps/app.xml".into(),
-        app_xml(&worksheets, wb.total_time.as_deref()).into_bytes(),
+        app_xml(&worksheets, wb.total_time).into_bytes(),
     ));
     overrides.push((
         "docProps/app.xml".into(),
@@ -3116,7 +3166,7 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
 
 /// docProps/app.xml — 한셀이 쓰는 꼴 (프로그램 이름, 시트 이름 목록, 편집 시간, 버전).
 /// 편집 시간(분)은 원본 값을 옮긴다 (한셀 관측: 서식 파일의 `TotalTime` 51 이 바이너리에도 51)
-fn app_xml(sheets: &[&Sheet], total_time: Option<&str>) -> String {
+fn app_xml(sheets: &[&Sheet], total_time: Option<u32>) -> String {
     let mut s = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?><ep:Properties xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:ep=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\"><ep:Application>Cell</ep:Application><ep:TitlesOfParts>",
     );
@@ -3128,9 +3178,7 @@ fn app_xml(sheets: &[&Sheet], total_time: Option<&str>) -> String {
     for sh in sheets {
         let _ = write!(s, "<vt:lpstr>{}</vt:lpstr>", esc(&sh.name));
     }
-    let minutes = total_time
-        .and_then(|t| t.trim().parse::<u64>().ok())
-        .unwrap_or(0);
+    let minutes = total_time.unwrap_or(0);
     let _ = write!(
         s,
         "</vt:vector></ep:TitlesOfParts><ep:TotalTime>{minutes}</ep:TotalTime><ep:AppVersion>12.0300</ep:AppVersion></ep:Properties>"

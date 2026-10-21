@@ -24,6 +24,7 @@
 pub mod binary;
 pub mod cf_eval;
 pub mod cfb;
+pub mod cfb_write;
 pub mod chart_svg;
 pub mod chart_xml;
 pub mod compare;

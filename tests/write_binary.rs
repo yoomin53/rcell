@@ -75,7 +75,7 @@ fn corpus_pairs() -> Option<Vec<(PathBuf, PathBuf)>> {
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with(".bin.cell"))
+                    .is_some_and(|n| !n.starts_with("~$") && n.ends_with(".bin.cell"))
             })
             .collect();
         v.sort();

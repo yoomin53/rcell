@@ -93,7 +93,7 @@ pub fn parse_styles(root: &Element) -> Styles {
     st
 }
 
-fn parse_dxf(e: &Element) -> Dxf {
+pub(crate) fn parse_dxf(e: &Element) -> Dxf {
     Dxf {
         font: e.sml_child("font").map(parse_font),
         fill: e.sml_child("fill").map(parse_fill),
