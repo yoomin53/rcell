@@ -19,7 +19,7 @@
 - [x] 바이너리 `.cell` (xlCellb / XLSB)
 - [x] 자체 OLE2 리더 (MS-CFB)
 - [x] XML `.cell` / `.xlsx` 저장, `rcell convert` — HCell(원본) 과 HCell(rcell(원본)) 비교 131쌍 일치 (한셀이 같은 형식의 바뀌지 않은 문서는 다시 쓰지 않고 복사한다는 함정을 찾아 검증 방법을 고침, docs/reverse-engineering.md)
-- [x] 표시 형식 엔진 — 한셀 화면 742개 일치
+- [x] 표시 형식 엔진 — 한셀 화면 4818칸 일치 (`[DBNum1]`–`[DBNum4]`, `G/표준`, 일반 서식 유효숫자, 조건 구역 부호, 고정 분모, 공학 표기, 시스템 날짜·시간, 일본 연호)
 - [x] 테마 색, HTML 렌더러, WebAssembly 웹 뷰어, GitHub Pages 배포
 - [x] 한셀 COM 자동화 기반 차분 분석 도구 (`tools/probe`)
 - [x] 실전 문서 검증: 한셀 서식 파일 28종 — 레거시·바이너리 읽기가 한셀과 일치, 저장은 한셀 판정 기준(HCell(원본) 대 HCell(rcell(원본)))으로 검증
