@@ -352,7 +352,7 @@ pub(crate) fn after_cells(
     }
     ctx.art.sheet_drawing(out, ctx)?;
     for h in &sheet.hyperlinks {
-        hlink(out, h);
+        hlink(out, h, ctx.sheet);
     }
     ctx.art.notes(out, ctx);
     data_validations(out, ctx);
@@ -368,8 +368,12 @@ pub(crate) fn after_cells(
     Ok(())
 }
 
-/// HLINK: 범위 (행 u32) + CLSID_StdHlink + 하이퍼링크 객체 ([MS-OSHARED] 2.3.7.1)
-fn hlink(out: &mut Out, h: &crate::model::Hyperlink) {
+/// HLINK: 범위 (행 u32) + CLSID_StdHlink + 하이퍼링크 객체 ([MS-OSHARED] 2.3.7.1).
+///
+/// 한셀의 꼴 (관측: structure·view_print): 표시 이름이 없으면 범위 첫 셀의 글을 표시 이름으로 쓰고
+/// (`hlstmfSiteGaveDisplayName | hlstmfHasDisplayName`), URL 에 hlstmfIsAbsolute 를 켜지 않으며 (플래그 0x15),
+/// 화면 설명(HLINKTOOLTIP 0x0800)은 쓰지 않는다
+fn hlink(out: &mut Out, h: &crate::model::Hyperlink, sheet: &crate::model::Sheet) {
     let Some(r) = CellRange::parse(&h.range) else {
         return;
     };
@@ -380,11 +384,20 @@ fn hlink(out: &mut Out, h: &crate::model::Hyperlink) {
         0x0B,
     ]);
     b.u32(2);
+    let cell_text = sheet
+        .cells
+        .iter()
+        .find(|c| c.r == r.start)
+        .and_then(|c| match &c.value {
+            crate::model::CellValue::Text(t) => Some(t.clone()),
+            _ => None,
+        });
+    let display = h.display.clone().or(cell_text);
     let mut flags = 0u32;
     if h.target.is_some() {
-        flags |= 0x01 | 0x02;
+        flags |= 0x01;
     }
-    if h.display.is_some() {
+    if display.is_some() {
         flags |= 0x04 | 0x10;
     }
     if h.location.is_some() {
@@ -394,7 +407,7 @@ fn hlink(out: &mut Out, h: &crate::model::Hyperlink) {
     let hstr = |b: &mut Buf, s: &str| {
         b.u32(units(s) as u32 + 1).utf16(s).u16(0);
     };
-    if let Some(d) = &h.display {
+    if let Some(d) = &display {
         hstr(&mut b, d);
     }
     if let Some(t) = &h.target {
@@ -409,20 +422,6 @@ fn hlink(out: &mut Out, h: &crate::model::Hyperlink) {
         hstr(&mut b, l);
     }
     out.rec_buf(0x01B8, &mut b);
-    if let Some(t) = &h.tooltip {
-        let mut b = Buf::new();
-        b.u16(0x0800);
-        range_ref8_u16(&mut b, &r);
-        b.utf16(t).u16(0);
-        out.rec_buf(0x0800, &mut b);
-    }
-}
-
-fn range_ref8_u16(b: &mut Buf, r: &CellRange) {
-    b.u16(r.start.row.min(0xFFFF) as u16)
-        .u16(r.end.row.min(0xFFFF) as u16)
-        .u16(r.start.col as u16)
-        .u16(r.end.col as u16);
 }
 
 /// DVAL + DV (6.3절)
