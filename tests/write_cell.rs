@@ -167,6 +167,7 @@ fn comments_roundtrip() {
                 runs: Vec::new(),
             },
             visible,
+            ..Default::default()
         });
     }
     let out = write(&a, Flavor::Cell).unwrap();

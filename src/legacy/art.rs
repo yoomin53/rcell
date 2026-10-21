@@ -278,10 +278,46 @@ fn sheet_objects(sheet: &crate::model::Sheet) -> Vec<Obj<'_>> {
             v.push(Obj::Shape(s));
         }
     }
-    for (i, c) in sheet.comments.iter().enumerate() {
+    // 메모: 그리기 차례(VML 도형 차례)대로, 차례가 없으면 모델 차례
+    let mut notes: Vec<(usize, &Comment)> = sheet.comments.iter().enumerate().collect();
+    notes.sort_by_key(|(i, c)| (c.z_order.is_none(), c.z_order, *i));
+    for (i, c) in notes {
         v.push(Obj::Note(i, c));
     }
     v
+}
+
+/// 메모 상자 자리 (VML `x:Anchor` 의 픽셀 오프셋) → 레거시 앵커 (dx 는 (열 픽셀 − 1)의 1/32768, dy 는 (행 픽셀 − 1)의
+/// 1/8192 — [`legacy_anchor`] 와 같은 식)
+fn note_anchor(a: [u32; 8], ctx: &SheetCtx) -> [u32; 8] {
+    let mdw = crate::units::max_digit_width(ctx.wb);
+    let sheet = ctx.sheet;
+    let dx = |c: u32, px: u32| {
+        let eff = crate::units::sheet_col_px(sheet, c, mdw).saturating_sub(1) as f64;
+        if eff <= 0.0 {
+            0
+        } else {
+            ((px as f64 * 32768.0 / eff).round() as i64).clamp(0, 0x7FFF) as u32
+        }
+    };
+    let dy = |r: u32, px: u32| {
+        let eff = crate::units::sheet_row_px(sheet, r).saturating_sub(1) as f64;
+        if eff <= 0.0 {
+            0
+        } else {
+            ((px as f64 * 8192.0 / eff).round() as i64).clamp(0, 0x1FFF) as u32
+        }
+    };
+    [
+        a[0],
+        dx(a[0], a[1]),
+        a[2],
+        dy(a[2], a[3]),
+        a[4],
+        dx(a[4], a[5]),
+        a[6],
+        dy(a[6], a[7]),
+    ]
 }
 
 fn count_shapes(s: &Shape) -> u32 {
@@ -524,16 +560,19 @@ impl Art {
                     p.set(0x01BF, 0x0010_0010);
                     p.set(0x01CC, 0x0001_0000);
                     p.set(0x01FF, 0x0008_0008);
-                    p.string(0x0380, &format!("메모 {}", i + 1));
+                    let name = c
+                        .shape_name
+                        .clone()
+                        .unwrap_or_else(|| format!("메모 {}", i + 1));
+                    p.string(0x0380, &name);
                     if !c.visible {
                         p.set(0x03BF, 0x0002_0002);
                     }
                     sp.extend(p.record());
-                    // 메모 상자 자리: 셀 오른쪽 위 (모델에 상자 위치가 없다)
+                    // 메모 상자 자리: VML 의 x:Anchor, 없으면 셀 오른쪽 위
                     let r = c.cell.row;
                     let col = c.cell.col;
-                    sp.extend(client_anchor(
-                        3,
+                    let anchor = c.anchor.map_or(
                         [
                             col + 1,
                             0x0F00,
@@ -544,7 +583,9 @@ impl Art {
                             r + 3,
                             0x0400,
                         ],
-                    ));
+                        |a| note_anchor(a, ctx),
+                    );
+                    sp.extend(client_anchor(3, anchor));
                     sp.extend(rec(0, 0, 0xF011, &[]));
                     let mut obj = Buf::new();
                     obj.u16(0x15)

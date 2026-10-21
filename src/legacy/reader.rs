@@ -1576,6 +1576,8 @@ fn read_sheet(
     // 메모: OBJ(ftCmo, 종류 0x19) 번호 → 바로 뒤 TXO 의 내용. NOTE 가 번호로 가리킨다
     let mut last_note_obj: Option<u16> = None;
     let mut note_texts: HashMap<u16, RichText> = HashMap::new();
+    // NOTE 의 idObj → 메모 번호 (메모 도형의 이름·자리를 나중에 붙인다)
+    let mut note_ids: Vec<(u16, usize)> = Vec::new();
     // 그리기: MSODRAWING 을 이어 붙인 OfficeArt 스트림, OBJ 목록(종류, 번호, TXO 내용)
     let mut art: Vec<u8> = Vec::new();
     let mut objs: Vec<ObjRec> = Vec::new();
@@ -2317,7 +2319,7 @@ fn read_sheet(
                     continue;
                 };
                 last_note_obj = (ft == 0x15 && ot == 0x19).then_some(id);
-                objs.push(ObjRec { ot, text: None });
+                objs.push(ObjRec { ot, id, text: None });
             }
             0x01B6 => {
                 // TXO (한컴): 머리 10바이트, cch u16, flag u8, UTF-16 (CONTINUE 없이 바로),
@@ -2361,6 +2363,7 @@ fn read_sheet(
                 };
                 let cch = r.u16().unwrap_or(0) as usize;
                 let _flag = r.u8();
+                note_ids.push((id, sheet.comments.len()));
                 sheet.comments.push(Comment {
                     cell: CellRef {
                         row,
@@ -2369,6 +2372,7 @@ fn read_sheet(
                     author: r.utf16(cch).unwrap_or_default(),
                     text: note_texts.remove(&id).unwrap_or_default(),
                     visible: grbit & 0x0002 != 0,
+                    ..Default::default()
                 });
             }
             0x0041 => {
@@ -2791,12 +2795,43 @@ fn read_sheet(
         })
         .collect();
     if !art.is_empty() {
+        let tree = escher::parse(&art);
         let mut k = 0;
         shapes.extend(
-            escher::parse(&art)
-                .iter()
+            tree.iter()
                 .filter_map(|e| legacy_shape(e, &objs, &mut k, sheet, wb, mdw)),
         );
+        // 메모 도형: 이름·상자 자리(픽셀)·그리기 차례를 메모에 붙인다 (VML 의 id·x:Anchor·도형 차례와 같은 뜻)
+        let mut notes: Vec<(u16, Option<String>, Option<[u32; 8]>)> = Vec::new();
+        fn walk(
+            e: &escher::EscherShape,
+            objs: &[ObjRec],
+            k: &mut usize,
+            out: &mut Vec<(u16, Option<String>, Option<[u32; 8]>)>,
+        ) {
+            let obj = objs.get(*k);
+            *k += 1;
+            for c in &e.children {
+                walk(c, objs, k, out);
+            }
+            if let Some(o) = obj.filter(|o| o.ot == 0x19) {
+                out.push((o.id, e.string(0x0380), e.anchor));
+            }
+        }
+        let mut k = 0;
+        for e in &tree {
+            walk(e, &objs, &mut k, &mut notes);
+        }
+        for (z, (id, name, anchor)) in notes.into_iter().enumerate() {
+            let Some(&(_, ci)) = note_ids.iter().find(|(n, _)| *n == id) else {
+                continue;
+            };
+            let px = anchor.map(|a| note_px(a, sheet, mdw));
+            let c = &mut sheet.comments[ci];
+            c.shape_name = name;
+            c.z_order = Some(z as u32);
+            c.anchor = px;
+        }
     }
     sheet.shapes = shapes;
     if prot {
@@ -2830,6 +2865,29 @@ fn read_sheet(
             .unwrap_or_default();
     }
     Ok(())
+}
+
+/// 메모 상자의 레거시 앵커 → VML `x:Anchor` 꼴 (열, 오프셋 px, 행, 오프셋 px, …) — [`legacy_anchor`] 와 같은 식
+fn note_px(a: [u32; 8], sheet: &Sheet, mdw: u32) -> [u32; 8] {
+    let [c1, dx1, r1, dy1, c2, dx2, r2, dy2] = a;
+    let px_c = |c: u32, dx: u32| {
+        let eff = crate::units::sheet_col_px(sheet, c, mdw).saturating_sub(1) as f64;
+        (dx as f64 * eff / 32768.0).round() as u32
+    };
+    let px_r = |r: u32, dy: u32| {
+        let eff = crate::units::sheet_row_px(sheet, r).saturating_sub(1) as f64;
+        (dy as f64 * eff / 8192.0).round() as u32
+    };
+    [
+        c1,
+        px_c(c1, dx1),
+        r1,
+        px_r(r1, dy1),
+        c2,
+        px_c(c2, dx2),
+        r2,
+        px_r(r2, dy2),
+    ]
 }
 
 /// 레거시 앵커 → 모델. dx 는 (열 픽셀 − 1)의 1/32768, dy 는 (행 픽셀 − 1)의 1/8192 이고
@@ -3073,6 +3131,8 @@ fn legacy_icon_set(r: &mut Rd) -> Option<IconSet> {
 /// OBJ 레코드 요약: 종류(ot)와 뒤따른 TXO 의 내용·런
 struct ObjRec {
     ot: u16,
+    /// ftCmo 의 개체 번호 (NOTE 의 idObj 가 가리킨다)
+    id: u16,
     text: Option<(String, Vec<(u16, u16)>)>,
 }
 

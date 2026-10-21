@@ -1436,6 +1436,15 @@ pub struct Comment {
     pub text: RichText,
     /// 항상 표시 (VML `x:Visible`, 레거시 NOTE 0x0002)
     pub visible: bool,
+    /// 메모 상자 자리 (VML `x:Anchor`: 왼쪽 열, 오프셋 px, 위 행, 오프셋 px, 오른쪽 열, 오프셋 px, 아래 행, 오프셋 px)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<[u32; 8]>,
+    /// 메모 도형 이름 (VML `v:shape/@id`, 레거시 OfficeArt 0x0380 — 한셀은 "메모 N")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape_name: Option<String>,
+    /// 메모 도형의 그리기 차례 (VML 도형 차례, 레거시 OBJ 차례)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub z_order: Option<u32>,
 }
 
 /// 시트 보기 (`sheetView`, 레거시 WINDOW2/SCL/SELECTION/PANE, XLSB BrtBeginWsView/BrtSel/BrtPane).

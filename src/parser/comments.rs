@@ -39,13 +39,15 @@ pub fn parse_comments(root: &Element) -> Vec<Comment> {
                     .unwrap_or_default(),
                 text: c.sml_child("text").map(parse_rich_text).unwrap_or_default(),
                 visible: false,
+                ..Default::default()
             })
         })
         .collect()
 }
 
-/// VML 의 메모 도형에서 표시 여부를 읽어 같은 셀의 메모에 넣는다.
+/// VML 의 메모 도형에서 표시 여부·상자 자리(`x:Anchor`)·도형 이름(`id`)·차례를 읽어 같은 셀의 메모에 넣는다.
 pub fn apply_vml(vml: &Element, comments: &mut [Comment]) {
+    let mut order = 0u32;
     vml.walk(&mut |e| {
         if !e.is(ns::VML, "shape") {
             return;
@@ -67,8 +69,20 @@ pub fn apply_vml(vml: &Element, comments: &mut [Comment]) {
             .attr("style")
             .is_some_and(|s| s.replace(' ', "").contains("visibility:visible"));
         let visible = cd.child_ns(ns::VML_EXCEL, "Visible").is_some() || style_visible;
+        let anchor = cd.child_ns(ns::VML_EXCEL, "Anchor").and_then(|a| {
+            let v: Vec<u32> = a
+                .text()
+                .split(',')
+                .filter_map(|x| x.trim().parse().ok())
+                .collect();
+            <[u32; 8]>::try_from(v).ok()
+        });
         if let Some(c) = comments.iter_mut().find(|c| c.cell == CellRef { row, col }) {
             c.visible = visible;
+            c.anchor = anchor;
+            c.shape_name = e.attr("id").map(str::to_string);
+            c.z_order = Some(order);
         }
+        order += 1;
     });
 }
