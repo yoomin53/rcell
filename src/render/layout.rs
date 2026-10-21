@@ -135,10 +135,14 @@ impl Layout {
     }
     /// 보이는 열 (0..n)
     pub fn cols(&self, n: u32) -> Vec<u32> {
-        (0..n.min(self.ncols)).filter(|&c| self.col_w(c) > 0).collect()
+        (0..n.min(self.ncols))
+            .filter(|&c| self.col_w(c) > 0)
+            .collect()
     }
     pub fn rows(&self, n: u32) -> Vec<u32> {
-        (0..n.min(self.nrows)).filter(|&r| self.row_h(r) > 0).collect()
+        (0..n.min(self.nrows))
+            .filter(|&r| self.row_h(r) > 0)
+            .collect()
     }
     /// 칸(병합이면 병합 영역 전체)의 너비·높이
     pub fn cell_size(&self, r: u32, c: u32) -> (u32, u32) {
@@ -250,7 +254,11 @@ fn rotated_base_pt(deg: f64, size: f64) -> f64 {
         (90.0, 8.25, 8.25),
     ];
     let d = deg.clamp(0.0, 90.0);
-    let i = T.iter().position(|t| t.0 >= d).unwrap_or(T.len() - 1).max(1);
+    let i = T
+        .iter()
+        .position(|t| t.0 >= d)
+        .unwrap_or(T.len() - 1)
+        .max(1);
     let (a, b) = (T[i - 1], T[i]);
     let t = (d - a.0) / (b.0 - a.0);
     let at = |s: f64| {
@@ -330,7 +338,9 @@ fn cell_text_pt(wb: &Workbook, cell: &Cell, col_w_px: u32) -> f64 {
         let deg = if rot > 90 { rot - 90 } else { rot } as f64;
         // 글자 폭은 글자마다 정수 px
         let tw: f64 = text.chars().map(|c| m.char_width(c).round()).sum();
-        let size = font.and_then(effective_size).unwrap_or(metrics::DEFAULT_SIZE);
+        let size = font
+            .and_then(effective_size)
+            .unwrap_or(metrics::DEFAULT_SIZE);
         // 돌린 글자는 글꼴 기본 높이를 최솟값으로 두지 않는다 (20pt 90도 "0" → 19.5pt)
         return rotated_base_pt(deg, size) + tw * 0.75 * deg.to_radians().sin();
     } else if al.is_some_and(|a| {
@@ -452,7 +462,12 @@ pub(super) fn layout(wb: &Workbook, sheet: &Sheet, nrows: u32, ncols: u32) -> La
     };
     // 행 요소가 없는 행도 열 서식 글꼴로 맞춘 높이 (defaultRowHeight 는 쓰지 않는다)
     let sheet_default = base_pt;
-    let col_screen = |c: u32| col_w.get(c as usize).copied().unwrap_or_else(|| col_px(default_w, k));
+    let col_screen = |c: u32| {
+        col_w
+            .get(c as usize)
+            .copied()
+            .unwrap_or_else(|| col_px(default_w, k))
+    };
     let mut row_pt = Vec::with_capacity(nrows as usize);
     for r in 0..nrows {
         let info = row_info.get(&r);
@@ -485,7 +500,10 @@ pub(super) fn layout(wb: &Workbook, sheet: &Sheet, nrows: u32, ncols: u32) -> La
         };
         row_pt.push(pt.max(0.0));
     }
-    let row_h: Vec<u32> = row_pt.iter().map(|&p| if p > 0.0 { row_px(p) } else { 0 }).collect();
+    let row_h: Vec<u32> = row_pt
+        .iter()
+        .map(|&p| if p > 0.0 { row_px(p) } else { 0 })
+        .collect();
 
     let mut col_x = Vec::with_capacity(ncols as usize);
     let mut x = 0;
@@ -552,7 +570,10 @@ mod tests {
     fn wrap_counts_hangul_lines() {
         let m = FontMetrics::new(Some("맑은 고딕"), Some(11.0), false);
         // 72px 칸(글자 자리 65px)에 한글 4자씩: 18자 + 공백 → 5줄 (자동 높이 대조 81.85pt)
-        assert_eq!(wrap_lines("가나다라마바사아자차카타파하 가나다라", 65.0, &m), 5);
+        assert_eq!(
+            wrap_lines("가나다라마바사아자차카타파하 가나다라", 65.0, &m),
+            5
+        );
         assert_eq!(wrap_lines("가\n가", 65.0, &m), 2);
     }
 }

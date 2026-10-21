@@ -32,7 +32,11 @@ fn pattern_tile(kind: &str) -> Option<Tile> {
         "darkDown" => (4, 4, |x, y| matches!((x + 4 - y) % 4, 1 | 2)),
         "darkUp" => (4, 4, |x, y| (x + y) % 4 < 2),
         "darkGrid" => (4, 4, |x, y| {
-            if y < 2 { matches!(x, 1 | 2) } else { matches!(x, 0 | 3) }
+            if y < 2 {
+                matches!(x, 1 | 2)
+            } else {
+                matches!(x, 0 | 3)
+            }
         }),
         "darkTrellis" => (4, 4, |x, y| match y {
             1 | 3 => true,
@@ -294,7 +298,10 @@ fn hline(s: &mut String, y: i64, x0: i64, x1: i64, dash: &[u32], color: &str) {
             y as f64 + 0.5,
             x1 + 1,
             y as f64 + 0.5,
-            dash.iter().map(u32::to_string).collect::<Vec<_>>().join(" ")
+            dash.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
         );
     }
 }
@@ -316,7 +323,10 @@ fn vline(s: &mut String, x: i64, y0: i64, y1: i64, dash: &[u32], color: &str) {
             x as f64 + 0.5,
             x as f64 + 0.5,
             y1 + 1,
-            dash.iter().map(u32::to_string).collect::<Vec<_>>().join(" ")
+            dash.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
         );
     }
 }
@@ -380,7 +390,10 @@ pub fn borders_svg(b: &CellBorders, w: u32, h: u32) -> String {
         } else {
             format!(
                 " stroke-dasharray='{}'",
-                dash.iter().map(u32::to_string).collect::<Vec<_>>().join(" ")
+                dash.iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
             )
         };
         let shifts: &[f64] = if double { &[-1.0, 1.0] } else { &[0.0] };

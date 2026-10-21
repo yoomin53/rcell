@@ -12,13 +12,17 @@
 //! - 테두리·대각선은 칸마다 SVG 로 경계 픽셀에 그린다 ([`paint`]). 무늬 18종·그라데이션.
 //! - 글자는 빈 이웃 칸으로 넘친다 (왼쪽·오른쪽·가운데, 값이 있는 칸에서 멈춤, 넘친 자리의 세로선은
 //!   지운다). 숫자는 칸에 맞게 줄이거나 `#` 로 채운다 ([`numfit`], [`cell`]).
-//! - 도형은 미리 정의된 모양과 사용자 정의 경로를 SVG 로 ([`shape`], [`draw`]), 스파크라인은 칸 안 SVG
-//!   ([`sparkline`]), 차트는 [`crate::chart_svg`].
+//! - 도형은 미리 정의된 모양과 사용자 정의 경로를 SVG 로 ([`shape`], [`draw`] — 그림자·화살표·겹선),
+//!   스파크라인은 칸 안 SVG ([`sparkline`]), 차트는 [`crate::chart_svg`].
+//! - 조건부 서식: 데이터 막대는 한셀처럼 삼각형([`cell`]), 아이콘은 16px SVG ([`icons`]). 보이는 메모는 상자와
+//!   화살표 ([`note`]).
 
 mod cell;
 mod draw;
+mod icons;
 mod layout;
 mod metrics;
+mod note;
 mod numfit;
 mod paint;
 mod shape;
@@ -37,10 +41,10 @@ pub fn dash_pattern(d: &str, px: f64) -> Option<String> {
     draw::dash_array(d, px)
 }
 
-use cell::CellView;
 use crate::model::{Alignment, CellRef, CellValue, RichText, Sheet, Workbook, Xf};
 use crate::theme::{self, Theme};
 use crate::writer::esc;
+use cell::CellView;
 
 /// 렌더링 옵션.
 #[derive(Debug, Clone, Copy)]
@@ -96,8 +100,12 @@ pub struct Geometry {
 pub fn sheet_geometry(wb: &Workbook, sheet: &Sheet, max_rows: u32, max_cols: u32) -> Geometry {
     let lay = layout::layout(wb, sheet, max_rows, max_cols);
     Geometry {
-        cols: (0..max_cols).map(|c| (lay.col_x(c), lay.col_w(c))).collect(),
-        rows: (0..max_rows).map(|r| (lay.row_y(r), lay.row_h(r))).collect(),
+        cols: (0..max_cols)
+            .map(|c| (lay.col_x(c), lay.col_w(c)))
+            .collect(),
+        rows: (0..max_rows)
+            .map(|r| (lay.row_y(r), lay.row_h(r)))
+            .collect(),
         col_px: lay.col_exact.clone(),
         row_pt: lay.row_pt.clone(),
     }
@@ -302,8 +310,8 @@ pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Ex
     let headers = opts.headers && view.show_row_col_headers;
     // 조건부 서식 결과 (칸 → 덧입힐 서식)
     let cfx = crate::cf_eval::evaluate(sheet, st, &theme);
-    // 메모: 셀 오른쪽 위 빨간 삼각형 + 마우스를 올리면 작성자·내용
-    let notes: HashMap<(u32, u32), String> = sheet
+    // 메모: 셀 오른쪽 위 빨간 삼각형. 숨긴 메모는 마우스를 올리면 작성자·내용, 보이는 메모는 상자 (note.rs)
+    let notes: HashMap<(u32, u32), (String, bool)> = sheet
         .comments
         .iter()
         .map(|c| {
@@ -312,7 +320,10 @@ pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Ex
             } else {
                 format!("{}:\n", c.author)
             };
-            ((c.cell.row, c.cell.col), format!("{who}{}", c.text.text))
+            (
+                (c.cell.row, c.cell.col),
+                (format!("{who}{}", c.text.text), c.visible),
+            )
         })
         .collect();
     // 서식 있는 글: 공유 문자열 중 조각이 둘 이상인 것
@@ -410,6 +421,9 @@ pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Ex
         } else {
             shown.text
         };
+        let hashed = !text.is_empty()
+            && text.bytes().all(|b| b == b'#')
+            && !matches!(value, CellValue::Text(_));
         let rich = match &value {
             CellValue::Text(t) => rich.get(t.as_str()).copied(),
             _ => None,
@@ -433,7 +447,8 @@ pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Ex
             font,
             m,
             code_color: shown.color.as_deref().map(cell::code_color),
-            h,
+            // 넘쳐 # 로 채운 칸은 왼쪽부터 (한셀 화면 — dbnum 실험의 오른쪽 맞춤 숫자도 # 는 왼쪽 2px 에서 시작)
+            h: if hashed { HAlign::Left } else { h },
             v: v_align(align),
             wrap,
             shrink,
@@ -616,11 +631,7 @@ pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Ex
     }
     s.push_str("<tbody>");
     for &r in &rows {
-        let _ = write!(
-            s,
-            "<tr data-r=\"{r}\" style=\"height:{}px\">",
-            lay.row_h(r)
-        );
+        let _ = write!(s, "<tr data-r=\"{r}\" style=\"height:{}px\">", lay.row_h(r));
         if headers {
             let st = sticky_top
                 .get(&r)
@@ -641,8 +652,12 @@ pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Ex
                     let _ = write!(attrs, " colspan=\"{cs}\"");
                 }
             }
-            if let Some(n) = notes.get(&(r, c)) {
-                let _ = write!(attrs, " class=\"rc-note\" data-note=\"{}\"", esc(n));
+            match notes.get(&(r, c)) {
+                Some((_, true)) => attrs.push_str(" class=\"rc-note rc-note-v\""),
+                Some((n, false)) => {
+                    let _ = write!(attrs, " class=\"rc-note\" data-note=\"{}\"", esc(n));
+                }
+                None => {}
             }
             let (w, h) = lay.cell_size(r, c);
             let mut css = sticky(r, Some(c));
@@ -686,12 +701,18 @@ pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Ex
                         up: tl.up,
                     }
                 }
-                None => views.get(&(r, c)).map(|v| v.borders.clone()).unwrap_or_default(),
+                None => views
+                    .get(&(r, c))
+                    .map(|v| v.borders.clone())
+                    .unwrap_or_default(),
             };
             if ov.no_vline.contains(&(r, ec)) {
                 b.right = None;
             }
-            if prev_col.get(&c).is_some_and(|&p| ov.no_vline.contains(&(r, p))) {
+            if prev_col
+                .get(&c)
+                .is_some_and(|&p| ov.no_vline.contains(&(r, p)))
+            {
                 b.left = None;
             }
             if !b.is_empty() {
@@ -719,57 +740,12 @@ pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Ex
         s.push_str("</tr>");
     }
     s.push_str("</tbody></table>");
-    s.push_str(&draw::shapes_html(wb, sheet, &lay, header_w, header_h, &theme));
+    s.push_str(&draw::shapes_html(
+        wb, sheet, &lay, header_w, header_h, &theme,
+    ));
+    s.push_str(&note::notes_html(sheet, &lay, header_w, header_h, &theme));
     s.push_str("</div>");
     s
-}
-
-/// 아이콘 집합의 단계 → (글리프, 색)
-fn icon_glyph(set: &str, level: usize, n: usize) -> (&'static str, &'static str) {
-    const RYG: [&str; 5] = ["#E5333B", "#F4A700", "#F4D100", "#8DC63F", "#21A366"];
-    let pick = |i: usize| -> &'static str {
-        // 단계 수에 맞춰 빨강 → 초록 사이에서 고른다
-        let k = if n <= 1 { 0 } else { i * 4 / (n - 1) };
-        RYG[k.min(4)]
-    };
-    if set.contains("Arrows") {
-        const A3: [&str; 3] = ["↓", "→", "↑"];
-        const A4: [&str; 4] = ["↓", "↘", "↗", "↑"];
-        const A5: [&str; 5] = ["↓", "↘", "→", "↗", "↑"];
-        let g = match n {
-            3 => A3[level.min(2)],
-            4 => A4[level.min(3)],
-            _ => A5[level.min(4)],
-        };
-        (
-            g,
-            if set.contains("Gray") {
-                "#808080"
-            } else {
-                pick(level)
-            },
-        )
-    } else if set.contains("Quarters") {
-        (["○", "◔", "◑", "◕", "●"][level.min(4)], "#404040")
-    } else if set.contains("Rating") || set.contains("Boxes") {
-        (
-            ["▁", "▃", "▅", "▇", "█"][level * 4 / n.max(2).saturating_sub(1).max(1)],
-            "#2F6FB7",
-        )
-    } else if set.contains("Stars") {
-        (["☆", "⯪", "★"][level.min(2)], "#F4B400")
-    } else if set.contains("Triangles") {
-        (["▼", "▬", "▲"][level.min(2)], pick(level))
-    } else if set.contains("Flags") {
-        ("⚑", pick(level))
-    } else if set.contains("RedToBlack") {
-        (
-            "●",
-            ["#000000", "#808080", "#F08080", "#E5333B"][level.min(3)],
-        )
-    } else {
-        ("●", pick(level))
-    }
 }
 
 /// 뷰어 공통 CSS. 칸은 오른쪽·아래 1px 가 격자선 자리다 (한셀 화면과 같다)
@@ -794,10 +770,13 @@ table.rc-sheet tbody th{position:sticky;left:0;text-align:center}\
 .rc-vert{writing-mode:vertical-lr;text-orientation:upright;white-space:pre}\
 .rc-bd{position:absolute;left:-2px;top:-2px;pointer-events:none;overflow:visible;z-index:3}\
 .rc-spark{position:absolute;left:0;top:0;pointer-events:none}\
-.rc-bar{position:absolute;left:1px;top:2px;bottom:3px}\
+.rc-bar{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}\
 .rc-hidden{display:none}\
 .rc-canvas{position:relative;display:inline-block}\
-.rc-icon{display:inline-block;margin-right:3px;font-weight:normal}\
+.rc-icon{position:absolute;left:3px;z-index:1;overflow:visible}\
+.rc-note-box,.rc-note-line{position:absolute;overflow:visible;z-index:6;pointer-events:none}\
+.rc-note-text{position:absolute;z-index:7;display:flex;flex-direction:column;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;font:9pt '돋움',Dotum,sans-serif;line-height:15px;color:#000;pointer-events:none}\
+table.rc-sheet td.rc-note-v:hover::before{content:none}\
 .rc-shape{position:absolute;box-sizing:border-box;overflow:hidden;pointer-events:auto;z-index:4}\
 .rc-geom{position:absolute;left:0;top:0;overflow:visible}\
 .rc-text{position:relative;display:flex;flex-direction:column;box-sizing:border-box;width:100%;height:100%;font-size:11pt;line-height:1.2}\

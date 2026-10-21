@@ -109,6 +109,7 @@ try {
     }
 } finally {
     try { $app.Visible = $false } catch {}
+    # New-Object 마다 새 한셀 프로세스가 뜨고 빈 "통합 문서 1" 을 연다 — 이 인스턴스는 우리 것이므로 닫는다
     try { $app.Quit() } catch {}
     [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null
 }

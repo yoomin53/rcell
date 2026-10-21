@@ -22,14 +22,18 @@ pub fn object_element(raw: &str) -> Option<Element> {
     root.elements()
         .find(|c| {
             c.ns.as_deref() == Some(XDR)
-                && matches!(c.name.as_str(), "sp" | "cxnSp" | "pic" | "graphicFrame" | "grpSp")
+                && matches!(
+                    c.name.as_str(),
+                    "sp" | "cxnSp" | "pic" | "graphicFrame" | "grpSp"
+                )
         })
         .cloned()
 }
 
 /// spPr (또는 grpSpPr)
 pub fn sp_pr(obj: &Element) -> Option<&Element> {
-    obj.child_ns(XDR, "spPr").or_else(|| obj.child_ns(XDR, "grpSpPr"))
+    obj.child_ns(XDR, "spPr")
+        .or_else(|| obj.child_ns(XDR, "grpSpPr"))
 }
 
 /// `a:avLst` 의 조정값 (`val n` 만)
@@ -189,13 +193,20 @@ fn star(w: f64, h: f64, n: usize, inner: Option<f64>) -> String {
 
 /// 미리 정의된 모양 → 경로들 (w×h px 상자). 조정값은 1/100000 단위 비율. 모르는 모양은 None
 /// (그리는 쪽이 사각형으로 그린다). 모양은 ECMA-376 의 이름과 기본 조정값을 따라 직접 그린 근사다
-pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> Option<Vec<PathSpec>> {
+pub fn preset_paths(
+    prst: &str,
+    w: f64,
+    h: f64,
+    adj: &HashMap<String, f64>,
+) -> Option<Vec<PathSpec>> {
     let ss = w.min(h);
     let a = |n: &str, d: f64| adj.get(n).copied().unwrap_or(d) / 100_000.0;
     let one = |d: String| Some(vec![PathSpec::new(d)]);
     let (hc, vc) = (w / 2.0, h / 2.0);
     match prst {
-        "rect" | "flowChartProcess" | "textBox" => one(poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])),
+        "rect" | "flowChartProcess" | "textBox" => {
+            one(poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]))
+        }
         "flowChartPredefinedProcess" => {
             let x = w / 8.0;
             Some(vec![
@@ -226,7 +237,13 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
             };
             one(round_rect(0.0, 0.0, w, h, [r; 4]))
         }
-        "round1Rect" => one(round_rect(0.0, 0.0, w, h, [0.0, ss * a("adj", 16667.0), 0.0, 0.0])),
+        "round1Rect" => one(round_rect(
+            0.0,
+            0.0,
+            w,
+            h,
+            [0.0, ss * a("adj", 16667.0), 0.0, 0.0],
+        )),
         "round2SameRect" => {
             let (t, b) = (ss * a("adj1", 16667.0), ss * a("adj2", 0.0));
             one(round_rect(0.0, 0.0, w, h, [t, t, b, b]))
@@ -242,7 +259,16 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
         "snip2SameRect" => {
             let x = ss * a("adj1", 16667.0);
             let y = ss * a("adj2", 0.0);
-            one(poly(&[(x, 0.0), (w - x, 0.0), (w, x), (w, h - y), (w - y, h), (y, h), (0.0, h - y), (0.0, x)]))
+            one(poly(&[
+                (x, 0.0),
+                (w - x, 0.0),
+                (w, x),
+                (w, h - y),
+                (w - y, h),
+                (y, h),
+                (0.0, h - y),
+                (0.0, x),
+            ]))
         }
         "snipRoundRect" => {
             let r = ss * a("adj1", 16667.0);
@@ -262,7 +288,11 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
         }
         "ellipse" | "flowChartConnector" => one(ellipse(hc, vc, hc, vc)),
         "triangle" | "flowChartExtract" => {
-            let x = if prst == "triangle" { w * a("adj", 50000.0) } else { hc };
+            let x = if prst == "triangle" {
+                w * a("adj", 50000.0)
+            } else {
+                hc
+            };
             one(poly(&[(0.0, h), (x, 0.0), (w, h)]))
         }
         "flowChartMerge" => one(poly(&[(0.0, 0.0), (w, 0.0), (hc, h)])),
@@ -274,7 +304,11 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
         ]),
         "flowChartCollate" => one(poly(&[(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)])),
         "parallelogram" | "flowChartInputOutput" => {
-            let x = if prst == "parallelogram" { ss * a("adj", 25000.0) } else { w / 5.0 };
+            let x = if prst == "parallelogram" {
+                ss * a("adj", 25000.0)
+            } else {
+                w / 5.0
+            };
             one(poly(&[(x, 0.0), (w, 0.0), (w - x, h), (0.0, h)]))
         }
         "trapezoid" => {
@@ -286,8 +320,20 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
             one(poly(&[(0.0, 0.0), (w, 0.0), (w - x, h), (x, h)]))
         }
         "flowChartManualInput" => one(poly(&[(0.0, h / 5.0), (w, 0.0), (w, h), (0.0, h)])),
-        "flowChartPunchedCard" => one(poly(&[(w / 5.0, 0.0), (w, 0.0), (w, h), (0.0, h), (0.0, h / 5.0)])),
-        "flowChartOffpageConnector" => one(poly(&[(0.0, 0.0), (w, 0.0), (w, h * 0.8), (hc, h), (0.0, h * 0.8)])),
+        "flowChartPunchedCard" => one(poly(&[
+            (w / 5.0, 0.0),
+            (w, 0.0),
+            (w, h),
+            (0.0, h),
+            (0.0, h / 5.0),
+        ])),
+        "flowChartOffpageConnector" => one(poly(&[
+            (0.0, 0.0),
+            (w, 0.0),
+            (w, h * 0.8),
+            (hc, h),
+            (0.0, h * 0.8),
+        ])),
         "flowChartDelay" => one(format!(
             "M0,0H{}A{},{} 0 0 1 {},{}H0Z",
             f(hc),
@@ -321,7 +367,10 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
             f(w / 6.0)
         )),
         "flowChartSummingJunction" | "flowChartOr" => {
-            let (dx, dy) = (hc * std::f64::consts::FRAC_1_SQRT_2, vc * std::f64::consts::FRAC_1_SQRT_2);
+            let (dx, dy) = (
+                hc * std::f64::consts::FRAC_1_SQRT_2,
+                vc * std::f64::consts::FRAC_1_SQRT_2,
+            );
             let cross = if prst == "flowChartOr" {
                 format!("M{},0V{}M0,{}H{}", f(hc), f(h), f(vc), f(w))
             } else {
@@ -393,7 +442,13 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
         }
         "homePlate" => {
             let x = (ss * a("adj", 50000.0)).min(w);
-            one(poly(&[(0.0, 0.0), (w - x, 0.0), (w, vc), (w - x, h), (0.0, h)]))
+            one(poly(&[
+                (0.0, 0.0),
+                (w - x, 0.0),
+                (w, vc),
+                (w - x, h),
+                (0.0, h),
+            ]))
         }
         "pentagon" => one(poly(&[
             (hc, 0.0),
@@ -404,11 +459,29 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
         ])),
         "chevron" => {
             let x = (ss * a("adj", 50000.0)).min(w);
-            one(poly(&[(0.0, 0.0), (w - x, 0.0), (w, vc), (w - x, h), (0.0, h), (x, vc)]))
+            one(poly(&[
+                (0.0, 0.0),
+                (w - x, 0.0),
+                (w, vc),
+                (w - x, h),
+                (0.0, h),
+                (x, vc),
+            ]))
         }
         "hexagon" | "flowChartPreparation" => {
-            let x = if prst == "hexagon" { ss * a("adj", 25000.0) } else { w / 5.0 };
-            one(poly(&[(0.0, vc), (x, 0.0), (w - x, 0.0), (w, vc), (w - x, h), (x, h)]))
+            let x = if prst == "hexagon" {
+                ss * a("adj", 25000.0)
+            } else {
+                w / 5.0
+            };
+            one(poly(&[
+                (0.0, vc),
+                (x, 0.0),
+                (w - x, 0.0),
+                (w, vc),
+                (w - x, h),
+                (x, h),
+            ]))
         }
         "octagon" => {
             let x = ss * a("adj", 29289.0);
@@ -428,8 +501,16 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
         "dodecagon" => one(star(w, h, 12, None)),
         "plus" | "mathPlus" => {
             let x = ss * a("adj", if prst == "plus" { 25000.0 } else { 23520.0 });
-            let (x0, y0) = if prst == "plus" { (x, x) } else { (hc - x / 2.0, vc - x / 2.0) };
-            let (x1, y1) = if prst == "plus" { (w - x, h - x) } else { (hc + x / 2.0, vc + x / 2.0) };
+            let (x0, y0) = if prst == "plus" {
+                (x, x)
+            } else {
+                (hc - x / 2.0, vc - x / 2.0)
+            };
+            let (x1, y1) = if prst == "plus" {
+                (w - x, h - x)
+            } else {
+                (hc + x / 2.0, vc + x / 2.0)
+            };
             one(poly(&[
                 (x0, 0.0),
                 (x1, 0.0),
@@ -447,14 +528,29 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
         }
         "mathMinus" => {
             let t = h * a("adj1", 23520.0);
-            one(poly(&[(0.0, vc - t / 2.0), (w, vc - t / 2.0), (w, vc + t / 2.0), (0.0, vc + t / 2.0)]))
+            one(poly(&[
+                (0.0, vc - t / 2.0),
+                (w, vc - t / 2.0),
+                (w, vc + t / 2.0),
+                (0.0, vc + t / 2.0),
+            ]))
         }
         "mathEqual" => {
             let t = h * a("adj1", 23520.0);
             let g = h * a("adj2", 11760.0);
             Some(vec![
-                PathSpec::new(poly(&[(0.0, vc - g / 2.0 - t), (w, vc - g / 2.0 - t), (w, vc - g / 2.0), (0.0, vc - g / 2.0)])),
-                PathSpec::new(poly(&[(0.0, vc + g / 2.0), (w, vc + g / 2.0), (w, vc + g / 2.0 + t), (0.0, vc + g / 2.0 + t)])),
+                PathSpec::new(poly(&[
+                    (0.0, vc - g / 2.0 - t),
+                    (w, vc - g / 2.0 - t),
+                    (w, vc - g / 2.0),
+                    (0.0, vc - g / 2.0),
+                ])),
+                PathSpec::new(poly(&[
+                    (0.0, vc + g / 2.0),
+                    (w, vc + g / 2.0),
+                    (w, vc + g / 2.0 + t),
+                    (0.0, vc + g / 2.0 + t),
+                ])),
             ])
         }
         "mathMultiply" => {
@@ -475,7 +571,8 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
                 (0.0, dy),
             ]))
         }
-        "star4" | "star5" | "star6" | "star7" | "star8" | "star10" | "star12" | "star16" | "star24" | "star32" => {
+        "star4" | "star5" | "star6" | "star7" | "star8" | "star10" | "star12" | "star16"
+        | "star24" | "star32" => {
             let n: usize = prst[4..].parse().unwrap_or(5);
             let d = match n {
                 4 => 12500.0,
@@ -487,8 +584,12 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
             };
             one(star(w, h, n, Some(a("adj", d) * 2.0)))
         }
-        "rightArrow" | "leftArrow" | "upArrow" | "downArrow" | "leftRightArrow" | "upDownArrow" | "notchedRightArrow" => {
-            let horiz = matches!(prst, "rightArrow" | "leftArrow" | "leftRightArrow" | "notchedRightArrow");
+        "rightArrow" | "leftArrow" | "upArrow" | "downArrow" | "leftRightArrow" | "upDownArrow"
+        | "notchedRightArrow" => {
+            let horiz = matches!(
+                prst,
+                "rightArrow" | "leftArrow" | "leftRightArrow" | "notchedRightArrow"
+            );
             let (len, thick) = if horiz { (w, h) } else { (h, w) };
             let shaft = thick * a("adj1", 50000.0);
             let both = matches!(prst, "leftRightArrow" | "upDownArrow");
@@ -502,7 +603,13 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
             } else {
                 base.push((0.0, y1));
             }
-            base.extend([(x2, y1), (x2, 0.0), (len, thick / 2.0), (x2, thick), (x2, y2)]);
+            base.extend([
+                (x2, y1),
+                (x2, 0.0),
+                (len, thick / 2.0),
+                (x2, thick),
+                (x2, y2),
+            ]);
             if both {
                 base.extend([(head, y2), (head, thick)]);
             } else {
@@ -523,7 +630,12 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
             one(poly(&pts))
         }
         "can" | "flowChartMagneticDisk" => {
-            let ry = if prst == "can" { ss * a("adj", 25000.0) / 2.0 } else { h / 6.0 }.min(vc);
+            let ry = if prst == "can" {
+                ss * a("adj", 25000.0) / 2.0
+            } else {
+                h / 6.0
+            }
+            .min(vc);
             Some(vec![
                 PathSpec::with(
                     format!(
@@ -559,13 +671,32 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
         "cube" => {
             let d = ss * a("adj", 25000.0);
             Some(vec![
-                PathSpec::with(poly(&[(0.0, d), (w - d, d), (w - d, h), (0.0, h)]), PathFill::Norm, false),
-                PathSpec::with(poly(&[(0.0, d), (d, 0.0), (w, 0.0), (w - d, d)]), PathFill::LightenLess, false),
-                PathSpec::with(poly(&[(w - d, d), (w, 0.0), (w, h - d), (w - d, h)]), PathFill::DarkenLess, false),
+                PathSpec::with(
+                    poly(&[(0.0, d), (w - d, d), (w - d, h), (0.0, h)]),
+                    PathFill::Norm,
+                    false,
+                ),
+                PathSpec::with(
+                    poly(&[(0.0, d), (d, 0.0), (w, 0.0), (w - d, d)]),
+                    PathFill::LightenLess,
+                    false,
+                ),
+                PathSpec::with(
+                    poly(&[(w - d, d), (w, 0.0), (w, h - d), (w - d, h)]),
+                    PathFill::DarkenLess,
+                    false,
+                ),
                 PathSpec::with(
                     format!(
                         "{}M0,{}L{},0M{},{}L{},0",
-                        poly(&[(0.0, d), (d, 0.0), (w, 0.0), (w, h - d), (w - d, h), (0.0, h)]),
+                        poly(&[
+                            (0.0, d),
+                            (d, 0.0),
+                            (w, 0.0),
+                            (w, h - d),
+                            (w - d, h),
+                            (0.0, h)
+                        ]),
                         f(d),
                         f(d),
                         f(w - d),
@@ -580,15 +711,49 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
         "bevel" => {
             let d = ss * a("adj", 12500.0);
             Some(vec![
-                PathSpec::with(poly(&[(d, d), (w - d, d), (w - d, h - d), (d, h - d)]), PathFill::Norm, false),
-                PathSpec::with(poly(&[(0.0, 0.0), (w, 0.0), (w - d, d), (d, d)]), PathFill::LightenLess, false),
-                PathSpec::with(poly(&[(0.0, 0.0), (d, d), (d, h - d), (0.0, h)]), PathFill::Lighten, false),
-                PathSpec::with(poly(&[(w, 0.0), (w, h), (w - d, h - d), (w - d, d)]), PathFill::DarkenLess, false),
-                PathSpec::with(poly(&[(0.0, h), (d, h - d), (w - d, h - d), (w, h)]), PathFill::Darken, false),
+                PathSpec::with(
+                    poly(&[(d, d), (w - d, d), (w - d, h - d), (d, h - d)]),
+                    PathFill::Norm,
+                    false,
+                ),
+                PathSpec::with(
+                    poly(&[(0.0, 0.0), (w, 0.0), (w - d, d), (d, d)]),
+                    PathFill::LightenLess,
+                    false,
+                ),
+                PathSpec::with(
+                    poly(&[(0.0, 0.0), (d, d), (d, h - d), (0.0, h)]),
+                    PathFill::Lighten,
+                    false,
+                ),
+                PathSpec::with(
+                    poly(&[(w, 0.0), (w, h), (w - d, h - d), (w - d, d)]),
+                    PathFill::DarkenLess,
+                    false,
+                ),
+                PathSpec::with(
+                    poly(&[(0.0, h), (d, h - d), (w - d, h - d), (w, h)]),
+                    PathFill::Darken,
+                    false,
+                ),
                 PathSpec::with(
                     poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])
                         + &poly(&[(d, d), (w - d, d), (w - d, h - d), (d, h - d)])
-                        + &format!("M0,0L{},{}M{},0L{},{}M0,{}L{},{}M{},{}L{},{}", f(d), f(d), f(w), f(w - d), f(d), f(h), f(d), f(h - d), f(w), f(h), f(w - d), f(h - d)),
+                        + &format!(
+                            "M0,0L{},{}M{},0L{},{}M0,{}L{},{}M{},{}L{},{}",
+                            f(d),
+                            f(d),
+                            f(w),
+                            f(w - d),
+                            f(d),
+                            f(h),
+                            f(d),
+                            f(h - d),
+                            f(w),
+                            f(h),
+                            f(w - d),
+                            f(h - d)
+                        ),
                     PathFill::None,
                     true,
                 ),
@@ -597,7 +762,11 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
         "foldedCorner" => {
             let d = ss * a("adj", 16667.0);
             Some(vec![
-                PathSpec::with(poly(&[(0.0, 0.0), (w, 0.0), (w, h - d), (w - d, h), (0.0, h)]), PathFill::Norm, false),
+                PathSpec::with(
+                    poly(&[(0.0, 0.0), (w, 0.0), (w, h - d), (w - d, h), (0.0, h)]),
+                    PathFill::Norm,
+                    false,
+                ),
                 PathSpec::with(
                     format!(
                         "M{},{}L{},{}L{},{}Z",
@@ -633,23 +802,25 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
         }
         "frame" => {
             let d = ss * a("adj1", 12500.0);
-            one(poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]) + &poly(&[(d, d), (d, h - d), (w - d, h - d), (w - d, d)]))
+            one(poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])
+                + &poly(&[(d, d), (d, h - d), (w - d, h - d), (w - d, d)]))
         }
         "donut" => {
             let d = ss * a("adj", 25000.0);
-            one(ellipse(hc, vc, hc, vc) + &format!(
-                "M{},{}A{},{} 0 1 0 {},{}A{},{} 0 1 0 {},{}Z",
-                f(d),
-                f(vc),
-                f(hc - d),
-                f(vc - d),
-                f(w - d),
-                f(vc),
-                f(hc - d),
-                f(vc - d),
-                f(d),
-                f(vc)
-            ))
+            one(ellipse(hc, vc, hc, vc)
+                + &format!(
+                    "M{},{}A{},{} 0 1 0 {},{}A{},{} 0 1 0 {},{}Z",
+                    f(d),
+                    f(vc),
+                    f(hc - d),
+                    f(vc - d),
+                    f(w - d),
+                    f(vc),
+                    f(hc - d),
+                    f(vc - d),
+                    f(d),
+                    f(vc)
+                ))
         }
         "noSmoking" => {
             let d = ss * a("adj", 18750.0);
@@ -735,12 +906,21 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
             Some(vec![
                 PathSpec::new(ellipse(hc, vc, hc, vc)),
                 PathSpec::with(
-                    ellipse(w * 0.35, h * 0.37, w * 0.05, h * 0.05) + &ellipse(w * 0.65, h * 0.37, w * 0.05, h * 0.05),
+                    ellipse(w * 0.35, h * 0.37, w * 0.05, h * 0.05)
+                        + &ellipse(w * 0.65, h * 0.37, w * 0.05, h * 0.05),
                     PathFill::DarkenLess,
                     true,
                 ),
                 PathSpec::with(
-                    format!("M{},{}Q{},{} {},{}", f(w * 0.25), f(h * 0.68), f(hc), f(smile_y + h * 0.08), f(w * 0.75), f(h * 0.68)),
+                    format!(
+                        "M{},{}Q{},{} {},{}",
+                        f(w * 0.25),
+                        f(h * 0.68),
+                        f(hc),
+                        f(smile_y + h * 0.08),
+                        f(w * 0.75),
+                        f(h * 0.68)
+                    ),
                     PathFill::None,
                     true,
                 ),
@@ -760,7 +940,10 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
                 (7305.0, 7811.0),
                 (0.0, 3923.0),
             ];
-            let pts: Vec<(f64, f64)> = P.iter().map(|&(x, y)| (x / 21600.0 * w, y / 21600.0 * h)).collect();
+            let pts: Vec<(f64, f64)> = P
+                .iter()
+                .map(|&(x, y)| (x / 21600.0 * w, y / 21600.0 * h))
+                .collect();
             one(poly(&pts))
         }
         "moon" => {
@@ -798,7 +981,11 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
             let large = if sw > 180.0 { 1 } else { 0 };
             let arc = format!("A{},{} 0 {large} 1 {},{}", f(hc), f(vc), f(p1.0), f(p1.1));
             match prst {
-                "arc" => Some(vec![PathSpec::with(format!("M{},{}{arc}", f(p0.0), f(p0.1)), PathFill::None, true)]),
+                "arc" => Some(vec![PathSpec::with(
+                    format!("M{},{}{arc}", f(p0.0), f(p0.1)),
+                    PathFill::None,
+                    true,
+                )]),
                 "chord" => one(format!("M{},{}{arc}Z", f(p0.0), f(p0.1))),
                 "blockArc" => {
                     let d = ss * a("adj3", 25000.0);
@@ -816,7 +1003,13 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
                         f(q0.1)
                     ))
                 }
-                _ => one(format!("M{},{}L{},{}{arc}Z", f(hc), f(vc), f(p0.0), f(p0.1))),
+                _ => one(format!(
+                    "M{},{}L{},{}{arc}Z",
+                    f(hc),
+                    f(vc),
+                    f(p0.0),
+                    f(p0.1)
+                )),
             }
         }
         "wedgeRectCallout" | "wedgeRoundRectCallout" | "wedgeEllipseCallout" => {
@@ -841,7 +1034,11 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
                     f(b0.1)
                 ));
             }
-            let r = if prst == "wedgeRoundRectCallout" { ss * a("adj3", 16667.0) } else { 0.0 };
+            let r = if prst == "wedgeRoundRectCallout" {
+                ss * a("adj3", 16667.0)
+            } else {
+                0.0
+            };
             // 꼬리가 나가는 변: 끝이 칸 밖으로 더 멀리 나간 쪽
             let (dx, dy) = ((tx - hc) / w, (ty - vc) / h);
             let inside = tx >= 0.0 && tx <= w && ty >= 0.0 && ty <= h;
@@ -903,12 +1100,45 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
             d.push('Z');
             one(d)
         }
-        "leftBracket" | "rightBracket" | "leftBrace" | "rightBrace" | "bracketPair" | "bracePair" => {
+        "leftBracket" | "rightBracket" | "leftBrace" | "rightBrace" | "bracketPair"
+        | "bracePair" => {
             let r = ss * a("adj", 8333.0);
-            let lb = format!("M{},0A{},{} 0 0 0 0,{}V{}A{},{} 0 0 0 {},{}", f(w.min(r * 2.0)), f(r), f(r), f(r), f(h - r), f(r), f(r), f(w.min(r * 2.0)), f(h));
+            let lb = format!(
+                "M{},0A{},{} 0 0 0 0,{}V{}A{},{} 0 0 0 {},{}",
+                f(w.min(r * 2.0)),
+                f(r),
+                f(r),
+                f(r),
+                f(h - r),
+                f(r),
+                f(r),
+                f(w.min(r * 2.0)),
+                f(h)
+            );
             let d = match prst {
-                "leftBracket" => format!("M{},0A{},{} 0 0 0 0,{}V{}A{},{} 0 0 0 {},{}", f(w), f(w), f(r), f(r), f(h - r), f(w), f(r), f(w), f(h)),
-                "rightBracket" => format!("M0,0A{},{} 0 0 1 {},{}V{}A{},{} 0 0 1 0,{}", f(w), f(r), f(w), f(r), f(h - r), f(w), f(r), f(h)),
+                "leftBracket" => format!(
+                    "M{},0A{},{} 0 0 0 0,{}V{}A{},{} 0 0 0 {},{}",
+                    f(w),
+                    f(w),
+                    f(r),
+                    f(r),
+                    f(h - r),
+                    f(w),
+                    f(r),
+                    f(w),
+                    f(h)
+                ),
+                "rightBracket" => format!(
+                    "M0,0A{},{} 0 0 1 {},{}V{}A{},{} 0 0 1 0,{}",
+                    f(w),
+                    f(r),
+                    f(w),
+                    f(r),
+                    f(h - r),
+                    f(w),
+                    f(r),
+                    f(h)
+                ),
                 "leftBrace" => format!(
                     "M{},0Q{},0 {},{}V{}Q{},{} 0,{}Q{},{} {},{}V{}Q{},{} {},{}",
                     f(w),
@@ -982,16 +1212,39 @@ pub fn preset_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> O
             };
             Some(vec![PathSpec::with(d, PathFill::None, true)])
         }
-        "line" | "straightConnector1" => Some(vec![PathSpec::with(format!("M0,0L{},{}", f(w), f(h)), PathFill::None, true)]),
-        "bentConnector2" => Some(vec![PathSpec::with(open(&[(0.0, 0.0), (w, 0.0), (w, h)]), PathFill::None, true)]),
+        "line" | "straightConnector1" => Some(vec![PathSpec::with(
+            format!("M0,0L{},{}", f(w), f(h)),
+            PathFill::None,
+            true,
+        )]),
+        "bentConnector2" => Some(vec![PathSpec::with(
+            open(&[(0.0, 0.0), (w, 0.0), (w, h)]),
+            PathFill::None,
+            true,
+        )]),
         "bentConnector3" => {
             let x = w * a("adj1", 50000.0);
-            Some(vec![PathSpec::with(open(&[(0.0, 0.0), (x, 0.0), (x, h), (w, h)]), PathFill::None, true)])
+            Some(vec![PathSpec::with(
+                open(&[(0.0, 0.0), (x, 0.0), (x, h), (w, h)]),
+                PathFill::None,
+                true,
+            )])
         }
         "curvedConnector3" => {
             let x = w * a("adj1", 50000.0);
             Some(vec![PathSpec::with(
-                format!("M0,0C{},0 {},{} {},{}S{},{} {},{}", f(x / 2.0), f(x), f(h / 4.0), f(x), f(vc), f(x + (w - x) / 2.0), f(h), f(w), f(h)),
+                format!(
+                    "M0,0C{},0 {},{} {},{}S{},{} {},{}",
+                    f(x / 2.0),
+                    f(x),
+                    f(h / 4.0),
+                    f(x),
+                    f(vc),
+                    f(x + (w - x) / 2.0),
+                    f(h),
+                    f(w),
+                    f(h)
+                ),
                 PathFill::None,
                 true,
             )])
@@ -1257,7 +1510,11 @@ fn arc_svg(cur: (f64, f64), wr: f64, hr: f64, st: f64, sw: f64) -> String {
     } else {
         -(-dt).rem_euclid(std::f64::consts::TAU)
     };
-    let large = if dt.abs() > std::f64::consts::PI { 1 } else { 0 };
+    let large = if dt.abs() > std::f64::consts::PI {
+        1
+    } else {
+        0
+    };
     let sweep = if sw > 0.0 { 1 } else { 0 };
     format!(
         "A{},{} 0 {large} {sweep} {},{}",
@@ -1271,7 +1528,8 @@ fn arc_svg(cur: (f64, f64), wr: f64, hr: f64, st: f64, sw: f64) -> String {
 /// 모양 요소 (prstGeom/custGeom) 와 조정값
 pub fn geometry(obj: &Element) -> Option<&Element> {
     let p = sp_pr(obj)?;
-    p.child_ns(A, "custGeom").or_else(|| p.child_ns(A, "prstGeom"))
+    p.child_ns(A, "custGeom")
+        .or_else(|| p.child_ns(A, "prstGeom"))
 }
 
 /// 도형의 경로들 (w×h px). 원본이 없거나 모르는 모양이면 None
@@ -1316,10 +1574,18 @@ mod tests {
             preset_path("diamond", 100.0, 50.0, &none).unwrap(),
             "M50,0L100,25L50,50L0,25Z"
         );
-        assert!(preset_path("rightArrow", 100.0, 40.0, &none).unwrap().starts_with("M0,10L80,10"));
+        assert!(
+            preset_path("rightArrow", 100.0, 40.0, &none)
+                .unwrap()
+                .starts_with("M0,10L80,10")
+        );
         assert!(preset_path("unknownShape", 10.0, 10.0, &none).is_none());
         // 별 5개 꼭짓점: 위 꼭짓점에서 시작
-        assert!(preset_path("star5", 100.0, 100.0, &none).unwrap().starts_with("M50,0"));
+        assert!(
+            preset_path("star5", 100.0, 100.0, &none)
+                .unwrap()
+                .starts_with("M50,0")
+        );
         assert_eq!(preset_paths("cube", 100.0, 100.0, &none).unwrap().len(), 4);
     }
 }

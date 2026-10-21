@@ -135,12 +135,20 @@ fn layout_matches_hancell_com_geometry() {
     for name in &files {
         let stem = name.trim_end_matches(".cell");
         // XML 원본과 같은 문서의 다른 형식: 그 판을 잰 정답이 있으면 그것, 없으면 XML 판의 정답 (한셀 화면은 같다)
-        for variant in [name.to_string(), format!("{stem}.bin.cell"), format!("{stem}.legacy.cell")] {
+        for variant in [
+            name.to_string(),
+            format!("{stem}.bin.cell"),
+            format!("{stem}.legacy.cell"),
+        ] {
             let path = dir.join(&variant);
             if !path.exists() {
                 continue;
             }
-            let key = if has(&variant) { variant.as_str() } else { name.as_str() };
+            let key = if has(&variant) {
+                variant.as_str()
+            } else {
+                name.as_str()
+            };
             let (c, r, bad) = compare(&path, key, &oracle);
             docs += 1;
             cols += c;

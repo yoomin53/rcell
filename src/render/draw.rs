@@ -14,9 +14,9 @@ use super::cell::font_family;
 use super::layout::Layout;
 use super::shape;
 use crate::model::{DrawColor, Marker, Paint, Shape, ShapeKind, TextBody, Workbook};
-use crate::xml::Element;
 use crate::theme::Theme;
 use crate::writer::esc;
+use crate::xml::Element;
 
 const EMU: f64 = crate::units::EMU_PER_PX as f64;
 
@@ -33,8 +33,12 @@ fn anchor_px(lay: &Layout, x0: u32, y0: u32, m: &Marker) -> (f64, f64) {
     } else {
         lay.row_y.last().copied().unwrap_or(0) + lay.row_h.last().copied().unwrap_or(0)
     } as f64;
-    let col_off = (m.col_off as f64 / EMU).min(lay.col_w(m.col) as f64).max(0.0);
-    let row_off = (m.row_off as f64 / EMU).min(lay.row_h(m.row) as f64).max(0.0);
+    let col_off = (m.col_off as f64 / EMU)
+        .min(lay.col_w(m.col) as f64)
+        .max(0.0);
+    let row_off = (m.row_off as f64 / EMU)
+        .min(lay.row_h(m.row) as f64)
+        .max(0.0);
     (x0 as f64 + x + col_off, y0 as f64 + y + row_off)
 }
 
@@ -69,9 +73,12 @@ pub(super) fn shapes_html(
         // (선 가운데를 −0.5px 에), 그림은 1px 왼쪽·위, 차트 틀은 왼쪽 2px·위 1px 바깥에서 오른쪽·아래
         // 경계의 1px 안쪽까지 (틀 크기 +1)
         let r = match sh.kind {
-            crate::model::ShapeKind::Chart => {
-                (x1.round() - 2.0, y1.round() - 1.0, w.round() + 1.0, h.round() + 1.0)
-            }
+            crate::model::ShapeKind::Chart => (
+                x1.round() - 2.0,
+                y1.round() - 1.0,
+                w.round() + 1.0,
+                h.round() + 1.0,
+            ),
             crate::model::ShapeKind::Picture => (x1 - 1.0, y1 - 1.0, w, h),
             _ => (x1 - 0.5, y1 - 0.5, w, h),
         };
@@ -115,7 +122,8 @@ fn object_html(
             .and_then(shape::sp_pr)
             .and_then(|p| p.child_ns(shape::A, "xfrm"));
         let num = |e: Option<&crate::xml::Element>, n: &str| {
-            e.and_then(|e| e.attr(n)).and_then(|v| v.parse::<f64>().ok())
+            e.and_then(|e| e.attr(n))
+                .and_then(|v| v.parse::<f64>().ok())
         };
         let ch_off = xf.and_then(|x| x.child_ns(shape::A, "chOff"));
         let ch_ext = xf.and_then(|x| x.child_ns(shape::A, "chExt"));
@@ -193,7 +201,10 @@ fn fill_from(
     wb: &Workbook,
     sh: &Shape,
 ) -> Option<Option<(String, f64)>> {
-    for c in parent.elements().filter(|c| c.ns.as_deref() == Some(shape::A)) {
+    for c in parent
+        .elements()
+        .filter(|c| c.ns.as_deref() == Some(shape::A))
+    {
         match c.name.as_str() {
             "noFill" => return Some(None),
             "solidFill" => return Some(c.elements().next().and_then(|e| color_el(e, theme))),
@@ -297,7 +308,10 @@ fn pattern_def(p: &Element, theme: &Theme, defs: &mut String, id: &str) -> Optio
             "dkUpDiag" => (x + y) % 4 < 2,
             "smGrid" | "cross" => x.is_multiple_of(4) || y.is_multiple_of(4),
             "lgGrid" => x == 0 || y == 0,
-            "dotGrid" => x.is_multiple_of(4) && y.is_multiple_of(2) || y.is_multiple_of(4) && x.is_multiple_of(2),
+            "dotGrid" => {
+                x.is_multiple_of(4) && y.is_multiple_of(2)
+                    || y.is_multiple_of(4) && x.is_multiple_of(2)
+            }
             "smCheck" => (x / 2 + y / 2).is_multiple_of(2),
             "lgCheck" => (x / 4 + y / 4).is_multiple_of(2),
             "diagCross" | "trellis" => (x + y).is_multiple_of(4) || (x + 8 - y).is_multiple_of(4),
@@ -306,7 +320,9 @@ fn pattern_def(p: &Element, theme: &Theme, defs: &mut String, id: &str) -> Optio
             "dashDnDiag" => (x + 8 - y).is_multiple_of(4) && y % 8 < 4,
             "dashUpDiag" => (x + y).is_multiple_of(4) && y % 8 < 4,
             "zigZag" | "wave" => y == [0, 1, 2, 3, 3, 2, 1, 0][x as usize % 8],
-            "solidDmnd" | "openDmnd" | "dotDmnd" => (x as i32 - 4).abs() + (y as i32 - 4).abs() == 3,
+            "solidDmnd" | "openDmnd" | "dotDmnd" => {
+                (x as i32 - 4).abs() + (y as i32 - 4).abs() == 3
+            }
             _ => pct(50),
         }
     };
@@ -326,14 +342,24 @@ fn pattern_def(p: &Element, theme: &Theme, defs: &mut String, id: &str) -> Optio
 }
 
 /// a:blipFill → 도형을 채우는 그림 (늘이기)
-fn image_def(b: &Element, wb: &Workbook, sh: &Shape, defs: &mut String, id: &str) -> Option<String> {
+fn image_def(
+    b: &Element,
+    wb: &Workbook,
+    sh: &Shape,
+    defs: &mut String,
+    id: &str,
+) -> Option<String> {
     let blip = b.child_ns(shape::A, "blip")?;
     let rid = blip
         .attrs
         .iter()
         .find(|a| a.name == "embed")
         .map(|a| a.value.as_str())?;
-    let target = sh.raw_rels.iter().find(|r| r.0 == rid).map(|r| r.2.as_str())?;
+    let target = sh
+        .raw_rels
+        .iter()
+        .find(|r| r.0 == rid)
+        .map(|r| r.2.as_str())?;
     let part = wb.raw_parts.iter().find(|p| p.name == target)?;
     let ct = part.content_type.as_deref().unwrap_or("image/png");
     let _ = write!(
@@ -378,11 +404,15 @@ struct Line {
     join: &'static str,
     head: Option<(String, String, String)>,
     tail: Option<(String, String, String)>,
+    /// 겹선 (cmpd: dbl, thickThin, thinThick, tri). 없으면 한 줄
+    compound: Option<String>,
 }
 
 /// 선 (원본 a:ln → 모델 → 스타일 참조). 선이 없으면 None
 fn shape_line(sh: &Shape, obj: Option<&Element>, theme: &Theme) -> Option<Line> {
-    let ln = obj.and_then(shape::sp_pr).and_then(|p| p.child_ns(shape::A, "ln"));
+    let ln = obj
+        .and_then(shape::sp_pr)
+        .and_then(|p| p.child_ns(shape::A, "ln"));
     let style_color = || {
         obj.and_then(|o| shape::style_ref(o, "lnRef"))
             .and_then(|e| color_el(e, theme))
@@ -429,27 +459,55 @@ fn shape_line(sh: &Shape, obj: Option<&Element>, theme: &Theme) -> Option<Line> 
         .map(str::to_string)
         .or(sh.line.as_ref().and_then(|l| l.dash.clone()))
         .and_then(|d| dash_array(&d, px));
-    let cap = match ln.and_then(|l| l.attr("cap")) {
+    let model = sh.line.as_ref();
+    let cap = match ln
+        .and_then(|l| l.attr("cap"))
+        .or(model.and_then(|l| l.cap.as_deref()))
+    {
         Some("rnd") => "round",
         Some("sq") => "square",
         _ => "butt",
     };
-    let join = if ln.and_then(|l| l.child_ns(shape::A, "round")).is_some() {
-        "round"
-    } else if ln.and_then(|l| l.child_ns(shape::A, "bevel")).is_some() {
+    // 이음: 지정이 없으면 둥글게 (한셀 화면 — 도형 실험의 6pt 겹선 사각형 모서리가 둥글다)
+    let model_join = model.and_then(|l| l.join.as_deref());
+    let has = |n: &str| ln.and_then(|l| l.child_ns(shape::A, n)).is_some();
+    let join = if has("bevel") || (ln.is_none() && model_join == Some("bevel")) {
         "bevel"
-    } else {
+    } else if has("miter") || (ln.is_none() && model_join == Some("miter")) {
         "miter"
+    } else {
+        "round"
     };
     let end = |which: &str| {
-        let e = ln?.child_ns(shape::A, which)?;
-        let t = e.attr("type").filter(|t| *t != "none")?;
+        let from_xml = ln.and_then(|l| l.child_ns(shape::A, which)).map(|e| {
+            (
+                e.attr("type").map(str::to_string),
+                e.attr("w").map(str::to_string),
+                e.attr("len").map(str::to_string),
+            )
+        });
+        let from_model = model
+            .and_then(|l| {
+                if which == "headEnd" {
+                    l.head.as_ref()
+                } else {
+                    l.tail.as_ref()
+                }
+            })
+            .map(|e| (e.kind.clone(), e.w.clone(), e.len.clone()));
+        let (t, w, len) = from_xml.or(from_model)?;
+        let t = t.filter(|t| t != "none")?;
         Some((
-            t.to_string(),
-            e.attr("w").unwrap_or("med").to_string(),
-            e.attr("len").unwrap_or("med").to_string(),
+            t,
+            w.unwrap_or_else(|| "med".into()),
+            len.unwrap_or_else(|| "med".into()),
         ))
     };
+    let compound = ln
+        .and_then(|l| l.attr("cmpd"))
+        .map(str::to_string)
+        .or_else(|| model.and_then(|l| l.compound.clone()))
+        .filter(|c| c != "sng");
     Some(Line {
         color,
         alpha,
@@ -459,6 +517,7 @@ fn shape_line(sh: &Shape, obj: Option<&Element>, theme: &Theme) -> Option<Line> 
         join,
         head: end("headEnd"),
         tail: end("tailEnd"),
+        compound,
     })
 }
 
@@ -483,27 +542,84 @@ pub(super) fn dash_array(d: &str, px: f64) -> Option<String> {
     )
 }
 
-/// 선 끝 모양 → SVG marker (크기는 선 굵기 배수: sm 2, med 3, lg 5)
-fn marker_def(defs: &mut String, id: &str, end: &(String, String, String), color: &str, tail: bool) {
+/// 선 끝 모양 → SVG marker. 크기는 선 굵기 배수 (sm 2, med 3, lg 5) — 한셀 화면은 2pt 보다 가는 선도 2pt 로 본다
+/// (도형 실험: 1pt 선의 lg 삼각형이 13px, 3pt 선의 med 가 12px). 끝(삼각형 꼭짓점)이 선 끝에, 원·마름모는 가운데가
+fn marker_def(defs: &mut String, id: &str, end: &(String, String, String), color: &str, px: f64) {
+    let base = px.max(8.0 / 3.0);
     let k = |v: &str| match v {
         "sm" => 2.0,
         "lg" => 5.0,
         _ => 3.0,
-    };
+    } * base;
     let (mw, ml) = (k(&end.1), k(&end.2));
     let shape = match end.0.as_str() {
         "oval" => "<ellipse cx=\"5\" cy=\"5\" rx=\"5\" ry=\"5\"/>".to_string(),
         "diamond" => "<path d=\"M0,5L5,0L10,5L5,10Z\"/>".to_string(),
         "stealth" => "<path d=\"M0,0L10,5L0,10L3,5Z\"/>".to_string(),
-        "arrow" => "<path d=\"M0,0L10,5L0,10\" fill=\"none\" stroke-width=\"1.5\" stroke=\"COL\"/>".to_string(),
+        "arrow" => "<path d=\"M0,0L10,5L0,10\" fill=\"none\" stroke-width=\"SW\" stroke=\"COL\"/>"
+            .to_string(),
         _ => "<path d=\"M0,0L10,5L0,10Z\"/>".to_string(),
     }
-    .replace("COL", color);
+    .replace("COL", color)
+    .replace("SW", &format!("{:.2}", (px * 10.0 / ml.max(1.0)).max(1.0)));
     let _ = write!(
         defs,
-        "<marker id=\"{id}\" viewBox=\"0 0 10 10\" refX=\"{}\" refY=\"5\" markerWidth=\"{ml}\" markerHeight=\"{mw}\" orient=\"auto-start-reverse\" fill=\"{color}\">{shape}</marker>",
-        if tail { 9 } else { 1 }
+        "<marker id=\"{id}\" viewBox=\"0 0 10 10\" refX=\"{}\" refY=\"5\" markerWidth=\"{ml:.1}\" markerHeight=\"{mw:.1}\" markerUnits=\"userSpaceOnUse\" orient=\"auto-start-reverse\" preserveAspectRatio=\"none\" fill=\"{color}\" overflow=\"visible\">{shape}</marker>",
+        if matches!(end.0.as_str(), "oval" | "diamond") {
+            5
+        } else {
+            10
+        }
     );
+}
+
+/// 겹선 마스크: 선 굵기 W 를 바깥 → 안 띠로 나눈다. dbl 은 1:1:1, tri 는 1:1:2:1:1 (가운데가 굵다). thickThin·
+/// thinThick 은 안팎을 가르지 않고 dbl 로 그린다 (한셀은 굵은 쪽이 바깥·안 — 근사)
+fn compound_mask(id: &str, line: &Line, paths: &[&str], w: f64, h: f64) -> String {
+    let wpx = line.px;
+    // (너비 비율, 흰/검) — 뒤에 칠한 것이 앞을 덮는다
+    let bands: &[(f64, &str)] = match line.compound.as_deref() {
+        Some("tri") => &[(1.0, "#fff"), (2.0 / 3.0, "#000"), (1.0 / 3.0, "#fff")],
+        _ => &[(1.0, "#fff"), (1.0 / 3.0, "#000")],
+    };
+    let mut m = format!(
+        "<mask id=\"{id}\" maskUnits=\"userSpaceOnUse\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\">",
+        -wpx * 2.0 - 2.0,
+        -wpx * 2.0 - 2.0,
+        w + wpx * 4.0 + 4.0,
+        h + wpx * 4.0 + 4.0
+    );
+    for (k, c) in bands {
+        for d in paths {
+            let _ = write!(
+                m,
+                "<path d=\"{d}\" fill=\"none\" stroke=\"{c}\" stroke-width=\"{:.2}\" stroke-linejoin=\"{}\"/>",
+                wpx * k,
+                line.join
+            );
+        }
+    }
+    m.push_str("</mask>");
+    m
+}
+
+/// 바깥 그림자 (a:outerShdw) → SVG 필터. 거리·방향으로 옮기고 흐림 반지름의 반을 표준 편차로 (도형 실험의 세 그림자)
+fn shadow_filter(sh: &Shape, theme: &Theme, id: &str) -> Option<String> {
+    let sd = sh.shadow.as_ref()?;
+    let color = draw_color(&sd.color, theme).unwrap_or_else(|| "#000000".into());
+    let alpha = sd
+        .color
+        .mods
+        .iter()
+        .find(|(k, _)| k == "alpha")
+        .map_or(1.0, |(_, v)| *v as f64 / 100_000.0);
+    let dist = sd.dist as f64 / EMU;
+    let dir = (sd.dir as f64 / 60_000.0).to_radians();
+    let (dx, dy) = (dist * dir.cos(), dist * dir.sin());
+    let blur = sd.blur as f64 / EMU / 2.0;
+    Some(format!(
+        "<filter id=\"{id}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\" color-interpolation-filters=\"sRGB\"><feDropShadow dx=\"{dx:.2}\" dy=\"{dy:.2}\" stdDeviation=\"{blur:.2}\" flood-color=\"{color}\" flood-opacity=\"{alpha:.3}\"/></filter>"
+    ))
 }
 
 /// 선 SVG 속성 (stroke …, 선 끝 marker)
@@ -519,11 +635,11 @@ fn stroke_attrs(line: &Line, defs: &mut String, id: &str) -> String {
         let _ = write!(a, " stroke-dasharray=\"{d}\"");
     }
     if let Some(e) = &line.head {
-        marker_def(defs, &format!("{id}h"), e, &line.color, false);
+        marker_def(defs, &format!("{id}h"), e, &line.color, line.px);
         let _ = write!(a, " marker-start=\"url(#{id}h)\"");
     }
     if let Some(e) = &line.tail {
-        marker_def(defs, &format!("{id}t"), e, &line.color, true);
+        marker_def(defs, &format!("{id}t"), e, &line.color, line.px);
         let _ = write!(a, " marker-end=\"url(#{id}t)\"");
     }
     a
@@ -571,7 +687,9 @@ fn shape_body(
                 let _ = write!(
                     css,
                     "outline:{:.1}px solid {};outline-offset:-{:.1}px;",
-                    line.px, line.color, line.px / 2.0
+                    line.px,
+                    line.color,
+                    line.px / 2.0
                 );
             }
         }
@@ -585,6 +703,7 @@ fn shape_body(
                 join: "miter",
                 head: None,
                 tail: None,
+                compound: None,
             });
             let mut defs = String::new();
             let attrs = stroke_attrs(&line, &mut defs, &id);
@@ -596,7 +715,10 @@ fn shape_body(
                 .and_then(|g| g.attr("prst"))
                 .or(sh.geometry.as_deref())
                 .unwrap_or("straightConnector1");
-            let adj = obj.and_then(shape::geometry).map(shape::adjusts).unwrap_or_default();
+            let adj = obj
+                .and_then(shape::geometry)
+                .map(shape::adjusts)
+                .unwrap_or_default();
             let d = shape::preset_path(prst, w, h, &adj)
                 .unwrap_or_else(|| format!("M0,0L{w:.1},{h:.1}"));
             let tf = match (flip_h, flip_v) {
@@ -632,6 +754,16 @@ fn shape_body(
                     .as_ref()
                     .map(|l| stroke_attrs(l, &mut defs, &id))
                     .unwrap_or_default();
+                // 겹선: 채우기와 따로, 마스크를 씌운 선만 한 번 더
+                let cmask = line.as_ref().filter(|l| l.compound.is_some()).map(|l| {
+                    let strokes: Vec<&str> = paths
+                        .iter()
+                        .filter(|p| p.stroke)
+                        .map(|p| p.d.as_str())
+                        .collect();
+                    defs.push_str(&compound_mask(&format!("{id}m"), l, &strokes, w, h));
+                    format!("{id}m")
+                });
                 let mut body = String::new();
                 for p in &paths {
                     let fill_attr = match (&fill, p.fill) {
@@ -644,7 +776,11 @@ fn shape_body(
                         }
                         _ => " fill=\"none\"".to_string(),
                     };
-                    let st = if p.stroke { stroke.as_str() } else { "" };
+                    let st = if p.stroke && cmask.is_none() {
+                        stroke.as_str()
+                    } else {
+                        ""
+                    };
                     let _ = write!(
                         body,
                         "<path d=\"{}\" fill-rule=\"evenodd\"{fill_attr}{st}/>",
@@ -660,7 +796,23 @@ fn shape_body(
                             p.d
                         );
                     }
+                    if p.stroke
+                        && let Some(m) = &cmask
+                    {
+                        let _ = write!(
+                            body,
+                            "<path d=\"{}\" fill=\"none\"{stroke} mask=\"url(#{m})\"/>",
+                            p.d
+                        );
+                    }
                 }
+                let body = match shadow_filter(sh, theme, &format!("{id}s")) {
+                    Some(f) => {
+                        defs.push_str(&f);
+                        format!("<g filter=\"url(#{id}s)\">{body}</g>")
+                    }
+                    None => body,
+                };
                 let _ = write!(
                     inner,
                     "<svg class=\"rc-geom\" width=\"{w:.1}\" height=\"{h:.1}\" viewBox=\"0 0 {w:.1} {h:.1}\"><defs>{defs}</defs>{body}</svg>"
@@ -804,7 +956,10 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
         };
         // 문단 글꼴 크기: 조각 중 가장 큰 것 (없으면 문단 끝 서식, 기본 11pt)
         let mut size: Option<f64> = None;
-        for r in p.elements().filter(|e| e.is(shape::A, "r") || e.is(shape::A, "endParaRPr")) {
+        for r in p
+            .elements()
+            .filter(|e| e.is(shape::A, "r") || e.is(shape::A, "endParaRPr"))
+        {
             let rp = if r.is(shape::A, "r") {
                 r.child_ns(shape::A, "rPr")
             } else {
@@ -821,7 +976,10 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
         // 줄 간격: spcPct 100% = 글꼴 크기의 1.2 배, spcPts 는 그대로
         let lnspc = ppr.and_then(|x| x.child_ns(shape::A, "lnSpc"));
         let line = match lnspc.and_then(|l| l.child_ns(shape::A, "spcPct")) {
-            Some(pct) => format!("{:.3}", 1.2 * pct.attr_f64("val").unwrap_or(100_000.0) / 100_000.0),
+            Some(pct) => format!(
+                "{:.3}",
+                1.2 * pct.attr_f64("val").unwrap_or(100_000.0) / 100_000.0
+            ),
             None => match lnspc.and_then(|l| l.child_ns(shape::A, "spcPts")) {
                 Some(pts) => format!("{:.2}pt", pts.attr_f64("val").unwrap_or(0.0) / 100.0),
                 None => "1.2".into(),
@@ -864,12 +1022,13 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
             if !(r.is(shape::A, "r") || r.is(shape::A, "fld")) {
                 continue;
             }
-            let t = r.child_ns(shape::A, "t").map(|t| t.text()).unwrap_or_default();
+            let t = r
+                .child_ns(shape::A, "t")
+                .map(|t| t.text())
+                .unwrap_or_default();
             let (mut st, _) = run_css(r.child_ns(shape::A, "rPr").or(lvl1), theme, base_color);
             if scale != 1.0
-                && let Some(z) = r
-                    .child_ns(shape::A, "rPr")
-                    .and_then(|x| x.attr_f64("sz"))
+                && let Some(z) = r.child_ns(shape::A, "rPr").and_then(|x| x.attr_f64("sz"))
             {
                 let _ = write!(st, "font-size:{:.2}pt;", z / 100.0 * scale);
             }
@@ -951,11 +1110,10 @@ fn text_html(t: &TextBody, theme: &Theme) -> String {
             if let Some(c) = r.color.as_ref().and_then(|c| draw_color(c, theme)) {
                 let _ = write!(st, "color:{c};");
             }
-            if let Some(f) = r
-                .ea
-                .as_deref()
-                .or(r.latin.as_deref())
-                .and_then(|f| theme_font(f, theme))
+            if let Some(f) =
+                r.ea.as_deref()
+                    .or(r.latin.as_deref())
+                    .and_then(|f| theme_font(f, theme))
             {
                 let _ = write!(st, "font-family:{};", font_family(f));
             }

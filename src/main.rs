@@ -211,7 +211,13 @@ fn main() -> ExitCode {
             sheet,
             no_headers,
             fill,
-        } => html(&file, output.as_deref(), sheet.as_deref(), no_headers, fill.as_deref()),
+        } => html(
+            &file,
+            output.as_deref(),
+            sheet.as_deref(),
+            no_headers,
+            fill.as_deref(),
+        ),
         Cmd::Convert {
             input,
             output,

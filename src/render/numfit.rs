@@ -55,12 +55,20 @@ fn sci(a: f64, m: usize) -> String {
 
 /// 정수부 자릿수 (반올림 뒤)
 fn int_digits(a: f64) -> usize {
-    if a < 1.0 { 1 } else { format!("{:.0}", a.trunc()).len() }
+    if a < 1.0 {
+        1
+    } else {
+        format!("{:.0}", a.trunc()).len()
+    }
 }
 
 /// 고정 표기의 최대 소수 자리 (11글자 안)
 fn max_fixed_decimals(a: f64) -> usize {
-    if a < 1.0 { 9 } else { 10usize.saturating_sub(int_digits(a)) }
+    if a < 1.0 {
+        9
+    } else {
+        10usize.saturating_sub(int_digits(a))
+    }
 }
 
 /// 지수 표기의 최대 가수 소수 자리 (11글자 안)

@@ -98,7 +98,10 @@ fn parse_groups(root: &Element) -> Vec<SparklineGroup> {
         let Some(groups) = ext.child_ns(ns::X14, "sparklineGroups") else {
             continue;
         };
-        for g in groups.elements().filter(|g| g.is(ns::X14, "sparklineGroup")) {
+        for g in groups
+            .elements()
+            .filter(|g| g.is(ns::X14, "sparklineGroup"))
+        {
             let c = |n: &str| {
                 g.child_ns(ns::X14, n)
                     .map(crate::parser::styles::parse_color)
@@ -132,7 +135,10 @@ fn parse_groups(root: &Element) -> Vec<SparklineGroup> {
             };
             if let Some(list) = g.child_ns(ns::X14, "sparklines") {
                 for s in list.elements().filter(|s| s.is(ns::X14, "sparkline")) {
-                    let f = s.child_ns(ns::XM, "f").map(|e| e.text()).unwrap_or_default();
+                    let f = s
+                        .child_ns(ns::XM, "f")
+                        .map(|e| e.text())
+                        .unwrap_or_default();
                     let Some(at) = s
                         .child_ns(ns::XM, "sqref")
                         .and_then(|e| CellRef::parse(&e.text()))
@@ -164,11 +170,13 @@ fn range_values(wb: &Workbook, here: usize, f: &str) -> Vec<Option<f64>> {
     let mut out = Vec::new();
     for row in r.start.row..=r.end.row {
         for col in r.start.col..=r.end.col {
-            let v = sheet.cell(CellRef { row, col }).and_then(|c| match &c.value {
-                CellValue::Number(n) => Some(*n),
-                CellValue::Bool(b) => Some(*b as u8 as f64),
-                _ => None,
-            });
+            let v = sheet
+                .cell(CellRef { row, col })
+                .and_then(|c| match &c.value {
+                    CellValue::Number(n) => Some(*n),
+                    CellValue::Bool(b) => Some(*b as u8 as f64),
+                    _ => None,
+                });
             out.push(v);
         }
     }
@@ -210,7 +218,12 @@ fn color(c: &Option<Color>, theme: &Theme, default: &str) -> String {
         .unwrap_or_else(|| default.into())
 }
 
-/// 칸 하나의 스파크라인 SVG (w×h px)
+/// 칸 하나의 스파크라인 SVG (w×h px). 한셀 화면 (스파크라인 실험 — 꺾은선·막대·승패 8개, 행 40px·열 160px):
+/// - 점은 칸 폭 − 3 을 값 수로 나눈 칸의 가운데 (왼쪽 1.5px 부터), 막대 폭은 그 칸의 0.65.
+/// - 꺾은선은 위·아래 20% 를 띄운다. 막대는 위·아래 2px — 음수가 섞이면 0 이 바닥, 모두 양수면 최솟값이 바닥이고
+///   가장 낮은 막대도 높이의 9% (자동 최솟값일 때).
+/// - 빈 칸은 span 일 때만 잇고, gap·zero 는 0 으로 그린다 (한셀은 gap 을 0 으로 그린다). 가로 축(displayXAxis)은
+///   그리지 않는다. 승패의 0 은 막대 없음.
 pub fn svg(
     g: &SparklineGroup,
     vals: &[Option<f64>],
@@ -220,7 +233,7 @@ pub fn svg(
     theme: &Theme,
 ) -> String {
     let mut vals: Vec<Option<f64>> = vals.to_vec();
-    if g.empty_as == "zero" {
+    if g.empty_as != "span" {
         for v in &mut vals {
             v.get_or_insert(0.0);
         }
@@ -237,6 +250,7 @@ pub fn svg(
         present.iter().copied().fold(f64::INFINITY, f64::min),
         present.iter().copied().fold(f64::NEG_INFINITY, f64::max),
     );
+    let auto_min = !matches!(g.min_type.as_str(), "group" | "custom");
     match g.min_type.as_str() {
         "group" => lo = group_lohi.0,
         "custom" => lo = g.manual_min.unwrap_or(lo),
@@ -249,10 +263,8 @@ pub fn svg(
     }
     let series = color(&g.color_series, theme, "#376092");
     let negative = color(&g.color_negative, theme, "#D00000");
-    let axis = color(&g.color_axis, theme, "#000000");
-    // 칸 가장자리 여백 (px)
-    let (px0, py0) = (2.0, 2.0);
-    let (pw, ph) = ((w - 2.0 * px0).max(1.0), (h - 2.0 * py0).max(1.0));
+    let slot = ((w - 3.0) / n as f64).max(1.0);
+    let cx = |i: usize| 1.5 + slot * (i as f64 + 0.5);
     let mut s = format!(
         "<svg class=\"rc-spark\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.1} {h:.1}\">"
     );
@@ -290,69 +302,81 @@ pub fn svg(
     };
     match g.kind.as_str() {
         "column" | "stacked" => {
-            let band = pw / n as f64;
-            let bw = (band * 0.75).max(1.0);
+            let bw = (slot * 0.65).max(1.0);
             let win = g.kind == "stacked";
-            let (lo2, hi2) = if win { (-1.0, 1.0) } else { (lo.min(0.0), hi.max(0.0)) };
+            let (top, bot) = (2.0, (h - 2.0).max(3.0));
+            let ph = bot - top;
+            // 바닥: 음수가 섞이면 0, 모두 양수면(자동 최솟값) 최솟값 — 가장 낮은 막대도 9%
+            let floor_min = !win && auto_min && lo > 0.0;
+            let (lo2, hi2) = if win {
+                (-1.0, 1.0)
+            } else if floor_min {
+                (lo, hi)
+            } else {
+                (lo.min(0.0), hi.max(0.0))
+            };
             let span = (hi2 - lo2).max(f64::EPSILON);
-            let y = |v: f64| py0 + (hi2 - v) / span * ph;
-            let base = y(0.0f64.clamp(lo2, hi2));
+            let hmin = if floor_min { ph * 0.09 } else { 0.0 };
+            let y = |v: f64| top + (hi2 - v) / span * (ph - hmin);
+            let base = if floor_min {
+                bot
+            } else {
+                y(0.0f64.clamp(lo2, hi2))
+            };
             for (i, v) in vals.iter().enumerate() {
                 let Some(v) = *v else { continue };
-                let v = if win { v.signum() } else { v };
-                if v == 0.0 && win {
+                // 0 은 막대 없음 (승패도, 빈 칸을 0 으로 채운 것도)
+                if v == 0.0 && !floor_min {
                     continue;
                 }
-                let x = px0 + band * i as f64 + (band - bw) / 2.0;
+                let v = if win { v.signum() } else { v };
+                let x = cx(i) - bw / 2.0;
                 let (y0, y1) = if win {
-                    if v > 0.0 { (py0, py0 + ph / 2.0 - 0.5) } else { (py0 + ph / 2.0 + 0.5, py0 + ph) }
+                    if v > 0.0 {
+                        (top, top + ph / 2.0 - 0.5)
+                    } else {
+                        (top + ph / 2.0 + 0.5, bot)
+                    }
                 } else {
                     let yv = y(v);
                     (yv.min(base), yv.max(base).max(yv.min(base) + 1.0))
                 };
-                let c = point_color(i, v, if v < 0.0 && g.negative { &negative } else { &series });
+                let c = point_color(
+                    i,
+                    v,
+                    if v < 0.0 && g.negative {
+                        &negative
+                    } else {
+                        &series
+                    },
+                );
                 let _ = write!(
                     s,
                     "<rect x=\"{x:.1}\" y=\"{y0:.1}\" width=\"{bw:.1}\" height=\"{:.1}\" fill=\"{c}\"/>",
                     (y1 - y0).max(1.0)
                 );
             }
-            if g.display_x_axis && lo2 < 0.0 && hi2 > 0.0 {
-                let _ = write!(
-                    s,
-                    "<line x1=\"{px0}\" y1=\"{base:.1}\" x2=\"{:.1}\" y2=\"{base:.1}\" stroke=\"{axis}\" stroke-width=\"1\"/>",
-                    px0 + pw
-                );
-            }
         }
         _ => {
             let span = (hi - lo).max(f64::EPSILON);
-            let step = if n > 1 { pw / (n - 1) as f64 } else { 0.0 };
+            let (py0, ph) = (h * 0.2, (h * 0.6).max(1.0));
             let xy = |i: usize, v: f64| {
-                let y = if hi == lo { py0 + ph / 2.0 } else { py0 + (hi - v) / span * ph };
-                (px0 + step * i as f64, y)
+                let y = if hi == lo {
+                    py0 + ph / 2.0
+                } else {
+                    py0 + (hi - v) / span * ph
+                };
+                (cx(i), y)
             };
             let lw = (g.line_weight * 96.0 / 72.0).max(0.75);
-            if g.display_x_axis && lo < 0.0 && hi > 0.0 {
-                let (_, ya) = xy(0, 0.0);
-                let _ = write!(
-                    s,
-                    "<line x1=\"{px0}\" y1=\"{ya:.1}\" x2=\"{:.1}\" y2=\"{ya:.1}\" stroke=\"{axis}\" stroke-width=\"1\"/>",
-                    px0 + pw
-                );
-            }
-            // 빈 칸: gap 이면 선을 끊고, span 이면 잇는다
+            // 빈 칸: span 이면 잇는다 (나머지는 위에서 0 으로 채웠다)
             let mut d = String::new();
             let mut pen = false;
             for (i, v) in vals.iter().enumerate() {
-                match v {
-                    Some(v) => {
-                        let (x, y) = xy(i, *v);
-                        let _ = write!(d, "{}{x:.1},{y:.1}", if pen { "L" } else { "M" });
-                        pen = true;
-                    }
-                    None if g.empty_as == "span" => {}
-                    None => pen = false,
+                if let Some(v) = v {
+                    let (x, y) = xy(i, *v);
+                    let _ = write!(d, "{}{x:.1},{y:.1}", if pen { "L" } else { "M" });
+                    pen = true;
                 }
             }
             let _ = write!(
@@ -366,7 +390,11 @@ pub fn svg(
                 if !show {
                     continue;
                 }
-                let c = if c.is_empty() { color(&g.color_markers, theme, &series) } else { c };
+                let c = if c.is_empty() {
+                    color(&g.color_markers, theme, &series)
+                } else {
+                    c
+                };
                 let (x, y) = xy(i, v);
                 let _ = write!(
                     s,
@@ -393,7 +421,14 @@ mod tests {
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].kind, "column");
         assert_eq!(g[0].items[0].1, CellRef::parse("E1").unwrap());
-        let s = svg(&g[0], &[Some(1.0), Some(-2.0), None, Some(3.0)], (0.0, 0.0), 72.0, 20.0, &Theme::default());
+        let s = svg(
+            &g[0],
+            &[Some(1.0), Some(-2.0), None, Some(3.0)],
+            (0.0, 0.0),
+            72.0,
+            20.0,
+            &Theme::default(),
+        );
         assert_eq!(s.matches("<rect").count(), 3);
         assert!(s.contains("#D00000"));
     }

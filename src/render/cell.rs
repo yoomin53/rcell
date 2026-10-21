@@ -20,6 +20,77 @@ use crate::model::{CellValue, Font, RichText};
 use crate::theme::{self, Theme};
 use crate::writer::esc;
 
+/// 아이콘이 차지하는 왼쪽 폭 (px)
+const ICON_W: f64 = 19.0;
+
+/// 데이터 막대 (한셀 화면: 직각삼각형 — x14 데이터 막대 실험). 칸 안쪽 [1, 1 + (w − 4)) 이 막대 영역이고 축은
+/// 그 영역의 비율 자리 픽셀, 막대는 축 오른쪽 경계에서 시작한다. 위·아래는 3px 씩 띄우고 (행 높이 16·22·27·40·60px
+/// 모두), 테두리는 세로선이 축 다음 픽셀, 위·아래는 1px 바깥. 삼각형의 세로 변은 양수 막대면 왼쪽, 음수면 오른쪽
+/// (오른쪽에서 왼쪽 방향은 자리만 좌우로 뒤집고 모양은 그대로). 그라데이션은 세로 변의 색에서 끝의 흰색까지.
+/// 축은 칸 높이 전체(아래 격자선 포함)에 2px 점·1px 틈 점선
+fn data_bar_svg(b: &crate::cf_eval::BarDraw, w: u32, h: u32) -> String {
+    let iw = w.saturating_sub(1) as f64;
+    let area = (w as f64 - 4.0).max(1.0);
+    let (top, bot) = (3.0, (h as f64 - 3.0).max(4.0));
+    let ax = b.axis.as_ref().map(|(a, _)| (1.0 + area * a).floor());
+    // 왼쪽 → 오른쪽 기준의 시작(축 쪽)·끝
+    let (xs, xe) = match ax {
+        Some(ax) => {
+            let xs = ax + 1.0;
+            if b.leftward {
+                (xs, xs - (xs - 1.0) * b.len)
+            } else {
+                (xs, xs + (1.0 + area - xs) * b.len)
+            }
+        }
+        None => (1.0, 1.0 + area * b.len),
+    };
+    let flip = |x: f64| if b.rtl { iw - x } else { x };
+    let mut g = String::new();
+    if (xe - xs).abs() >= 0.5 {
+        let (p, q) = (flip(xs).min(flip(xe)), flip(xs).max(flip(xe)));
+        // 세로 변: 양수 막대는 왼쪽, 음수(왼쪽 기준에서 왼쪽으로 자라는) 막대는 오른쪽
+        let (v, t) = if b.leftward { (q, p) } else { (p, q) };
+        let fill = if b.gradient {
+            let id = format!(
+                "rcdb{}{}",
+                b.fill.trim_start_matches('#'),
+                if b.leftward { "l" } else { "r" }
+            );
+            let (x1, x2) = if b.leftward { (1, 0) } else { (0, 1) };
+            let _ = write!(
+                g,
+                "<defs><linearGradient id=\"{id}\" x1=\"{x1}\" y1=\"0\" x2=\"{x2}\" y2=\"0\"><stop offset=\"0\" stop-color=\"{}\"/><stop offset=\"1\" stop-color=\"#FFFFFF\"/></linearGradient></defs>",
+                b.fill
+            );
+            format!("url(#{id})")
+        } else {
+            b.fill.clone()
+        };
+        let _ = write!(
+            g,
+            "<path d=\"M{v:.1},{top}V{bot}H{t:.1}Z\" fill=\"{fill}\"/>"
+        );
+        if let Some(bc) = &b.border {
+            let _ = write!(
+                g,
+                "<path d=\"M{:.1},{:.1}V{:.1}H{t:.1}Z\" fill=\"none\" stroke=\"{bc}\" stroke-width=\"1\"/>",
+                v + 0.5,
+                top - 0.5,
+                bot + 0.5
+            );
+        }
+    }
+    if let (Some((_, c)), Some(ax)) = (&b.axis, ax) {
+        let _ = write!(
+            g,
+            "<path d=\"M{:.1},0V{h}\" stroke=\"{c}\" stroke-width=\"1\" stroke-dasharray=\"2 1\"/>",
+            flip(ax + 0.5)
+        );
+    }
+    format!("<svg class=\"rc-bar\" width=\"{iw:.0}\" height=\"{h}\">{g}</svg>")
+}
+
 /// 칸 하나를 그리는 데 필요한 것
 pub(super) struct CellView<'a> {
     pub value: CellValue,
@@ -109,8 +180,7 @@ pub(super) fn font_css(f: Option<&Font>, theme: &Theme, color: Option<&str>) -> 
     }
     if !deco.is_empty() {
         let _ = write!(css, "text-decoration:{};", deco.join(" "));
-        if f
-            .underline
+        if f.underline
             .as_deref()
             .is_some_and(|u| u.starts_with("double"))
             || f.double_strike
@@ -169,11 +239,8 @@ pub(super) fn ratio_of(f: Option<&Font>) -> Option<f64> {
 }
 
 /// 글 (서식 있는 글이면 조각마다 글꼴)
-fn rich_html(v: &CellView, text: &str, theme: &Theme, icon: Option<&str>) -> String {
+fn rich_html(v: &CellView, text: &str, theme: &Theme) -> String {
     let mut s = String::new();
-    if let Some(i) = icon {
-        s.push_str(i);
-    }
     match v.rich {
         Some(rt) if text == rt.text => {
             for run in &rt.runs {
@@ -206,25 +273,29 @@ pub(super) fn cell_content(
 ) -> String {
     let mut out = String::new();
     // 데이터 막대 (조건부 서식): 글자 뒤 칸 안쪽
-    if let Some(cf) = cf
-        && let Some((len, c)) = &cf.bar
-        && let Some(c) = theme::resolve(c, theme)
-    {
-        let p = (len * 100.0).clamp(0.0, 100.0);
-        let _ = write!(
-            out,
-            "<div class=\"rc-bar\" style=\"width:calc({p:.1}% - 3px);background:linear-gradient(to right,{c},{c}33)\"></div>"
-        );
+    if let Some(b) = cf.and_then(|c| c.bar.as_ref()) {
+        out.push_str(&data_bar_svg(b, w, h));
     }
     let mut text = v.text.clone();
     if cf.is_some_and(|c| c.hide_value) {
         text.clear();
     }
-    let icon = cf.and_then(|c| c.icon.as_ref()).map(|(set, level, n)| {
-        let (g, color) = super::icon_glyph(set, *level, *n);
-        format!("<span class=\"rc-icon\" style=\"color:{color}\">{g}</span>")
-    });
-    if text.is_empty() && icon.is_none() {
+    // 아이콘: 칸 왼쪽 3px, 세로는 글자 맞춤대로 (한셀 화면 — 가운데면 (높이 − 16)/2, 아이콘 실험)
+    let has_icon = match cf.and_then(|c| c.icon.as_ref()) {
+        Some((set, idx, _)) => {
+            let bh = h.saturating_sub(1) as f64;
+            let top = match v.v {
+                VAlign::Top => 2.0,
+                VAlign::Center => ((bh - 16.0) / 2.0).round(),
+                VAlign::Bottom => bh - 18.0,
+            }
+            .max(0.0);
+            out.push_str(&super::icons::icon_svg(set, *idx, top));
+            true
+        }
+        None => false,
+    };
+    if text.is_empty() {
         return out;
     }
     // 글꼴·색 (조건부 서식이 덮는다)
@@ -254,7 +325,18 @@ pub(super) fn cell_content(
     // 줄 높이 = 글꼴의 한 줄 높이 (행 자동 높이와 같은 값)
     let line = v.m.row_pt * 4.0 / 3.0;
     let _ = write!(fcss, "line-height:{line:.2}px;");
-    let indent = v.indent as f64 * INDENT_PX;
+    // 왼쪽 맞춤 글자는 아이콘 뒤에서 (3px + 16px)
+    let indent = v.indent as f64 * INDENT_PX
+        + if has_icon
+            && !matches!(
+                v.h,
+                HAlign::Right | HAlign::Center | HAlign::CenterContinuous
+            )
+        {
+            ICON_W
+        } else {
+            0.0
+        };
     let ratio = ratio_of(v.font);
     let scaled = |inner: String, origin: &str| match ratio {
         Some(r) => format!(
@@ -263,14 +345,17 @@ pub(super) fn cell_content(
         None => inner,
     };
     // 보이는 칸 상자 (격자선 제외)
-    let (bw, bh) = (w.saturating_sub(1).max(1) as f64, h.saturating_sub(1).max(1) as f64);
+    let (bw, bh) = (
+        w.saturating_sub(1).max(1) as f64,
+        h.saturating_sub(1).max(1) as f64,
+    );
     let vpos = match v.v {
         VAlign::Top => "top:0".to_string(),
         VAlign::Center => format!("top:{:.1}px", bh / 2.0),
         VAlign::Bottom => "bottom:0".to_string(),
     };
     let vshift = if v.v == VAlign::Center { "-50%" } else { "0" };
-    let body = rich_html(v, &text, theme, icon.as_deref());
+    let body = rich_html(v, &text, theme);
 
     // 돌린 글자·세로 쓰기
     if v.rotation != 0 {
@@ -321,11 +406,7 @@ pub(super) fn cell_content(
         let tw = v.text_px();
         if tw > avail {
             let k = (avail / tw).max(0.05);
-            let size = v
-                .font
-                .and_then(|f| f.size)
-                .unwrap_or(metrics::DEFAULT_SIZE)
-                * k;
+            let size = v.font.and_then(|f| f.size).unwrap_or(metrics::DEFAULT_SIZE) * k;
             let _ = write!(fcss, "font-size:{size:.2}pt;");
         }
     }

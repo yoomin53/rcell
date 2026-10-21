@@ -76,7 +76,13 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
             None => (w / 2.0, 10.0),
         };
         for (i, l) in lines.iter().enumerate() {
-            out.text(tx, ty + lh * i as f64 + font.px() * 0.95, l, &font, "middle");
+            out.text(
+                tx,
+                ty + lh * i as f64 + font.px() * 0.95,
+                l,
+                &font,
+                "middle",
+            );
         }
         if ch.title_full.as_ref().and_then(|t| t.overlay) != Some(true) {
             let bottom = ty + lh * lines.len() as f64 + 8.0;
@@ -345,13 +351,20 @@ impl Ctx<'_> {
             ChartFill::None => Some(None),
             ChartFill::Solid(c) => Some(self.chart_color(c)),
             // 그라데이션·무늬: 첫 색으로 칠한다
-            ChartFill::Other(xml) => Some(first_color_in(xml).and_then(|c| (self.color)(&c)).map(|c| (c, 1.0))),
+            ChartFill::Other(xml) => Some(
+                first_color_in(xml)
+                    .and_then(|c| (self.color)(&c))
+                    .map(|c| (c, 1.0)),
+            ),
         }
     }
 
     fn stroke(&self, l: &ChartLine) -> Option<Option<Stroke>> {
         let color = match l.fill.as_ref()? {
             ChartFill::None => return Some(None),
+            // 한셀 차트 화면은 미리 정한 색(a:prstClr)의 선을 그리지 않는다 (레거시 차트의 범례 테두리 prstClr black 이
+            // 한셀 화면에 없다 — craft-charts 레거시 15개)
+            ChartFill::Solid(c) if c.value.starts_with("prst:") => return Some(None),
             f => self.fill(f)?.map(|c| c.0)?,
         };
         let width = l.width.map_or(1.0, |w| (w as f64 / 9525.0).max(0.75));
@@ -384,8 +397,15 @@ impl Ctx<'_> {
     }
 
     /// 선 서식만 (눈금선·축 선)
-    fn line_of(&self, sp: Option<&ChartShapeProps>, default: Option<(&str, f64)>) -> Option<Stroke> {
-        match sp.and_then(|p| p.line.as_ref()).and_then(|l| self.stroke(l)) {
+    fn line_of(
+        &self,
+        sp: Option<&ChartShapeProps>,
+        default: Option<(&str, f64)>,
+    ) -> Option<Stroke> {
+        match sp
+            .and_then(|p| p.line.as_ref())
+            .and_then(|l| self.stroke(l))
+        {
             Some(v) => v,
             None => default.map(|(c, w)| Stroke::new(c, w)),
         }
@@ -407,11 +427,16 @@ impl Ctx<'_> {
         }
         let Some(r) = rich else { return f };
         f.rot = r.rot;
-        let src: Option<&ChartFont> = r
-            .paras
-            .first()
-            .and_then(|p| p.def_font.as_ref())
-            .or_else(|| r.paras.first().and_then(|p| p.runs.first()).and_then(|x| x.font.as_ref()));
+        let src: Option<&ChartFont> =
+            r.paras
+                .first()
+                .and_then(|p| p.def_font.as_ref())
+                .or_else(|| {
+                    r.paras
+                        .first()
+                        .and_then(|p| p.runs.first())
+                        .and_then(|x| x.font.as_ref())
+                });
         if let Some(cf) = src {
             self.apply_font(&mut f, cf);
         }
@@ -431,7 +456,12 @@ impl Ctx<'_> {
         if let Some(c) = cf.fill.as_ref().and_then(|x| self.fill(x)).flatten() {
             f.color = c.0;
         }
-        if let Some(n) = cf.ea.as_ref().or(cf.latin.as_ref()).filter(|n| !n.is_empty() && !n.starts_with('+')) {
+        if let Some(n) = cf
+            .ea
+            .as_ref()
+            .or(cf.latin.as_ref())
+            .filter(|n| !n.is_empty() && !n.starts_with('+'))
+        {
             f.family = Some(n.clone());
         }
     }
@@ -466,7 +496,12 @@ fn first_color_in(xml: &str) -> Option<DrawColor> {
     let root = crate::xml::parse(xml, "fill").ok()?;
     let mut found = None;
     root.walk(&mut |e| {
-        if found.is_none() && matches!(e.name.as_str(), "srgbClr" | "schemeClr" | "sysClr" | "prstClr") {
+        if found.is_none()
+            && matches!(
+                e.name.as_str(),
+                "srgbClr" | "schemeClr" | "sysClr" | "prstClr"
+            )
+        {
             found = Some(crate::parser::drawing::color(e));
         }
     });
@@ -517,11 +552,12 @@ fn title_of(ch: &Chart, cx: &Ctx, base: &Font) -> Option<(String, Font)> {
     font.family = font.family.or_else(|| base.family.clone());
     if let Some(crate::model::ChartTx::Rich(r)) = &t.tx {
         // 서식 있는 제목: 첫 조각의 글꼴
-        if let Some(cf) = r
-            .paras
-            .first()
-            .and_then(|p| p.runs.first().and_then(|r| r.font.as_ref()).or(p.def_font.as_ref()))
-        {
+        if let Some(cf) = r.paras.first().and_then(|p| {
+            p.runs
+                .first()
+                .and_then(|r| r.font.as_ref())
+                .or(p.def_font.as_ref())
+        }) {
             cx.apply_font(&mut font, cf);
         }
     }
@@ -598,7 +634,12 @@ fn point_style(s: &ChartSeries, i: usize, pt: usize, cx: &Ctx, base: &str) -> St
 
 /// 계열 선 서식 (꺾은선·분산형): 지정 → 기본 굵기와 계열 색
 fn series_stroke(s: &ChartSeries, color: &str, cx: &Ctx) -> Option<Stroke> {
-    match s.sp_pr.as_ref().and_then(|p| p.line.as_ref()).and_then(|l| cx.stroke(l)) {
+    match s
+        .sp_pr
+        .as_ref()
+        .and_then(|p| p.line.as_ref())
+        .and_then(|l| cx.stroke(l))
+    {
         Some(v) => v,
         None => Some(Stroke::new(color, LINE_PX)),
     }
@@ -725,7 +766,10 @@ fn draw_legend(
     let vertical = matches!(pos, "r" | "l" | "tr");
     // 상자: 세로면 항목 줄들, 가로면 한 줄
     let (bw, bh) = if vertical {
-        (items.iter().map(item_w).fold(0.0, f64::max), row * items.len() as f64)
+        (
+            items.iter().map(item_w).fold(0.0, f64::max),
+            row * items.len() as f64,
+        )
     } else {
         (
             items.iter().map(|i| item_w(i) + 16.0).sum::<f64>() - 16.0,
@@ -780,7 +824,13 @@ fn draw_legend(
             };
             let kx = x + (kw - key) / 2.0;
             // 표지는 글 가운데보다 1px 아래 (한셀 화면)
-            out.rect(kx.round() + 0.5, (cy - key / 2.0 + 1.0).round() + 0.5, key, key, &st);
+            out.rect(
+                kx.round() + 0.5,
+                (cy - key / 2.0 + 1.0).round() + 0.5,
+                key,
+                key,
+                &st,
+            );
         } else if let Some(st) = &it.stroke {
             out.line(x, cy.round() + 0.5, x + kw, cy.round() + 0.5, st);
         }
@@ -808,7 +858,9 @@ fn draw_legend(
 /// 계열의 표식 (모양, 크기 px). 꺾은선 묶음에 표식이 꺼져 있거나 `none` 이면 None.
 /// 자동이면 계열 번호마다 마름모 → 네모 → 세모 → × → 별 → 원 → +
 fn marker_of(s: &ChartSeries, g: &Group, k: usize) -> Option<(String, f64)> {
-    const AUTO: [&str; 7] = ["diamond", "square", "triangle", "x", "star", "circle", "plus"];
+    const AUTO: [&str; 7] = [
+        "diamond", "square", "triangle", "x", "star", "circle", "plus",
+    ];
     let m: Option<&ChartMarker> = s.marker.as_ref();
     let sym = m.and_then(|m| m.symbol.as_deref());
     let size = m.and_then(|m| m.size).unwrap_or(7) as f64 * 1.1;
@@ -832,8 +884,21 @@ fn draw_marker(out: &mut Svg, sym: &str, x: f64, y: f64, size: f64, st: &Style) 
     let r = size / 2.0;
     let d = match sym {
         "square" => format!("M{:.1},{:.1}h{size:.1}v{size:.1}h-{size:.1}Z", x - r, y - r),
-        "diamond" => format!("M{x:.1},{:.1}L{:.1},{y:.1}L{x:.1},{:.1}L{:.1},{y:.1}Z", y - r, x + r, y + r, x - r),
-        "triangle" => format!("M{x:.1},{:.1}L{:.1},{:.1}L{:.1},{:.1}Z", y - r, x + r, y + r, x - r, y + r),
+        "diamond" => format!(
+            "M{x:.1},{:.1}L{:.1},{y:.1}L{x:.1},{:.1}L{:.1},{y:.1}Z",
+            y - r,
+            x + r,
+            y + r,
+            x - r
+        ),
+        "triangle" => format!(
+            "M{x:.1},{:.1}L{:.1},{:.1}L{:.1},{:.1}Z",
+            y - r,
+            x + r,
+            y + r,
+            x - r,
+            y + r
+        ),
         "circle" => format!(
             "M{:.1},{y:.1}A{r:.1},{r:.1} 0 1 1 {:.1},{y:.1}A{r:.1},{r:.1} 0 1 1 {:.1},{y:.1}Z",
             x - r,
@@ -944,7 +1009,14 @@ fn nice_unit(range: f64, n: f64) -> f64 {
 }
 
 /// 자동 범위: 0 을 포함하고, 끝에 `room` 비율 여유(2차원 5%, 3차원 0 — chart_col3d 의 20~60 이 0~60)를 두어 주 단위로 맞춘다. 축 지정값이 이긴다
-fn make_scale(lo: f64, hi: f64, axis: Option<&ChartAxis>, len_px: f64, zero_based: bool, room: f64) -> Scale {
+fn make_scale(
+    lo: f64,
+    hi: f64,
+    axis: Option<&ChartAxis>,
+    len_px: f64,
+    zero_based: bool,
+    room: f64,
+) -> Scale {
     let sc = axis.map(|a| &a.scaling);
     let reverse = sc.and_then(|s| s.orientation.as_deref()) == Some("maxMin");
     if let Some(b) = sc.and_then(|s| s.log_base).filter(|b| *b > 1.0) {
@@ -965,9 +1037,8 @@ fn make_scale(lo: f64, hi: f64, axis: Option<&ChartAxis>, len_px: f64, zero_base
     }
     let (mut lo, mut hi) = (lo, hi);
     // 0 에서 먼 값만 있으면(폭이 끝값의 1/6 이하) 0 을 넣지 않는다 — 분산형 20~60 이 0~70 (chart_scatter)
-    let zero_based = zero_based
-        || (lo >= 0.0 && hi - lo > hi / 6.0)
-        || (hi <= 0.0 && hi - lo > -lo / 6.0);
+    let zero_based =
+        zero_based || (lo >= 0.0 && hi - lo > hi / 6.0) || (hi <= 0.0 && hi - lo > -lo / 6.0);
     if zero_based {
         lo = lo.min(0.0);
         hi = hi.max(0.0);
@@ -1012,12 +1083,16 @@ fn tick_label(v: f64, axis: Option<&ChartAxis>, linked: Option<&str>, percent: b
     if percent && axis.and_then(|a| a.num_fmt.as_ref()).is_none() {
         return format!("{:.0}%", v * 100.0);
     }
-    let code = match axis.and_then(|a| a.num_fmt.as_ref()) {
-        Some(f) if f.source_linked == Some(true) => linked.unwrap_or(&f.format_code).to_string(),
-        Some(f) => f.format_code.clone(),
-        None => linked.unwrap_or("General").to_string(),
+    // 원본 연결 형식의 G/표준 은 일반 서식으로, 축에 정한 G/표준 은 표시 형식 그대로 (연호 G + 글자 — 한셀 화면의
+    // 레거시 차트 값 축 레이블이 "/표준", craft-charts 레거시)
+    let (code, from_link) = match axis.and_then(|a| a.num_fmt.as_ref()) {
+        Some(f) if f.source_linked == Some(true) => {
+            (linked.unwrap_or(&f.format_code).to_string(), true)
+        }
+        Some(f) => (f.format_code.clone(), false),
+        None => (linked.unwrap_or("General").to_string(), true),
     };
-    let code = if code.eq_ignore_ascii_case("G/표준") || code.is_empty() {
+    let code = if code.is_empty() || (from_link && code.eq_ignore_ascii_case("G/표준")) {
         "General".to_string()
     } else {
         code
@@ -1050,7 +1125,11 @@ fn group_axes<'a>(ch: &'a Chart, g: &Group) -> (Option<&'a ChartAxis>, Option<&'
         .iter()
         .find(|a| matches!(a.kind.as_str(), "catAx" | "dateAx"))
         .copied()
-        .or_else(|| ch.axes.iter().find(|a| matches!(a.kind.as_str(), "catAx" | "dateAx")));
+        .or_else(|| {
+            ch.axes
+                .iter()
+                .find(|a| matches!(a.kind.as_str(), "catAx" | "dateAx"))
+        });
     let val = found
         .iter()
         .find(|a| a.kind == "valAx")
@@ -1174,8 +1253,18 @@ fn draw_axis_chart(
         .and_then(|c| c.format_code.clone());
 
     // 글꼴
-    let cat_font = cx.font(cat_ax.and_then(|a| a.tx_pr.as_ref()), Some(base), base.size, false);
-    let val_font = cx.font(val_ax.and_then(|a| a.tx_pr.as_ref()), Some(base), base.size, false);
+    let cat_font = cx.font(
+        cat_ax.and_then(|a| a.tx_pr.as_ref()),
+        Some(base),
+        base.size,
+        false,
+    );
+    let val_font = cx.font(
+        val_ax.and_then(|a| a.tx_pr.as_ref()),
+        Some(base),
+        base.size,
+        false,
+    );
 
     // 그림 영역: 직접 배치 또는 축 레이블 자리를 빼고
     let (vlo, vhi, percent) = value_range(&primary);
@@ -1210,11 +1299,12 @@ fn draw_axis_chart(
         let text = t.plain_text()?;
         let mut f = cx.font(t.tx_pr.as_ref(), Some(base), 10.0, true);
         if let Some(crate::model::ChartTx::Rich(r)) = &t.tx {
-            if let Some(cf) = r
-                .paras
-                .first()
-                .and_then(|p| p.runs.first().and_then(|r| r.font.as_ref()).or(p.def_font.as_ref()))
-            {
+            if let Some(cf) = r.paras.first().and_then(|p| {
+                p.runs
+                    .first()
+                    .and_then(|r| r.font.as_ref())
+                    .or(p.def_font.as_ref())
+            }) {
                 cx.apply_font(&mut f, cf);
             }
             f.rot = r.rot;
@@ -1258,7 +1348,13 @@ fn draw_axis_chart(
         }
     };
     // 가로 막대·분산형: 값 레이블이 눈금 가운데에 오므로 마지막 레이블의 반을 오른쪽에 남긴다
-    if (horizontal || xy) && ch.plot_layout.as_ref().and_then(|l| l.manual.as_ref()).is_none() {
+    if (horizontal || xy)
+        && ch
+            .plot_layout
+            .as_ref()
+            .and_then(|l| l.manual.as_ref())
+            .is_none()
+    {
         let last = if horizontal {
             val_labels.last().map_or(0.0, |l| val_font.width(l))
         } else {
@@ -1272,16 +1368,28 @@ fn draw_axis_chart(
                 }
             }
             let xs = make_scale(lo.min(hi), hi.max(lo), cat_ax, plot.w, true, room);
-            xs.ticks()
-                .last()
-                .map_or(0.0, |v| cat_font.width(&tick_label(*v, cat_ax, cat_fmt.as_deref(), false)))
+            xs.ticks().last().map_or(0.0, |v| {
+                cat_font.width(&tick_label(*v, cat_ax, cat_fmt.as_deref(), false))
+            })
         };
         // 한셀 화면: chart_barh·chart_scatter 모두 세로 막대·꺾은선보다 10.5px 좁다 (마지막 레이블 70·10)
         plot.w -= last / 2.0 + 4.5;
     }
     // 3차원: 깊이 자리만큼 앞면 그림 영역이 작다 (chart_col3d: 2차원 415×267 보다 왼쪽 +9, 오른쪽 −38, 위 +15, 아래 −2 px)
-    if first.three_d && !xy && ch.plot_layout.as_ref().and_then(|l| l.manual.as_ref()).is_none() {
-        let (l, r, t, b) = (plot.w * 0.022, plot.w * 0.092, plot.h * 0.056, plot.h * 0.008);
+    if first.three_d
+        && !xy
+        && ch
+            .plot_layout
+            .as_ref()
+            .and_then(|l| l.manual.as_ref())
+            .is_none()
+    {
+        let (l, r, t, b) = (
+            plot.w * 0.022,
+            plot.w * 0.092,
+            plot.h * 0.056,
+            plot.h * 0.008,
+        );
         plot.x += l;
         plot.w -= l + r;
         plot.y += t;
@@ -1331,11 +1439,9 @@ fn draw_axis_chart(
         }
     };
     // 항목 띠 (between: 띠 가운데, midCat: 눈금 위)
-    let between = val_ax.and_then(|a| a.cross_between.as_deref()) != Some("midCat")
-        || first.kind == "bar";
-    let cat_reverse = cat_ax
-        .and_then(|a| a.scaling.orientation.as_deref())
-        == Some("maxMin");
+    let between =
+        val_ax.and_then(|a| a.cross_between.as_deref()) != Some("midCat") || first.kind == "bar";
+    let cat_reverse = cat_ax.and_then(|a| a.scaling.orientation.as_deref()) == Some("maxMin");
     let band_len = if horizontal { plot.h } else { plot.w };
     let band = if between {
         band_len / n_cat as f64
@@ -1368,7 +1474,9 @@ fn draw_axis_chart(
         cx.line_of(l.sp_pr.as_ref(), Some(("#D9D9D9", 1.0)))
     };
     if let Some(gs) = grid(val_ax, false) {
-        let minor = val_ax.and_then(|a| a.minor_unit).unwrap_or(scale.major / 5.0);
+        let minor = val_ax
+            .and_then(|a| a.minor_unit)
+            .unwrap_or(scale.major / 5.0);
         if minor > 0.0 && scale.log.is_none() {
             let mut v = scale.min;
             while v <= scale.max && (v - scale.min) / minor < 500.0 {
@@ -1393,7 +1501,11 @@ fn draw_axis_chart(
         } else {
             for k in 0..=n_cat {
                 let off = band * k as f64;
-                let p = if horizontal { plot.y + off } else { plot.x + off };
+                let p = if horizontal {
+                    plot.y + off
+                } else {
+                    plot.x + off
+                };
                 grid_line(out, !horizontal, p, &plot, &gs);
             }
         }
@@ -1408,7 +1520,9 @@ fn draw_axis_chart(
             &scale
         };
         match g.kind {
-            "bar" => draw_bars(out, g, cx, sc, &plot, horizontal, n_cat, band, &cat_mid, &vpos),
+            "bar" => draw_bars(
+                out, g, cx, sc, &plot, horizontal, n_cat, band, &cat_mid, &vpos,
+            ),
             "line" | "stock" => draw_lines(out, g, cx, sc, n_cat, &cat_mid, &vpos, false),
             "area" => draw_areas(out, g, cx, sc, n_cat, &cat_mid, &vpos, &plot),
             "scatter" | "bubble" => {
@@ -1423,7 +1537,9 @@ fn draw_axis_chart(
     out.end_clip();
 
     // 축 선과 눈금, 레이블
-    let ax_line = |a: Option<&ChartAxis>| cx.line_of(a.and_then(|a| a.sp_pr.as_ref()), Some((AXIS_GRAY, 1.0)));
+    let ax_line = |a: Option<&ChartAxis>| {
+        cx.line_of(a.and_then(|a| a.sp_pr.as_ref()), Some((AXIS_GRAY, 1.0)))
+    };
     let tick_len = |a: Option<&ChartAxis>| match a.and_then(|a| a.major_tick_mark.as_deref()) {
         Some("none") => (0.0, 0.0),
         Some("in") => (-5.0, 0.0),
@@ -1438,7 +1554,14 @@ fn draw_axis_chart(
             .and_then(|a| a.crosses_at)
             .unwrap_or_else(|| 0.0f64.clamp(scale.min, scale.max)),
     };
-    let cross_p = vpos(&scale, if scale.log.is_some() { scale.min } else { cross_v });
+    let cross_p = vpos(
+        &scale,
+        if scale.log.is_some() {
+            scale.min
+        } else {
+            cross_v
+        },
+    );
     // 값 축 (세로 차트는 왼쪽)
     if axis_visible(val_ax) {
         let st = ax_line(val_ax);
@@ -1458,7 +1581,13 @@ fn draw_axis_chart(
                 }
                 if labels_on(val_ax) {
                     let t = tick_label(v, val_ax, val_fmt.as_deref(), percent);
-                    out.text(p, y + 22.5 * val_font.size / BASE_PT + val_font.px() * 0.35, &t, &val_font, "middle");
+                    out.text(
+                        p,
+                        y + 22.5 * val_font.size / BASE_PT + val_font.px() * 0.35,
+                        &t,
+                        &val_font,
+                        "middle",
+                    );
                 }
             }
         } else {
@@ -1481,7 +1610,13 @@ fn draw_axis_chart(
                 if labels_on(val_ax) {
                     let t = tick_label(v, val_ax, val_fmt.as_deref(), percent);
                     if right {
-                        out.text(x + VAL_GAP, p + val_font.px() * 0.35, &t, &val_font, "start");
+                        out.text(
+                            x + VAL_GAP,
+                            p + val_font.px() * 0.35,
+                            &t,
+                            &val_font,
+                            "start",
+                        );
                     } else {
                         out.text(x - VAL_GAP, p + val_font.px() * 0.35, &t, &val_font, "end");
                     }
@@ -1531,7 +1666,13 @@ fn draw_axis_chart(
                 }
                 if labels_on(cat_ax) {
                     let t = tick_label(v, cat_ax, cat_fmt.as_deref(), false);
-                    out.text(p, plot.y + plot.h + 22.5 * cat_font.size / BASE_PT + cat_font.px() * 0.35, &t, &cat_font, "middle");
+                    out.text(
+                        p,
+                        plot.y + plot.h + 22.5 * cat_font.size / BASE_PT + cat_font.px() * 0.35,
+                        &t,
+                        &cat_font,
+                        "middle",
+                    );
                 }
             }
         } else if horizontal {
@@ -1548,7 +1689,13 @@ fn draw_axis_chart(
             if labels_on(cat_ax) {
                 for (k, c) in cats.iter().enumerate().take(n_cat) {
                     let t = cat_text(c, cat_fmt.as_deref());
-                    out.text(plot.x - VAL_GAP, cat_mid(k) + cat_font.px() * 0.35, &t, &cat_font, "end");
+                    out.text(
+                        plot.x - VAL_GAP,
+                        cat_mid(k) + cat_font.px() * 0.35,
+                        &t,
+                        &cat_font,
+                        "end",
+                    );
                 }
             }
         } else {
@@ -1589,7 +1736,13 @@ fn draw_axis_chart(
     // 축 제목
     if let Some((t, f)) = val_title {
         if horizontal {
-            out.text(plot.x + plot.w / 2.0, plot.y + plot.h + val_font.px() * 1.3 + 8.0 + f.px(), &t, &f, "middle");
+            out.text(
+                plot.x + plot.w / 2.0,
+                plot.y + plot.h + val_font.px() * 1.3 + 8.0 + f.px(),
+                &t,
+                &f,
+                "middle",
+            );
         } else {
             let x = plot.x - val_label_w - f.px() * 0.6;
             let y = plot.y + plot.h / 2.0;
@@ -1602,10 +1755,19 @@ fn draw_axis_chart(
     }
     if let Some((t, f)) = cat_title {
         if horizontal {
-            let x = plot.x - 10.0 - cats.iter().map(|c| cat_font.width(c)).fold(0.0, f64::max) - f.px() * 0.6;
+            let x = plot.x
+                - 10.0
+                - cats.iter().map(|c| cat_font.width(c)).fold(0.0, f64::max)
+                - f.px() * 0.6;
             out.text_rot(x, plot.y + plot.h / 2.0, &t, &f, -90.0);
         } else {
-            out.text(plot.x + plot.w / 2.0, plot.y + plot.h + cat_label_h + f.px(), &t, &f, "middle");
+            out.text(
+                plot.x + plot.w / 2.0,
+                plot.y + plot.h + cat_label_h + f.px(),
+                &t,
+                &f,
+                "middle",
+            );
         }
     }
 
@@ -1616,7 +1778,21 @@ fn draw_axis_chart(
         } else {
             &scale
         };
-        draw_axis_labels(out, ch, g, cx, base, sc, n_cat, band, horizontal, &cat_mid, &vpos, xscale.as_ref(), &plot);
+        draw_axis_labels(
+            out,
+            ch,
+            g,
+            cx,
+            base,
+            sc,
+            n_cat,
+            band,
+            horizontal,
+            &cat_mid,
+            &vpos,
+            xscale.as_ref(),
+            &plot,
+        );
     }
 }
 
@@ -1632,7 +1808,11 @@ fn grid_line(out: &mut Svg, vertical: bool, p: f64, plot: &Rect, st: &Stroke) {
 /// 항목 레이블 글 (숫자 항목은 형식대로)
 fn cat_text(c: &str, fmt: Option<&str>) -> String {
     match (c.trim().parse::<f64>(), fmt) {
-        (Ok(v), Some(f)) if !f.is_empty() && !f.eq_ignore_ascii_case("G/표준") && !f.eq_ignore_ascii_case("general") => {
+        (Ok(v), Some(f))
+            if !f.is_empty()
+                && !f.eq_ignore_ascii_case("G/표준")
+                && !f.eq_ignore_ascii_case("general") =>
+        {
             crate::numfmt::format(&crate::model::CellValue::Number(v), f, false).text
         }
         _ => c.to_string(),
@@ -1661,7 +1841,11 @@ fn draw_bars(
         .overlap
         .map_or(if stacked { 1.0 } else { 0.0 }, |o| o as f64 / 100.0);
     // 띠 = 막대들 + 간격(막대 폭 × gap). 겹침이 있으면 막대 폭 × (1 − overlap) 씩 옮긴다
-    let slots = if stacked { 1.0 } else { ns as f64 - (ns as f64 - 1.0) * overlap };
+    let slots = if stacked {
+        1.0
+    } else {
+        ns as f64 - (ns as f64 - 1.0) * overlap
+    };
     let bw = band / (slots + gap);
     let step = bw * (1.0 - overlap);
     let base_v = 0.0f64.clamp(sc.min, sc.max);
@@ -1675,8 +1859,17 @@ fn draw_bars(
             .map(|s| s.values.get(k).copied().flatten().unwrap_or(0.0).abs())
             .sum();
         let (mut pos, mut neg) = (0.0, 0.0);
-        let group_w = if stacked { bw } else { bw + step * (ns as f64 - 1.0) };
-        let start = cat_mid(k) - if horizontal { -group_w / 2.0 } else { group_w / 2.0 };
+        let group_w = if stacked {
+            bw
+        } else {
+            bw + step * (ns as f64 - 1.0)
+        };
+        let start = cat_mid(k)
+            - if horizontal {
+                -group_w / 2.0
+            } else {
+                group_w / 2.0
+            };
         for (i, s) in g.series.iter().enumerate() {
             let Some(mut v) = s.values.get(k).copied().flatten() else {
                 continue;
@@ -1695,10 +1888,7 @@ fn draw_bars(
             } else {
                 (base_v, v)
             };
-            let (p0, p1) = (
-                if stacked { vpos(sc, a) } else { base },
-                vpos(sc, b),
-            );
+            let (p0, p1) = (if stacked { vpos(sc, a) } else { base }, vpos(sc, b));
             let color = if g.vary_colors && g.series.len() == 1 {
                 cx.palette(k)
             } else {
@@ -1793,7 +1983,11 @@ fn draw_lines(
         let st = cx.line_of(hl.sp_pr.as_ref(), Some(("#000000", 1.0)));
         if let Some(st) = st {
             for k in 0..n_cat {
-                let vs: Vec<f64> = g.series.iter().filter_map(|s| s.values.get(k).copied().flatten()).collect();
+                let vs: Vec<f64> = g
+                    .series
+                    .iter()
+                    .filter_map(|s| s.values.get(k).copied().flatten())
+                    .collect();
                 if vs.len() >= 2 {
                     let lo = vs.iter().copied().fold(f64::INFINITY, f64::min);
                     let hi = vs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -1824,7 +2018,13 @@ fn draw_lines(
         // 주식형 계열은 보통 선이 없다 (ln noFill)
         if let Some(st) = series_stroke(s, &color, cx) {
             let d = polyline(&pts, smooth);
-            out.path(&d, &Style { fill: None, stroke: Some(st) });
+            out.path(
+                &d,
+                &Style {
+                    fill: None,
+                    stroke: Some(st),
+                },
+            );
         }
         if let Some((sym, size)) = marker_of(s, g, k0) {
             let ms = marker_style(s, &color, cx);
@@ -1980,12 +2180,23 @@ fn draw_xy(
             for (k, p) in pts.iter().enumerate() {
                 if let Some((x, y)) = p {
                     let sz = sizes.get(k).copied().unwrap_or(0.0).max(0.0);
-                    let r = if max_size > 0.0 { rmax * (sz / max_size).sqrt() } else { 0.0 };
+                    let r = if max_size > 0.0 {
+                        rmax * (sz / max_size).sqrt()
+                    } else {
+                        0.0
+                    };
                     let st = cx.shape(s.sp_pr.as_ref(), Some(&color), None);
-                    draw_marker(out, "circle", *x, *y, r * 2.0, &Style {
-                        fill: st.fill.map(|(c, a)| (c, a.min(0.75))),
-                        stroke: st.stroke,
-                    });
+                    draw_marker(
+                        out,
+                        "circle",
+                        *x,
+                        *y,
+                        r * 2.0,
+                        &Style {
+                            fill: st.fill.map(|(c, a)| (c, a.min(0.75))),
+                            stroke: st.stroke,
+                        },
+                    );
                 }
             }
             continue;
@@ -1993,16 +2204,19 @@ fn draw_xy(
         let style = g.props.scatter_style.as_deref().unwrap_or("lineMarker");
         let smooth = matches!(style, "smooth" | "smoothMarker") || s.smooth == Some(true);
         let line_off = style == "marker"
-            || s
-                .sp_pr
+            || s.sp_pr
                 .as_ref()
                 .and_then(|p| p.line.as_ref())
                 .and_then(|l| l.fill.as_ref())
                 .is_some_and(|f| matches!(f, ChartFill::None));
-        if !line_off
-            && let Some(st) = series_stroke(s, &color, cx)
-        {
-            out.path(&polyline(&pts, smooth), &Style { fill: None, stroke: Some(st) });
+        if !line_off && let Some(st) = series_stroke(s, &color, cx) {
+            out.path(
+                &polyline(&pts, smooth),
+                &Style {
+                    fill: None,
+                    stroke: Some(st),
+                },
+            );
         }
         if let Some((sym, size)) = marker_of(s, g, k0) {
             let ms = marker_style(s, &color, cx);
@@ -2019,7 +2233,14 @@ fn labels_of<'a>(s: &'a ChartSeries, g: &'a Group) -> Option<&'a ChartDataLabels
     if d.delete == Some(true) {
         return None;
     }
-    let any = [d.show_val, d.show_cat_name, d.show_ser_name, d.show_percent, d.show_bubble_size].contains(&Some(true));
+    let any = [
+        d.show_val,
+        d.show_cat_name,
+        d.show_ser_name,
+        d.show_percent,
+        d.show_bubble_size,
+    ]
+    .contains(&Some(true));
     any.then_some(d)
 }
 
@@ -2029,7 +2250,12 @@ fn label_text(d: &ChartDataLabels, s: &ChartSeries, k: usize, v: f64, pct: Optio
         parts.push(s.name.clone().unwrap_or_default());
     }
     if d.show_cat_name == Some(true) {
-        parts.push(s.categories.get(k).cloned().unwrap_or_else(|| (k + 1).to_string()));
+        parts.push(
+            s.categories
+                .get(k)
+                .cloned()
+                .unwrap_or_else(|| (k + 1).to_string()),
+        );
     }
     if d.show_val == Some(true) {
         let code = d
@@ -2037,7 +2263,12 @@ fn label_text(d: &ChartDataLabels, s: &ChartSeries, k: usize, v: f64, pct: Optio
             .as_ref()
             .filter(|f| f.source_linked != Some(true))
             .map(|f| f.format_code.clone())
-            .or_else(|| s.val.as_ref().and_then(|x| x.cache.as_ref()).and_then(|c| c.format_code.clone()))
+            .or_else(|| {
+                s.val
+                    .as_ref()
+                    .and_then(|x| x.cache.as_ref())
+                    .and_then(|c| c.format_code.clone())
+            })
             .filter(|c| !c.eq_ignore_ascii_case("G/표준"))
             .unwrap_or_else(|| "General".into());
         parts.push(crate::numfmt::format(&crate::model::CellValue::Number(v), &code, false).text);
@@ -2070,7 +2301,11 @@ fn draw_axis_labels(
     let stacked = matches!(g.grouping, "stacked" | "percentStacked");
     let ns = g.series.len().max(1);
     let gap = g.props.gap_width.unwrap_or(150) as f64 / 100.0;
-    let bw = if stacked { band / (1.0 + gap) } else { band / (ns as f64 + gap) };
+    let bw = if stacked {
+        band / (1.0 + gap)
+    } else {
+        band / (ns as f64 + gap)
+    };
     let mut acc = vec![0.0; n_cat];
     for (i, s) in g.series.iter().enumerate() {
         let Some(d) = labels_of(s, g) else {
@@ -2096,9 +2331,16 @@ fn draw_axis_labels(
                 } else {
                     v
                 };
-                let off = if stacked { 0.0 } else { bw * (i as f64 - (ns as f64 - 1.0) / 2.0) };
+                let off = if stacked {
+                    0.0
+                } else {
+                    bw * (i as f64 - (ns as f64 - 1.0) / 2.0)
+                };
                 let p = vpos(sc, top);
-                let pos = d.d_lbl_pos.as_deref().unwrap_or(if stacked { "ctr" } else { "outEnd" });
+                let pos = d
+                    .d_lbl_pos
+                    .as_deref()
+                    .unwrap_or(if stacked { "ctr" } else { "outEnd" });
                 if horizontal {
                     let y = cat_mid(k) - off + font.px() * 0.35;
                     let x = match pos {
@@ -2110,7 +2352,10 @@ fn draw_axis_labels(
                 } else {
                     let x = cat_mid(k) + off;
                     let y = match pos {
-                        "ctr" => (p + vpos(sc, if stacked { top - v } else { 0.0 })) / 2.0 + font.px() * 0.35,
+                        "ctr" => {
+                            (p + vpos(sc, if stacked { top - v } else { 0.0 })) / 2.0
+                                + font.px() * 0.35
+                        }
                         "inEnd" => p + font.px() + 2.0,
                         "inBase" => vpos(sc, 0.0) - 3.0,
                         _ => p - 4.0,
@@ -2129,9 +2374,15 @@ fn draw_axis_labels(
                 match pos {
                     "t" => (cat_mid(k), p - 6.0),
                     "b" => (cat_mid(k), p + font.px() + 4.0),
-                    "l" => (cat_mid(k) - font.width(&t) / 2.0 - 6.0, p + font.px() * 0.35),
+                    "l" => (
+                        cat_mid(k) - font.width(&t) / 2.0 - 6.0,
+                        p + font.px() * 0.35,
+                    ),
                     "ctr" => (cat_mid(k), p + font.px() * 0.35),
-                    _ => (cat_mid(k) + font.width(&t) / 2.0 + 6.0, p + font.px() * 0.35),
+                    _ => (
+                        cat_mid(k) + font.width(&t) / 2.0 + 6.0,
+                        p + font.px() * 0.35,
+                    ),
                 }
             };
             out.text(x, y, &t, &font, "middle");
@@ -2147,7 +2398,11 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
     let g = &groups[0];
     let doughnut = g.kind == "doughnut";
     // 한셀 화면: 원은 틀 위·아래에서 13px 안쪽까지 (안쪽 영역보다 위·아래로 3px 크다)
-    let plot = match manual_rect(ch.plot_layout.as_ref(), inner.x + inner.w + PAD.1, inner.y + inner.h + PAD.3) {
+    let plot = match manual_rect(
+        ch.plot_layout.as_ref(),
+        inner.x + inner.w + PAD.1,
+        inner.y + inner.h + PAD.3,
+    ) {
         Some((r, _)) => r,
         None => Rect {
             x: inner.x,
@@ -2159,7 +2414,11 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
     let (cx0, cy0) = (plot.x + plot.w / 2.0, plot.y + plot.h / 2.0);
     let r_out = (plot.w.min(plot.h) / 2.0).max(4.0);
     let first_ang = g.props.first_slice_ang.unwrap_or(0) as f64;
-    let rings: Vec<&ChartSeries> = if doughnut { g.series.iter().collect() } else { g.series.iter().take(1).collect() };
+    let rings: Vec<&ChartSeries> = if doughnut {
+        g.series.iter().collect()
+    } else {
+        g.series.iter().take(1).collect()
+    };
     let hole = if doughnut {
         g.props.hole_size.unwrap_or(50).clamp(10, 90) as f64 / 100.0
     } else {
@@ -2203,12 +2462,28 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
                 if r0 > 0.0 {
                     format!(
                         "M{:.1},{:.1}A{r1:.1},{r1:.1} 0 1 1 {:.1},{:.1}A{r1:.1},{r1:.1} 0 1 1 {:.1},{:.1}ZM{:.1},{:.1}A{r0:.1},{r0:.1} 0 1 0 {:.1},{:.1}A{r0:.1},{r0:.1} 0 1 0 {:.1},{:.1}Z",
-                        ox - r1, oy, ox + r1, oy, ox - r1, oy, ox - r0, oy, ox + r0, oy, ox - r0, oy
+                        ox - r1,
+                        oy,
+                        ox + r1,
+                        oy,
+                        ox - r1,
+                        oy,
+                        ox - r0,
+                        oy,
+                        ox + r0,
+                        oy,
+                        ox - r0,
+                        oy
                     )
                 } else {
                     format!(
                         "M{:.1},{:.1}A{r1:.1},{r1:.1} 0 1 1 {:.1},{:.1}A{r1:.1},{r1:.1} 0 1 1 {:.1},{:.1}Z",
-                        ox - r1, oy, ox + r1, oy, ox - r1, oy
+                        ox - r1,
+                        oy,
+                        ox + r1,
+                        oy,
+                        ox - r1,
+                        oy
                     )
                 }
             } else {
@@ -2236,7 +2511,13 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
                     "outEnd" => r1 + font.px() * 1.2,
                     "inEnd" => r1 * 0.8,
                     "ctr" => (r0 + r1) / 2.0,
-                    _ => if doughnut { (r0 + r1) / 2.0 } else { r1 * 0.65 },
+                    _ => {
+                        if doughnut {
+                            (r0 + r1) / 2.0
+                        } else {
+                            r1 * 0.65
+                        }
+                    }
                 };
                 let (lx, ly) = p(rr, mid);
                 out.text(lx, ly + font.px() * 0.35, &t, &font, "middle");
@@ -2293,15 +2574,30 @@ fn draw_radar(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font
             let _ = write!(d, "{}{x:.1},{y:.1}", if k == 0 { "M" } else { "L" });
         }
         d.push('Z');
-        out.path(&d, &Style { fill: None, stroke: Some(grid.clone()) });
+        out.path(
+            &d,
+            &Style {
+                fill: None,
+                stroke: Some(grid.clone()),
+            },
+        );
         let (x, y) = pt(0, v);
-        out.text(x - 4.0, y + font.px() * 0.35, &tick_label(v, val_ax, None, false), &font, "end");
+        out.text(
+            x - 4.0,
+            y + font.px() * 0.35,
+            &tick_label(v, val_ax, None, false),
+            &font,
+            "end",
+        );
     }
     let spoke = Stroke::new(AXIS_GRAY, 1.0);
     for (k, c) in cats.iter().enumerate().take(n) {
         let (x, y) = (cx0 + r * ang(k).cos(), cy0 + r * ang(k).sin());
         out.line(cx0, cy0, x, y, &spoke);
-        let (lx, ly) = (cx0 + (r + label_r * 0.5) * ang(k).cos(), cy0 + (r + label_r * 0.5) * ang(k).sin());
+        let (lx, ly) = (
+            cx0 + (r + label_r * 0.5) * ang(k).cos(),
+            cy0 + (r + label_r * 0.5) * ang(k).sin(),
+        );
         out.text(lx, ly + font.px() * 0.35, c, &font, "middle");
     }
     let filled = g.props.radar_style.as_deref() == Some("filled");
