@@ -112,7 +112,7 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
   comments, shapes and chart references are adjusted), formatting, borders, merging, column widths and row heights,
   sheet add/rename/delete/move, copy/cut/paste/fill, protection — [editing rules](docs/editing.md) (Korean)
 - Formulas are recalculated after every edit; saves to all three formats (XML and binary `.cell`, `.xlsx`)
-- Hancom Cell as the oracle: 224 of 240 edits (48 corpus documents × 5 edit scripts) give the same document as Hancom Cell
+- Hancom Cell as the oracle: 225 of 240 edits (48 corpus documents × 5 edit scripts) give the same document as Hancom Cell
 
 ### Verification (Hancom Cell as the oracle)
 
