@@ -755,6 +755,7 @@ U+0002 (같은 드라이브의 루트 — 서식 파일 9개의 `\x01\x02Hancell
 | 피벗 (SXVIEW…·캐시 스트림 `_SX_DB_CUR`) | 쓰지 않는다 — 레거시로 쓰면 피벗이 사라진다 (`lossy::legacy_view` 는 피벗 파트를 버린다). 한셀이 쓰는 꼴은 11절 |
 | 차트 VtString 의 pad 바이트 | 한셀이 초기화하지 않은 바이트를 쓴다 — rcell 은 0 (`rec-diff --ignore-volatile` 은 보지 않는다) |
 | 레거시 차트가 담지 못하는 차트 속성 | 제목 글꼴·채우기·축 눈금 범위 … 는 한셀처럼 버린다 ([`cell-legacy-chart.md`](cell-legacy-chart.md) 6절) |
+| 이름 수식의 XTI 차례 | 전역 이름 먼저 (Trade_Show_Budget) 가 서식 파일 Average_Selling_Price 와 어긋난다 — 한셀은 지역 이름의 `[1]` 을 XTI 0 으로 둔다. 두 문서의 다른 점은 전역 이름 `'[2]Intro'!…` 의 따옴표와 SET_RANGE 의 `#REF!` 뿐이라 규칙을 정하지 못했다 (거꾸로 차례는 서식 파일 18개를 깨뜨린다). 뜻은 같다 — 한셀 판정 차이 0 |
 | SST 문자열 차례 | 한셀의 해시 표 차례 — 파일에서 정할 수 없다 (`rec-diff --ignore-sst-order` 로 견준다) |
 | TXO 첫 u16 0x0200 | 한셀이 저장할 때마다 다르다 (10.8절, `rec-diff --ignore-volatile`) |
 | 레거시 입력의 글 상자 회전 잠금 | 레거시 읽기가 한셀처럼 글 상자를 늘 회전 잠금으로 읽어(6.2절) 파일의 0x0100 비트인지 모델에 남지 않는다 — 다시 쓰면 0x007F 에 켜진다 |
