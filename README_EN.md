@@ -106,6 +106,15 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 - Legacy `.cell` (`xlCell8`) — written the way Hancom Cell saves it with -2005 (97.7% of records identical to Hancom Cell opening the XML and saving legacy, ignoring per-save values such as the SST order; charts and tables not yet)
 - CSV, document-model JSON
 
+### Editing
+
+- **Edits the way Hancom Cell does** — cell input (numbers, dates, percentages, `'text`, formulas — Hancom Cell input rules),
+  clearing, row/column insert and delete (formulas on every sheet, names, merges, conditional formatting, validation,
+  comments, shapes and chart references are adjusted), formatting, borders, merging, column widths and row heights,
+  sheet add/rename/delete/move, copy/cut/paste/fill, protection — [editing rules](docs/editing.md) (Korean)
+- Formulas are recalculated after every edit; saves to all three formats (XML and binary `.cell`, `.xlsx`)
+- Hancom Cell as the oracle: 225 of 240 edits (48 corpus documents × 5 edit scripts) give the same document as Hancom Cell
+
 ### Verification (Hancom Cell as the oracle)
 
 - **Legacy reading** — compared with Hancom Cell's own reading of the same file (28 Hancom Cell templates + crafted documents)
@@ -115,7 +124,9 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 
 ## Web viewer — in the browser, nothing to install
 
-Drop a `.cell` file to render it in the browser and save it as modern `.cell` or `.xlsx`. Files never leave the browser.
+Drop a `.cell` file to render it in the browser, edit it the way Hancom Cell does and save it as modern `.cell`, binary `.cell`
+or `.xlsx` (cell selection, in-cell and formula-bar input, copy/paste, undo, a formatting toolbar, row/column insert and
+delete, column/row resizing, sheet tabs — [editing rules](docs/editing.md)). Files never leave the browser.
 
 - Online: <https://yoomin53.github.io/rcell/> — open a file directly with `?file=path` (e.g. `?file=samples/demo.cell`)
 - Locally:
@@ -150,6 +161,12 @@ document.querySelector('#view').innerHTML = new TextDecoder().decode(out.subarra
 | `rcell_render` | Sheet HTML (styles from `rcell_css()`) |
 | `rcell_info` | Document summary JSON |
 | `rcell_to_cell` / `rcell_to_xlsx` | Modern XML `.cell` / `.xlsx` file bytes |
+| `rcell_doc_open` / `rcell_doc_new` | Open a document for editing; returns its handle |
+| `rcell_doc_edit` | Apply one edit command (JSON, `rcell::edit::Edit`) and recalculate |
+| `rcell_doc_render` / `rcell_doc_cell` | Sheet HTML and grid layout / one cell (formula-bar text, format) |
+| `rcell_doc_undo`, `rcell_doc_copy` / `rcell_doc_paste` / `rcell_doc_paste_text`, `rcell_doc_jump` | Undo/redo, copy/paste (TSV), Ctrl+arrow |
+| `rcell_doc_save` | Saved file bytes (0 XML `.cell`, 1 `.xlsx`, 2 binary `.cell`) |
+| `rcell_set_clock` | Current time and time zone (wasm has no clock — `NOW()`, `TODAY()`) |
 
 ## Quick start (build from source)
 
@@ -195,6 +212,14 @@ rcell convert book.cell book.legacy.cell # to legacy .cell (--format legacy)
 rcell dump    book.cell --no-cells       # document model as JSON
 rcell info    locked.cell --password pw  # documents with a user password
 ```
+
+### Edit
+
+```bash
+rcell edit book.cell script.json out.cell  # run {"edits":[{"op":"set","cell":"B2","input":"=SUM(A1:A3)"}, …]}, recalculate, save
+```
+
+See section 1 of the [editing rules](docs/editing.md) for the edit commands.
 
 ### Compare
 
@@ -243,6 +268,7 @@ src/
 │   ├── escher.rs              # OfficeArt shapes, picture store
 │   └── props.rs               # document properties (SummaryInformation)
 ├── writer.rs                  # XML .cell / .xlsx writer
+├── edit/                      # editing (input rules, reference adjustment, formats/borders/merges, clipboard, sheets)
 ├── numfmt.rs                  # number-format engine
 ├── render.rs cf_eval.rs chart_svg.rs theme.rs units.rs image.rs   # rendering
 └── compare.rs scan.rs vocab.rs formula_text.rs                   # semantic diff, vocabulary scanner
@@ -307,6 +333,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full procedure.
 - [Legacy `.cell` format](docs/format/cell-legacy.md) — differences from BIFF8, Hancom records, OfficeArt and the picture store, conditional formatting, filters and protection, document properties
 - [Binary `.cell` format](docs/format/cell-binary.md) — relation to XLSB, what Hancom Cell's binary writer loses
 - [Reverse-engineering method](docs/reverse-engineering.md) — clean-room rules, differential analysis with Hancom Cell as the oracle
+- [Editing rules](docs/editing.md) — input rules, reference adjustment, borders and merges, clipboard, results against Hancom Cell
 - [Roadmap](docs/ROADMAP.md)
 
 ## Notice

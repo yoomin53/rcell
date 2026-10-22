@@ -47,10 +47,7 @@ pub fn current_year() -> i64 {
     if let Some(y) = THIS_YEAR.with(|c| c.get()) {
         return y;
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = crate::calc::unix_now() as i64;
     civil_from_days((now + 9 * 3600) / 86_400).0
 }
 

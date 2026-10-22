@@ -369,11 +369,10 @@ impl Engine {
             .iter()
             .map(|x| crate::numfmt::code_for(&wb.styles, x.num_fmt_id))
             .collect();
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x9E37_79B9_7F4A_7C15)
-            | 1;
+        let seed = match (crate::calc::unix_now() * 1e9) as u64 {
+            0 => 0x9E37_79B9_7F4A_7C15,
+            n => n,
+        } | 1;
         Engine {
             date1904,
             now,

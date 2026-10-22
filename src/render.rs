@@ -59,6 +59,8 @@ pub struct Options {
     /// 빈 칸으로라도 채울 최소 크기 (px, 너비·높이). 한셀 창처럼 쓰는 범위 밖도 격자를 보인다. (0, 0) 이면
     /// 쓰는 범위(값·서식·병합·개체, 넘치는 글자)까지만
     pub fill: (u32, u32),
+    /// 적어도 그릴 행·열 수 (웹 편집기: 선택한 칸까지)
+    pub min_cells: (u32, u32),
 }
 
 impl Default for Options {
@@ -69,6 +71,7 @@ impl Default for Options {
             headers: true,
             active_sheet: None,
             fill: (1280, 640),
+            min_cells: (0, 0),
         }
     }
 }
@@ -291,10 +294,38 @@ fn overflow_spans(
 
 /// 시트 하나를 `<table>` 로 (원본에서 다시 읽은 스파크라인 포함)
 pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Extras) -> String {
+    sheet_table_grid(wb, sheet, opts, extras).0
+}
+
+/// 그린 표의 칸 배치 (웹 편집기가 마우스 자리 → 칸, 선택 상자 자리를 정하는 데 쓴다). 좌표는 표 왼쪽 위
+/// (머리글 모서리) 기준 px, 확대율 적용 전
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct GridInfo {
+    pub header_w: u32,
+    pub header_h: u32,
+    /// 그린 열: (열 번호, 왼쪽, 너비) — 숨긴 열은 없다
+    pub cols: Vec<(u32, u32, u32)>,
+    /// 그린 행: (행 번호, 위, 높이)
+    pub rows: Vec<(u32, u32, u32)>,
+    /// 확대율 (%)
+    pub zoom: u32,
+    /// 틀 고정 칸 (이 칸의 위·왼쪽이 고정된다)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frozen: Option<(u32, u32)>,
+}
+
+/// [`sheet_table_with`] + 칸 배치
+pub fn sheet_table_grid(
+    wb: &Workbook,
+    sheet: &Sheet,
+    opts: Options,
+    extras: &Extras,
+) -> (String, GridInfo) {
     let theme = wb.theme.clone().unwrap_or_default();
     let st = &wb.styles;
     // 배치: 쓰는 범위 + 넘침·채우기 여유
     let (used_r, used_c) = layout::used_extent(sheet);
+    let (used_r, used_c) = (used_r.max(opts.min_cells.0), used_c.max(opts.min_cells.1));
     let slack_c = 64.max(opts.fill.0 / 8);
     let slack_r = 64.max(opts.fill.1 / 12);
     let lay_r = (used_r + slack_r).min(opts.max_rows);
@@ -594,6 +625,27 @@ pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Ex
         css
     };
 
+    let zoom_pct = view
+        .zoom_scale
+        .filter(|&z| (10..=400).contains(&z))
+        .unwrap_or(100);
+    let mut info = GridInfo {
+        header_w,
+        header_h,
+        zoom: zoom_pct,
+        frozen: freeze.map(|f| (f.row, f.col)),
+        ..Default::default()
+    };
+    let mut x = header_w;
+    for &c in &cols {
+        info.cols.push((c, x, lay.col_w(c)));
+        x += lay.col_w(c);
+    }
+    let mut y = header_h;
+    for &r in &rows {
+        info.rows.push((r, y, lay.row_h(r)));
+        y += lay.row_h(r);
+    }
     let mut s = String::new();
     let zoom = view
         .zoom_scale
@@ -745,7 +797,7 @@ pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Ex
     ));
     s.push_str(&note::notes_html(sheet, &lay, header_w, header_h, &theme));
     s.push_str("</div>");
-    s
+    (s, info)
 }
 
 /// 뷰어 공통 CSS. 칸은 오른쪽·아래 1px 가 격자선 자리다 (한셀 화면과 같다)
