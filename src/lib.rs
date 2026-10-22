@@ -31,6 +31,7 @@ pub mod chart_xml;
 pub mod compare;
 pub mod container;
 pub mod crypto;
+pub mod edit;
 pub mod error;
 pub mod formula_text;
 pub mod image;

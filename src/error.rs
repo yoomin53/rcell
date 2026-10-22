@@ -41,6 +41,10 @@ pub enum Error {
 
     #[error("잘못된 값 ({context}): {value}")]
     InvalidValue { context: String, value: String },
+
+    /// 편집할 수 없음 (배열 수식의 일부, 잘못된 시트 이름 …)
+    #[error("편집할 수 없습니다: {0}")]
+    Edit(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
