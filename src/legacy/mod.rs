@@ -19,6 +19,7 @@ pub mod formula;
 pub mod ftab;
 pub mod lossy;
 pub(crate) mod pivot;
+pub(crate) mod pivotw;
 pub mod props;
 pub mod reader;
 pub mod recdiff;

@@ -74,7 +74,7 @@ PID 0x0A 편집 시간은 `VT_FILETIME` 이지만 [MS-OLEPS] 의 100ns 단위가
 ## 5. 통합 문서 전역 레코드
 
 순서: BOF → `0xA030` → WRITEACCESS → CODEPAGE(1200) → CODENAME → 보호 → WINDOW1 → DATEMODE →
-`0x0900` → PRECISION → FONT* → FORMAT* → `0xA001`* → `0xA011`* → XF* → STYLE* → TABLESTYLES →
+`0x0900` → PRECISION → FONT* → FORMAT* → `0xA001`* → `0xA011`* → XF* → STYLE* → [피벗 캐시 원본 (11절)] → TABLESTYLES →
 USESELFS → BOUNDSHEET* → `0xA101` → SUPBOOK/EXTERNSHEET/NAME → SST → EOF (관측).
 
 ### 5.1 BOF (0x0809, 16바이트)
@@ -119,7 +119,7 @@ bCharSet u8, 예약 u8, cch u8, flag u8, 이름 UTF-16[cch]`.
 | 70 | i32 | 글자 위치 (%) | `hs:offset` |
 | 74 | COLORREF | 취소선 색 | `hs:strikeoutColor` |
 
-COLORREF 는 `0x00BBGGRR` 이다. `0xFFFFFFFF` = 지정 안 함, `0xDFFFFFFF` = 자동, `0x80800002` = 색인 65 (피벗 서식의 테두리 — XML `indexed="65"`; 한셀의 바이너리 저장은 이 값의 아래 세 바이트를 RGB `020080` 으로 쓴다) (관측).
+COLORREF 는 `0x00BBGGRR` 이다. `0xFFFFFFFF` = 지정 안 함, `0xDFFFFFFF` = 자동, `0x80800002` = 색인 65 (피벗 서식의 테두리 — XML `indexed="65"`; 한셀의 바이너리 저장은 이 값의 아래 세 바이트를 RGB `020080` 으로 쓴다) (관측). 그 XF 의 BIFF 테두리 색 번호는 0x41(65)이고, 선이 있는 오른쪽 테두리는 XFEXT 0x0A 에 색인 종류(1) + 65 를 둔다 (피벗 실험 pa 의 XF 22·23·25).
 
 한셀은 외곽선 종류(오프셋 14)가 있으면 실선이 아니어도 ECMA 외곽선(`x:outline`)을 켠다. grbit 0x10 은 실선일 때만
 켜져 있으므로 둘 중 하나라도 있으면 외곽선이다 (글꼴 대조 실험). 그림자 종류(오프셋 18)는 `x:shadow` 를 켜지 않는다.
@@ -509,7 +509,7 @@ XTI 가 외부 SUPBOOK 을 가리키면 XML 표기로 `[n]시트!A1` 이 된다.
 | 조건부 서식의 x14 확장 | 데이터 막대의 테두리·그라데이션·음수 색·축, `autoMin`/`autoMax`, 사용자 지정 아이콘, x14 구역의 수식 규칙은 저장되지 않는다. 남는 방향(오른쪽에서 왼쪽)도 다시 열 때 읽지 않는다 (6.3절) |
 | 문서 분류·상태, 패키지 파트 | DocumentSummaryInformation 을 쓰지 않아 분류·상태가 사라진다 (문서 속성 실험). 연결·사용자 지정 XML·프린터 설정 파트는 레거시에 없다 — 매크로 프로젝트만 `_VBS_PROJECT_W` 스트림으로 남는다 |
 | 메모 상자 | 셀과 함께 옮기지 않으면서 크기만 바꾸는 상자는 앵커 플래그 3(고정)이 된다 |
-| 피벗 | 표의 표시 속성 여러 개(`showItems`·`showDrill` …·`indent`·`showHeaders`·`chartFormat`), 총합계·행/열 머리글 글, 표 스타일의 머리글·줄무늬 표시, 캐시의 `refreshedBy`·`refreshedDate`·`missingItemsLimit`·`upgradeOnRefresh`, 캐시 필드의 표시 형식이 저장되지 않는다. 다시 열 때 `pageWrap` 을 두 배로, 태그를 페이지 스타일로도 읽고, 항목이 255개를 넘는 필드의 레코드 번호를 잘못 읽는다 (11절) |
+| 피벗 | 표의 표시 속성 여러 개(`showItems`·`showDrill` …·`indent`·`showHeaders`·`chartFormat`), 총합계·행/열 머리글 글, 표 스타일의 머리글·줄무늬 표시, 캐시의 `refreshedBy`·`refreshedDate`·`missingItemsLimit`·`upgradeOnRefresh`, 캐시 필드의 표시 형식이 저장되지 않는다. `compactData` 자리(0x00B3 의 0x08)에는 `outlineData` 를 쓴다 (w_tcd0·w_tod0). 다시 열 때 `pageWrap` 을 두 배로, 태그를 페이지 스타일로도 읽고, 항목이 255개를 넘는 필드의 레코드 번호를 잘못 읽는다 (11절) |
 | 색인 65 테두리 | 다시 열 때 몇몇 오른쪽 테두리를 흰색(`ffffff`)으로 읽는다 (피벗 서식의 테두리 — 파일에는 다른 쪽과 같은 `0x80800002`) |
 
 ## 9. 검증 방법
@@ -550,7 +550,10 @@ OLE2 판 3 (512바이트 섹터, `src/cfb_write.rs::write`). 섹터 배치는 ol
 스트림은 디렉터리에 `Workbook`, 매크로가 있으면 `_VBS_PROJECT_W`(모델의 `hancom.vbs_project` 그대로), 
 `\x05SummaryInformation` 차례로 놓이고, **데이터는 그 거꾸로 놓인다** — 작은 문서의 미니 스트림 0 번에 SummaryInformation,
 그 뒤 `_VBS_PROJECT_W`, `Workbook` (작은 말뭉치 문서와 매크로 실험 문서 관측. 세 스트림이면 `_VBS_PROJECT_W` 가 뿌리, 양쪽이
-빨강). XML·바이너리의 `xl/vbsProject.bin` 은 같은 모듈의 메모리 배치(`write_streams`: FAT 0, 디렉터리 1, 미니 FAT 2,
+빨강). 피벗이 있으면 루트 스트림 뒤에 저장소 `_SX_DB_CUR`(만든·고친 시각은 저장 시각)와 그 안의 캐시 스트림 `0001`… 이
+오고, 캐시 스트림의 데이터는 루트 스트림 다음에 거꾸로 (캐시 둘인 pf3: 미니 스트림에 0002 가 0001 보다 앞). 섹터는 쓰는
+차례로 잡는다: 디렉터리가 두 섹터면 2·4 (첫 FAT 3), 미니 FAT 5, 미니 스트림 6 → Workbook 다음으로 이어진다 (pa: 미니
+스트림 6 → 18 → 19, Workbook 7–17; `cfb_write::write_with_storages`). XML·바이너리의 `xl/vbsProject.bin` 은 같은 모듈의 메모리 배치(`write_streams`: FAT 0, 디렉터리 1, 미니 FAT 2,
 미니 스트림 3 …, 흔적 섹터 없음 — 한셀의 vbsProject.bin 관측)로 쓴다.
 
 `\x05SummaryInformation` 은 2절의 꼴 (코드 페이지 1200, VT_LPWSTR, FILETIME). 편집 시간(PID 0x0A, app.xml `TotalTime`)은
@@ -561,14 +564,17 @@ FILETIME 자리에 분 수 그대로. 분류·상태(DocumentSummaryInformation)
 전역: `BOF → 0xA030(1) → WRITEACCESS(사용자 이름, 112바이트를 0x20 으로 채움) → CODEPAGE(1200) → CODENAME(workbookPr
 codeName, 없으면 ThisWorkbook) →
 WINDOWPROTECT(늘 0)·PROTECT·PASSWORD → WINDOW1 → DATEMODE → 0x0900(1) → PRECISION → FONT* → FORMAT* →
-0xA020* → 0xA001* → 0xA011* → XF* → XFEXT* → STYLE* → 0x088D* → TABLESTYLES·TABLESTYLE·TABLESTYLEELEMENT →
+0xA020* → 0xA001* → 0xA011* → XF* → XFEXT* → STYLE* → (SXSTREAMID·SXVS·DCONREF/DCONNAME)* → 0x088D* →
+TABLESTYLES·TABLESTYLE·TABLESTYLEELEMENT →
 USESELFS → BOUNDSHEET* → 0xA101 → MSODRAWINGGROUP → SUPBOOK·EXTERNSHEET → NAME* → SST → EOF`.
 
 시트: `BOF → CALCMODE·CALCCOUNT(100)·REFMODE·ITERATION·DELTA·SAVERECALC → PRINTHEADERS·PRINTGRIDLINES →
 GUTS(늘 0) → DEFAULTROWHEIGHT → WSBOOL(0x04C1, 페이지에 맞춤이면 +0x0100) → 페이지 나누기 → HEADER·FOOTER →
 HCENTER·VCENTER → 여백 4개 → SETUP → 0x089C → 보호 → DEFCOLWIDTH → COLINFO·0xB00E → 자동 필터 →
-DIMENSIONS → 행·셀 → SHEETEXT → MERGECELLS → 그리기 → HLINK·HLINKTOOLTIP → NOTE → DVAL·DV →
-CONDFMT·CF·CONDFMT12·CF12·CFEX → WINDOW2 → SCL → PANE → SELECTION → CODENAME → FEATHDR → EOF` (관측, 시트 163개).
+DIMENSIONS → 행·셀 → SHEETEXT → MERGECELLS → 그리기 → 피벗 표 (SXVIEW…SXEX) → DVAL·DV →
+CONDFMT·CF·CONDFMT12·CF12·CFEX → HLINK·HLINKTOOLTIP → NOTE → WINDOW2 → SCL → PANE → SELECTION → CODENAME → FEATHDR → EOF`
+(관측, 시트 163개. 하이퍼링크·메모와 유효성·조건부 서식이 한 시트에 함께 있는 문서는 배치 실험 place1 하나 — 피벗 문서 pa 에
+COM 으로 병합·탭 색·도형·하이퍼링크·메모·유효성·조건부 서식을 더해 한셀이 레거시로 저장한 것).
 
 FRT 머리의 예약 8바이트는 한셀이 초기화하지 않은 값을 쓴다 — rcell 은 0 을 쓰고 비교 도구는 지운다.
 
@@ -752,7 +758,8 @@ U+0002 (같은 드라이브의 루트 — 서식 파일 9개의 `\x01\x02Hancell
 
 | 항목 | 상태 |
 |---|---|
-| 피벗 (SXVIEW…·캐시 스트림 `_SX_DB_CUR`) | 쓰지 않는다 — 레거시로 쓰면 피벗이 사라진다 (`lossy::legacy_view` 는 피벗 파트를 버린다). 한셀이 쓰는 꼴은 11절 |
+| 피벗 서식 (SXFORMAT·SXRULE·SXFILT·SXITM·0x00F4) | 쓰지 않는다 — 표본이 v_fmt 하나라 꼴을 정하지 못했다 (11.1절). 한셀은 레거시의 서식을 다시 읽는다 |
+| 한셀 XML 이 잃은 피벗 값 | `sortType` 은 한셀 XML 에 없어 XML 입력에서는 수동 정렬로 쓴다 (v_sorta·v_sortd — 레거시·바이너리 입력은 지킨다) |
 | 차트 VtString 의 pad 바이트 | 한셀이 초기화하지 않은 바이트를 쓴다 — rcell 은 0 (`rec-diff --ignore-volatile` 은 보지 않는다) |
 | 레거시 차트가 담지 못하는 차트 속성 | 제목 글꼴·채우기·축 눈금 범위 … 는 한셀처럼 버린다 ([`cell-legacy-chart.md`](cell-legacy-chart.md) 6절) |
 | 이름 수식의 XTI 차례 | 전역 이름 먼저 (Trade_Show_Budget) 가 서식 파일 Average_Selling_Price 와 어긋난다 — 한셀은 지역 이름의 `[1]` 을 XTI 0 으로 둔다. 두 문서의 다른 점은 전역 이름 `'[2]Intro'!…` 의 따옴표와 SET_RANGE 의 `#REF!` 뿐이라 규칙을 정하지 못했다 (거꾸로 차례는 서식 파일 18개를 깨뜨린다). 뜻은 같다 — 한셀 판정 차이 0 |
@@ -817,3 +824,34 @@ XML 과 같은 꼴이다. 레거시에 없는 값은 한셀이 읽을 때 쓰는
 쓴 피벗 XML 파트가 49개는 한셀의 레거시 읽기와 같고, 나머지 5개는 v_fmt 의 서식, 한셀이 XML 에 쓰지 않는 `sortType`(v_sorta·v_sortd)과
 항목 없는 필드의 `defaultSubtotal="0"`(v_calc), w_big 의 레코드만 다르다. 한셀 대조(한셀이 rcell XML 을 읽은 것 대 한셀이 레거시를 읽은
 것, `rcell diff`)는 54개 모두 피벗 차이 0 이다.
+
+### 11.1 쓰기 (`src/legacy/pivotw.rs`)
+
+모델의 XML 피벗 파트를 위 레코드로 쓴다 (읽기의 반대). 캐시는 통합 문서 관계 차례로 스트림 번호 1부터, 피벗 표는 시트의 관계
+차례. 한셀의 레거시 저장과 다른 값을 쓰지 않도록 맞춘 규칙 (피벗 실험 54개 + XTI 실험 px1·px2 의 한셀 레거시, 배치 실험 place1):
+
+| 레코드 | 한셀의 꼴 |
+|---|---|
+| 전역 | 캐시마다 SXSTREAMID·SXVS(1 시트, 2 외부, 4 통합, 16 시나리오)·DCONREF (`U+0002` + 시트 이름) 또는 DCONNAME (이름 원본, 파일 글자 수 0) — STYLE 뒤, 0x088D 앞 (v_fmt). 캐시의 원본 시트는 모든 수식 다음에 XTI 를 받는다 (px1: `[셋째, 넷째, 다섯째, 첫째]`; 이름이 먼저 쓰면 그 번호 — px2) |
+| `SXDB` | 블록당 레코드 수 u16 = 0x1FFF / 원본 필드 수 (5개 0x0666, 4개 0x07FF, 3개 0x0AAA). 고친 사람은 쓰지 않는다 (글자 수 0) |
+| `SXDBEX` | 새로 고친 날짜·수식 수 모두 0 (v_cache 의 `refreshedDate` 45000.5 도, 계산 필드가 있는 v_calc 도) |
+| `SXFDB` | 플래그는 공유 항목 속성에서 (0x20 `containsNumber`, 0x40 `containsInteger`, 0x80 `containsString`, 0x100 최소·최대, 0x400 `containsNonDate`, 0x800 `containsDate`, 0x10 `rangePr`, 0x08 `par`, 0x200 항목 255개 넘음). 계산 필드는 0x8405. 6바이트 자리는 `예약 u16, 기준 항목 수 u32` — 범위 묶음 필드(v_group: 수량, 묶음 항목 6 · 공유 항목 7)는 고유 항목 수 6, 묶음 항목 수 6, 7, 공유 항목 7 |
+| 항목 | 묶음 항목, [SXRNG + 시작·끝·간격], 공유 항목 차례. SXRNG 은 `autoStart | autoEnd << 1 | 단위 << 2 | 0x20` (v_group 0x23 — 0x20 의 뜻은 모른다) |
+| `SXDBB` | 공유 항목이 없는 원본 필드의 값은 항목으로 모아 번호로 쓴다 (레거시의 레코드는 번호만 담는다 — 한셀의 XML 에는 없는 꼴) |
+| `SXVD` | 항목 없는 계산 필드는 부분합이 없다 (부분합 수·플래그 0 — v_calc; 한셀 XML 은 `defaultSubtotal="0"` 을 쓰지 않는다) |
+| `SXVDEX` | 계산 필드는 비트 13. 자동 표시 수 = `itemPageCount`, 자동 정렬 데이터 필드는 늘 0xFFFF |
+| `SXPI` | 개체 번호 u16 = 1 (표본은 페이지 필드 하나뿐 — rcell 은 차례 + 1) |
+| `SXDI` | 값 표시·기준 필드·기준 항목·표시 형식은 XML 값 (한셀 XML 은 늘 0) |
+| `SXLI` | 줄마다 자리 수만큼 항목 번호. `r` 보다 앞 자리는 앞 줄 값, 항목 수 뒤 자리는 데이터 줄이면 0xFFFF7FFF, 총합계 줄이면 앞 줄 값 (pd·pg: `[0, X] [0, 0] [0, 1] [1, X] … [2, 1] 총합계 [0, 1]`). 플래그 = `i << 1` (+ 0x200 데이터·빈 줄이 아니면, + 0x800 총합계) |
+| `SXEX` | 서식 수 0 (서식은 쓰지 않는다), 선택 수 0 |
+
+배치: 시트의 그리기 다음, 유효성 앞 (place1). 캐시 스트림과 저장소는 10.1절.
+
+검증:
+
+- 레코드 대조: rcell 이 한셀 XML 저장본(`X.cell`)에서 쓴 레거시의 피벗 레코드(전역·시트)와 캐시 스트림이 한셀의 `X.legacy.cell` 과
+  피벗 문서 56개 중 53개가 바이트까지 같다 (한셀 레코드 6508 중 6460). 나머지는 v_fmt 의 피벗 서식(쓰지 않는다)과 한셀 XML 이 잃은
+  `sortType` (v_sorta·v_sortd).
+- 왕복 (`rcell diff --legacy-view`, 레거시 보기는 같은 레코드를 지어 읽기로 다시 읽은 피벗): XML 입력·레거시 입력 112개 모두 차이 0.
+- 한셀 판정: 한셀이 rcell 의 레거시를 열어 XML 로 저장한 것 대 한셀이 자기 레거시를 읽은 `X.legacy.as.cell` (레거시 판정 옵션) —
+  XML 입력 56개·레거시 입력 56개 모두 문서 전체 차이 0 (피벗 표 비교 포함, 색인 65 테두리의 XF 도 — 5.3절).
