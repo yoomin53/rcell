@@ -200,7 +200,12 @@ enum Cmd {
     /// 레거시 .cell 시트의 그리기(OfficeArt) 도형 목록 — 리버스 엔지니어링용
     Escher { file: PathBuf },
     /// 레거시 .cell 의 한컴 차트(0x7EF0) Vt 아카이브를 `경로 = 값` 줄로 — 리버스 엔지니어링용
-    Vtdump { file: PathBuf },
+    Vtdump {
+        file: PathBuf,
+        /// 값마다 0x7EF0 레코드 안의 자리(`@0x…`)와 레코드의 스트림 위치를 붙인다
+        #[arg(long)]
+        offsets: bool,
+    },
     /// 레코드 목록: 레거시 .cell 의 /Workbook, 또는 바이너리 .cell 의 파트(--part) — 리버스 엔지니어링용
     Records {
         file: PathBuf,
@@ -249,7 +254,7 @@ fn main() -> ExitCode {
             part,
         } => records(&file, bytes, only.as_deref(), part.as_deref()),
         Cmd::Escher { file } => escher(&file),
-        Cmd::Vtdump { file } => vtdump(&file),
+        Cmd::Vtdump { file, offsets } => vtdump(&file, offsets),
         Cmd::Patch {
             input,
             output,
@@ -605,9 +610,12 @@ fn hex_preview(data: &[u8], preview: usize) -> String {
 }
 
 /// 시트(BOF 단위)마다 MSODRAWING 을 이어 붙여 OfficeArt 도형과 OBJ 종류를 보여 준다.
-fn vtdump(file: &Path) -> rcell::Result<()> {
+fn vtdump(file: &Path, offsets: bool) -> rcell::Result<()> {
     let bytes = std::fs::read(file)?;
-    for (i, d) in rcell::legacy::chart_dumps(&bytes)?.iter().enumerate() {
+    for (i, d) in rcell::legacy::chart_dumps_with(&bytes, offsets)?
+        .iter()
+        .enumerate()
+    {
         println!("=== 차트 {i}");
         print!("{d}");
     }
