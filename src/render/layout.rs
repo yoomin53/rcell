@@ -40,22 +40,25 @@ pub fn book_metrics(wb: &Workbook) -> FontMetrics {
     )
 }
 
-pub(super) fn font_metrics(f: Option<&Font>) -> FontMetrics {
+/// 글꼴 측정값. `wb` 는 상대 크기를 쓸지 정한다 ([`effective_size`])
+pub(super) fn font_metrics(wb: &Workbook, f: Option<&Font>) -> FontMetrics {
+    let legacy = wb.styles.from_legacy;
     FontMetrics::new(
         f.and_then(|f| f.name.as_deref()),
-        f.and_then(effective_size),
+        f.and_then(|f| effective_size(f, legacy)),
         f.is_some_and(|f| f.bold),
     )
 }
 
-/// 글꼴 크기 (pt) × 한컴 상대 크기(hs:size, %) — 한셀은 이 크기로 글자를 그리고 행 높이를 맞춘다
-/// (글꼴 대조 문서: 20pt·상대 크기 83% 행 → 16.6pt 높이 24.35)
-pub(super) fn effective_size(f: &Font) -> Option<f64> {
+/// 글꼴 크기 (pt) × 한컴 상대 크기(hs:size, %) — 한셀은 이 크기로 행 높이를 맞춘다 (글꼴 대조 문서: 20pt·상대
+/// 크기 83% 행 → 16.6pt 높이 24.35). 레거시 문서에서 읽은 글꼴은 상대 크기를 쓰지 않는다 (같은 문서의 레거시 판은
+/// 그 행이 20pt 높이 29.15 — COM 대조)
+pub(super) fn effective_size(f: &Font, legacy: bool) -> Option<f64> {
     let rel = f
         .hancom
         .as_ref()
         .and_then(|h| h.size)
-        .filter(|&s| s > 0 && s != 100)
+        .filter(|&s| s > 0 && s != 100 && !legacy)
         .map_or(1.0, |s| s as f64 / 100.0);
     f.size.map(|s| s * rel)
 }
@@ -80,7 +83,7 @@ fn border_twips(wb: &Workbook, style: u32) -> f64 {
 
 /// 서식 하나(값 없는 칸)가 행에 요구하는 높이 (1/20 pt): 글꼴 기본 높이 + 테두리
 fn style_twips(wb: &Workbook, style: u32) -> f64 {
-    let m = font_metrics(wb.styles.font_of(style));
+    let m = font_metrics(wb, wb.styles.font_of(style));
     m.row_pt * 20.0 + m.row_frac + border_twips(wb, style)
 }
 
@@ -271,7 +274,7 @@ fn rotated_base_pt(deg: f64, size: f64) -> f64 {
 
 /// 칸 하나가 행에 요구하는 높이 (1/20 pt): 글자 높이(1/20 pt 로 반올림) + 위·아래 테두리
 pub(super) fn cell_height_twips(wb: &Workbook, cell: &Cell, col_w_px: u32) -> f64 {
-    let m = font_metrics(wb.styles.font_of(cell.style));
+    let m = font_metrics(wb, wb.styles.font_of(cell.style));
     let text = (cell_text_pt(wb, cell, col_w_px) * 20.0).round();
     // 한 줄이면 글꼴 높이의 잘린 아래 자리를 되살린다
     let frac = if text == (m.row_pt * 20.0).round() {
@@ -301,7 +304,7 @@ pub(super) fn cell_height_twips(wb: &Workbook, cell: &Cell, col_w_px: u32) -> f6
 fn cell_text_pt(wb: &Workbook, cell: &Cell, col_w_px: u32) -> f64 {
     let st = &wb.styles;
     let font = st.font_of(cell.style);
-    let m = font_metrics(font);
+    let m = font_metrics(wb, font);
     let one = m.row_pt;
     if cell.value.is_empty() {
         return one;
@@ -324,7 +327,7 @@ fn cell_text_pt(wb: &Workbook, cell: &Cell, col_w_px: u32) -> f64 {
                         if f.name.is_none() {
                             f.name = font.and_then(|x| x.name.clone());
                         }
-                        font_metrics(Some(&f)).row_pt
+                        font_metrics(wb, Some(&f)).row_pt
                     })
                     .fold(one, f64::max)
             }),
@@ -339,7 +342,7 @@ fn cell_text_pt(wb: &Workbook, cell: &Cell, col_w_px: u32) -> f64 {
         // 글자 폭은 글자마다 정수 px
         let tw: f64 = text.chars().map(|c| m.char_width(c).round()).sum();
         let size = font
-            .and_then(effective_size)
+            .and_then(|f| effective_size(f, wb.styles.from_legacy))
             .unwrap_or(metrics::DEFAULT_SIZE);
         // 돌린 글자는 글꼴 기본 높이를 최솟값으로 두지 않는다 (20pt 90도 "0" → 19.5pt)
         return rotated_base_pt(deg, size) + tw * 0.75 * deg.to_radians().sin();
@@ -460,8 +463,14 @@ pub(super) fn layout(wb: &Workbook, sheet: &Sheet, nrows: u32, ncols: u32) -> La
         let h = col_heights.max_without(&none).floor() / 20.0;
         if h > 0.0 { h } else { book.row_pt }
     };
-    // 행 요소가 없는 행도 열 서식 글꼴로 맞춘 높이 (defaultRowHeight 는 쓰지 않는다)
-    let sheet_default = base_pt;
+    // 행 요소가 없는 행도 열 서식 글꼴로 맞춘 높이 (defaultRowHeight 는 쓰지 않는다). 기본 높이를 직접 정한
+    // 시트(sheetFormatPr/@customHeight)는 높이를 정하지 않은 행 모두 그 높이 (값이 있는 행도 맞추지 않는다 — 차트 실험)
+    let custom_default = sheet
+        .default_row_custom
+        .then_some(sheet.default_row_height)
+        .flatten()
+        .map(|h| (h * 20.0 + 1e-7).floor() / 20.0);
+    let sheet_default = custom_default.unwrap_or(base_pt);
     let col_screen = |c: u32| {
         col_w
             .get(c as usize)
@@ -478,6 +487,7 @@ pub(super) fn layout(wb: &Workbook, sheet: &Sheet, nrows: u32, ncols: u32) -> La
             Some(i) if i.hidden => 0.0,
             Some(i) if i.custom_height && i.height.is_some() => stored(i.height.unwrap_or(0.0)),
             _ if info.is_none() && cells.is_empty() => sheet_default,
+            _ if custom_default.is_some() => sheet_default,
             _ => {
                 // 맞춘 높이: 레코드가 있는 칸 + 나머지 칸의 행·열 서식
                 let mut h: f64 = 0.0;

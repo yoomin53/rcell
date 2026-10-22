@@ -62,6 +62,7 @@ pub fn parse_worksheet(
     if let Some(f) = root.sml_child("sheetFormatPr") {
         sheet.default_col_width = f.attr_f64("defaultColWidth");
         sheet.default_row_height = f.attr_f64("defaultRowHeight");
+        sheet.default_row_custom = f.attr_bool("customHeight").unwrap_or(false);
     }
 
     if let Some(cols) = root.sml_child("cols") {

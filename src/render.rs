@@ -413,7 +413,7 @@ pub fn sheet_table_grid(
         let xf = st.xf(style);
         let align = xf.and_then(|x| x.alignment.as_ref());
         let font = xf.and_then(|x| st.fonts.get(x.font_id as usize));
-        let m = layout::font_metrics(font);
+        let m = layout::font_metrics(wb, font);
         let h = h_align(align, &value);
         let (w_px, _) = lay.cell_size(r, c);
         let origin = (lay.col_x(c), lay.row_y(r));

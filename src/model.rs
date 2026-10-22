@@ -210,6 +210,10 @@ pub struct Sheet {
     pub show_grid_lines: bool,
     pub default_col_width: Option<f64>,
     pub default_row_height: Option<f64>,
+    /// 기본 행 높이를 직접 정했다 (`sheetFormatPr/@customHeight`, 바이너리 BrtWsFmtInfo·레거시 DEFAULTROWHEIGHT 의
+    /// 플래그 비트 0). 켜져 있으면 높이를 직접 정하지 않은 행도 다시 맞추지 않고 기본 높이를 쓴다 (한셀 화면)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub default_row_custom: bool,
     pub cols: Vec<ColInfo>,
     /// 높이·숨김 등 속성이 있는 행만
     pub rows: Vec<RowInfo>,

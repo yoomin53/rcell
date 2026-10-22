@@ -3168,7 +3168,9 @@ fn write_sheet(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
     let default_h = sheet.default_row_height.unwrap_or(15.0);
     {
         let mut b = Buf::new();
-        b.u16(0).u16((default_h * 20.0).round() as u16);
+        // 플래그 비트 0: 기본 높이를 직접 정했다 (customHeight, 한셀이 XML 의 sheetFormatPr 을 저장할 때와 같다)
+        b.u16(u16::from(sheet.default_row_custom))
+            .u16((default_h * 20.0).round() as u16);
         out.rec_buf(0x0225, &mut b);
     }
     // WSBOOL: 한셀은 요약 위치·자동 나누기를 쓰지 않고 0x04C1 을 쓴다 (6.4절)
