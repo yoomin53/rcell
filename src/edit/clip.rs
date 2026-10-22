@@ -17,6 +17,9 @@ use crate::model::{
     FormulaKind, Sheet, Workbook,
 };
 
+/// (첫 행, 첫 열, 끝 행, 끝 열)
+type Rect = (u32, u32, u32, u32);
+
 /// 복사한 칸 하나
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClipCell {
@@ -43,9 +46,9 @@ pub struct Clip {
     /// 범위 안의 병합 (원본 범위 기준 (첫 행, 첫 열, 끝 행, 끝 열))
     pub merges: Vec<(u32, u32, u32, u32)>,
     /// 범위에 걸친 조건부 서식: 원본 범위 기준 조각들과, 첫 조각의 왼쪽 위 칸(원본 좌표)에 맞춘 수식
-    pub cfs: Vec<(Vec<(u32, u32, u32, u32)>, ConditionalFormat)>,
+    pub cfs: Vec<(Vec<Rect>, ConditionalFormat)>,
     /// 범위에 걸친 데이터 유효성 (조건부 서식과 같은 꼴)
-    pub dvs: Vec<(Vec<(u32, u32, u32, u32)>, DataValidation)>,
+    pub dvs: Vec<(Vec<Rect>, DataValidation)>,
 }
 
 fn err(m: &str) -> crate::Error {
@@ -134,7 +137,7 @@ pub fn copy(wb: &Workbook, si: usize, range: CellRange) -> crate::Result<Clip> {
     }
     // 조건부 서식·유효성 조각: 수식은 첫 조각의 왼쪽 위 칸(원본 좌표)에 맞춰 둔다
     let area = (r0, c0, r1, c1);
-    let pieces = |sqref: &str| -> Option<((i64, i64), Vec<(u32, u32, u32, u32)>)> {
+    let pieces = |sqref: &str| -> Option<((i64, i64), Vec<Rect>)> {
         let areas = refs::parse_sqref(sqref);
         let tl = areas.first().map(|a| {
             let b = a.bounds();
