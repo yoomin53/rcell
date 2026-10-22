@@ -2102,9 +2102,36 @@ pub fn select_sheet(wb: &mut Workbook, si: usize) {
     }
 }
 
+/// 코드 이름이 없는 워크시트에 쓰지 않은 가장 작은 `SheetN` 을 차례로 준다 — 한셀은 문서를 열 때 코드 이름을
+/// 정하므로, 시트를 더하거나 지우거나 옮긴 뒤에도 처음 순서대로의 이름이 남는다 (편집 대조 실험: 코드 이름 없는
+/// 문서에 시트를 더해 앞으로 옮기면 원래 시트가 `Sheet1`, 새 시트가 `Sheet2`)
+fn ensure_code_names(wb: &mut Workbook) {
+    let missing = |s: &Sheet| s.kind == crate::model::SheetKind::Worksheet && s.code_name.is_none();
+    if !wb.sheets.iter().any(missing) {
+        return;
+    }
+    for i in 0..wb.sheets.len() {
+        if !missing(&wb.sheets[i]) {
+            continue;
+        }
+        let name = (1..)
+            .map(|n| format!("Sheet{n}"))
+            .find(|n| {
+                !wb.sheets.iter().any(|s| {
+                    s.code_name
+                        .as_deref()
+                        .is_some_and(|c| refs::same_sheet(c, n))
+                })
+            })
+            .unwrap_or_default();
+        wb.sheets[i].code_name = Some(name);
+    }
+}
+
 /// 시트를 더한다 (`at` 자리에). 이름이 없으면 한셀처럼 쓰지 않은 가장 작은 `SheetN`
 pub fn add_sheet(wb: &mut Workbook, name: Option<&str>, at: usize) -> crate::Result<usize> {
     guard_structure(wb)?;
+    ensure_code_names(wb);
     let at = at.min(wb.sheets.len());
     let name = match name {
         Some(n) => {
@@ -2187,6 +2214,7 @@ pub fn delete_sheet(wb: &mut Workbook, si: usize) -> crate::Result<()> {
     if visible <= 1 && wb.sheets[si].state == crate::model::SheetState::Visible {
         return Err(err("시트가 하나뿐이면 지울 수 없습니다"));
     }
+    ensure_code_names(wb);
     let name = wb.sheets[si].name.clone();
     let was_selected = wb.sheets[si].view.tab_selected;
     let after: Vec<String> = wb
@@ -2234,6 +2262,7 @@ pub fn move_sheet(wb: &mut Workbook, from: usize, to: usize) -> crate::Result<()
     if from == to {
         return Ok(());
     }
+    ensure_code_names(wb);
     let s = wb.sheets.remove(from);
     wb.sheets.insert(to, s);
     remap_sheet_indexes(wb, &|i| {

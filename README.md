@@ -103,6 +103,14 @@ XML, 바이너리, 한셀 2010 이하의 레거시 — 을 모두 읽고, 한셀
 - 바이너리 `.cell`(`xlCellb`) 저장 — 한셀이 바이너리로 저장하는 꼴 그대로 (레코드 98.9% 가 바이트까지 같다)
 - CSV, 문서 모델 JSON
 
+### Editing (편집)
+
+- **한셀처럼 편집** — 셀 입력(숫자·날짜·백분율·`'글`·수식 — 한셀 입력 규칙), 지우기, 행·열 삽입·삭제(모든 시트의
+  수식·이름·병합·조건부 서식·유효성·메모·도형·차트 참조 조정), 서식·테두리·병합, 열 너비·행 높이, 시트 추가·이름
+  바꾸기·삭제·옮기기, 복사·잘라 붙이기·채우기, 보호 — [편집 규칙](docs/editing.md)
+- 편집마다 수식 다시 계산, 세 형식(XML·바이너리 `.cell`, `.xlsx`)으로 저장
+- 한셀 판정: corpus 문서 48종 × 편집 대본 5종 중 224건이 한셀의 편집 결과와 같다
+
 ### Verification (한셀을 정답지로)
 
 - **레거시 읽기** — 한셀이 같은 파일을 읽은 결과와 비교 (한셀 서식 파일 28종 + 값을 조작한 문서들)
@@ -112,8 +120,9 @@ XML, 바이너리, 한셀 2010 이하의 레거시 — 을 모두 읽고, 한셀
 
 ## 웹 뷰어 — 설치 없이 브라우저에서
 
-`.cell` 파일을 끌어 놓으면 브라우저 안에서 바로 그리고, 최신 `.cell` 이나 `.xlsx` 로 저장할 수 있습니다.
-파일은 브라우저 밖으로 나가지 않습니다.
+`.cell` 파일을 끌어 놓으면 브라우저 안에서 바로 그리고, 한셀처럼 편집해 최신 `.cell`·바이너리 `.cell`·`.xlsx` 로
+저장할 수 있습니다 (칸 고르기, 칸·수식 입력줄 입력, 복사·붙여넣기, 되돌리기, 서식 도구 막대, 행·열 삽입·삭제,
+열 너비·행 높이 끌기, 시트 탭 — [편집 규칙](docs/editing.md)). 파일은 브라우저 밖으로 나가지 않습니다.
 
 - 온라인: <https://yoomin53.github.io/rcell/> — `?file=경로` 로 바로 열 수 있습니다 (예: `?file=samples/demo.cell`)
 - 로컬:
@@ -148,6 +157,12 @@ document.querySelector('#view').innerHTML = new TextDecoder().decode(out.subarra
 | `rcell_render` | 시트 HTML (스타일은 `rcell_css()`) |
 | `rcell_info` | 문서 요약 JSON |
 | `rcell_to_cell` / `rcell_to_xlsx` | 최신 XML `.cell` / `.xlsx` 파일 바이트 |
+| `rcell_doc_open` / `rcell_doc_new` | 편집할 문서를 열고 번호를 돌려준다 |
+| `rcell_doc_edit` | 편집 명령 JSON 하나 (`rcell::edit::Edit`) — 편집하고 다시 계산 |
+| `rcell_doc_render` / `rcell_doc_cell` | 시트 HTML 과 칸 배치 / 칸 하나 (수식 입력줄 글·서식) |
+| `rcell_doc_undo`, `rcell_doc_copy` / `rcell_doc_paste` / `rcell_doc_paste_text`, `rcell_doc_jump` | 되돌리기, 복사·붙이기(TSV), Ctrl+방향키 |
+| `rcell_doc_save` | 저장한 파일 바이트 (0 XML `.cell`, 1 `.xlsx`, 2 바이너리 `.cell`) |
+| `rcell_set_clock` | 지금 시각·시간대 (wasm 에는 시계가 없다 — `NOW()`·`TODAY()`) |
 
 ## Quick Start (소스 빌드)
 
@@ -192,6 +207,14 @@ rcell convert 문서.cell 문서.bin.cell    # 바이너리 .cell 로 (--format 
 rcell dump    문서.cell --no-cells       # 문서 모델 JSON
 rcell info    잠긴문서.cell --password 암호   # 사용자 암호가 걸린 문서
 ```
+
+### 편집
+
+```bash
+rcell edit 문서.cell 대본.json 결과.cell  # {"edits":[{"op":"set","cell":"B2","input":"=SUM(A1:A3)"}, …]} 를 실행·계산·저장
+```
+
+편집 명령은 [편집 규칙](docs/editing.md) 1절을 참고하세요.
 
 ### 비교
 
@@ -240,6 +263,7 @@ src/
 │   ├── escher.rs              # OfficeArt 도형, 그림 저장소
 │   └── props.rs               # 문서 속성 (SummaryInformation)
 ├── writer.rs                  # XML .cell / .xlsx 저장
+├── edit/                      # 편집 (입력 규칙, 참조 조정, 서식·테두리·병합, 복사·붙여넣기, 시트)
 ├── numfmt.rs                  # 표시 형식 엔진
 ├── render.rs cf_eval.rs chart_svg.rs theme.rs units.rs image.rs   # 그리기
 └── compare.rs scan.rs vocab.rs formula_text.rs                   # 의미 비교, 어휘 스캐너
@@ -304,6 +328,7 @@ graph TB
 - [레거시 `.cell` 형식](docs/format/cell-legacy.md) — BIFF8 과의 차이, 한컴 레코드, OfficeArt·그림 저장소, 조건부 서식, 필터·보호, 문서 속성
 - [바이너리 `.cell` 형식](docs/format/cell-binary.md) — XLSB 와의 관계, 한셀의 바이너리 저장이 잃는 것
 - [리버스 엔지니어링 방법](docs/reverse-engineering.md) — 클린룸 원칙, 한셀을 정답으로 쓰는 차분 분석, 판정 기준
+- [편집 규칙](docs/editing.md) — 입력 규칙, 참조 조정, 테두리·병합, 복사·붙여넣기, 한셀 대조 결과
 - [로드맵](docs/ROADMAP.md)
 
 ## Notice

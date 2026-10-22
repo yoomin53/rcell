@@ -1114,3 +1114,24 @@ fn anchors_follow_resized_cells_like_hcell() {
         .collect();
     assert_eq!(got, [(5, 2), (87, 27), (120, 38), (130, 41)]);
 }
+
+// 편집 대조 실험: 코드 이름이 없는 문서에 시트를 더해 앞으로 옮기면 원래 시트가 Sheet1, 새 시트가 Sheet2
+#[test]
+fn code_names_follow_the_original_order() {
+    let mut wb = hcell_book();
+    let at = add_sheet(&mut wb, Some("새 시트"), 1).unwrap();
+    rename_sheet(&mut wb, 0, "편집됨").unwrap();
+    move_sheet(&mut wb, at, 0).unwrap();
+    let got: Vec<(String, Option<String>)> = wb
+        .sheets
+        .iter()
+        .map(|s| (s.name.clone(), s.code_name.clone()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("새 시트".to_string(), Some("Sheet2".to_string())),
+            ("편집됨".to_string(), Some("Sheet1".to_string()))
+        ]
+    );
+}
