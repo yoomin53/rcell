@@ -49,6 +49,8 @@ pub struct Clip {
     pub cfs: Vec<(Vec<Rect>, ConditionalFormat)>,
     /// 범위에 걸친 데이터 유효성 (조건부 서식과 같은 꼴)
     pub dvs: Vec<(Vec<Rect>, DataValidation)>,
+    /// 유효성마다 원본 시트의 개체 (같은 시트에 붙이면 그 개체에 범위를 더한다 — 한셀)
+    pub dv_src: Vec<(usize, DataValidation)>,
 }
 
 fn err(m: &str) -> crate::Error {
@@ -167,7 +169,7 @@ pub fn copy(wb: &Workbook, si: usize, range: CellRange) -> crate::Result<Clip> {
         }
         clip.cfs.push((cut, m));
     }
-    for dv in &sheet.data_validations {
+    for (k, dv) in sheet.data_validations.iter().enumerate() {
         let Some(((dr, dc), cut)) = pieces(&dv.sqref) else {
             continue;
         };
@@ -176,16 +178,17 @@ pub fn copy(wb: &Workbook, si: usize, range: CellRange) -> crate::Result<Clip> {
             *f = crate::formula_text::shift_references(f, dr, dc);
         }
         clip.dvs.push((cut, m));
+        clip.dv_src.push((k, dv.clone()));
     }
+    // 병합: 범위에 걸친 것은 범위 안 몫만 (한셀 — B4:I4 에 걸친 A1:D6 를 붙이면 B4:D4 몫이 병합된다)
     for m in &sheet.merges {
-        if m.start.row >= r0 && m.start.col >= c0 && m.end.row <= r1 && m.end.col <= c1 {
-            clip.merges.push((
-                m.start.row - r0,
-                m.start.col - c0,
-                m.end.row - r0,
-                m.end.col - c0,
-            ));
+        let Some(x) = intersect(rect(m), area) else {
+            continue;
+        };
+        if x.0 == x.2 && x.1 == x.3 {
+            continue;
         }
+        clip.merges.push((x.0 - r0, x.1 - c0, x.2 - r0, x.3 - c0));
     }
     Ok(clip)
 }
@@ -196,6 +199,13 @@ fn overlaps(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> bool {
 
 fn rect(r: &CellRange) -> (u32, u32, u32, u32) {
     (r.start.row, r.start.col, r.end.row, r.end.col)
+}
+
+fn to_range(a: Rect) -> CellRange {
+    CellRange {
+        start: CellRef { row: a.0, col: a.1 },
+        end: CellRef { row: a.2, col: a.3 },
+    }
 }
 
 /// 배열 수식 범위를 일부만 덮는가
@@ -331,6 +341,7 @@ pub fn paste_with(
         return Err(err("붙여 넣을 범위가 시트를 넘습니다"));
     }
     let area = (at.row, at.col, at.row + total_r - 1, at.col + total_c - 1);
+    super::guard_cells(wb, si, to_range(area))?;
     let sheet = wb.sheets.get(si).ok_or_else(|| err("시트가 없습니다"))?;
     if cuts_array(sheet, area) {
         return Err(err("배열 수식의 일부를 바꿀 수 없습니다"));
@@ -424,13 +435,13 @@ pub fn paste_with(
                 m.sqref = place(cut);
                 cfs.push(m);
             }
-            for (cut, dv) in &clip.dvs {
+            for (k, (cut, dv)) in clip.dvs.iter().enumerate() {
                 let mut m = dv.clone();
                 for f in [&mut m.formula1, &mut m.formula2].into_iter().flatten() {
                     *f = crate::formula_text::shift_references(f, drow, dcol);
                 }
                 m.sqref = place(cut);
-                dvs.push(m);
+                dvs.push((k, m));
             }
         }
     }
@@ -446,7 +457,19 @@ pub fn paste_with(
     sheet.merges.extend(merges);
     cut_out(sheet, area);
     sheet.conditional_formats.extend(cfs);
-    sheet.data_validations.extend(dvs);
+    // 같은 시트에 붙인 유효성은 원본 개체에 범위를 더한다 (원본이 그대로 있으면)
+    for (k, m) in dvs {
+        let target = clip.dv_src.get(k).and_then(|(i, orig)| {
+            (si == clip.sheet && sheet.data_validations.get(*i) == Some(orig)).then_some(*i)
+        });
+        match target {
+            Some(i) => {
+                let dv = &mut sheet.data_validations[i];
+                dv.sqref = format!("{} {}", dv.sqref, m.sqref).trim().to_string();
+            }
+            None => sheet.data_validations.push(m),
+        }
+    }
     replace_cells(sheet, area, new);
     unshare(sheet);
     update_dimension(sheet);
@@ -476,6 +499,7 @@ pub fn fill(wb: &mut Workbook, si: usize, range: CellRange, down: bool) -> crate
             end: CellRef { row: r1, col: c0 },
         }
     };
+    super::guard_cells(wb, si, range)?;
     let clip = copy(wb, si, src)?;
     let target = if down {
         CellRange {
@@ -555,6 +579,18 @@ pub fn move_cells(
     if wb.sheets.get(si).is_none() || wb.sheets.get(dsi).is_none() {
         return Err(err("시트가 없습니다"));
     }
+    super::guard_cells(wb, si, to_range(s))?;
+    super::guard_cells(wb, dsi, to_range(d))?;
+    // 병합된 칸의 일부만 옮기거나 덮어쓸 수 없다 (한셀은 잘라 붙이기를 하지 않는다)
+    let cuts_merge = |sheet: &Sheet, a: Rect| {
+        sheet.merges.iter().any(|m| {
+            let r = rect(m);
+            overlaps(r, a) && !(r.0 >= a.0 && r.1 >= a.1 && r.2 <= a.2 && r.3 <= a.3)
+        })
+    };
+    if cuts_merge(&wb.sheets[si], s) || cuts_merge(&wb.sheets[dsi], d) {
+        return Err(err("병합된 셀의 일부를 바꿀 수 없습니다"));
+    }
     if cuts_array(&wb.sheets[si], s) || cuts_array(&wb.sheets[dsi], d) {
         return Err(err("배열 수식의 일부를 바꿀 수 없습니다"));
     }
@@ -569,10 +605,40 @@ pub fn move_cells(
     };
     let names: Vec<String> = wb.sheets.iter().map(|x| x.name.clone()).collect();
 
-    // 1. 옮길 셀을 떼어 낸다 (참조를 고치기 전 원문 — 고치는 것은 아래에서 함께)
+    // 1. 옮길 셀을 떼어 낸다 (참조를 고치기 전 원문 — 고치는 것은 아래에서 함께). 셀 레코드가 없는 칸도 그
+    // 자리의 서식(행·열 서식)을 가지고 간다 — 한셀은 옮긴 자리에 그 서식의 셀을 쓴다 (편집 대조 실험)
+    let small = (h as u64 + 1) * (w as u64 + 1) <= 100_000;
+    let carried: Vec<Cell> = if small {
+        let (src_sheet, dst_sheet) = (&wb.sheets[si], &wb.sheets[dsi]);
+        let mut v = Vec::new();
+        for r in s.0..=s.2 {
+            for c in s.1..=s.3 {
+                let at = CellRef { row: r, col: c };
+                if src_sheet.cell(at).is_some() {
+                    continue;
+                }
+                let style = super::style_at(src_sheet, at);
+                let to = CellRef {
+                    row: (r as i64 + mv.drow) as u32,
+                    col: (c as i64 + mv.dcol) as u32,
+                };
+                if style != 0 || super::style_at(dst_sheet, to) != 0 {
+                    v.push(Cell {
+                        r: at,
+                        style,
+                        value: CellValue::Empty,
+                        formula: None,
+                    });
+                }
+            }
+        }
+        v
+    } else {
+        Vec::new()
+    };
     let taken: Vec<Cell> = {
         let sheet = &mut wb.sheets[si];
-        let mut taken = Vec::new();
+        let mut taken = carried;
         sheet.cells.retain(|c| {
             let inside = c.r.row >= s.0 && c.r.row <= s.2 && c.r.col >= s.1 && c.r.col <= s.3;
             if inside {
@@ -701,6 +767,24 @@ pub fn move_cells(
         let mut keep_dv = Vec::new();
         for mut dv in std::mem::take(&mut sheet.data_validations) {
             let areas = refs::parse_sqref(&dv.sqref);
+            if si == dsi && areas.iter().any(|a| overlaps(a.bounds(), s)) {
+                let mut list: Vec<Area> = Vec::new();
+                for a in &areas {
+                    let b = a.bounds();
+                    list.extend(subtract(b, s).into_iter().map(rect_area));
+                    if let Some(x) = intersect(b, s)
+                        && let Some(m) = rect_area(x).offset(mv.drow, mv.dcol)
+                    {
+                        list.push(m);
+                    }
+                }
+                for f in [&mut dv.formula1, &mut dv.formula2].into_iter().flatten() {
+                    *f = refs::move_formula(f, &here, &mv);
+                }
+                dv.sqref = refs::sqref_text(&list);
+                keep_dv.push(dv);
+                continue;
+            }
             let mut rest = Vec::new();
             let mut cut = Vec::new();
             for a in &areas {

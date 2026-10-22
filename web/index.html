@@ -7,49 +7,155 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>rcell 뷰어</title>
-<meta name="description" content="한컴 셀(.cell) 파일을 설치 없이 브라우저에서 여는 오픈소스 뷰어 — by yoomin53">
+<title>rcell 편집기</title>
+<meta name="description" content="한컴 셀(.cell) 파일을 설치 없이 브라우저에서 열고 고치는 오픈소스 편집기 — by yoomin53">
 <meta name="author" content="yoomin53">
 <style>
-:root{--bg:#f6f7f9;--fg:#1d2329;--muted:#5f6b76;--line:#d6dbe0;--accent:#1f7a5c;--card:#fff}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#15181b;--fg:#e6e9ec;--muted:#9aa5b0;--line:#2c3238;--accent:#4cc39a;--card:#1d2125}}
+:root{--bg:#f6f7f9;--fg:#1d2329;--muted:#5f6b76;--line:#d6dbe0;--accent:#1f7a5c;--card:#fff;--sel:#1f7a5c;--selfill:rgba(31,122,92,.10);--hdr:#e6efe9}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#15181b;--fg:#e6e9ec;--muted:#9aa5b0;--line:#2c3238;--accent:#4cc39a;--card:#1d2125;--hdr:#24423a}}
+:root[data-theme=dark]{--bg:#15181b;--fg:#e6e9ec;--muted:#9aa5b0;--line:#2c3238;--accent:#4cc39a;--card:#1d2125;--hdr:#24423a}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,'맑은 고딕','Malgun Gothic',sans-serif}
-header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--card)}
-h1{font-size:18px;margin:0}
-h1 small{font-weight:normal;color:var(--muted);font-size:13px;margin-left:6px}
-.actions{display:flex;gap:8px;flex-wrap:wrap}
-button,.pick{font:inherit;font-size:14px;padding:7px 12px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,'맑은 고딕','Malgun Gothic',sans-serif;display:flex;flex-direction:column}
+header{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--card)}
+h1{font-size:17px;margin:0;white-space:nowrap}
+h1 small{font-weight:normal;color:var(--muted);font-size:12px;margin-left:6px}
+.actions,.tools{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+button,select,.pick{font:inherit;font-size:13px;padding:5px 9px;border-radius:5px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;min-height:30px}
 .pick{background:var(--accent);border-color:var(--accent);color:#fff}
-button:disabled{opacity:.45;cursor:default}
-main{padding:16px}
-#drop{border:2px dashed var(--line);border-radius:10px;padding:48px 16px;text-align:center;color:var(--muted);line-height:1.7}
+button:disabled{opacity:.4;cursor:default}
+button[aria-pressed=true]{background:var(--hdr);border-color:var(--accent)}
+.tools{padding:6px 16px;border-bottom:1px solid var(--line);background:var(--card)}
+.tools .sep{width:1px;height:22px;background:var(--line);margin:0 2px}
+.tools input[type=color]{width:34px;height:30px;padding:2px;border:1px solid var(--line);border-radius:5px;background:var(--card)}
+.tools label{display:flex;align-items:center;gap:3px;font-size:12px;color:var(--muted)}
+#fbar{display:flex;gap:6px;align-items:center;padding:6px 16px;border-bottom:1px solid var(--line);background:var(--card)}
+#namebox{width:96px;font:13px ui-monospace,Consolas,monospace;padding:5px 6px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg)}
+#fx{color:var(--muted);font-style:italic;font-size:13px}
+#formula{flex:1;min-width:0;font:13px ui-monospace,Consolas,'맑은 고딕',monospace;padding:5px 8px;border:1px solid var(--line);border-radius:4px;background:var(--card);color:var(--fg)}
+main{flex:1;min-height:0;display:flex;flex-direction:column;padding:0 16px}
+#drop{margin:16px 0;border:2px dashed var(--line);border-radius:10px;padding:40px 16px;text-align:center;color:var(--muted);line-height:1.7}
 #drop.over{border-color:var(--accent);color:var(--accent)}
-#status{color:var(--muted);font-size:13px;margin:8px 0;min-height:1.2em}
+#area{position:relative;flex:1;min-height:200px;overflow:auto;border:1px solid var(--line);background:#fff;margin-top:8px;outline:none}
+#area[hidden]{display:none}
+#tabs{display:flex;gap:2px;align-items:flex-end;flex-wrap:wrap;padding:4px 0}
+#tabs button{border-radius:0 0 5px 5px;border-top:0;min-height:28px;padding:3px 12px}
+#tabs button[aria-selected=true]{background:#fff;color:#000;font-weight:bold;border-color:var(--accent)}
+#status{color:var(--muted);font-size:12px;min-height:1.4em;padding:2px 0 6px}
 #status.err{color:#c0392b}
-#view{color:#000}
-footer{padding:12px 16px;color:var(--muted);font-size:12px;border-top:1px solid var(--line);line-height:1.6}
+footer{padding:8px 16px;color:var(--muted);font-size:11px;border-top:1px solid var(--line);line-height:1.5}
 footer a{color:var(--accent)}
+/* 선택 */
+.ed-sel{position:absolute;pointer-events:none;border:2px solid var(--sel);background:var(--selfill);z-index:8;box-sizing:border-box}
+.ed-act{position:absolute;pointer-events:none;border:2px solid var(--sel);z-index:9;box-sizing:border-box}
+.ed-clip{position:absolute;pointer-events:none;border:2px dashed #1565c0;z-index:9;box-sizing:border-box}
+.ed-ref{position:absolute;pointer-events:none;border:2px dashed #c2185b;z-index:9;box-sizing:border-box}
+.ed-guide{position:absolute;pointer-events:none;background:var(--sel);z-index:10}
+#editor{position:absolute;z-index:11;margin:0;padding:1px 3px;border:2px solid var(--sel);resize:none;overflow:hidden;font:11pt '맑은 고딕','Malgun Gothic',sans-serif;background:#fff;color:#000;outline:none;box-shadow:0 2px 6px rgba(0,0,0,.25);white-space:pre-wrap}
+table.rc-sheet thead th.ed-hdr,table.rc-sheet tbody th.ed-hdr{background:#d7e9df;color:#000}
+#menu{position:fixed;z-index:50;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:4px 0;min-width:180px}
+#menu[hidden]{display:none}
+#menu button{display:block;width:100%;text-align:left;border:0;border-radius:0;background:none;padding:6px 14px;min-height:0}
+#menu button:hover{background:var(--hdr)}
+#menu hr{border:0;border-top:1px solid var(--line);margin:4px 0}
+@media (max-width:600px){header,.tools,#fbar,main{padding-left:16px;padding-right:16px}#namebox{width:64px}}
 </style>
 <style id="rc-css"></style>
 </head>
 <body>
 <header>
-  <h1>rcell 뷰어<small>한컴 셀(.cell) 파일을 브라우저에서</small></h1>
+  <h1>rcell 편집기<small>한컴 셀(.cell) 문서를 브라우저에서 열고 고친다</small></h1>
   <div class="actions">
     <label class="pick">파일 열기<input id="file" type="file" accept=".cell,.xlsx,.xlsb" hidden></label>
-    <button id="save-cell" disabled>최신 .cell 로 저장</button>
-    <button id="save-xlsx" disabled>.xlsx 로 저장</button>
+    <button id="new">새 문서</button>
+    <button id="save-cell" disabled title="XML .cell (한셀 2014 이후 기본 형식)">.cell 저장</button>
+    <button id="save-bin" disabled title="바이너리 .cell (한셀 xlCellb)">.bin.cell 저장</button>
+    <button id="save-xlsx" disabled>.xlsx 저장</button>
   </div>
 </header>
+<div class="tools" id="tools" hidden>
+  <button id="undo" title="실행 취소 (Ctrl+Z)" disabled>↶</button>
+  <button id="redo" title="다시 실행 (Ctrl+Y)" disabled>↷</button>
+  <span class="sep"></span>
+  <select id="font-name" title="글꼴">
+    <option>맑은 고딕</option><option>굴림</option><option>돋움</option><option>바탕</option><option>궁서</option>
+    <option>함초롬돋움</option><option>함초롬바탕</option><option>Arial</option><option>Times New Roman</option><option>Courier New</option>
+  </select>
+  <select id="font-size" title="글자 크기">
+    <option>8</option><option>9</option><option>10</option><option>11</option><option>12</option><option>14</option>
+    <option>16</option><option>18</option><option>20</option><option>24</option><option>28</option><option>36</option>
+  </select>
+  <button id="bold" title="굵게 (Ctrl+B)" aria-pressed="false"><b>가</b></button>
+  <button id="italic" title="기울임 (Ctrl+I)" aria-pressed="false"><i>가</i></button>
+  <button id="underline" title="밑줄 (Ctrl+U)" aria-pressed="false"><u>가</u></button>
+  <button id="strike" title="취소선" aria-pressed="false"><s>가</s></button>
+  <label title="글자 색">글자<input id="font-color" type="color" value="#000000"></label>
+  <label title="채우기 색">채우기<input id="fill-color" type="color" value="#ffff00"></label>
+  <button id="no-fill" title="채우기 없음">채우기 없음</button>
+  <select id="border" title="테두리">
+    <option value="">테두리…</option>
+    <option value="all">모든 테두리</option>
+    <option value="outline">바깥쪽 테두리</option>
+    <option value="thick">굵은 바깥쪽 테두리</option>
+    <option value="inside">안쪽 테두리</option>
+    <option value="top">위쪽 테두리</option>
+    <option value="bottom">아래쪽 테두리</option>
+    <option value="left">왼쪽 테두리</option>
+    <option value="right">오른쪽 테두리</option>
+    <option value="none">테두리 없음</option>
+  </select>
+  <span class="sep"></span>
+  <button id="h-left" title="왼쪽 맞춤" aria-pressed="false">⇤</button>
+  <button id="h-center" title="가운데 맞춤" aria-pressed="false">↔</button>
+  <button id="h-right" title="오른쪽 맞춤" aria-pressed="false">⇥</button>
+  <button id="v-top" title="위쪽 맞춤" aria-pressed="false">⤒</button>
+  <button id="v-center" title="세로 가운데 맞춤" aria-pressed="false">↕</button>
+  <button id="v-bottom" title="아래쪽 맞춤" aria-pressed="false">⤓</button>
+  <button id="wrap" title="자동 줄 바꿈" aria-pressed="false">줄 바꿈</button>
+  <button id="merge" title="병합하고 가운데 맞춤 / 병합 풀기">병합</button>
+  <select id="num-fmt" title="표시 형식">
+    <option value="General">일반</option>
+    <option value="0">숫자</option>
+    <option value="0.00">숫자 (소수 2자리)</option>
+    <option value="#,##0">쉼표 스타일</option>
+    <option value="#,##0.00">쉼표 스타일 (소수)</option>
+    <option value="&quot;₩&quot;#,##0;\-&quot;₩&quot;#,##0">통화</option>
+    <option value="_-* #,##0_-;\-* #,##0_-;_-* &quot;-&quot;_-;_-@_-">회계</option>
+    <option value="0%">백분율</option>
+    <option value="0.00%">백분율 (소수 2자리)</option>
+    <option value="yyyy-mm-dd">날짜</option>
+    <option value="yyyy&quot;년&quot; mm&quot;월&quot; dd&quot;일&quot;">긴 날짜</option>
+    <option value="mm-dd">월-일</option>
+    <option value="h:mm">시간</option>
+    <option value="h:mm:ss">시간 (초)</option>
+    <option value="h:mm AM/PM">시간 (오전/오후)</option>
+    <option value="# ?/?">분수</option>
+    <option value="0.00E+00">지수</option>
+    <option value="@">텍스트</option>
+    <option value="000-000">우편번호 (6자리)</option>
+  </select>
+  <span class="sep"></span>
+  <button id="ins-row" title="행 삽입">행+</button>
+  <button id="del-row" title="행 삭제">행−</button>
+  <button id="ins-col" title="열 삽입">열+</button>
+  <button id="del-col" title="열 삭제">열−</button>
+</div>
+<div id="fbar" hidden>
+  <input id="namebox" aria-label="셀 주소" spellcheck="false">
+  <span id="fx">fx</span>
+  <input id="formula" aria-label="수식 입력줄" spellcheck="false" autocomplete="off">
+</div>
 <main>
-  <div id="drop">여기에 .cell 파일을 끌어 놓으세요. XML·바이너리·한셀 2010 이하 레거시 형식을 모두 엽니다.<br>파일은 브라우저 밖으로 전송되지 않습니다.</div>
+  <div id="drop">여기에 .cell 파일을 끌어 놓거나 [새 문서]를 누르세요. XML·바이너리·한셀 2010 이하 레거시 형식을 모두 엽니다.<br>파일은 브라우저 밖으로 전송되지 않습니다.</div>
+  <div id="area" tabindex="0" hidden></div>
+  <div id="tabs" role="tablist"></div>
   <div id="status" role="status"></div>
-  <div id="view"></div>
 </main>
+<div id="menu" hidden></div>
 <footer>
   rcell — 한컴 셀 포맷 클린룸 오픈소스 구현 · 만든 사람 <a href="https://github.com/yoomin53">yoomin53</a> ·
-  <a href="https://github.com/yoomin53/rcell">GitHub</a> · Apache-2.0<br>
+  <a href="https://github.com/yoomin53/rcell">GitHub</a> · Apache-2.0 ·
+  편집 규칙: <a href="https://github.com/yoomin53/rcell/blob/main/docs/editing.md">docs/editing.md</a><br>
   한컴, 한셀은 (주)한글과컴퓨터의 상표이며 이 프로젝트는 한컴과 관련이 없습니다.
 </footer>
 <script src="rcell.js"></script>

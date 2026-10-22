@@ -510,6 +510,64 @@ fn cell_mut(sheet: &mut Sheet, r: CellRef) -> &mut Cell {
     &mut sheet.cells[i]
 }
 
+// ---------------------------------------------------------------------------
+// 보호 (한셀: 보호된 시트의 잠긴 칸·막힌 동작은 "변경하려는 셀은 보호되어 있으므로 읽기 전용입니다")
+// ---------------------------------------------------------------------------
+
+fn sheet_protected(wb: &Workbook, si: usize) -> Option<&crate::model::SheetProtection> {
+    wb.sheets
+        .get(si)?
+        .protection
+        .as_ref()
+        .filter(|p| p.flag("sheet"))
+}
+
+/// 보호된 시트에서 범위 안에 잠긴 칸이 있으면 편집할 수 없다
+pub fn guard_cells(wb: &Workbook, si: usize, range: CellRange) -> crate::Result<()> {
+    if sheet_protected(wb, si).is_none() {
+        return Ok(());
+    }
+    let sheet = &wb.sheets[si];
+    let locked = |st: u32| {
+        wb.styles
+            .xf(st)
+            .and_then(|x| x.protection.as_ref())
+            .and_then(|p| p.locked)
+            != Some(false)
+    };
+    let (h, w) = (
+        (range.end.row - range.start.row) as u64 + 1,
+        (range.end.col - range.start.col) as u64 + 1,
+    );
+    let any_locked = h * w > 1_000_000
+        || (range.start.row..=range.end.row).any(|r| {
+            (range.start.col..=range.end.col)
+                .any(|c| locked(style_at(sheet, CellRef { row: r, col: c })))
+        });
+    if any_locked {
+        return Err(err(
+            "변경하려는 셀은 보호되어 있으므로 읽기 전용입니다 (시트 보호)",
+        ));
+    }
+    Ok(())
+}
+
+/// 보호된 시트에서 막힌 동작 (`formatCells`, `insertRows` … — [`crate::model::SHEET_PROTECTION_FLAGS`])
+pub fn guard_action(wb: &Workbook, si: usize, flag: &str) -> crate::Result<()> {
+    match sheet_protected(wb, si) {
+        Some(p) if p.flag(flag) => Err(err("보호된 시트에서는 할 수 없습니다 (시트 보호)")),
+        _ => Ok(()),
+    }
+}
+
+/// 통합 문서 구조가 보호되면 시트를 더하거나 지우거나 옮기거나 이름을 바꿀 수 없다
+pub fn guard_structure(wb: &Workbook) -> crate::Result<()> {
+    if wb.protection.as_ref().is_some_and(|p| p.lock_structure) {
+        return Err(err("통합 문서 구조가 보호되어 있습니다"));
+    }
+    Ok(())
+}
+
 /// 칸의 서식 번호 (셀이 없으면 행·열 서식)
 pub fn style_at(sheet: &Sheet, r: CellRef) -> u32 {
     sheet
@@ -562,6 +620,129 @@ fn canon_name(wb: &Workbook) -> impl Fn(&str) -> Option<String> + '_ {
     }
 }
 
+/// 수식 입력줄에 보일 글: 수식은 `=…` (배열 수식은 `{=…}`), 날짜는 `yyyy-mm-dd`(시각이 있으면 ` h:mm:ss`),
+/// 시각은 `h:mm:ss`, 백분율 서식은 `10%`, 글자 접두가 있는 글은 `'…`, 숫자는 유효숫자 15자리
+pub fn input_text(wb: &Workbook, si: usize, r: CellRef) -> String {
+    let Some(sheet) = wb.sheets.get(si) else {
+        return String::new();
+    };
+    let Some(c) = sheet.cell(r) else {
+        return String::new();
+    };
+    if let Some(f) = c.formula.as_ref().filter(|f| !f.text.is_empty()) {
+        return match f.kind {
+            FormulaKind::Array => format!("{{={}}}", f.text),
+            _ => format!("={}", f.text),
+        };
+    }
+    let xf = wb.styles.xf(c.style);
+    let code = xf
+        .map(|x| crate::numfmt::code_for(&wb.styles, x.num_fmt_id))
+        .unwrap_or_else(|| "General".into());
+    match &c.value {
+        CellValue::Empty => String::new(),
+        CellValue::Text(t) if xf.is_some_and(|x| x.quote_prefix) => format!("'{t}"),
+        CellValue::Number(v) => {
+            let v = *v;
+            match input::category(&code) {
+                input::Cat::Date | input::Cat::Time if (0.0..2_958_466.0).contains(&v) => {
+                    let date = crate::calc::date::ymd_from_serial(v.floor(), wb.date1904);
+                    let (h, m, s) = crate::calc::date::hms_from_serial(v);
+                    let time = format!("{h}:{m:02}:{s:02}");
+                    match (input::category(&code), date) {
+                        (input::Cat::Time, _) if v < 1.0 => time,
+                        (_, Some((y, mo, d))) if v.fract() == 0.0 => {
+                            format!("{y:04}-{mo:02}-{d:02}")
+                        }
+                        (_, Some((y, mo, d))) => format!("{y:04}-{mo:02}-{d:02} {time}"),
+                        _ => crate::model::format_general(v),
+                    }
+                }
+                input::Cat::Percent => format!(
+                    "{}%",
+                    crate::model::format_general(crate::calc::value::round15(v * 100.0))
+                ),
+                _ => crate::model::format_general(v),
+            }
+        }
+        v => v.display(),
+    }
+}
+
+/// Ctrl+방향키: 값이 이어진 끝으로, 빈 칸에서는 다음 값이 있는 칸으로, 없으면 시트 끝으로 (`dr`·`dc` 는 −1·0·1)
+pub fn jump(sheet: &Sheet, r: CellRef, dr: i32, dc: i32) -> CellRef {
+    let filled = |row: i64, col: i64| -> bool {
+        row >= 0
+            && col >= 0
+            && sheet
+                .cell(CellRef {
+                    row: row as u32,
+                    col: col as u32,
+                })
+                .is_some_and(|c| !c.value.is_empty() || c.formula.is_some())
+    };
+    let max_r = refs::MAX_ROWS as i64 - 1;
+    let max_c = refs::MAX_COLS as i64 - 1;
+    let inside = |row: i64, col: i64| (0..=max_r).contains(&row) && (0..=max_c).contains(&col);
+    let (mut row, mut col) = (r.row as i64, r.col as i64);
+    let (dr, dc) = (dr as i64, dc as i64);
+    if !inside(row + dr, col + dc) {
+        return r;
+    }
+    // 이 줄에서 값이 있는 칸들 (시트 끝까지 하나씩 보지 않도록)
+    let line: std::collections::BTreeSet<i64> = sheet
+        .cells
+        .iter()
+        .filter(|c| !c.value.is_empty() || c.formula.is_some())
+        .filter(|c| {
+            if dr != 0 {
+                c.r.col as i64 == col
+            } else {
+                c.r.row as i64 == row
+            }
+        })
+        .map(|c| {
+            if dr != 0 {
+                c.r.row as i64
+            } else {
+                c.r.col as i64
+            }
+        })
+        .collect();
+    let pos = if dr != 0 { row } else { col };
+    let step = dr + dc;
+    let edge = if step > 0 {
+        if dr != 0 { max_r } else { max_c }
+    } else {
+        0
+    };
+    let target = if filled(row, col) && filled(row + dr, col + dc) {
+        // 이어진 값의 끝
+        let mut p = pos;
+        while p != edge && line.contains(&(p + step)) {
+            p += step;
+        }
+        p
+    } else {
+        // 다음 값이 있는 칸 (없으면 끝)
+        let next = if step > 0 {
+            line.range(pos + 1..).next().copied()
+        } else {
+            line.range(..pos).next_back().copied()
+        };
+        next.unwrap_or(edge)
+    };
+    if dr != 0 {
+        row = target;
+    } else {
+        col = target;
+    }
+    CellRef {
+        row: row as u32,
+        col: col as u32,
+    }
+}
+
 /// 입력한 수식을 한셀이 저장하는 꼴로 고르고 문법을 확인한다 (`=` 없이)
 pub fn normalize_formula(wb: &Workbook, text: &str) -> crate::Result<String> {
     let canon = canon_name(wb);
@@ -572,6 +753,7 @@ pub fn normalize_formula(wb: &Workbook, text: &str) -> crate::Result<String> {
 
 /// 셀에 입력한다 (한셀 입력 규칙). 빈 글이면 내용을 지운다
 pub fn set_input(wb: &mut Workbook, si: usize, r: CellRef, text: &str) -> crate::Result<()> {
+    guard_cells(wb, si, CellRange { start: r, end: r })?;
     let sheet = wb.sheets.get(si).ok_or_else(|| err("시트가 없습니다"))?;
     if let Some(a) = array_at(sheet, r)
         && (a.start != a.end)
@@ -661,11 +843,20 @@ pub fn set_input(wb: &mut Workbook, si: usize, r: CellRef, text: &str) -> crate:
 /// 수식 결과 칸의 표시 형식 (일반 서식 칸에 수식을 넣을 때 한셀이 붙이는 것 — 입력 대조 실험 2):
 /// 날짜·시각 함수(TODAY·DATE → 14, NOW → 22, TIME → 18), 재무 함수(PMT·NPV·FV·PV → 8), 그 밖에는 처음 참조한
 /// 칸의 형식 (더하기·빼기·곱하기·나누기·부호·괄호·SUM·MAX·MIN·AVERAGE·ROUND 를 거쳐서. 곱하기·나누기는
-/// 백분율을 버리고, SUM 은 날짜 범위의 형식을 버린다)
+/// 숫자·백분율 형식을 버리고, SUM 은 날짜 범위의 형식을 버린다)
 pub fn formula_format(wb: &Workbook, si: usize, text: &str) -> Option<u32> {
     use crate::calc::ast::{BinaryOp, Expr, SheetSpec, UnaryOp};
     let e = crate::calc::parse(text).ok()?;
-    let cat_of = |id: u32| input::category(&crate::numfmt::code_for(&wb.styles, id));
+    // 통화 기호가 있는 숫자 형식은 통화 (곱해도 남는다)
+    let cat_of = |id: u32| {
+        let code = crate::numfmt::code_for(&wb.styles, id);
+        match input::category(&code) {
+            input::Cat::Number if code.contains(['₩', '$', '€', '£', '¥', '￦']) => {
+                input::Cat::Currency
+            }
+            c => c,
+        }
+    };
     let ref_fmt = |r: &crate::calc::ast::RefExpr, dates_ok: bool| -> Option<u32> {
         if r.book.is_some() {
             return None;
@@ -713,9 +904,22 @@ pub fn formula_format(wb: &Workbook, si: usize, text: &str) -> Option<u32> {
             Expr::Binary(BinaryOp::Add | BinaryOp::Sub, a, b) => {
                 walk(a, ref_fmt, cat_of).or_else(|| walk(b, ref_fmt, cat_of))
             }
-            Expr::Binary(BinaryOp::Mul | BinaryOp::Div, a, b) => walk(a, ref_fmt, cat_of)
-                .or_else(|| walk(b, ref_fmt, cat_of))
-                .filter(|&i| cat_of(i) != input::Cat::Percent),
+            // 곱하기·나누기·거듭제곱: 숫자·백분율 형식은 버리고 통화·날짜·시각·지수·분수는 남긴다. 같은 형식끼리면
+            // 백분율·지수·분수만 남는다 (입력 대조 실험 3: X*2, X/2, X^2, X*X)
+            Expr::Binary(BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow, a, b) => {
+                use input::Cat;
+                let (fa, fb) = (walk(a, ref_fmt, cat_of), walk(b, ref_fmt, cat_of));
+                match (fa, fb) {
+                    (Some(x), Some(y)) if cat_of(x) == cat_of(y) => {
+                        matches!(cat_of(x), Cat::Percent | Cat::Scientific | Cat::Fraction)
+                            .then_some(x)
+                    }
+                    (Some(x), _) | (None, Some(x)) => {
+                        (!matches!(cat_of(x), Cat::Number | Cat::Percent)).then_some(x)
+                    }
+                    _ => None,
+                }
+            }
             Expr::Call(c) => match c.name.as_str() {
                 "TODAY" | "DATE" => Some(14),
                 "NOW" => Some(22),
@@ -749,6 +953,10 @@ pub enum ClearKind {
 
 /// 범위를 지운다
 pub fn clear(wb: &mut Workbook, si: usize, range: CellRange, kind: ClearKind) -> crate::Result<()> {
+    match kind {
+        ClearKind::Formats => guard_action(wb, si, "formatCells")?,
+        _ => guard_cells(wb, si, range)?,
+    }
     let sheet = wb
         .sheets
         .get_mut(si)
@@ -872,30 +1080,33 @@ fn split_tsv_line(line: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 pub fn insert_rows(wb: &mut Workbook, si: usize, at: u32, n: u32) -> crate::Result<()> {
+    guard_action(wb, si, "insertRows")?;
     structure::shift(wb, si, Shift::InsRows { at, n: n.max(1) })
 }
 
 pub fn delete_rows(wb: &mut Workbook, si: usize, at: u32, n: u32) -> crate::Result<()> {
+    guard_action(wb, si, "deleteRows")?;
     structure::shift(wb, si, Shift::DelRows { at, n: n.max(1) })
 }
 
 pub fn insert_cols(wb: &mut Workbook, si: usize, at: u32, n: u32) -> crate::Result<()> {
+    guard_action(wb, si, "insertColumns")?;
     structure::shift(wb, si, Shift::InsCols { at, n: n.max(1) })
 }
 
 pub fn delete_cols(wb: &mut Workbook, si: usize, at: u32, n: u32) -> crate::Result<()> {
+    guard_action(wb, si, "deleteColumns")?;
     structure::shift(wb, si, Shift::DelCols { at, n: n.max(1) })
 }
 
-/// 한셀 COM `ColumnWidth`(글자 수) → 저장하는 열 너비: 여백 6.22 px 를 글자 수로 더해 1/256 로 자른다
-/// (대조 실험: 20 → 20.77734375, 8.43 → 9.20703125 — 맑은 고딕 11, 숫자 폭 8 px)
+/// 한셀 COM `ColumnWidth`(글자 수) → 저장하는 열 너비: 1/256 로 자르고 199/256 을 더한다 — 글꼴과 상관없다
+/// (대조 실험: 20 → 20.77734375, 8.43 → 9.20703125, Arial 10 문서에서도 18 → 18.77734375)
 pub fn stored_col_width(wb: &Workbook, chars: f64) -> f64 {
     if chars < 1.0 {
         return (chars * 256.0).floor() / 256.0;
     }
-    let k = crate::render::book_metrics(wb).k;
-    let pad = (6.22 / k * 256.0).round();
-    ((chars * 256.0).floor() + pad) / 256.0
+    let _ = wb;
+    ((chars * 256.0).floor() + 199.0) / 256.0
 }
 
 /// 열 너비 (저장 값, 글자 수). 0 이하면 숨긴다
@@ -906,10 +1117,16 @@ pub fn set_col_width(
     c1: u32,
     width: f64,
 ) -> crate::Result<()> {
-    let sheet = wb
-        .sheets
-        .get_mut(si)
-        .ok_or_else(|| err("시트가 없습니다"))?;
+    if si >= wb.sheets.len() {
+        return Err(err("시트가 없습니다"));
+    }
+    guard_action(wb, si, "formatColumns")?;
+    let k = crate::render::book_metrics(wb).k;
+    let old: Vec<f64> = (c0..=c1.min(c0 + 16_384))
+        .map(|c| col_px_of(wb, si, c, k))
+        .collect();
+    let before = one_cell_before(wb, si);
+    let sheet = &mut wb.sheets[si];
     let (a, b) = (c0 + 1, c1.min(refs::MAX_COLS - 1) + 1);
     let mut out: Vec<ColInfo> = Vec::new();
     let mut base: Vec<(u32, ColInfo)> = Vec::new();
@@ -957,7 +1174,65 @@ pub fn set_col_width(
     }
     out.sort_by_key(|c| c.min);
     sheet.cols = out;
+    let new: Vec<f64> = (c0..=c1.min(c0 + 16_384))
+        .map(|c| col_px_of(wb, si, c, k))
+        .collect();
+    structure::scale_offsets(&mut wb.sheets[si], false, c0, &old, &new);
+    one_cell_after(wb, si, &before);
     Ok(())
+}
+
+/// 열 너비·행 높이를 바꾸기 전의 배치: 크기를 지키는 그림(`editAs="oneCell"`)의 크기, 메모 상자를 둘 화면 자리
+struct Before {
+    sizes: Vec<Option<(i64, i64)>>,
+    old: Option<crate::render::Geometry>,
+    ext: (u32, u32),
+}
+
+fn one_cell_before(wb: &Workbook, si: usize) -> Before {
+    let sheet = &wb.sheets[si];
+    let pictures = sheet
+        .shapes
+        .iter()
+        .any(|s| s.anchor.edit_as.as_deref() == Some("oneCell"));
+    let boxes = sheet.comments.iter().any(|c| c.shape.is_some());
+    if !pictures && !boxes {
+        return Before {
+            sizes: Vec::new(),
+            old: None,
+            ext: (0, 0),
+        };
+    }
+    let (r1, c1) = structure::shapes_extent(sheet);
+    let (r2, c2) = structure::comments_extent(sheet);
+    let ext = (r1.max(r2) + 64, c1.max(c2) + 32);
+    let g = crate::render::sheet_geometry(wb, sheet, ext.0, ext.1);
+    Before {
+        sizes: structure::one_cell_sizes(sheet, &g),
+        old: Some(g),
+        ext,
+    }
+}
+
+fn one_cell_after(wb: &mut Workbook, si: usize, before: &Before) {
+    let Some(old) = &before.old else { return };
+    let g = crate::render::sheet_geometry(wb, &wb.sheets[si], before.ext.0, before.ext.1);
+    structure::keep_one_cell_sizes(&mut wb.sheets[si], &before.sizes, &g);
+    structure::keep_comment_boxes(&mut wb.sheets[si], old, &g);
+}
+
+/// 열의 화면 너비 (px, 렌더러와 같은 규칙)
+fn col_px_of(wb: &Workbook, si: usize, c: u32, k: f64) -> f64 {
+    let sheet = &wb.sheets[si];
+    match sheet
+        .cols
+        .iter()
+        .find(|x| (x.min..=x.max).contains(&(c + 1)))
+    {
+        Some(x) if x.hidden => 0.0,
+        Some(x) if x.width.is_some() => crate::render::col_px(x.width.unwrap_or(0.0), k) as f64,
+        _ => crate::render::default_col_px(sheet, k) as f64,
+    }
 }
 
 /// 행 높이 (pt). 0 이하면 숨긴다
@@ -968,11 +1243,20 @@ pub fn set_row_height(
     r1: u32,
     height: f64,
 ) -> crate::Result<()> {
-    let sheet = wb
-        .sheets
-        .get_mut(si)
-        .ok_or_else(|| err("시트가 없습니다"))?;
-    for r in r0..=r1.min(refs::MAX_ROWS - 1) {
+    if si >= wb.sheets.len() {
+        return Err(err("시트가 없습니다"));
+    }
+    guard_action(wb, si, "formatRows")?;
+    let r1 = r1.min(refs::MAX_ROWS - 1);
+    let span = r1.min(r0 + 100_000);
+    let geo = |wb: &Workbook| -> Vec<f64> {
+        let g = crate::render::sheet_geometry(wb, &wb.sheets[si], span + 1, 1);
+        (r0..=span).map(|r| g.rows[r as usize].1 as f64).collect()
+    };
+    let old = geo(wb);
+    let before = one_cell_before(wb, si);
+    let sheet = &mut wb.sheets[si];
+    for r in r0..=r1 {
         let i = match sheet.rows.binary_search_by_key(&(r + 1), |x| x.index) {
             Ok(i) => i,
             Err(i) => {
@@ -995,6 +1279,9 @@ pub fn set_row_height(
             info.hidden = false;
         }
     }
+    let new = geo(wb);
+    structure::scale_offsets(&mut wb.sheets[si], true, r0, &old, &new);
+    one_cell_after(wb, si, &before);
     Ok(())
 }
 
@@ -1158,9 +1445,13 @@ fn restyle(
     if (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64 > 2_000_000 {
         return Err(err("범위가 너무 큽니다"));
     }
+    let skip = format_skips(&wb.sheets[si], range);
     for r in r0..=r1 {
         for c in c0..=c1 {
             let at = CellRef { row: r, col: c };
+            if skip(at) {
+                continue;
+            }
             let old = style_at(&wb.sheets[si], at);
             let new = apply_one(&mut wb.styles, old, at);
             if new != old || wb.sheets[si].cell(at).is_some() {
@@ -1170,6 +1461,40 @@ fn restyle(
     }
     structure::update_dimension(&mut wb.sheets[si]);
     Ok(())
+}
+
+/// 서식을 바꾸지 않는 칸: 개요를 접어 숨긴 행·열, 범위 밖으로 걸친 병합의 칸 (한셀은 이런 칸을 건너뛴다 — 편집
+/// 대조 실험. 그냥 숨긴 행·열은 바꾼다)
+fn format_skips(sheet: &Sheet, range: CellRange) -> impl Fn(CellRef) -> bool + use<> {
+    let hidden_rows: std::collections::HashSet<u32> = sheet
+        .rows
+        .iter()
+        .filter(|r| r.hidden && r.outline_level > 0)
+        .map(|r| r.index - 1)
+        .collect();
+    let hidden_cols: Vec<(u32, u32)> = sheet
+        .cols
+        .iter()
+        .filter(|c| c.hidden && c.outline_level > 0)
+        .map(|c| (c.min - 1, c.max - 1))
+        .collect();
+    let partial: Vec<CellRange> = sheet
+        .merges
+        .iter()
+        .filter(|m| {
+            let overlaps = !(m.end.row < range.start.row
+                || m.start.row > range.end.row
+                || m.end.col < range.start.col
+                || m.start.col > range.end.col);
+            overlaps && !(range.contains(m.start) && range.contains(m.end))
+        })
+        .copied()
+        .collect();
+    move |at: CellRef| {
+        hidden_rows.contains(&at.row)
+            || hidden_cols.iter().any(|&(a, b)| (a..=b).contains(&at.col))
+            || partial.iter().any(|m| m.contains(at))
+    }
 }
 
 /// 글꼴·채우기·맞춤·줄 바꿈·표시 형식
@@ -1182,6 +1507,7 @@ pub fn format(
     if p.is_empty() {
         return Ok(());
     }
+    guard_action(wb, si, "formatCells")?;
     restyle(wb, si, range, &|st, xf, _| style::patch_xf(st, xf, p))
 }
 
@@ -1194,6 +1520,7 @@ pub fn border(
     line: &str,
     color: Option<&str>,
 ) -> crate::Result<()> {
+    guard_action(wb, si, "formatCells")?;
     let e = style::edge(line, color);
     let (r0, c0, r1, c1) = (
         range.start.row,
@@ -1201,19 +1528,131 @@ pub fn border(
         range.end.row,
         range.end.col,
     );
-    restyle(wb, si, range, &|st, xf, at| {
-        let set = style::edges_for(
-            preset,
-            &e,
-            at.row == r0,
-            at.row == r1,
-            at.col == c0,
-            at.col == c1,
-        );
-        if !set.is_empty() {
-            style::patch_border(st, xf, &set);
+    let whole = (c0 == 0 && c1 >= refs::MAX_COLS - 1) || (r0 == 0 && r1 >= refs::MAX_ROWS - 1);
+    if whole || (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64 > 1_000_000 {
+        return restyle(wb, si, range, &|st, xf, at| {
+            let set = style::edges_for(
+                preset,
+                &e,
+                at.row == r0,
+                at.row == r1,
+                at.col == c0,
+                at.col == c1,
+            );
+            if !set.is_empty() {
+                style::patch_border(st, xf, &set);
+            }
+        });
+    }
+    let skip = format_skips(&wb.sheets[si], range);
+    let mut plan: Vec<(CellRef, style::EdgeSet)> = Vec::new();
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            let at = CellRef { row: r, col: c };
+            if skip(at) {
+                continue;
+            }
+            let mut set = style::edges_for(preset, &e, r == r0, r == r1, c == c0, c == c1);
+            if set.is_empty() {
+                continue;
+            }
+            if e.color.is_none() {
+                // 안쪽 선(범위 가운데의 칸 사이)은 검정, 바깥 선은 칸의 원래 색 (테두리 대조 실험)
+                let black = || {
+                    Some(crate::model::Color {
+                        rgb: Some("FF000000".into()),
+                        ..Default::default()
+                    })
+                };
+                for (inner, slot) in [
+                    (r > r0, &mut set.top),
+                    (r < r1, &mut set.bottom),
+                    (c > c0, &mut set.left),
+                    (c < c1, &mut set.right),
+                ] {
+                    if inner && let Some(Some(edge)) = slot {
+                        edge.color = black();
+                    }
+                }
+            }
+            plan.push((at, set));
         }
-    })
+    }
+    // 범위 가장자리에 선을 그으면 범위 밖 이웃 칸의 맞닿은 선은 지운다 — 한셀은 칸 사이 선을 하나로 다룬다
+    // (B10 위 선을 그으면 B9 의 아래 선이 없어진다, 테두리 대조 실험)
+    let mut outside: Vec<(CellRef, style::EdgeSet)> = Vec::new();
+    for (at, set) in &plan {
+        let mut push = |r: i64, c: i64, f: &dyn Fn(&mut style::EdgeSet)| {
+            if r < 0 || c < 0 || r >= refs::MAX_ROWS as i64 || c >= refs::MAX_COLS as i64 {
+                return;
+            }
+            let mut n = style::EdgeSet::default();
+            f(&mut n);
+            outside.push((
+                CellRef {
+                    row: r as u32,
+                    col: c as u32,
+                },
+                n,
+            ));
+        };
+        let (r, c) = (at.row as i64, at.col as i64);
+        if at.row == r0 && matches!(set.top, Some(Some(_))) {
+            push(r - 1, c, &|n| n.bottom = Some(None));
+        }
+        if at.row == r1 && matches!(set.bottom, Some(Some(_))) {
+            push(r + 1, c, &|n| n.top = Some(None));
+        }
+        if at.col == c0 && matches!(set.left, Some(Some(_))) {
+            push(r, c - 1, &|n| n.right = Some(None));
+        }
+        if at.col == c1 && matches!(set.right, Some(Some(_))) {
+            push(r, c + 1, &|n| n.left = Some(None));
+        }
+    }
+    let has_edge = |wb: &Workbook, at: CellRef, n: &style::EdgeSet| -> bool {
+        let st = style_at(&wb.sheets[si], at);
+        let Some(b) = wb
+            .styles
+            .xf(st)
+            .and_then(|x| wb.styles.borders.get(x.border_id as usize))
+        else {
+            return false;
+        };
+        let on = |e: &Option<crate::model::BorderEdge>| {
+            e.as_ref()
+                .is_some_and(|e| e.style.as_deref().is_some_and(|s| s != "none"))
+        };
+        (n.bottom.is_some() && on(&b.bottom))
+            || (n.top.is_some() && on(&b.top))
+            || (n.left.is_some() && on(&b.left))
+            || (n.right.is_some() && on(&b.right))
+    };
+    for (at, n) in outside {
+        if has_edge(wb, at, &n) {
+            plan.push((at, n));
+        }
+    }
+    let mut memo: std::collections::HashMap<(u32, String), u32> = std::collections::HashMap::new();
+    for (at, set) in plan {
+        let old = style_at(&wb.sheets[si], at);
+        let key = (old, format!("{set:?}"));
+        let new = match memo.get(&key) {
+            Some(&n) => n,
+            None => {
+                let mut xf = wb.styles.xf(old).cloned().unwrap_or_default();
+                style::patch_border(&mut wb.styles, &mut xf, &set);
+                let n = style::intern_xf(&mut wb.styles, xf);
+                memo.insert(key, n);
+                n
+            }
+        };
+        if new != old || wb.sheets[si].cell(at).is_some() {
+            cell_mut(&mut wb.sheets[si], at).style = new;
+        }
+    }
+    structure::update_dimension(&mut wb.sheets[si]);
+    Ok(())
 }
 
 /// 병합 (왼쪽 위 칸의 값만 남는다 — 한셀). 겹치는 병합은 먼저 푼다
@@ -1221,6 +1660,7 @@ pub fn merge(wb: &mut Workbook, si: usize, range: CellRange, center: bool) -> cr
     if range.start == range.end {
         return Ok(());
     }
+    guard_action(wb, si, "formatCells")?;
     {
         let sheet = wb.sheets.get(si).ok_or_else(|| err("시트가 없습니다"))?;
         for r in range.start.row..=range.end.row.min(range.start.row + 10_000) {
@@ -1243,6 +1683,20 @@ pub fn merge(wb: &mut Workbook, si: usize, range: CellRange, center: bool) -> cr
                 || m.start.col > range.end.col)
         };
         sheet.merges.retain(|m| !overlap(m));
+        // 왼쪽 위 칸이 비었으면 처음 만나는 값(행 우선)을 왼쪽 위 칸으로 옮긴다 (한셀 — 병합 대조 실험)
+        let first = sheet
+            .cells
+            .iter()
+            .filter(|c| range.contains(c.r) && (!c.value.is_empty() || c.formula.is_some()))
+            .map(|c| (c.r, c.value.clone(), c.formula.clone()))
+            .next();
+        if let Some((at, value, formula)) = first
+            && at != tl
+        {
+            let c = cell_mut(sheet, tl);
+            c.value = value;
+            c.formula = formula;
+        }
         for c in &mut sheet.cells {
             if range.contains(c.r) && c.r != tl {
                 c.value = CellValue::Empty;
@@ -1263,6 +1717,7 @@ pub fn merge(wb: &mut Workbook, si: usize, range: CellRange, center: bool) -> cr
 
 /// 병합 풀기 (범위와 겹치는 병합 모두)
 pub fn unmerge(wb: &mut Workbook, si: usize, range: CellRange) -> crate::Result<()> {
+    guard_action(wb, si, "formatCells")?;
     let sheet = wb
         .sheets
         .get_mut(si)
@@ -1348,20 +1803,32 @@ fn remap_sheet_indexes(wb: &mut Workbook, map: &dyn Fn(usize) -> Option<usize>) 
         },
         None => true,
     });
+    // 활성 시트는 선택된 시트를 따른다. 탭 줄의 첫 시트는 자리 그대로 (한셀)
+    let selected = wb.sheets.iter().position(|s| s.view.tab_selected);
+    let n = wb.sheets.len();
     if let Some(v) = &mut wb.view {
-        if let Some(n) = map(v.active_tab as usize) {
-            v.active_tab = n as u32;
+        if let Some(i) = selected {
+            v.active_tab = i as u32;
         }
-        if let Some(n) = map(v.first_sheet as usize) {
-            v.first_sheet = n as u32;
-        } else {
+        if v.first_sheet as usize >= n {
             v.first_sheet = 0;
         }
     }
 }
 
+/// 시트 하나를 선택한다 (시트 탭)
+pub fn select_sheet(wb: &mut Workbook, si: usize) {
+    for (i, s) in wb.sheets.iter_mut().enumerate() {
+        s.view.tab_selected = i == si;
+    }
+    if let Some(v) = &mut wb.view {
+        v.active_tab = si as u32;
+    }
+}
+
 /// 시트를 더한다 (`at` 자리에). 이름이 없으면 한셀처럼 쓰지 않은 가장 작은 `SheetN`
 pub fn add_sheet(wb: &mut Workbook, name: Option<&str>, at: usize) -> crate::Result<usize> {
+    guard_structure(wb)?;
     let at = at.min(wb.sheets.len());
     let name = match name {
         Some(n) => {
@@ -1382,10 +1849,24 @@ pub fn add_sheet(wb: &mut Workbook, name: Option<&str>, at: usize) -> crate::Res
         .map(|n| format!("xl/worksheets/sheet{}.xml", sheet_id + n - 1))
         .find(|p| !wb.sheets.iter().any(|s| &s.part == p))
         .unwrap_or_default();
+    // 코드 이름: 문서의 시트에 코드 이름이 있으면 한셀처럼 쓰지 않은 가장 작은 `SheetN`
+    let code_name = wb.sheets.iter().any(|s| s.code_name.is_some()).then(|| {
+        (1..)
+            .map(|n| format!("Sheet{n}"))
+            .find(|n| {
+                !wb.sheets.iter().any(|s| {
+                    s.code_name
+                        .as_deref()
+                        .is_some_and(|c| refs::same_sheet(c, n))
+                })
+            })
+            .unwrap_or_default()
+    });
     let sheet = Sheet {
         name,
         sheet_id,
         part,
+        code_name,
         show_grid_lines: true,
         default_col_width: model.and_then(|m| m.default_col_width),
         default_row_height: model.and_then(|m| m.default_row_height),
@@ -1395,11 +1876,14 @@ pub fn add_sheet(wb: &mut Workbook, name: Option<&str>, at: usize) -> crate::Res
     };
     wb.sheets.insert(at, sheet);
     remap_sheet_indexes(wb, &|i| Some(if i >= at { i + 1 } else { i }));
+    // 한셀은 새 시트를 선택한다
+    select_sheet(wb, at);
     Ok(at)
 }
 
 /// 시트 이름을 바꾼다 (그 시트를 가리키는 수식·이름·차트·하이퍼링크도)
 pub fn rename_sheet(wb: &mut Workbook, si: usize, name: &str) -> crate::Result<()> {
+    guard_structure(wb)?;
     if si >= wb.sheets.len() {
         return Err(err("시트가 없습니다"));
     }
@@ -1415,6 +1899,7 @@ pub fn rename_sheet(wb: &mut Workbook, si: usize, name: &str) -> crate::Result<(
 
 /// 시트를 지운다 (그 시트를 가리키는 참조는 `#REF!`). 보이는 시트가 하나뿐이면 지울 수 없다
 pub fn delete_sheet(wb: &mut Workbook, si: usize) -> crate::Result<()> {
+    guard_structure(wb)?;
     if si >= wb.sheets.len() {
         return Err(err("시트가 없습니다"));
     }
@@ -1465,6 +1950,7 @@ pub fn delete_sheet(wb: &mut Workbook, si: usize) -> crate::Result<()> {
 
 /// 시트를 옮긴다 (`to` = 옮긴 뒤의 자리)
 pub fn move_sheet(wb: &mut Workbook, from: usize, to: usize) -> crate::Result<()> {
+    guard_structure(wb)?;
     if from >= wb.sheets.len() {
         return Err(err("시트가 없습니다"));
     }

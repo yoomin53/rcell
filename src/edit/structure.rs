@@ -116,6 +116,200 @@ pub(crate) fn patch_anchor_xml(raw: &str, from: &Marker, to: Option<&Marker>) ->
     out
 }
 
+/// 열 너비·행 높이가 바뀐 칸 안의 도형 표지 오프셋을 같은 비율로 늘이거나 줄인다 — 한셀은 표지를 칸 안의
+/// 비율로 두어, B 열을 넓히면 B 열 안 18px 이던 표지가 87px 이 된다 (편집 대조 실험). `first` 부터 `old`·`new`
+/// (px) 개수만큼의 행(`rows`) 또는 열
+pub(crate) fn scale_offsets(sheet: &mut Sheet, rows: bool, first: u32, old: &[f64], new: &[f64]) {
+    let scale = |m: &mut Marker| -> bool {
+        let idx = if rows { m.row } else { m.col };
+        let Some(k) = idx.checked_sub(first).map(|k| k as usize) else {
+            return false;
+        };
+        let (Some(&o), Some(&n)) = (old.get(k), new.get(k)) else {
+            return false;
+        };
+        if o <= 0.0 || o == n {
+            return false;
+        }
+        let off = if rows { &mut m.row_off } else { &mut m.col_off };
+        let v = (*off as f64 * n / o).round() as i64;
+        let changed = v != *off;
+        *off = v;
+        changed
+    };
+    for sh in &mut sheet.shapes {
+        let a = &mut sh.anchor;
+        if a.kind == crate::model::AnchorKind::Absolute {
+            continue;
+        }
+        let mut changed = scale(&mut a.from);
+        if let Some(to) = &mut a.to {
+            changed |= scale(to);
+        }
+        if changed && let Some(raw) = &sh.raw {
+            sh.raw = Some(patch_anchor_xml(raw, &a.from, a.to.as_ref()));
+        }
+    }
+}
+
+/// `editAs="oneCell"` 도형(칸과 함께 옮기되 크기는 그대로)의 크기 (EMU). 열 너비·행 높이를 바꾸기 전에 잰다
+pub(crate) fn one_cell_sizes(
+    sheet: &Sheet,
+    g: &crate::render::Geometry,
+) -> Vec<Option<(i64, i64)>> {
+    sheet
+        .shapes
+        .iter()
+        .map(|sh| {
+            let a = &sh.anchor;
+            // 한셀은 그림만 크기를 지킨다 (글상자 도형은 끝 표지를 그대로 둔다 — 편집 대조 실험)
+            if a.kind != crate::model::AnchorKind::TwoCell
+                || a.edit_as.as_deref() != Some("oneCell")
+                || sh.kind != crate::model::ShapeKind::Picture
+            {
+                return None;
+            }
+            let to = a.to?;
+            let (fx, fy) = marker_abs(g, &a.from);
+            let (tx, ty) = marker_abs(g, &to);
+            Some((tx - fx, ty - fy))
+        })
+        .collect()
+}
+
+/// 열 너비·행 높이를 바꾼 뒤 `editAs="oneCell"` 도형의 끝 표지를 크기에 맞춰 다시 정한다 — 한셀은 그림의 크기를
+/// 그대로 둔다 (4행을 높이면 그림 끝이 8행+10px 에서 7행+21px 로, 편집 대조 실험)
+pub(crate) fn keep_one_cell_sizes(
+    sheet: &mut Sheet,
+    sizes: &[Option<(i64, i64)>],
+    g: &crate::render::Geometry,
+) {
+    const EMU: i64 = crate::units::EMU_PER_PX;
+    let locate = |list: &[(u32, u32)], pos: i64| -> (u32, i64) {
+        for (i, &(l, w)) in list.iter().enumerate() {
+            let (a, b) = (l as i64 * EMU, (l + w) as i64 * EMU);
+            if pos >= a && pos < b {
+                return (i as u32, pos - a);
+            }
+        }
+        match list.last() {
+            Some(&(l, _)) => ((list.len() - 1) as u32, pos - l as i64 * EMU),
+            None => (0, pos),
+        }
+    };
+    for (sh, size) in sheet.shapes.iter_mut().zip(sizes) {
+        let Some((w, h)) = *size else { continue };
+        let (fx, fy) = marker_abs(g, &sh.anchor.from);
+        let (col, col_off) = locate(&g.cols, fx + w);
+        let (row, row_off) = locate(&g.rows, fy + h);
+        let to = Marker {
+            col,
+            col_off,
+            row,
+            row_off,
+        };
+        if sh.anchor.to != Some(to) {
+            sh.anchor.to = Some(to);
+            if let Some(raw) = &sh.raw {
+                sh.raw = Some(patch_anchor_xml(
+                    raw,
+                    &sh.anchor.from,
+                    sh.anchor.to.as_ref(),
+                ));
+            }
+        }
+    }
+}
+
+/// 열 너비·행 높이를 바꾼 뒤 메모 상자를 화면의 같은 자리에 둔다 — 셀과 함께 옮기지 않는 메모 상자(한셀 기본)는
+/// 절대 자리를 지킨다 (4행을 높이면 상자 위가 7행+10px 에서 5행+21px 로, 편집 대조 실험)
+pub(crate) fn keep_comment_boxes(
+    sheet: &mut Sheet,
+    old: &crate::render::Geometry,
+    new: &crate::render::Geometry,
+) {
+    let abs = |list: &[(u32, u32)], i: u32, off: u32| -> i64 {
+        list.get(i as usize).map_or(0, |p| p.0 as i64) + off as i64
+    };
+    let locate = |list: &[(u32, u32)], pos: i64| -> (u32, u32) {
+        for (i, &(l, w)) in list.iter().enumerate() {
+            if pos >= l as i64 && pos < (l + w) as i64 {
+                return (i as u32, (pos - l as i64) as u32);
+            }
+        }
+        match list.last() {
+            Some(&(l, _)) => ((list.len() - 1) as u32, (pos - l as i64).max(0) as u32),
+            None => (0, pos.max(0) as u32),
+        }
+    };
+    for c in &mut sheet.comments {
+        let Some(s) = &mut c.shape else { continue };
+        if s.move_with_cells {
+            continue;
+        }
+        let a = s.anchor;
+        let (lc, lo) = locate(&new.cols, abs(&old.cols, a[0], a[1]));
+        let (tr, to) = locate(&new.rows, abs(&old.rows, a[2], a[3]));
+        let (rc, ro) = locate(&new.cols, abs(&old.cols, a[4], a[5]));
+        let (br, bo) = locate(&new.rows, abs(&old.rows, a[6], a[7]));
+        s.anchor = [lc, lo, tr, to, rc, ro, br, bo];
+    }
+}
+
+/// 메모 상자가 닿는 가장 큰 행·열
+pub(crate) fn comments_extent(sheet: &Sheet) -> (u32, u32) {
+    let mut r = 0;
+    let mut c = 0;
+    for x in &sheet.comments {
+        if let Some(s) = &x.shape {
+            r = r.max(s.anchor[6]).max(s.anchor[2]);
+            c = c.max(s.anchor[4]).max(s.anchor[0]);
+        }
+    }
+    (r, c)
+}
+
+/// 표지의 시트 안 절대 자리 (EMU)
+fn marker_abs(g: &crate::render::Geometry, m: &Marker) -> (i64, i64) {
+    const EMU: i64 = crate::units::EMU_PER_PX;
+    let x = g.cols.get(m.col as usize).map_or(0, |c| c.0 as i64) * EMU + m.col_off;
+    let y = g.rows.get(m.row as usize).map_or(0, |r| r.0 as i64) * EMU + m.row_off;
+    (x, y)
+}
+
+/// 도형 표지가 닿는 가장 큰 행·열 (배치를 잴 범위)
+pub(crate) fn shapes_extent(sheet: &Sheet) -> (u32, u32) {
+    let mut r = 0;
+    let mut c = 0;
+    for sh in &sheet.shapes {
+        for m in [Some(sh.anchor.from), sh.anchor.to].into_iter().flatten() {
+            r = r.max(m.row);
+            c = c.max(m.col);
+        }
+    }
+    (r, c)
+}
+
+/// 두 칸 앵커 도형이 지운 행·열 안에 모두 드는가 (끝 표지가 지운 범위 바로 다음 칸의 처음이어도 든다)
+fn inside_deleted(sh: &Shape, op: Shift) -> bool {
+    use crate::model::AnchorKind;
+    let a = &sh.anchor;
+    if a.kind != AnchorKind::TwoCell || matches!(a.edit_as.as_deref(), Some("oneCell" | "absolute"))
+    {
+        return false;
+    }
+    let Some(to) = a.to else { return false };
+    match op {
+        Shift::DelRows { at, n } => {
+            a.from.row >= at && (to.row < at + n || (to.row == at + n && to.row_off == 0))
+        }
+        Shift::DelCols { at, n } => {
+            a.from.col >= at && (to.col < at + n || (to.col == at + n && to.col_off == 0))
+        }
+        _ => false,
+    }
+}
+
 /// 도형 앵커를 옮긴다: 두 칸 앵커(기본)는 양 끝을 따로, `oneCell` 은 시작 칸만큼 함께, `absolute` 는 그대로
 fn shift_shape(sh: &mut Shape, op: Shift) {
     use crate::model::AnchorKind;
@@ -673,7 +867,8 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
         })
         .collect();
 
-    // 7. 도형·차트 앵커
+    // 7. 도형·차트 앵커. 지운 행·열 안에 모두 든 두 칸 앵커 도형은 함께 지운다 (한셀)
+    sheet.shapes.retain(|s| !inside_deleted(s, op));
     for s in &mut sheet.shapes {
         shift_shape(s, op);
     }
@@ -742,7 +937,24 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
         }
     }
 
-    // 9. 페이지 나누기
+    // 9. 틀 고정: 고정한 행·열 안에 넣거나 지우면 고정 범위가 늘거나 준다 (한셀 — 왼쪽 위 칸은 그대로)
+    if let Some(p) = &mut sheet.view.pane
+        && p.state.as_deref().is_some_and(|s| s.starts_with("frozen"))
+    {
+        let split = if rows { &mut p.y_split } else { &mut p.x_split };
+        let n_frozen = *split as u32;
+        match op {
+            Shift::InsRows { at, n } | Shift::InsCols { at, n } if at < n_frozen => {
+                *split = (n_frozen + n) as f64;
+            }
+            Shift::DelRows { at, n } | Shift::DelCols { at, n } if at < n_frozen => {
+                *split = (n_frozen - n.min(n_frozen - at)) as f64;
+            }
+            _ => {}
+        }
+    }
+
+    // 10. 페이지 나누기
     let breaks = if rows {
         &mut sheet.page.row_breaks
     } else {

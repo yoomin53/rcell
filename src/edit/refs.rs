@@ -655,6 +655,24 @@ impl Shift {
     pub fn area(self, a: Area, adjacent: bool) -> Option<Area> {
         let ax = |x: Ax, n: u32| Ax { n, abs: x.abs };
         Some(match a {
+            // 조건부 서식·유효성의 칸 하나도 바로 앞에 넣은 행·열만큼 넓어진다 (`O2` → `O2:O4`)
+            Area::Cell { col, row } if adjacent => {
+                let (x0, x1) = self.span(false, col.n, col.n, true)?;
+                let (y0, y1) = self.span(true, row.n, row.n, true)?;
+                if x0 == x1 && y0 == y1 {
+                    Area::Cell {
+                        col: ax(col, x0),
+                        row: ax(row, y0),
+                    }
+                } else {
+                    Area::Rect {
+                        c0: ax(col, x0),
+                        r0: ax(row, y0),
+                        c1: ax(col, x1),
+                        r1: ax(row, y1),
+                    }
+                }
+            }
             Area::Cell { col, row } => Area::Cell {
                 col: ax(col, self.point(false, col.n)?),
                 row: ax(row, self.point(true, row.n)?),

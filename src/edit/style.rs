@@ -178,7 +178,20 @@ pub fn patch_xf(styles: &mut Styles, xf: &mut Xf, p: &FormatPatch) {
         xf.apply_font = Some(true);
     }
     if let Some(c) = &p.fill {
+        let cur = styles.fills.get(xf.fill_id as usize).cloned();
+        let patterned = cur.as_ref().is_some_and(|f| {
+            f.gradient.is_none()
+                && !matches!(
+                    f.pattern_type.as_deref(),
+                    None | Some("none") | Some("solid")
+                )
+        });
         let fill = match rgb(c) {
+            // 무늬 채우기는 무늬를 두고 바탕색만 바꾼다 (한셀 Interior.Color — 채우기 대조 실험)
+            Some(color) if patterned => Fill {
+                bg_color: Some(color),
+                ..cur.unwrap_or_default()
+            },
             Some(color) => Fill {
                 pattern_type: Some("solid".into()),
                 fg_color: Some(color),
@@ -216,13 +229,12 @@ pub fn patch_xf(styles: &mut Styles, xf: &mut Xf, p: &FormatPatch) {
 }
 
 /// 선 굵기·모양 이름 (`thin`, `medium`, `thick`, `dashed`, `dotted`, `double`, `hair` …) → 변
+/// 색을 주지 않으면 `color` 가 None — 적용할 때 그 변의 원래 색(선이 없어도 색이 있으면)을 쓰고, 없으면 자동 색.
+/// 한셀은 문서에서 읽은 기본 테두리의 색(왼쪽·오른쪽·아래 검정, 위 자동)을 그대로 둔다 (테두리 대조 실험)
 pub fn edge(style: &str, color: Option<&str>) -> BorderEdge {
     BorderEdge {
         style: Some(style.to_string()),
-        color: Some(color.and_then(rgb).unwrap_or(Color {
-            auto: true,
-            ..Default::default()
-        })),
+        color: color.and_then(rgb),
     }
 }
 
@@ -318,7 +330,16 @@ pub fn patch_border(styles: &mut Styles, xf: &mut Xf, set: &EdgeSet) {
         .unwrap_or_default();
     let put = |slot: &mut Option<BorderEdge>, v: &Option<Option<BorderEdge>>| {
         if let Some(v) = v {
-            *slot = v.clone();
+            let old_color = slot.as_ref().and_then(|e| e.color.clone());
+            *slot = v.clone().map(|mut e| {
+                if e.color.is_none() {
+                    e.color = Some(old_color.unwrap_or(Color {
+                        auto: true,
+                        ..Default::default()
+                    }));
+                }
+                e
+            });
         }
     };
     put(&mut b.left, &set.left);

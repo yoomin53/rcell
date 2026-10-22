@@ -2313,25 +2313,33 @@ pub fn compare(a: &Workbook, b: &Workbook, opts: Options) -> Vec<String> {
             format!("{:?} tab={}", code_b, color_key(sb.tab_color.as_ref())),
         );
 
+        // 이웃한 같은 열 정보는 하나로 본다: 한셀은 열 서식 번호가 다르면 같은 너비의 열도 따로 쓴다
+        // (열을 넣으면 왼쪽 열 서식을 새 번호로 복사한다 — 편집 대조 실험)
         let cols = |sh: &crate::model::Sheet| {
-            sh.cols
+            let mut runs: Vec<(u32, u32, String)> = Vec::new();
+            for c in sh
+                .cols
                 .iter()
                 .filter(|c| c.custom_width || c.hidden || c.outline_level > 0 || c.collapsed)
-                .map(|c| {
-                    format!(
-                        "{}-{}:{:.4}{}{}{}",
-                        c.min,
-                        c.max,
-                        c.width.unwrap_or(0.0),
-                        if c.hidden { "h" } else { "" },
-                        if c.outline_level > 0 {
-                            format!("L{}", c.outline_level)
-                        } else {
-                            String::new()
-                        },
-                        if c.collapsed { "c" } else { "" }
-                    )
-                })
+            {
+                let key = format!(
+                    "{:.4}{}{}{}",
+                    c.width.unwrap_or(0.0),
+                    if c.hidden { "h" } else { "" },
+                    if c.outline_level > 0 {
+                        format!("L{}", c.outline_level)
+                    } else {
+                        String::new()
+                    },
+                    if c.collapsed { "c" } else { "" }
+                );
+                match runs.last_mut() {
+                    Some(last) if last.1 + 1 == c.min && last.2 == key => last.1 = c.max,
+                    _ => runs.push((c.min, c.max, key)),
+                }
+            }
+            runs.iter()
+                .map(|(a, b, k)| format!("{a}-{b}:{k}"))
                 .collect::<Vec<_>>()
                 .join(" ")
         };

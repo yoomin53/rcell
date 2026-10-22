@@ -27,6 +27,8 @@ use crate::model::CellValue;
 pub enum Cat {
     General,
     Number,
+    /// 통화 기호가 있는 숫자 형식 (수식 결과 형식을 정할 때만 — [`category`] 는 숫자로 돌려준다)
+    Currency,
     Percent,
     Scientific,
     Date,
@@ -255,7 +257,7 @@ pub fn parse(text: &str, code: &str, date1904: bool) -> Input {
         };
         return match cat {
             Cat::General => value(num(v), implied),
-            Cat::Number | Cat::Scientific | Cat::Time => value(num(v), None),
+            Cat::Number | Cat::Currency | Cat::Scientific | Cat::Time => value(num(v), None),
             Cat::Date => value(num(v), implied),
             Cat::Fraction => value(num(v), implied.filter(|&f| f == 9 || f == 10 || f == 11)),
             Cat::Percent => {

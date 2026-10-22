@@ -114,13 +114,37 @@ pub struct CalcReport {
     pub unsupported_functions: BTreeMap<String, usize>,
 }
 
+thread_local! {
+    /// 바깥에서 준 지금 시각 (유닉스 초) — 시스템 시계가 없는 곳(브라우저의 wasm32-unknown-unknown)에서 쓴다
+    static CLOCK: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// 지금 시각을 정한다 (유닉스 초, 브라우저는 `Date.now() / 1000`). None 이면 시스템 시계
+pub fn set_clock(unix_secs: Option<f64>) {
+    CLOCK.with(|c| c.set(unix_secs));
+}
+
+/// 지금 시각 (유닉스 초). wasm32-unknown-unknown 에는 시스템 시계가 없어 [`set_clock`] 으로 준 값을 쓴다
+pub fn unix_now() -> f64 {
+    if let Some(t) = CLOCK.with(|c| c.get()) {
+        return t;
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0)
+    }
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        0.0
+    }
+}
+
 /// 지금 시각의 일련 번호
 pub fn now_serial(utc_offset_minutes: i32, date1904: bool) -> f64 {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-        + utc_offset_minutes as f64 * 60.0;
+    let secs = unix_now() + utc_offset_minutes as f64 * 60.0;
     // 1970-01-01 = 25569 (1900 체계)
     let serial = secs / 86_400.0 + 25_569.0;
     if date1904 { serial - 1462.0 } else { serial }
