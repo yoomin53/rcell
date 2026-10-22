@@ -12,5 +12,6 @@ pub mod biff12;
 pub mod encrypt;
 pub mod formula;
 pub mod parity;
+pub mod pivot;
 pub mod reader;
 pub mod writer;

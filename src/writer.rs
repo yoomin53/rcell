@@ -1173,9 +1173,108 @@ fn comments_xml(sheet: &Sheet) -> String {
     s
 }
 
-/// 메모 도형 VML (`xl/drawings/vmlDrawingN.vml`). 한셀이 쓰는 꼴: 선·채우기는 `v:shape` 속성과 `v:stroke`, 그림자는
-/// `v:shadow`, 셀 고정은 `x:MoveWithCells`·`x:SizeWithCells` (있으면 고정). 모양이 없는 메모는 셀 오른쪽 위에 둔다
-pub(crate) fn comments_vml(sheet: &Sheet, n: usize) -> String {
+/// 메모 상자의 `x:ShapeUri` GUID. 한셀은 문서를 읽을 때마다 새로 만든다 (같은 세션의 XML·바이너리 저장본은 같고, 다시
+/// 읽으면 달라진다 — 메모 이름 실험) — rcell 은 시트 번호와 메모 순서로 정한다
+fn note_guid(n: usize, k: usize) -> String {
+    let h = crate::crypto::sha1(format!("rcell-note-{n}-{k}").as_bytes());
+    let mut g = [0u8; 16];
+    g.copy_from_slice(&h[..16]);
+    // RFC 4122 변형 4 (한셀의 GUID 도 이 꼴이다)
+    g[6] = (g[6] & 0x0F) | 0x40;
+    g[8] = (g[8] & 0x3F) | 0x80;
+    let x: String = g.iter().map(|b| format!("{b:02X}")).collect();
+    format!(
+        "{{{}-{}-{}-{}-{}}}",
+        &x[0..8],
+        &x[8..12],
+        &x[12..16],
+        &x[16..20],
+        &x[20..32]
+    )
+}
+
+/// 메모 도형 VML (`xl/drawings/vmlDrawingN.vml`) — XML·바이너리 `.cell` 은 한셀이 쓰는 꼴로 ([`hcell_comments_vml`]),
+/// Excel 형식은 Excel 의 꼴로 (`_x0000_s{1024n+k+1}`, `o:idmap data="n"`)
+pub(crate) fn comments_vml(sheet: &Sheet, n: usize, hcell: bool) -> String {
+    if hcell {
+        return hcell_comments_vml(sheet, n);
+    }
+    excel_comments_vml(sheet, n)
+}
+
+/// 한셀이 쓰는 메모 VML (메모 대조 실험, 메모 이름 실험 — 한셀의 XML·바이너리 저장본이 같다): 이름은 `v:shape/@id`
+/// (모델의 이름, 없으면 `메모 k`), `o:spid` 는 시트 안 순서 `_x0000_s1`…, `z-index` 는 시트의 그리기 개체 수 + 순서 (서식
+/// 파일: 그리기 개체 12개인 시트의 메모가 12, 13), `o:idmap data="0"` 은 모든 시트, 선 두께는 소수 둘째 자리 pt —
+/// 1 pt(VML 기본값)면 두께를 쓰지 않는다, `x:ShapeUri` 는 GUID ([`note_guid`])
+fn hcell_comments_vml(sheet: &Sheet, n: usize) -> String {
+    let mut s = format!(
+        "{DECL}<xml xmlns:r=\"{REL}\" xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:x=\"urn:schemas-microsoft-com:office:excel\" xmlns:p=\"urn:schemas-microsoft-com:office:powerpoint\"><v:shapetype coordsize=\"21600,21600\" id=\"_x0000_t202\" o:spt=\"202\" path=\"m,l,21600r21600,l21600,xe\"><v:stroke joinstyle=\"miter\"/><v:path gradientshapeok=\"t\" o:connecttype=\"rect\"/></v:shapetype>"
+    );
+    let base = sheet.shapes.len();
+    for (k, c) in sheet.comments.iter().enumerate() {
+        let sh = c
+            .shape
+            .clone()
+            .unwrap_or_else(|| crate::model::CommentShape::implied(c.cell));
+        let (weight, stroke_weight) = if sh.stroke_weight == 1.0 {
+            (String::new(), String::new())
+        } else {
+            let w = format!("{:.2}pt", sh.stroke_weight);
+            (format!(" strokeweight=\"{w}\""), format!(" weight=\"{w}\""))
+        };
+        let _ = write!(
+            s,
+            "<v:shape id=\"{}\" style=\"position:absolute;visibility:{};z-index:{}\" o:spid=\"_x0000_s{}\" o:hralign=\"left\" o:insetmode=\"auto\" stroked=\"t\" strokecolor=\"{}\"{weight} filled=\"t\" fillcolor=\"{}\" o:connectortype=\"straight\" type=\"#_x0000_t202\"><v:stroke{stroke_weight} color=\"{}\" joinstyle=\"miter\" filltype=\"solid\"/>{}<v:path o:connecttype=\"none\"/><v:textbox style=\"mso-direction-alt:auto\"/><x:ClientData ObjectType=\"Note\">{}{}<x:Anchor>{}</x:Anchor><x:AutoFill>False</x:AutoFill>{}{}<x:Row>{}</x:Row><x:Column>{}</x:Column>{}<x:ShapeUri>{}</x:ShapeUri></x:ClientData></v:shape>",
+            esc(&sh.name_or(k)),
+            if c.visible { "visible" } else { "hidden" },
+            base + k,
+            k + 1,
+            esc(&sh.stroke_color),
+            esc(&sh.fill_color),
+            esc(&sh.stroke_color),
+            if sh.shadow {
+                "<v:shadow on=\"t\" obscured=\"t\" color=\"#000000\"/>"
+            } else {
+                ""
+            },
+            if sh.move_with_cells {
+                ""
+            } else {
+                "<x:MoveWithCells></x:MoveWithCells>"
+            },
+            if sh.size_with_cells {
+                ""
+            } else {
+                "<x:SizeWithCells></x:SizeWithCells>"
+            },
+            sh.anchor.map(|v| v.to_string()).join(", "),
+            sh.text_halign
+                .as_ref()
+                .map(|v| format!("<x:TextHAlign>{}</x:TextHAlign>", esc(v)))
+                .unwrap_or_default(),
+            sh.text_valign
+                .as_ref()
+                .map(|v| format!("<x:TextVAlign>{}</x:TextVAlign>", esc(v)))
+                .unwrap_or_default(),
+            c.cell.row,
+            c.cell.col,
+            if c.visible {
+                "<x:Visible></x:Visible>"
+            } else {
+                ""
+            },
+            note_guid(n, k)
+        );
+    }
+    s.push_str(
+        "<o:shapelayout v:ext=\"edit\"><o:idmap data=\"0\" v:ext=\"edit\"/></o:shapelayout></xml>",
+    );
+    s
+}
+
+/// Excel 꼴 메모 VML: 선·채우기는 `v:shape` 속성과 `v:stroke`, 그림자는 `v:shadow`, 셀 고정은 `x:MoveWithCells`·
+/// `x:SizeWithCells` (있으면 고정). 모양이 없는 메모는 셀 오른쪽 위에 둔다
+fn excel_comments_vml(sheet: &Sheet, n: usize) -> String {
     let mut s = format!(
         "<xml xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:x=\"urn:schemas-microsoft-com:office:excel\"><o:shapelayout v:ext=\"edit\"><o:idmap v:ext=\"edit\" data=\"{n}\"/></o:shapelayout><v:shapetype id=\"_x0000_t202\" coordsize=\"21600,21600\" o:spt=\"202\" path=\"m,l,21600r21600,l21600,xe\"><v:stroke joinstyle=\"miter\"/><v:path gradientshapeok=\"t\" o:connecttype=\"rect\"/></v:shapetype>"
     );
@@ -2352,7 +2451,7 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
                 )?;
                 put(
                     &format!("xl/drawings/vmlDrawing{}.vml", i + 1),
-                    comments_vml(worksheets[i], i + 1).as_bytes(),
+                    comments_vml(worksheets[i], i + 1, flavor == Flavor::Cell).as_bytes(),
                 )?;
             }
             r.push_str("</Relationships>");

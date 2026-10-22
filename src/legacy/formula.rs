@@ -371,6 +371,14 @@ fn decode_with(rgce: &[u8], ctx: &Context, rel3d: bool) -> Result<Decoded, Decod
                 // PtgList (0x18 0x19, XLSB·한셀 레거시 같은 꼴): ixti u16, 플래그 u16 (열 0·1 = 없음·하나·범위, 2–6 행 종류),
                 // 표 번호 u32, 첫 열 u16, 끝 열 u16 (표 대조 실험)
                 let eptg = r.u8()?;
+                if eptg == 0x1D {
+                    // PtgSxName: 피벗 계산 필드 수식의 이름 목록 번호 u32 (0부터). 피벗 수식을 읽을 때는 `names` 가
+                    // 이 목록(캐시 필드 이름)이다 (피벗 실험 v_calc)
+                    let i = r.u32()? as usize;
+                    let n = ctx.names.get(i).cloned().unwrap_or_else(|| "#REF!".into());
+                    stack.push(pivot_field_text(&n));
+                    continue;
+                }
                 if eptg != 0x19 {
                     return Err(DecodeError(format!(
                         "알 수 없는 확장 토큰 0x18 0x{eptg:02X} (위치 {})",
@@ -613,6 +621,22 @@ fn decode_with(rgce: &[u8], ctx: &Context, rel3d: bool) -> Result<Decoded, Decod
 /// 0x04 `#Data`, 0x08 `#Totals`, 0x10 `#This Row` 이고 겹친 종류는 `#Data`·`#Headers`·`#Totals` 순으로 쓴다
 /// (`Table1[[#Headers],[#Data],[수량]]` → `Table1[[#Data],[#Headers],[수량]]`). 열이 없으면 `Table1[]`, 열 하나는
 /// `Table1[수량]`, 범위는 `Table1[[수량]:[단가]]`. 모르는 표는 `#REF!`
+/// 계산 필드 수식의 필드 이름: 이름처럼 쓸 수 있으면 그대로, 아니면 작은따옴표로 감싼다 (`'판매 금액'`)
+fn pivot_field_text(name: &str) -> String {
+    let plain = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+    if plain {
+        name.to_string()
+    } else {
+        format!("'{}'", name.replace('\'', "''"))
+    }
+}
+
 fn structured_ref(ctx: &Context, flags: u16, list: u32, c1: u16, c2: u16) -> String {
     let Some((_, name, cols)) = ctx.tables.iter().find(|t| t.0 == list) else {
         return "#REF!".into();

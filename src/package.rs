@@ -139,31 +139,56 @@ impl Package {
         let Some(root) = self.read_xml(&rels_part)? else {
             return Ok(Vec::new());
         };
-        let base = parent_dir(&normalize_part(source));
-        let mut out = Vec::new();
-        for e in root
-            .elements()
-            .filter(|e| e.is(ns::PKG_REL, "Relationship"))
-        {
-            let (Some(id), Some(ty), Some(target)) =
-                (e.attr("Id"), e.attr("Type"), e.attr("Target"))
-            else {
-                continue;
-            };
-            let external = e.attr("TargetMode") == Some("External");
-            let target = if external {
-                target.to_string()
-            } else {
-                resolve_target(&base, target)
-            };
-            out.push(Relationship {
-                id: id.to_string(),
-                rel_type: ty.to_string(),
-                target,
-                external,
-            });
+        Ok(relationships_of(source, &root))
+    }
+}
+
+/// 관계 파트 XML (`source` 의 `.rels`) → 관계 목록 (대상은 패키지 기준 파트 이름)
+pub fn relationships_of(source: &str, root: &Element) -> Vec<Relationship> {
+    let base = parent_dir(&normalize_part(source));
+    let mut out = Vec::new();
+    for e in root
+        .elements()
+        .filter(|e| e.is(ns::PKG_REL, "Relationship"))
+    {
+        let (Some(id), Some(ty), Some(target)) = (e.attr("Id"), e.attr("Type"), e.attr("Target"))
+        else {
+            continue;
+        };
+        let external = e.attr("TargetMode") == Some("External");
+        let target = if external {
+            target.to_string()
+        } else {
+            resolve_target(&base, target)
+        };
+        out.push(Relationship {
+            id: id.to_string(),
+            rel_type: ty.to_string(),
+            target,
+            external,
+        });
+    }
+    out
+}
+
+/// 원본 그대로 옮기는 파트 목록에서 `name` 파트와 그 관계 파일, 관계가 가리키는 내부 파트를 모두 모은다
+pub fn raw_part_tree(raw: &[crate::model::RawPart], name: &str, out: &mut Vec<String>) {
+    if out.iter().any(|n| n == name) {
+        return;
+    }
+    out.push(name.to_string());
+    let rels = rels_part_for(name);
+    let Some(p) = raw.iter().find(|p| p.name == rels) else {
+        return;
+    };
+    out.push(rels.clone());
+    let Ok(root) = xml::parse_raw(&String::from_utf8_lossy(&p.data), &rels) else {
+        return;
+    };
+    for r in relationships_of(name, &root) {
+        if !r.external {
+            raw_part_tree(raw, &r.target, out);
         }
-        Ok(out)
     }
 }
 

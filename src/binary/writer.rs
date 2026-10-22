@@ -1053,6 +1053,8 @@ struct Book<'a> {
     names: Vec<NameEntry>,
     /// 지금 수식을 쓰는 시트 (지역 이름 찾기)
     cur: Option<u32>,
+    /// 표: (번호, 표시 이름, 이름, 열 이름, 시트 이름) — 구조적 참조
+    tables: Vec<(u32, String, String, Vec<String>, String)>,
 }
 
 impl Book<'_> {
@@ -1144,6 +1146,19 @@ impl Resolver for Book<'_> {
     fn extern_name(&mut self, _book: usize, _name: &str) -> Option<(u16, u32)> {
         None
     }
+
+    fn table(&mut self, name: &str) -> Option<formula::ListRef> {
+        let same = |t: &(u32, String, String, Vec<String>, String)| {
+            t.1.to_lowercase() == name.to_lowercase() || t.2.to_lowercase() == name.to_lowercase()
+        };
+        let (id, columns, sheet) = self
+            .tables
+            .iter()
+            .find(|t| same(t))
+            .map(|t| (t.0, t.3.clone(), t.4.clone()))?;
+        let ixti = self.xti(None, &sheet, None)?;
+        Some(formula::ListRef { id, columns, ixti })
+    }
 }
 
 /// 수식 하나를 토큰으로. 실패하면 경고를 남기고 None
@@ -1179,7 +1194,23 @@ struct SheetOut {
     vml: Option<String>,
     /// 그리기 파트 (이름, XML, 관계)
     drawing: Option<(String, String, Vec<Rel>)>,
+    /// 표 파트 (이름, 레코드)
+    tables: Vec<(String, Vec<u8>)>,
 }
+
+/// 표 열의 요약 행 함수 (`ilta` 순서, 0 = 없음 — 바이너리 읽기와 같다)
+const TOTALS_FUNCTIONS: [&str; 10] = [
+    "none",
+    "average",
+    "count",
+    "countNums",
+    "max",
+    "min",
+    "sum",
+    "stdDev",
+    "var",
+    "custom",
+];
 
 fn error_code(e: &str) -> u8 {
     match e {
@@ -1232,6 +1263,10 @@ struct SheetCtx<'a, 'b> {
     charts: &'a mut Vec<(String, String)>,
     /// [`Options::exact`]
     exact: bool,
+    /// 지금까지 쓴 표 파트 수 (파트 이름 `tableN.bin` 은 문서 전체에서 1부터)
+    next_table: usize,
+    /// 워크시트마다 피벗 표 파트 이름 ([`super::pivot::binary_parts`])
+    pivot_tables: &'a [Vec<String>],
 }
 
 /// 데이터 막대의 x14 확장 GUID. 한셀은 새로 만든다 (임의 값) — rcell 은 문서 안 순서로 정한다
@@ -1419,6 +1454,11 @@ impl SheetCtx<'_, '_> {
         comments_number: usize,
     ) -> SheetOut {
         self.book.cur = Some(index as u32);
+        // 표가 있는 시트는 셀 수식보다 먼저 XTI 를 받는다 — 쓰이지 않아도 (XTI 순서 실험: 시트 셋에 수식·표·이름을 나눠
+        // 넣은 COM 문서 셋 → [이름, S1 의 표, S1 수식의 S3, S2 의 표] 순서)
+        if !sheet.tables.is_empty() {
+            let _ = self.book.xti(None, &sheet.name, None);
+        }
         let mut o = Out::default();
         let mut rels: Vec<Rel> = Vec::new();
         o.e(129); // BrtBeginSheet
@@ -1503,7 +1543,20 @@ impl SheetCtx<'_, '_> {
             .exact
             .then(|| self.fonts.fonts.first().and_then(|f| f.name.clone()))
             .flatten();
-        page(&mut o, sheet, self.exact, hf_font.as_deref());
+        // 프린터 설정 파트(원본 그대로)는 BrtPageSetup 끝의 관계 ID 로 가리킨다 (시트 관계 rIdP<n>, XML 쓰기와 같다)
+        let printer = sheet
+            .part_links
+            .iter()
+            .filter(|l| binary_keeps(&l.rel_type))
+            .position(|l| l.rel_type.ends_with("/printerSettings"))
+            .map(|k| format!("rIdP{}", k + 1));
+        page(
+            &mut o,
+            sheet,
+            self.exact,
+            hf_font.as_deref(),
+            printer.as_deref(),
+        );
         let mut drawing = None;
         if let Some(name) = drawing_name {
             let id = format!("rId{}", rels.len() + 1);
@@ -1529,20 +1582,55 @@ impl SheetCtx<'_, '_> {
                 false,
             ));
             o.p(551, P::new().wstr(&id));
+            comments = Some(self.comments(&sheet.comments));
+            vml = Some(crate::writer::comments_vml(sheet, comments_number, true));
+        }
+        // 한셀이 늘 쓰는 ActiveX 컨트롤 묶음(643, 645, 비어 있음)과 표 목록(660 개수, 661 관계 ID, 662)
+        o.e(643);
+        o.e(645);
+        o.p(660, P::new().u32(sheet.tables.len() as u32));
+        let mut tables = Vec::new();
+        for t in &sheet.tables {
+            self.next_table += 1;
+            let name = format!("xl/tables/table{}.bin", self.next_table);
+            let id = format!("rId{}", rels.len() + 1);
+            rels.push((id.clone(), format!("{REL_BASE}/table"), name.clone(), false));
+            o.p(661, P::new().wstr(&id));
+            tables.push((name, self.table_part(t, sheet)));
+        }
+        o.e(662);
+        // 시트 관계 순서: 하이퍼링크, 그리기, VML, 표, 피벗 표, 메모 (표·피벗·메모 실험의 COM 문서). 피벗 표는 시트에
+        // 레코드가 없고 관계로만 가리킨다. 원본 그대로의 프린터 설정은 rIdP<n> (한셀은 버리는 파트라 자리를 관측할 수
+        // 없다 — XML 쓰기와 같은 이름)
+        for name in self.pivot_tables.get(index).into_iter().flatten() {
+            rels.push((
+                format!("rId{}", rels.len() + 1),
+                format!("{REL_BASE}/pivotTable"),
+                name.clone(),
+                false,
+            ));
+        }
+        for (k, l) in sheet
+            .part_links
+            .iter()
+            .filter(|l| binary_keeps(&l.rel_type))
+            .enumerate()
+        {
+            rels.push((
+                format!("rIdP{}", k + 1),
+                l.rel_type.clone(),
+                l.part.clone(),
+                false,
+            ));
+        }
+        if comments.is_some() {
             rels.push((
                 format!("rId{}", rels.len() + 1),
                 format!("{REL_BASE}/comments"),
                 format!("xl/comments{comments_number}.bin"),
                 false,
             ));
-            comments = Some(self.comments(&sheet.comments));
-            vml = Some(crate::writer::comments_vml(sheet, comments_number));
         }
-        // 한셀이 늘 쓰는 빈 묶음: ActiveX 컨트롤(643, 645), 표 목록(660 개수 0, 662)
-        o.e(643);
-        o.e(645);
-        o.p(660, P::new().u32(0));
-        o.e(662);
         if !bars.is_empty() {
             data_bars14(&mut o, &bars);
         }
@@ -1554,7 +1642,90 @@ impl SheetCtx<'_, '_> {
             comments,
             vml,
             drawing,
+            tables,
         }
+    }
+
+    /// 표 파트 (`xl/tables/tableN.bin`) — 한셀이 쓰는 꼴 (표 대조 실험: 조작한 XML·COM 문서의 X.bin.cell):
+    /// `BrtBeginList` 343, [자동 필터 161…162], `BrtBeginListCols` 345, 열마다 `BrtBeginListCol` 347 [`BrtListCCFmla` 351]
+    /// [`BrtListTrFmla` 352] `BrtEndListCol` 348, 346, [`BrtTableStyleClient` 513], `BrtEndList` 344
+    fn table_part(&mut self, t: &crate::model::Table, sheet: &Sheet) -> Vec<u8> {
+        let mut o = Out::default();
+        let range = ranges(&t.range).first().copied().unwrap_or(CellRange {
+            start: CellRef::default(),
+            end: CellRef::default(),
+        });
+        let lt = match t.table_type.as_deref() {
+            Some("xml") => 1,
+            Some("queryTable") => 2,
+            _ => 0,
+        };
+        let mut p = P::new();
+        p.rfx(range)
+            .u32(lt)
+            .u32(t.id)
+            .u32(t.header_rows)
+            .u32(t.totals_rows)
+            // 0x01 요약 행을 보인 적 있음 (fShownTotalRow)
+            .u32(u32::from(t.totals_shown));
+        for d in t.dxfs {
+            p.u32(d.unwrap_or(0xFFFF_FFFF));
+        }
+        p.u32(t.connection_id.unwrap_or(0))
+            .nwstr(Some(&t.name))
+            .nwstr(Some(&t.display_name))
+            .nwstr(t.comment.as_deref());
+        for s in &t.cell_styles {
+            p.nwstr(s.as_deref());
+        }
+        o.p(343, &p);
+        if let Some(af) = &t.auto_filter {
+            auto_filter_records(&mut o, af, sheet);
+        }
+        o.p(345, P::new().u32(t.columns.len() as u32));
+        for c in &t.columns {
+            let ilta = c
+                .totals_function
+                .as_deref()
+                .and_then(|f| TOTALS_FUNCTIONS.iter().position(|x| *x == f))
+                .unwrap_or(0) as u32;
+            let mut p = P::new();
+            p.u32(c.id).u32(ilta);
+            for d in c.dxfs {
+                p.u32(d.unwrap_or(0xFFFF_FFFF));
+            }
+            p.u32(c.query_table_field_id.unwrap_or(0))
+                .nwstr(c.unique_name.as_deref())
+                .nwstr(Some(&c.name))
+                .nwstr(c.totals_label.as_deref())
+                .nwstr(None)
+                .nwstr(None)
+                .nwstr(None);
+            o.p(347, &p);
+            // 계산 열 수식(351)·요약 행 수식(352): fArray u8 + CellParsedFormula
+            for (rt, f) in [
+                (351u16, c.calculated_formula.as_deref()),
+                (352, c.totals_formula.as_deref()),
+            ] {
+                if let Some(f) = f
+                    && let Some(e) =
+                        self.fmla(&format!("표 {} 열 {}", t.name, c.name), f, Place::Cell)
+                {
+                    o.p(rt, P::new().u8(0).fmla(&e));
+                }
+            }
+            o.e(348);
+        }
+        o.e(346);
+        if let Some(st) = &t.style {
+            let flags = u16::from(st.first_column)
+                | (u16::from(st.last_column) << 1)
+                | (u16::from(st.row_stripes) << 2)
+                | (u16::from(st.column_stripes) << 3);
+            o.p(513, P::new().u16(flags).nwstr(st.name.as_deref()));
+        }
+        o.e(344);
+        o.0
     }
 
     /// BrtWsProp: 플래그 3바이트, 탭 색, rwSync, colSync, 코드 이름
@@ -2349,8 +2520,56 @@ fn data_bars14(o: &mut Out, bars: &[DataBar14]) {
     o.e(36);
 }
 
+/// 상위/하위 필터의 기준값 — 한셀의 바이너리 저장이 기준값 없는 필터에 쓰는 값 (상위/하위 필터 기준값 실험: 시트 22개의
+/// 조작한 XML → 한셀 → 바이너리 BrtTop10Filter). 필터 범위의 머리글 아래 그 열의 숫자 값(글·빈 칸은 빼고, 숨은 행도
+/// 넣는다)을 늘어놓고 위(아래)에서 k번째 값이다. k 는 개수, 백분율이면 ⌊숫자 수 × 값 / 100⌋ (적어도 1, 11개의 20% → 2,
+/// 50% → 5, 5% → 1), 숫자 수보다 크면 끝 값. 같은 값도 하나씩 센다. 숫자가 없으면 0
+fn top10_value(
+    sheet: &Sheet,
+    range: CellRange,
+    col_id: u32,
+    top: bool,
+    percent: bool,
+    val: f64,
+) -> f64 {
+    let col = range.start.col + col_id;
+    let mut nums: Vec<f64> = sheet
+        .cells
+        .iter()
+        .filter(|c| c.r.col == col && c.r.row > range.start.row && c.r.row <= range.end.row)
+        .filter_map(|c| match c.value {
+            CellValue::Number(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    if nums.is_empty() {
+        return 0.0;
+    }
+    let n = nums.len();
+    let k = if percent {
+        // 정수 백분율의 곱이 부동소수 오차로 정수 바로 아래가 되지 않게
+        ((n as f64 * val / 100.0) + 1e-9).floor().max(1.0) as usize
+    } else {
+        val.max(1.0) as usize
+    }
+    .min(n);
+    if top {
+        nums.sort_by(|a, b| b.total_cmp(a));
+    } else {
+        nums.sort_by(|a, b| a.total_cmp(b));
+    }
+    nums[k - 1]
+}
+
 fn auto_filter(o: &mut Out, sheet: &Sheet) {
-    let Some(af) = &sheet.auto_filter else { return };
+    if let Some(af) = &sheet.auto_filter {
+        auto_filter_records(o, af, sheet);
+    }
+}
+
+/// 자동 필터 레코드 (시트와 표 파트가 같은 꼴): BrtBeginAFilter 161 … BrtEndAFilter 162. 상위/하위 기준값은 `sheet` 의
+/// 셀로 셈한다
+fn auto_filter_records(o: &mut Out, af: &crate::model::AutoFilter, sheet: &Sheet) {
     let Some(range) = ranges(&af.range).first().copied() else {
         return;
     };
@@ -2385,12 +2604,12 @@ fn auto_filter(o: &mut Out, sheet: &Sheet) {
             }
             o.e(173);
         } else if let Some((top, percent, val)) = c.top10 {
-            // 플래그: 0x01 위, 0x02 백분율, 0x04 (한셀이 늘 켠다), 개수, 기준값 (원본에 없으면 0)
+            // 플래그: 0x01 위, 0x02 백분율, 0x04 (한셀이 늘 켠다), 개수, 기준값 (원본에 없으면 한셀처럼 데이터로 셈한다)
             let f = 0x04 | u8::from(top) | (u8::from(percent) << 1);
-            o.p(
-                170,
-                P::new().u8(f).f64(val).f64(c.filter_val.unwrap_or(0.0)),
-            );
+            let fv = c
+                .filter_val
+                .unwrap_or_else(|| top10_value(sheet, range, c.col_id, top, percent, val));
+            o.p(170, P::new().u8(f).f64(val).f64(fv));
         } else if let Some(t) = &c.dynamic {
             let cft = crate::model::DYNAMIC_FILTER_TYPES
                 .iter()
@@ -2453,7 +2672,7 @@ fn hf_with_font(s: &str, font: &str) -> String {
 }
 
 /// 인쇄: BrtPrintOptions, BrtMargins, BrtPageSetup, 머리글·바닥글, 페이지 나누기
-fn page(o: &mut Out, sheet: &Sheet, exact: bool, hf_font: Option<&str>) {
+fn page(o: &mut Out, sheet: &Sheet, exact: bool, hf_font: Option<&str>, printer: Option<&str>) {
     let p = &sheet.page;
     // 0x01 가로 가운데, 0x02 세로 가운데, 0x04 머리글, 0x08 눈금선. 0x10 은 한셀 내부 상태 —
     // printOptions 가 없는 시트 104/108, 있는 시트 2/51 에 켜져 있다 (관측)
@@ -2487,7 +2706,7 @@ fn page(o: &mut Out, sheet: &Sheet, exact: bool, hf_font: Option<&str>) {
     );
     // BrtPageSetup: 모델에 없으면 쓰지 않는다 (한셀 문서에는 늘 있다)
     if let Some(s) = &p.setup {
-        page_setup(o, s, exact);
+        page_setup(o, s, exact, printer);
     }
     // 머리글·바닥글은 글이 있을 때만 (한셀은 빈 headerFooter 를 쓰지 않는다, 관측)
     if let Some(h) = &p.header_footer {
@@ -2535,7 +2754,7 @@ fn page(o: &mut Out, sheet: &Sheet, exact: bool, hf_font: Option<&str>) {
     }
 }
 
-fn page_setup(o: &mut Out, s: &crate::model::PageSetup, exact: bool) {
+fn page_setup(o: &mut Out, s: &crate::model::PageSetup, exact: bool, printer: Option<&str>) {
     let mut flags = 0u16;
     if s.page_order.as_deref() == Some("overThenDown") {
         flags |= 0x0001;
@@ -2570,8 +2789,22 @@ fn page_setup(o: &mut Out, s: &crate::model::PageSetup, exact: bool) {
             .u32(s.fit_to_width.unwrap_or(1))
             .u32(s.fit_to_height.unwrap_or(1))
             .u16(flags)
-            .wstr(""),
+            .wstr(printer.unwrap_or("")),
     );
+}
+
+/// 원본 그대로 옮기는 파트 가운데 바이너리 패키지에도 같은 꼴로 들어가는 것: 매크로 프로젝트(한컴·VBA), 사용자 지정
+/// XML, 프린터 설정 (한셀의 바이너리 저장은 매크로 프로젝트만 지키고 나머지는 버린다 — 패키지 파트 실험). 연결·쿼리 표·
+/// XML 대응은 바이너리에서 레코드 파트라 옮기지 않는다 (한셀도 세 형식에서 버린다)
+fn binary_keeps(rel_type: &str) -> bool {
+    [
+        "/customXml",
+        "/vbaProject",
+        "/vbsProject",
+        "/printerSettings",
+    ]
+    .iter()
+    .any(|k| rel_type.ends_with(k))
 }
 
 // ---------------------------------------------------------------------------
@@ -2655,6 +2888,20 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
             })
             .collect(),
         cur: None,
+        tables: worksheets
+            .iter()
+            .flat_map(|sh| {
+                sh.tables.iter().map(|t| {
+                    (
+                        t.id,
+                        t.display_name.clone(),
+                        t.name.clone(),
+                        t.columns.iter().map(|c| c.name.clone()).collect(),
+                        sh.name.clone(),
+                    )
+                })
+            })
+            .collect(),
     };
     // 이름 정의를 먼저 토큰으로 (XTI 는 처음 쓰이는 순서로 번호를 받는다)
     let mut name_tokens: Vec<Option<Encoded>> = Vec::new();
@@ -2704,6 +2951,13 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
     let mut sheets_out = Vec::new();
     let mut comments_n = 0;
     let mut model_charts: Vec<(String, String)> = Vec::new();
+    // 피벗 캐시·표: 모델의 XML 원본 파트를 레코드 파트로
+    let pivots = super::pivot::binary_parts(wb, &worksheets, &mut warnings, opts.exact);
+    let pivot_tables: Vec<Vec<String>> = pivots
+        .tables
+        .iter()
+        .map(|l| l.iter().map(|t| t.0.clone()).collect())
+        .collect();
     {
         let mut ctx = SheetCtx {
             book: &mut book,
@@ -2714,6 +2968,8 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
             mdw: crate::units::max_digit_width(wb),
             charts: &mut model_charts,
             exact: opts.exact,
+            next_table: 0,
+            pivot_tables: &pivot_tables,
         };
         for (i, sh) in worksheets.iter().enumerate() {
             if !sh.comments.is_empty() {
@@ -2727,6 +2983,12 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
                 drawing_names[i].clone(),
                 comments_n,
             ));
+        }
+    }
+    // 피벗 캐시의 원본 시트는 모든 시트의 수식 다음에 XTI 를 받는다 (쓰이지 않아도 — 피벗 실험 px1)
+    for c in &pivots.caches {
+        if let Some(s) = &c.source_sheet {
+            let _ = book.xti(None, s, None);
         }
     }
     let sst_bin = sst.bin(&mut fonts);
@@ -2781,6 +3043,52 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
         ));
         link_ids.push(id);
     }
+    // 피벗 캐시 정의: 시트 다음 (피벗 실험 pf3: 시트 둘 뒤 rId6·rId7)
+    let mut cache_ids = Vec::new();
+    for c in &pivots.caches {
+        let id = format!("rId{}", wbrels.len() + 1);
+        wbrels.push((
+            id.clone(),
+            format!("{REL_BASE}/pivotCacheDefinition"),
+            c.def_name.clone(),
+            false,
+        ));
+        cache_ids.push(id);
+    }
+    // 원본 그대로 옮기는 통합 문서 수준 파트 (매크로 프로젝트·사용자 지정 XML). 한셀의 매크로 프로젝트 관계는 시트
+    // 다음 (패키지 파트 실험의 vbs.bin.cell: rId4 = vbsProject, 콘텐츠 타입 application/vnd.hancom-office.vbsProject)
+    for l in wb.part_links.iter().filter(|l| binary_keeps(&l.rel_type)) {
+        wbrels.push((
+            format!("rId{}", wbrels.len() + 1),
+            l.rel_type.clone(),
+            l.part.clone(),
+            false,
+        ));
+    }
+    // 레거시 원본의 매크로 프로젝트: `_VBS_PROJECT_W` 스트림 하나짜리 복합 문서 (XML 쓰기와 같은 파트 — 세 형식에서 스트림
+    // 바이트가 같다. 복합 문서의 저장 시각은 한셀이 저장할 때마다 새로 쓴다)
+    let raw_has = |n: &str| wb.raw_parts.iter().any(|p| p.name == n);
+    let vbs_part = match &wb.hancom.vbs_project {
+        Some(st)
+            if !wb
+                .part_links
+                .iter()
+                .any(|l| l.rel_type == crate::ns::REL_HANCOM_VBS_PROJECT)
+                && !raw_has("xl/vbsProject.bin") =>
+        {
+            wbrels.push((
+                format!("rId{}", wbrels.len() + 1),
+                crate::ns::REL_HANCOM_VBS_PROJECT.into(),
+                "xl/vbsProject.bin".into(),
+                false,
+            ));
+            Some(crate::cfb_write::write_streams(&[(
+                crate::ns::VBS_PROJECT_STREAM.trim_start_matches('/'),
+                st,
+            )])?)
+        }
+        _ => None,
+    };
 
     let mut o = Out::default();
     o.e(131); // BrtBeginBook
@@ -2915,6 +3223,15 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
             0xF1, 0xD2, 0x4D, 0x62, 0x50, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x2A, 0x00,
         ]),
     );
+    // 피벗 캐시 목록: 캐시 번호(idSx)와 정의 파트의 관계 ID
+    if !pivots.caches.is_empty() {
+        o.e(384);
+        for (c, id) in pivots.caches.iter().zip(&cache_ids) {
+            o.p(386, P::new().u32(c.id).wstr(id));
+            o.e(387);
+        }
+        o.e(385);
+    }
     o.e(132);
     let workbook_bin = o.0;
 
@@ -3019,6 +3336,10 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
         let name = format!("xl/worksheets/sheet{}.bin", i + 1);
         parts.push((name.clone(), so.bin));
         overrides.push((name.clone(), "application/vnd.ms-excel.worksheet".into()));
+        for (tname, data) in so.tables {
+            overrides.push((tname.clone(), "application/vnd.ms-excel.table".into()));
+            parts.push((tname, data));
+        }
         if !so.rels.is_empty() {
             parts.push((
                 crate::package::rels_part_for(&name),
@@ -3063,6 +3384,51 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
             }
         }
     }
+    // 피벗 파트: 캐시 정의 (→ 레코드 rId1), 레코드, 피벗 표 (→ 캐시 정의 rId1) — 한셀 바이너리와 같은 관계
+    for c in pivots.caches {
+        if let Some((rname, data)) = c.records {
+            parts.push((
+                crate::package::rels_part_for(&c.def_name),
+                rels_xml(
+                    &[(
+                        "rId1".into(),
+                        format!("{REL_BASE}/pivotCacheRecords"),
+                        rname.clone(),
+                        false,
+                    )],
+                    "xl/pivotCache",
+                )
+                .into_bytes(),
+            ));
+            overrides.push((
+                rname.clone(),
+                "application/vnd.ms-excel.pivotCacheRecords".into(),
+            ));
+            parts.push((rname, data));
+        }
+        overrides.push((
+            c.def_name.clone(),
+            "application/vnd.ms-excel.pivotCacheDefinition".into(),
+        ));
+        parts.push((c.def_name, c.def));
+    }
+    for (name, data, cache) in pivots.tables.into_iter().flatten() {
+        parts.push((
+            crate::package::rels_part_for(&name),
+            rels_xml(
+                &[(
+                    "rId1".into(),
+                    format!("{REL_BASE}/pivotCacheDefinition"),
+                    cache,
+                    false,
+                )],
+                "xl/pivotTables",
+            )
+            .into_bytes(),
+        ));
+        overrides.push((name.clone(), "application/vnd.ms-excel.pivotTable".into()));
+        parts.push((name, data));
+    }
     // 원본 파트가 없는 모델 차트 (레거시에서 읽은 차트)
     for (name, xml) in model_charts {
         overrides.push((
@@ -3071,8 +3437,36 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
         ));
         parts.push((name, xml.into_bytes()));
     }
+    // XML 원본의 표 파트는 표 모델에서 레코드 파트로 새로 썼다 — XML 파트는 옮기지 않는다. 바이너리에 둘 수 없는 원본
+    // 파트([`binary_keeps`] 가 아닌 관계)도 관계가 가리키는 파트째 뺀다
+    let mut dropped: Vec<String> = worksheets
+        .iter()
+        .flat_map(|sh| sh.tables.iter().filter_map(|t| t.part.clone()))
+        .flat_map(|p| [crate::package::rels_part_for(&p), p])
+        .collect();
+    for l in wb
+        .part_links
+        .iter()
+        .chain(worksheets.iter().flat_map(|sh| sh.part_links.iter()))
+        .filter(|l| !binary_keeps(&l.rel_type))
+    {
+        let mut tree = Vec::new();
+        crate::package::raw_part_tree(&wb.raw_parts, &l.part, &mut tree);
+        for n in tree {
+            if !dropped.contains(&n) {
+                dropped.push(n);
+            }
+        }
+    }
+    if let Some(v) = vbs_part {
+        parts.push(("xl/vbsProject.bin".into(), v));
+        overrides.push((
+            "xl/vbsProject.bin".into(),
+            crate::ns::CT_HANCOM_VBS_PROJECT.into(),
+        ));
+    }
     for p in &wb.raw_parts {
-        if parts.iter().any(|(n, _)| *n == p.name) {
+        if parts.iter().any(|(n, _)| *n == p.name) || dropped.contains(&p.name) {
             continue;
         }
         let data = match charts.get(&p.name) {
@@ -3257,6 +3651,75 @@ mod tests {
             "&C&\"맑은 고딕,Regular\"&D &T"
         );
         assert_eq!(hf_with_font("&L&C&R", "X"), "&L&C&R");
+    }
+
+    #[test]
+    fn top10_filter_values_like_hancell() {
+        // 상위/하위 필터 기준값 실험의 한셀 바이너리 값 (머리글 + 값, A열)
+        let sheet_of = |vals: &[Option<f64>]| {
+            let mut s = Sheet::default();
+            s.cells.push(Cell {
+                r: CellRef { row: 0, col: 0 },
+                style: 0,
+                value: CellValue::Text("값".into()),
+                formula: None,
+            });
+            for (i, v) in vals.iter().enumerate() {
+                s.cells.push(Cell {
+                    r: CellRef {
+                        row: i as u32 + 1,
+                        col: 0,
+                    },
+                    style: 0,
+                    value: v.map_or(CellValue::Text("x".into()), CellValue::Number),
+                    formula: None,
+                });
+            }
+            let range = CellRange {
+                start: CellRef { row: 0, col: 0 },
+                end: CellRef {
+                    row: vals.len() as u32,
+                    col: 0,
+                },
+            };
+            (s, range)
+        };
+        let d1: Vec<Option<f64>> = (-4..=6).map(|v| Some(f64::from(v))).collect();
+        let (s, r) = sheet_of(&d1);
+        let v = |top, percent, val| top10_value(&s, r, 0, top, percent, val);
+        assert_eq!(v(false, true, 20.0), -3.0);
+        assert_eq!(v(true, true, 20.0), 5.0);
+        assert_eq!(v(false, true, 10.0), -4.0);
+        assert_eq!(v(false, true, 5.0), -4.0);
+        assert_eq!(v(true, true, 50.0), 2.0);
+        assert_eq!(v(true, true, 30.0), 4.0);
+        assert_eq!(v(false, false, 3.0), -2.0);
+        assert_eq!(v(true, false, 20.0), -4.0);
+        assert_eq!(v(false, false, 20.0), 6.0);
+        let ties: Vec<Option<f64>> = [5., 5., 5., 4., 4., 3., 2., 1., 1., 0.]
+            .iter()
+            .map(|v| Some(*v))
+            .collect();
+        let (s, r) = sheet_of(&ties);
+        assert_eq!(top10_value(&s, r, 0, true, false, 3.0), 5.0);
+        assert_eq!(top10_value(&s, r, 0, true, false, 4.0), 4.0);
+        assert_eq!(top10_value(&s, r, 0, false, false, 2.0), 1.0);
+        let mixed = [
+            Some(10.),
+            None,
+            Some(30.),
+            None,
+            Some(20.),
+            Some(50.),
+            None,
+            Some(40.),
+        ];
+        let (s, r) = sheet_of(&mixed);
+        assert_eq!(top10_value(&s, r, 0, true, false, 2.0), 40.0);
+        let d8: Vec<Option<f64>> = (1..=25).map(|v| Some(f64::from(v))).collect();
+        let (s, r) = sheet_of(&d8);
+        assert_eq!(top10_value(&s, r, 0, true, true, 10.0), 24.0);
+        assert_eq!(top10_value(&s, r, 0, false, true, 10.0), 2.0);
     }
 
     #[test]

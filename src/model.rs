@@ -1756,6 +1756,10 @@ pub struct CommentShape {
     /// `x:TextVAlign` (없으면 `Top`): `Center`, `Bottom`, `Justify`, `Distributed`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_valign: Option<String>,
+    /// 도형 이름 (VML `v:shape/@id`, 레거시 OfficeArt 이름 0x0380). 한셀은 세 형식에서 지킨다 (메모 이름 실험).
+    /// 없으면 쓸 때 시트 안 순서로 `메모 N` ([`CommentShape::name_or`])
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl CommentShape {
@@ -1771,6 +1775,31 @@ impl CommentShape {
             size_with_cells: false,
             text_halign: None,
             text_valign: None,
+            name: None,
+        }
+    }
+
+    /// 쓸 이름: 모델의 이름, 없으면 시트 안 `k`번째(0부터) 메모의 `메모 k+1` — rcell 이 예전에 쓰던 자동 번호
+    /// (`_x0000_s{1024n+k+1}`)를 한셀이 읽어 붙이는 이름과 같다
+    pub fn name_or(&self, k: usize) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| format!("메모 {}", k + 1))
+    }
+
+    /// 한셀이 VML `v:shape/@id` 를 읽어 붙이는 메모 이름 (메모 이름 실험): 자동 번호 꼴 `_x0000_sN` 은 `메모 N%1024`
+    /// (`_x0000_s1025` → `메모 1`, `_x0000_s2050` → `메모 2`), id 가 없으면 `메모 0`, 나머지(`메모 7`, `foo`,
+    /// `Comment 3`)는 그대로 — 같은 이름이 둘이어도 그대로
+    pub fn hcell_name_of_vml_id(id: Option<&str>) -> String {
+        match id {
+            None => "메모 0".into(),
+            Some(v) => match v
+                .strip_prefix("_x0000_s")
+                .and_then(|n| n.parse::<u64>().ok())
+            {
+                Some(n) => format!("메모 {}", n % 1024),
+                None => v.to_string(),
+            },
         }
     }
 

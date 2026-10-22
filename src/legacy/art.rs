@@ -617,13 +617,15 @@ impl Art {
                         p.set(0x0206, 25399);
                         p.set(0x023F, 0x0002_0002);
                     }
-                    // 이름: VML id (한셀이 쓴 "메모 N"), 자동 id(`_x0000_s1025` …)나 이름이 없으면 그리기 차례의
+                    // 이름: 한셀이 붙이는 메모 이름 (`CommentShape::name` — 메모 이름 실험: 자동 id `_x0000_sN` 은
+                    // `메모 N%1024`, id 없음은 `메모 0`), 모양이 없으면 VML id, 자동 id 나 이름이 없으면 그리기 차례의
                     // "메모 N" (메모 대조 실험: Excel 꼴 id 다섯 개 → 메모 1–5)
                     note_no += 1;
                     let name = c
-                        .shape_name
-                        .clone()
-                        .filter(|n| !n.starts_with("_x0000_"))
+                        .shape
+                        .as_ref()
+                        .and_then(|s| s.name.clone())
+                        .or_else(|| c.shape_name.clone().filter(|n| !n.starts_with("_x0000_")))
                         .unwrap_or_else(|| format!("메모 {note_no}"));
                     p.string(0x0380, &name);
                     if !c.visible {

@@ -45,6 +45,244 @@ fn fixture_roundtrips_through_binary() {
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
+/// 표: 표 파트(`xl/tables/table1.bin`)와 구조적 참조(PtgList)가 바이너리를 거쳐 그대로 돌아온다
+#[test]
+fn tables_and_structured_references_roundtrip() {
+    use rcell::model::{Cell, CellRef, CellValue, Formula, Table, TableColumn, TableStyleInfo};
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    let put = |s: &mut rcell::model::Sheet, row: u32, col: u32, v: CellValue, f: Option<&str>| {
+        s.cells.push(Cell {
+            r: CellRef { row, col },
+            style: 0,
+            value: v,
+            formula: f.map(|t| Formula {
+                text: t.into(),
+                ..Default::default()
+            }),
+        });
+    };
+    {
+        let s = &mut a.sheets[1];
+        put(s, 0, 4, CellValue::Text("안녕 & 반가워".into()), None);
+        put(s, 0, 5, CellValue::Text("굵게 보통".into()), None);
+        put(s, 1, 4, CellValue::Number(1.0), None);
+        put(s, 1, 5, CellValue::Number(3.0), None);
+        put(s, 2, 4, CellValue::Number(2.0), None);
+        put(s, 2, 5, CellValue::Number(4.0), None);
+        s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+        s.tables.push(Table {
+            id: 1,
+            name: "표1".into(),
+            display_name: "표1".into(),
+            range: "E1:F3".into(),
+            totals_shown: false,
+            columns: vec![
+                TableColumn {
+                    id: 1,
+                    name: "안녕 & 반가워".into(),
+                    ..Default::default()
+                },
+                TableColumn {
+                    id: 2,
+                    name: "굵게 보통".into(),
+                    ..Default::default()
+                },
+            ],
+            style: Some(TableStyleInfo {
+                name: Some("TableStyleMedium2".into()),
+                row_stripes: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+    {
+        let s = &mut a.sheets[0];
+        put(s, 0, 3, CellValue::Number(7.0), Some("SUM(표1[굵게 보통])"));
+        put(s, 1, 3, CellValue::Number(6.0), Some("COUNTA(표1[])"));
+        s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    }
+    let out = write_report(&a, &Options::default()).unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let t = rcell::container::read_entry(&out.bytes, "xl/tables/table1.bin").unwrap();
+    // BrtBeginList(343) 로 시작해 BrtEndList(344) 로 끝난다
+    assert_eq!(&t[..2], &[0xD7, 0x02]);
+    let (diffs, warnings) = roundtrip_diffs(&a);
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// 매크로 프로젝트: 레거시처럼 스트림만 있는 모델도 `xl/vbsProject.bin` 복합 문서와 통합 문서 관계로 쓰고 다시 읽는다
+#[test]
+fn macro_project_roundtrips() {
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    // 패키지 파트 실험의 스트림 꼴: 머리 0x104 바이트 + 글자 수 + UTF-16 모듈 글
+    let mut stream = vec![0x01, 0x01, 0x01, 0x00, 0x00, 0x01, 0x20, 0x02];
+    stream.resize(0x104, 0);
+    let text: Vec<u16> = "CLASS CLS_GM_MODULE\r\nEnd Class".encode_utf16().collect();
+    stream.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    for u in text {
+        stream.extend_from_slice(&u.to_le_bytes());
+    }
+    a.hancom.vbs_project = Some(stream.clone());
+    let out = write_report(&a, &Options::default()).unwrap();
+    let ct =
+        String::from_utf8(rcell::container::read_entry(&out.bytes, "[Content_Types].xml").unwrap())
+            .unwrap();
+    assert!(
+        ct.contains(r#"<Override PartName="/xl/vbsProject.bin" ContentType="application/vnd.hancom-office.vbsProject"/>"#),
+        "{ct}"
+    );
+    let b = rcell::from_bytes(out.bytes).unwrap();
+    assert_eq!(b.hancom.vbs_project.as_deref(), Some(stream.as_slice()));
+    assert!(b.part_links.iter().any(|l| l.rel_type
+        == "http://schemas.hancom.com/office/relationships/vbsProject"
+        && l.part == "xl/vbsProject.bin"));
+    // 다시 바이너리로: 원본 그대로의 파트로 옮긴다 (관계는 하나)
+    let out2 = write_report(&b, &Options::default()).unwrap();
+    let rels = String::from_utf8(
+        rcell::container::read_entry(&out2.bytes, "xl/_rels/workbook.bin.rels").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rels.matches("vbsProject").count(), 2, "{rels}");
+    let c = rcell::from_bytes(out2.bytes).unwrap();
+    assert_eq!(c.hancom.vbs_project.as_deref(), Some(stream.as_slice()));
+}
+
+/// 피벗: 모델의 XML 파트 → 바이너리 레코드 파트 → 다시 읽은 XML 파트 (손으로 쓴 작은 피벗: 행 필드, 값 필드 둘, 계산 필드)
+#[test]
+fn pivots_roundtrip() {
+    use rcell::model::{PartLink, RawPart};
+    const DECL: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#;
+    const NS: &str = r#"xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+    const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let rels = |ty: &str, target: &str| {
+        format!(
+            r#"{DECL}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{REL}/{ty}" Target="{target}"/></Relationships>"#
+        )
+    };
+    let cache = format!(
+        r#"{DECL}<pivotCacheDefinition {NS} r:id="rId1" refreshedDate="45000.5" createdVersion="3" recordCount="3"><cacheSource type="worksheet"><worksheetSource ref="A1:B4" sheet="데이터"/></cacheSource><cacheFields count="3"><cacheField name="품목" numFmtId="0"><sharedItems count="2"><s v="사과"/><s v="배"/></sharedItems></cacheField><cacheField name="금액" numFmtId="0"><sharedItems containsSemiMixedTypes="0" containsString="0" containsNumber="1" containsInteger="1" minValue="100" maxValue="300" count="3"><n v="100"/><n v="200"/><n v="300"/></sharedItems></cacheField><cacheField name="두배" numFmtId="0" formula="금액*2" databaseField="0"/></cacheFields></pivotCacheDefinition>"#
+    );
+    let records = format!(
+        r#"{DECL}<pivotCacheRecords {NS} count="3"><r><x v="0"/><x v="0"/></r><r><x v="1"/><x v="1"/></r><r><x v="0"/><x v="2"/></r></pivotCacheRecords>"#
+    );
+    let table = format!(
+        r#"{DECL}<pivotTableDefinition {NS} name="피벗1" cacheId="7" dataOnRows="0" applyWidthHeightFormats="1" dataCaption="값" grandTotalCaption="총계" updatedVersion="4" createdVersion="4" indent="0" outline="1" outlineData="1"><location ref="D1:F4" firstHeaderRow="1" firstDataRow="2" firstDataCol="1"/><pivotFields count="3"><pivotField axis="axisRow" showAll="0" sortType="descending"><items count="3"><item x="0"/><item x="1"/><item t="default"/></items></pivotField><pivotField dataField="1" showAll="0"/><pivotField dataField="1" showAll="0" defaultSubtotal="0"/></pivotFields><rowFields count="1"><field x="0"/></rowFields><rowItems count="3"><i><x/></i><i><x v="1"/></i><i t="grand"><x/></i></rowItems><colFields count="1"><field x="-2"/></colFields><colItems count="2"><i><x/></i><i i="1"><x v="1"/></i></colItems><dataFields count="2"><dataField name="합계 : 금액" fld="1" subtotal="sum" showDataAs="normal" baseField="0" baseItem="0"/><dataField name="최대 : 두배" fld="2" subtotal="max" showDataAs="normal" baseField="0" baseItem="0"/></dataFields><pivotTableStyleInfo name="PivotStyleLight16" showRowHeaders="1" showColHeaders="1" showRowStripes="0" showColStripes="0" showLastColumn="1"/></pivotTableDefinition>"#
+    );
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    let raw = |name: &str, ct: Option<&str>, data: String| RawPart {
+        name: name.into(),
+        content_type: ct.map(str::to_string),
+        data: data.into_bytes(),
+    };
+    a.raw_parts.extend([
+        raw(
+            "xl/pivotCache/pivotCacheDefinition1.xml",
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"),
+            cache,
+        ),
+        raw(
+            "xl/pivotCache/_rels/pivotCacheDefinition1.xml.rels",
+            None,
+            rels("pivotCacheRecords", "pivotCacheRecords1.xml"),
+        ),
+        raw(
+            "xl/pivotCache/pivotCacheRecords1.xml",
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheRecords+xml"),
+            records,
+        ),
+        raw(
+            "xl/pivotTables/pivotTable1.xml",
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml"),
+            table,
+        ),
+        raw(
+            "xl/pivotTables/_rels/pivotTable1.xml.rels",
+            None,
+            rels("pivotCacheDefinition", "../pivotCache/pivotCacheDefinition1.xml"),
+        ),
+    ]);
+    a.part_links.push(PartLink {
+        rel_type: format!("{REL}/pivotCacheDefinition"),
+        part: "xl/pivotCache/pivotCacheDefinition1.xml".into(),
+        cache_id: Some(7),
+    });
+    a.sheets[0].part_links.push(PartLink {
+        rel_type: format!("{REL}/pivotTable"),
+        part: "xl/pivotTables/pivotTable1.xml".into(),
+        cache_id: None,
+    });
+    let out = write_report(&a, &Options::default()).unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let part = |name: &str| rcell::container::read_entry(&out.bytes, name).unwrap();
+    // 계산 필드 수식: PtgSxName(0) * 2, 이름 목록 [금액 = 1]
+    let def = part("xl/pivotCache/pivotCacheDefinition1.bin");
+    let recs = rcell::binary::biff12::records(&def);
+    let field = recs.iter().filter(|r| r.rtype == 183).nth(2).unwrap();
+    assert!(
+        field.data.ends_with(&[
+            10, 0, 0, 0, 0x18, 0x1D, 0, 0, 0, 0, 0x1E, 2, 0, 0x05, 0, 0, 0, 0
+        ]),
+        "{:02x?}",
+        field.data
+    );
+    let pname = recs.iter().find(|r| r.rtype == 255).unwrap();
+    assert_eq!(pname.data, [1, 0, 0, 0, 0xFF, 0]);
+    // 통합 문서: 캐시 번호 7 과 관계
+    let wb = part("xl/workbook.bin");
+    let ids = rcell::binary::biff12::records(&wb);
+    let id = ids.iter().find(|r| r.rtype == 386).unwrap();
+    assert_eq!(&id.data[..4], &[7, 0, 0, 0]);
+    // 다시 읽기: 피벗 표 비교가 같고, 수식·정렬·총합계 글·레코드가 남는다
+    let b = rcell::from_bytes(out.bytes).unwrap();
+    let diffs: Vec<String> = compare(&a, &b, CmpOptions::default())
+        .into_iter()
+        .filter(|d| d.contains("피벗"))
+        .collect();
+    assert!(diffs.is_empty(), "{diffs:#?}");
+    let text = |w: &rcell::Workbook, name: &str| {
+        String::from_utf8(
+            w.raw_parts
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+                .data
+                .clone(),
+        )
+        .unwrap()
+    };
+    let cache_b = text(&b, "xl/pivotCache/pivotCacheDefinition1.xml");
+    assert!(
+        cache_b.contains(r#"formula="금액*2" databaseField="0""#),
+        "{cache_b}"
+    );
+    assert!(cache_b.contains(r#"recordCount="3""#), "{cache_b}");
+    let table_b = text(&b, "xl/pivotTables/pivotTable1.xml");
+    assert!(table_b.contains(r#"sortType="descending""#), "{table_b}");
+    assert!(table_b.contains(r#"grandTotalCaption="총계""#), "{table_b}");
+    let rec_b = text(&b, "xl/pivotCache/pivotCacheRecords1.xml");
+    assert_eq!(rec_b.matches("<x:r>").count(), 3, "{rec_b}");
+    assert_eq!(
+        b.part_links
+            .iter()
+            .find(|l| l.rel_type.ends_with("/pivotCacheDefinition"))
+            .and_then(|l| l.cache_id),
+        Some(7)
+    );
+    // exact: 한셀처럼 총합계 글을 잃는다
+    let ex = write_report(
+        &a,
+        &Options {
+            exact: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let c = rcell::from_bytes(ex.bytes).unwrap();
+    assert!(!text(&c, "xl/pivotTables/pivotTable1.xml").contains("grandTotalCaption"));
+}
+
 #[test]
 fn binary_is_detected_by_name() {
     use rcell::SaveFormat;

@@ -117,6 +117,7 @@ pub fn apply_vml(vml: &Element, comments: &mut [Comment]) {
                 text_valign: child("TextVAlign")
                     .map(|x| x.text().trim().to_string())
                     .filter(|v| v != "Top"),
+                name: Some(CommentShape::hcell_name_of_vml_id(e.attr("id"))),
             });
         if let Some(c) = comments.iter_mut().find(|c| c.cell == CellRef { row, col }) {
             c.visible = visible;
