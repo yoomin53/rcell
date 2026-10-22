@@ -155,6 +155,7 @@ fn refbase() -> Workbook {
         },
         visible: false,
         shape: Some(CommentShape::hcell_default([13, 14, 3, 10, 14, 69, 7, 1])),
+        ..Default::default()
     }];
     s1.hyperlinks = vec![Hyperlink {
         range: "O7:O7".into(),
