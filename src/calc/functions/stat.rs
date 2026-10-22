@@ -1766,7 +1766,7 @@ fn t_inv_2t(ctx: &mut Ctx, a: &[Value]) -> Value {
     if p <= 0.0 || p > 1.0 || df < 1.0 {
         return Value::Error(ErrorKind::Num);
     }
-    num(sp::t_inv(1.0 - p / 2.0, df))
+    num(sp::t_inv_two_tailed(p, df))
 }
 
 fn ttest(ctx: &mut Ctx, a: &[Value]) -> Value {

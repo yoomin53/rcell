@@ -584,6 +584,19 @@ pub fn t_inv(p: f64, df: f64) -> f64 {
     newton_refine(t, p, |t| t_cdf(t, df), |t| t_pdf(t, df))
 }
 
+/// 양쪽 꼬리 확률 p2 = P(|T| > t) 인 t. p2 가 1 에 가까우면(작은 t) 가운데 확률 1 − p2 = I_y(1/2, ν/2),
+/// y = t²/(ν+t²) 로 풀어 자릿수를 잃지 않는다 (TINV(0.999,1) = 0.00157079761872433, 대조 실험 dist4)
+pub fn t_inv_two_tailed(p2: f64, df: f64) -> f64 {
+    if p2 > 0.5 {
+        let y = beta_i_inv(1.0 - p2, 0.5, df / 2.0);
+        if y <= 0.0 {
+            return 0.0;
+        }
+        return (df * y / (1.0 - y)).sqrt();
+    }
+    t_inv(1.0 - p2 / 2.0, df)
+}
+
 /// F 분포 누적
 pub fn f_cdf(x: f64, d1: f64, d2: f64) -> f64 {
     if x <= 0.0 {
