@@ -25,6 +25,10 @@ pub const FNS: &[FnSpec] = &[
         let (r, n, p) = try_v!(three(c, a));
         let fv = try_v!(num_or(c, a, 3, 0.0));
         let t = try_v!(pay_type(c, a, 4));
+        // (1+r)^n = 0 (이율 −1) 은 #DIV/0! (대조 실험 financial)
+        if r != 0.0 && (1.0 + r).mpow(n) == 0.0 {
+            return Value::Error(ErrorKind::Div0);
+        }
         num(pv(r, n, p, fv, t))
     }),
     f("FV", 3, 5, V, |c, a| {
@@ -66,7 +70,8 @@ pub const FNS: &[FnSpec] = &[
         }
         num(p * r * (per / n - 1.0))
     }),
-    f("NPV", 2, MANY, VR, |c, a| {
+    // 현금 흐름이 없으면 0 (NPV(0.1), 대조 실험 financial)
+    f("NPV", 1, MANY, VR, |c, a| {
         let r = try_v!(num_arg(c, a, 0));
         if r == -1.0 {
             return Value::Error(ErrorKind::Div0);
@@ -159,11 +164,8 @@ pub const FNS: &[FnSpec] = &[
         if d <= 0.0 || dsm > 366.0 {
             return Value::Error(ErrorKind::Num);
         }
-        let p = 100.0 * (1.0 - d * dsm / 360.0);
-        if p <= 0.0 {
-            return Value::Error(ErrorKind::Num);
-        }
-        num(p)
+        // 가격이 음수여도 그대로 (TBILLPRICE(45000,45100,4) = −11.11, 대조 실험 financial)
+        num(100.0 * (1.0 - d * dsm / 360.0))
     }),
     f("TBILLYIELD", 3, 3, V, |c, a| {
         let (s, m) = try_v!(sm(c, a));
@@ -181,19 +183,8 @@ pub const FNS: &[FnSpec] = &[
         if d <= 0.0 || dsm > 366.0 {
             return Value::Error(ErrorKind::Num);
         }
-        if dsm <= 182.0 {
-            return num(365.0 * d / (360.0 - d * dsm));
-        }
-        let price = 100.0 * (1.0 - d * dsm / 360.0);
-        if price <= 0.0 {
-            return Value::Error(ErrorKind::Num);
-        }
-        let t = dsm / 365.0;
-        let disc = t * t - (2.0 * t - 1.0) * (1.0 - 100.0 / price);
-        if disc < 0.0 {
-            return Value::Error(ErrorKind::Num);
-        }
-        num((-t + disc.sqrt()) / (t - 0.5))
+        // 만기가 반년을 넘어도 365·d/(360 − d·일수) 하나 (TBILLEQ(45000,45300,0.05), 대조 실험 financial)
+        num(365.0 * d / (360.0 - d * dsm))
     }),
     f("DISC", 4, 5, V, |c, a| {
         let (s, m) = try_v!(sm(c, a));
@@ -226,8 +217,9 @@ pub const FNS: &[FnSpec] = &[
             return Value::Error(ErrorKind::Num);
         }
         let yf = try_v!(year_frac(s, m, b, c.date1904()));
+        // 분모가 음수여도 그대로 (RECEIVED(…,20) = −250000, 대조 실험 financial)
         let den = 1.0 - d * yf;
-        if den <= 0.0 {
+        if den == 0.0 {
             return Value::Error(ErrorKind::Num);
         }
         num(inv / den)
@@ -319,6 +311,8 @@ pub fn fv(r: f64, n: f64, p: f64, pv: f64, t: f64) -> f64 {
     -(pv * g + p * (1.0 + r * t) * (g - 1.0) / r)
 }
 
+/// 정기 지급액: −(pv + fv/g)·r / ((1 + rt)(1 − 1/g)), g = (1+r)^n — 아주 작은 이율에서 한셀과 같은 끝자리
+/// (PMT(1E-10,10,1000) = −99.9999917259636, 이율 −1 은 #NUM!, 대조 실험 financial)
 pub fn pmt(r: f64, n: f64, pv: f64, fv: f64, t: f64) -> Result<f64, ErrorKind> {
     if n == 0.0 {
         return Err(ErrorKind::Num);
@@ -327,17 +321,20 @@ pub fn pmt(r: f64, n: f64, pv: f64, fv: f64, t: f64) -> Result<f64, ErrorKind> {
         return Ok(-(pv + fv) / n);
     }
     let g = (1.0 + r).mpow(n);
-    let den = (1.0 + r * t) * (g - 1.0);
+    if g == 0.0 {
+        return Err(ErrorKind::Num);
+    }
+    let den = (1.0 + r * t) * (1.0 - 1.0 / g);
     if den == 0.0 {
         return Err(ErrorKind::Num);
     }
-    Ok(-(r * (fv + pv * g)) / den)
+    Ok(-(pv + fv / g) * r / den)
 }
 
 fn nper(r: f64, p: f64, pv: f64, fv: f64, t: f64) -> Result<f64, ErrorKind> {
     if r == 0.0 {
         if p == 0.0 {
-            return Err(ErrorKind::Num);
+            return Err(ErrorKind::Div0);
         }
         return Ok(-(pv + fv) / p);
     }
@@ -400,7 +397,8 @@ fn ipmt_fn(ctx: &mut Ctx, a: &[Value], interest: bool) -> Value {
     let p = try_v!(num_arg(ctx, a, 3));
     let fv_ = try_v!(num_or(ctx, a, 4, 0.0));
     let t = try_v!(pay_type(ctx, a, 5));
-    if per < 1.0 || per > n {
+    // IPMT 는 기간이 횟수를 넘어도 계산한다 (IPMT(0.1,4,3,8000) = 0), PPMT 는 #NUM! (대조 실험 financial)
+    if per < 1.0 || (per > n && !interest) {
         return Value::Error(ErrorKind::Num);
     }
     let i = try_v!(ipmt(r, per, n, p, fv_, t));
@@ -537,6 +535,10 @@ fn mirr(ctx: &mut Ctx, a: &[Value]) -> Value {
         .collect();
     let fr = try_v!(num_arg(ctx, a, 1));
     let rr = try_v!(num_arg(ctx, a, 2));
+    // 이율 −1 이하는 #NUM! (MIRR({-100,200},-1,0.1), 대조 실험 financial)
+    if fr <= -1.0 || rr <= -1.0 {
+        return Value::Error(ErrorKind::Num);
+    }
     let n = v.len() as f64;
     let mut npv_pos = 0.0;
     let mut npv_neg = 0.0;
@@ -812,6 +814,15 @@ fn coup(ctx: &mut Ctx, a: &[Value], what: u8) -> Value {
     }
 }
 
+/// PRICE·YIELD 의 이자 기간 일수: 30/360·실제/360 기준은 360/fr, 나머지는 실제 일수 (기준 3 도,
+/// PRICE(…,1,3) = 94.6725635950793, 대조 실험 financial)
+fn bond_period_days(pcd: f64, ncd: f64, fr: f64, b: u8) -> f64 {
+    match b {
+        0 | 2 | 4 => 360.0 / fr,
+        _ => ncd - pcd,
+    }
+}
+
 fn coup_days(pcd: f64, ncd: f64, fr: f64, b: u8, _d1904: bool) -> f64 {
     match b {
         1 => ncd - pcd,
@@ -821,15 +832,13 @@ fn coup_days(pcd: f64, ncd: f64, fr: f64, b: u8, _d1904: bool) -> f64 {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// 채권 가격: 남은 지급이 하나여도 일반식 (PRICE(39493,39600,…) = 99.77359320891287, 대조 실험 financial)
 fn bond_price(s: f64, m: f64, rate: f64, yld: f64, red: f64, fr: f64, b: u8, d1904: bool) -> f64 {
     let (pcd, ncd, n) = coupon_dates(s, m, fr, d1904);
-    let e = coup_days(pcd, ncd, fr, b, d1904);
+    let e = bond_period_days(pcd, ncd, fr, b);
     let a = day_count(pcd, s, b, d1904);
-    let dsc = if b == 0 || b == 4 { e - a } else { ncd - s };
+    let dsc = e - a;
     let c = 100.0 * rate / fr;
-    if n == 1.0 {
-        return (red + c) / (1.0 + dsc / e * yld / fr) - c * a / e;
-    }
     let v = 1.0 + yld / fr;
     let mut p = red / v.mpow(n - 1.0 + dsc / e);
     let mut k = 1.0;
@@ -864,18 +873,7 @@ fn yield_fn(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let d1904 = ctx.date1904();
-    let (pcd, ncd, n) = coupon_dates(s, m, fr, d1904);
-    if n == 1.0 {
-        let e = coup_days(pcd, ncd, fr, b, d1904);
-        let a_ = day_count(pcd, s, b, d1904);
-        let dsr = e - a_;
-        let c = 100.0 * rate / fr;
-        let num_ = (red / 100.0 + rate / fr) - (pr / 100.0 + a_ / e * rate / fr);
-        let den = pr / 100.0 + a_ / e * rate / fr;
-        let _ = c;
-        return num(num_ / den * fr * e / dsr);
-    }
-    // 가격 함수의 해
+    // 가격 함수(일반식)의 해 — 한셀은 남은 지급이 하나여도 같은 식을 푼다
     let f = |y: f64| bond_price(s, m, rate, y, red, fr, b, d1904) - pr;
     let (mut lo, mut hi) = (-0.99 * fr, 10.0);
     if f(lo) * f(hi) > 0.0 {
@@ -940,12 +938,8 @@ fn pricemat(ctx: &mut Ctx, a: &[Value]) -> Value {
     if rate < 0.0 || yld < 0.0 || iss >= s {
         return Value::Error(ErrorKind::Num);
     }
-    let d1904 = ctx.date1904();
-    let bb = year_basis(b, s, d1904);
-    let dim = day_count(iss, m, b, d1904);
-    let a_ = day_count(iss, s, b, d1904);
-    let dsm = day_count(s, m, b, d1904);
-    num((100.0 + dim / bb * rate * 100.0) / (1.0 + dsm / bb * yld) - a_ / bb * rate * 100.0)
+    let (fdim, fa, fdsm) = try_v!(mat_fracs(iss, s, m, b, ctx.date1904()));
+    num((100.0 + fdim * rate * 100.0) / (1.0 + fdsm * yld) - fa * rate * 100.0)
 }
 
 fn yieldmat(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -957,29 +951,75 @@ fn yieldmat(ctx: &mut Ctx, a: &[Value]) -> Value {
     if rate < 0.0 || pr <= 0.0 || iss >= s {
         return Value::Error(ErrorKind::Num);
     }
-    let d1904 = ctx.date1904();
+    let (fdim, fa, fdsm) = try_v!(mat_fracs(iss, s, m, b, ctx.date1904()));
+    let t1 = 1.0 + fdim * rate;
+    let t2 = pr / 100.0 + fa * rate;
+    num((t1 - t2) / t2 / fdsm)
+}
+
+/// (발행→만기, 발행→결제, 결제→만기) 의 햇수: 기준 1 은 구간마다 YEARFRAC, 나머지는 일수 ÷ 1년 일수
+/// (PRICEMAT(…,1) = 99.98029785136376, 대조 실험 financial)
+fn mat_fracs(iss: f64, s: f64, m: f64, b: u8, d1904: bool) -> Result<(f64, f64, f64), ErrorKind> {
+    if b == 1 {
+        return Ok((year_frac(iss, m, 1, d1904)?, year_frac(iss, s, 1, d1904)?, year_frac(s, m, 1, d1904)?));
+    }
     let bb = year_basis(b, s, d1904);
-    let dim = day_count(iss, m, b, d1904);
-    let a_ = day_count(iss, s, b, d1904);
-    let dsm = day_count(s, m, b, d1904);
-    let t1 = 1.0 + dim / bb * rate;
-    let t2 = pr / 100.0 + a_ / bb * rate;
-    num((t1 - t2) / t2 * bb / dsm)
+    Ok((day_count(iss, m, b, d1904) / bb, day_count(iss, s, b, d1904) / bb, day_count(s, m, b, d1904) / bb))
+}
+
+/// 실제/실제 경과 이자: 첫 이자일을 기준으로 센 이자 기간마다 (겹친 일수 / 기간 일수) 를 더한다
+/// (ACCRINT(…,1000,4,1) = 16.57608695652174 = 25 × 61/92, 대조 실험 financial)
+fn accrint_periods(iss: f64, first: f64, set: f64, fr: f64, d1904: bool) -> f64 {
+    let step = (12.0 / fr) as i64;
+    let mut total = 0.0;
+    // 첫 이자일 앞쪽 기간 (k = 0 은 첫 이자일로 끝나는 기간)
+    let mut k = 0i64;
+    while k < 100_000 {
+        let end = coupon_date(first, k * step, d1904);
+        let start = coupon_date(first, (k + 1) * step, d1904);
+        if end <= iss {
+            break;
+        }
+        let (lo, hi) = (start.max(iss), end.min(set));
+        if hi > lo {
+            total += (hi - lo) / (end - start);
+        }
+        k += 1;
+    }
+    // 첫 이자일 뒤쪽 기간
+    let mut k = 0i64;
+    while k < 100_000 {
+        let start = coupon_date(first, -k * step, d1904);
+        let end = coupon_date(first, -(k + 1) * step, d1904);
+        if start >= set {
+            break;
+        }
+        let (lo, hi) = (start.max(iss), end.min(set));
+        if hi > lo {
+            total += (hi - lo) / (end - start);
+        }
+        k += 1;
+    }
+    total
 }
 
 fn accrint(ctx: &mut Ctx, a: &[Value]) -> Value {
     let iss = try_v!(date_arg(ctx, a, 0));
-    let _first = try_v!(date_arg(ctx, a, 1));
+    let first = try_v!(date_arg(ctx, a, 1));
     let set = try_v!(date_arg(ctx, a, 2));
     let rate = try_v!(num_arg(ctx, a, 3));
-    let par = try_v!(num_or(ctx, a, 4, 1000.0));
+    // 비운 액면 인수는 1000 (ACCRINT(…,0.1,,2), 대조 실험 financial)
+    let par = if matches!(a.get(4), Some(Value::Empty)) { 1000.0 } else { try_v!(num_or(ctx, a, 4, 1000.0)) };
     let fr = try_v!(freq(ctx, a, 5));
     let b = try_v!(basis(ctx, a, 6));
     if rate <= 0.0 || par <= 0.0 || iss >= set {
         return Value::Error(ErrorKind::Num);
     }
-    let _ = fr;
-    let yf = try_v!(year_frac(iss, set, b, ctx.date1904()));
+    let d1904 = ctx.date1904();
+    if b == 1 {
+        return num(par * rate / fr * accrint_periods(iss, first, set, fr, d1904));
+    }
+    let yf = try_v!(year_frac(iss, set, b, d1904));
     num(par * rate * yf)
 }
 
@@ -1020,15 +1060,17 @@ fn amor(ctx: &mut Ctx, a: &[Value], degressive: bool) -> Value {
             }
         }
     }
+    // 수명 3–4 년 1.5, 5–6 년 2, 6 년 초과 2.5, 그 밖(3 년 미만, 4–5 년 사이)은 #NUM!
+    // (AMORDEGRC(…,0.4) = #NUM!, 대조 실험 financial)
     let life = 1.0 / rate;
-    let coef = if life < 3.0 {
-        1.0
-    } else if life < 5.0 {
+    let coef = if (3.0..=4.0).contains(&life) {
         1.5
-    } else if life <= 6.0 {
+    } else if (5.0..=6.0).contains(&life) {
         2.0
-    } else {
+    } else if life > 6.0 {
         2.5
+    } else {
+        return Value::Error(ErrorKind::Num);
     };
     let r = rate * coef;
     let round = |x: f64| super::math::round_digits(x, 0.0, super::math::Rounding::HalfAway);
@@ -1050,8 +1092,9 @@ fn amor(ctx: &mut Ctx, a: &[Value], degressive: bool) -> Value {
         } else {
             dep = round(book * r);
         }
+        // 잔존가 아래로 내려가면 그 기간부터 0 (AMORDEGRC(…,5,0.15,1) = 0, 대조 실험 financial)
         if book - dep < salv {
-            dep = (book - salv).max(0.0);
+            return Value::Number(0.0);
         }
         book -= dep;
         p += 1.0;

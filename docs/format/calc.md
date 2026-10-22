@@ -153,6 +153,13 @@ CLI: `rcell calc 문서.cell [--diff]` — 다시 계산해 저장하거나, `--
 | DB | 수명의 소수 부분을 버리지 않는다 (기간은 버린다): `DB(1000000,100000,6.5,2)` = 209196 |
 | DDB | 장부가 × 율 과 장부가 − 잔존가 가운데 작은 것 — 잔존가가 크면 음수 (`DDB(100,200,5,1)` = −100). 기간 < 1 은 #NUM!, 소수 기간은 정수 기간 장부가를 직선으로 이은 값의 차 (`DDB(2400,300,10,2.5)` = 345.6) |
 | DOLLARDE·DOLLARFR | 분모 자릿수의 10 거듭제곱은 적어도 10 (`DOLLARDE(1.1,1)` = 2) |
+| PV·PMT·NPER | 이율 −1 은 PV #DIV/0!·PMT #NUM!, NPER 의 이율·지급액 0 은 #DIV/0!. PMT 는 −(pv + fv/g)·r/((1+rt)(1 − 1/g)) 꼴 (`PMT(1E-10,10,1000)` = −99.9999917259636) |
+| IPMT·PPMT·NPV·MIRR | IPMT 는 기간이 횟수를 넘어도 계산(0), PPMT 는 #NUM!. NPV 는 현금 흐름 없이도 0. MIRR 이율 −1 이하 #NUM! |
+| TBILLPRICE·TBILLEQ·RECEIVED | 음수 가격·분모를 그대로 낸다. TBILLEQ 는 만기가 반년을 넘어도 365·d/(360 − d·일수) |
+| PRICE·YIELD | 남은 지급이 하나여도 일반식(할인 합). 이자 기간 일수 E 는 기준 0·2·4 가 360/횟수, 1·3 은 실제 일수. YIELD 는 그 식의 해 (한셀의 반복은 1E-9 안에서 멈춘 값) |
+| PRICEMAT·YIELDMAT | 기준 1 은 구간마다 YEARFRAC(…,1) 로 햇수를 잰다 |
+| ACCRINT | 비운 액면은 1000. 기준 1 은 첫 이자일로 센 이자 기간마다 (겹친 일수 / 기간 일수) × 액면 × 율 / 횟수 |
+| AMORDEGRC | 수명 1/율 이 3 미만이거나 4–5 사이면 #NUM!, 장부가가 잔존가 아래로 내려가는 기간부터 0 |
 
 ### 단위 환산
 
@@ -250,5 +257,7 @@ VALUETOTEXT, VSTACK, WON, XMATCH. rcell 은 `CalcOptions::excel_functions` 를 �
 | BESSELI 의 아주 작은 값 | 한셀 적분의 반올림 오차 1E-17 쯤 (`BESSELI(0,1)` = −8E-20, rcell 0) |
 | BESSELY | x 가 15 쯤부터 거듭제곱 급수가 자릿수를 잃는다 (`BESSELY(50,0)` = 113.3) — 같은 식을 찾지 못했다 |
 | GAMMA(음수) | 7E-8 상대 오차 |
-| XIRR·YIELD·ODDF… 등 일부 재무 함수 | 반복 끝내는 조건·날짜 셈이 다르다 |
+| RATE·XIRR·YIELD | 해에 가까워 멈추는 조건이 달라 1E-9 쯤 다르다. RATE 는 해가 0 이면 한셀이 2.4E-9 같은 값을 낸다 (rcell #NUM!) |
+| ODDFPRICE·ODDFYIELD·ODDLPRICE·ODDLYIELD | 한셀 값이 엑셀 도움말 예(113.60)와도 다르다 (113.6086) — 식을 찾지 못했다 |
+| IRR | 범위에 글·논리 칸이 섞인 `IRR(Data!C1:C10)` 이 한셀은 #NUM! |
 | MINVERSE(특이 행렬) | #NUM! 이 아니라 숫자를 낸다 |
