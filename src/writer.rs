@@ -1230,7 +1230,10 @@ fn t_el(text: &str) -> String {
         || text.ends_with(char::is_whitespace)
         || text.contains('\n');
     if preserve {
-        format!("<x:t xml:space=\"preserve\">{}</x:t>", esc(&crate::text::xstring_encode(text)))
+        format!(
+            "<x:t xml:space=\"preserve\">{}</x:t>",
+            esc(&crate::text::xstring_encode(text))
+        )
     } else {
         format!("<x:t>{}</x:t>", esc(&crate::text::xstring_encode(text)))
     }
@@ -1384,7 +1387,11 @@ fn sheet_xml(
                     let _ = write!(s, " t=\"d\">{f}<x:v>{}</x:v></x:c>", esc(d));
                 }
                 CellValue::Text(t) if !f.is_empty() => {
-                    let _ = write!(s, " t=\"str\">{f}<x:v>{}</x:v></x:c>", esc(&crate::text::xstring_encode(t)));
+                    let _ = write!(
+                        s,
+                        " t=\"str\">{f}<x:v>{}</x:v></x:c>",
+                        esc(&crate::text::xstring_encode(t))
+                    );
                 }
                 CellValue::Text(t) => {
                     let i = sst.add(t, rich.get(t.as_str()).copied());

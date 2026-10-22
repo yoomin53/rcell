@@ -126,7 +126,8 @@ pub fn serial_from_ymd(year: i64, month: i64, day: i64, date1904: bool) -> Optio
 
 /// 일련 번호(정수 부분) → (연, 월, 일). 0 은 1900-01-00.
 pub fn ymd_from_serial(serial: f64, date1904: bool) -> Option<(i64, u32, u32)> {
-    if !serial.is_finite() || serial < min_serial(date1904) || serial >= max_serial(date1904) + 1.0 {
+    if !serial.is_finite() || serial < min_serial(date1904) || serial >= max_serial(date1904) + 1.0
+    {
         return None;
     }
     let mut n = serial.floor() as i64;
@@ -167,7 +168,11 @@ pub fn hms_from_serial(serial: f64) -> (u32, u32, u32) {
     if secs >= 86_400 {
         secs -= 86_400;
     }
-    ((secs / 3600) as u32, ((secs / 60) % 60) as u32, (secs % 60) as u32)
+    (
+        (secs / 3600) as u32,
+        ((secs / 60) % 60) as u32,
+        (secs % 60) as u32,
+    )
 }
 
 /// `t="d"` 셀 값 (ISO 8601) → 일련 번호
@@ -286,7 +291,10 @@ pub fn parse_time(s: &str, standalone: bool) -> Option<f64> {
     let sec: f64 = match parts.get(2) {
         Some(x) => {
             let (i, f) = x.split_once('.').unwrap_or((x, ""));
-            if !all_digits(i) || (!f.is_empty() && !all_digits(f)) || (x.contains('.') && f.is_empty()) {
+            if !all_digits(i)
+                || (!f.is_empty() && !all_digits(f))
+                || (x.contains('.') && f.is_empty())
+            {
                 return None;
             }
             x.parse().ok()?
@@ -315,8 +323,18 @@ const MONTHS: [&str; 12] = [
     "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
 ];
 const MONTH_NAMES: [&str; 12] = [
-    "january", "february", "march", "april", "may", "june", "july", "august", "september",
-    "october", "november", "december",
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
 ];
 
 /// 달 이름 → 번호. `full` 이면 전체 이름도 받는다 (세 글자 약어는 늘 받는다).
@@ -345,7 +363,11 @@ fn year_of(s: &str) -> Option<i64> {
 }
 
 fn num(s: &str) -> Option<i64> {
-    if all_digits(s) && s.len() <= 5 { s.parse().ok() } else { None }
+    if all_digits(s) && s.len() <= 5 {
+        s.parse().ok()
+    } else {
+        None
+    }
 }
 
 fn ymd_checked(y: i64, m: i64, d: i64, date1904: bool) -> Option<f64> {
@@ -477,7 +499,10 @@ mod tests {
         assert_eq!(serial_from_ymd(2026, 10, 19, false), Some(46314.0));
         assert_eq!(serial_from_ymd(1900, 1, 0, false), Some(0.0));
         assert_eq!(serial_from_ymd(9999, 12, 31, false), Some(MAX_SERIAL_1900));
-        assert_eq!(serial_from_ymd(2026, 13, 1, false), serial_from_ymd(2027, 1, 1, false));
+        assert_eq!(
+            serial_from_ymd(2026, 13, 1, false),
+            serial_from_ymd(2027, 1, 1, false)
+        );
         assert_eq!(ymd_from_serial(60.0, false), Some((1900, 2, 29)));
         assert_eq!(ymd_from_serial(61.0, false), Some((1900, 3, 1)));
         assert_eq!(ymd_from_serial(46314.75, false), Some((2026, 10, 19)));

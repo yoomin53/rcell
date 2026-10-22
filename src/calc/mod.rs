@@ -165,7 +165,10 @@ fn collect(eng: &Engine) -> (Vec<FormulaResult>, CalcReport) {
         } else {
             CellStatus::Computed
         };
-        if matches!(status, CellStatus::Computed | CellStatus::Volatile | CellStatus::Cycle) {
+        if matches!(
+            status,
+            CellStatus::Computed | CellStatus::Volatile | CellStatus::Cycle
+        ) {
             report.computed += 1;
         }
         match f.array {
@@ -254,12 +257,19 @@ pub fn evaluate_formula(
 ) -> Result<CellValue, ParseError> {
     let e = parser::parse(formula)?;
     let mut eng = engine_for(wb, &CalcOptions::default());
-    Ok(eng.evaluate_expr(&e, sheet as u32, at.row, at.col).to_cell())
+    Ok(eng
+        .evaluate_expr(&e, sheet as u32, at.row, at.col)
+        .to_cell())
 }
 
 /// 계산한 값과 한셀의 캐시 값이 같은가: 숫자는 상대 오차 1e-12 이내이거나 셀 서식으로 같은 모양,
 /// 글은 그대로, 논리, 오류는 종류.
-pub fn same_value(computed: &CellValue, cached: &CellValue, num_fmt: Option<&str>, date1904: bool) -> bool {
+pub fn same_value(
+    computed: &CellValue,
+    cached: &CellValue,
+    num_fmt: Option<&str>,
+    date1904: bool,
+) -> bool {
     match (computed, cached) {
         (CellValue::Number(a), CellValue::Number(b)) => {
             if a == b || (a - b).abs() <= 1e-12 * a.abs().max(b.abs()) {

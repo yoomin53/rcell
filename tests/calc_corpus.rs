@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 use rcell::calc::{CalcOptions, CellStatus};
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
     entries.sort();
     for p in entries {
@@ -44,7 +46,10 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 fn untrusted(rel: &str) -> bool {
     let r = rel.replace('\\', "/");
     let first = r.split('/').next().unwrap_or("");
-    if matches!(first, "probe-in" | "probe2-in" | "probe4-in" | "probe" | "probe2") {
+    if matches!(
+        first,
+        "probe-in" | "probe2-in" | "probe4-in" | "probe" | "probe2"
+    ) {
         return true;
     }
     first == "probe3" && r.ends_with(".legacy.cell")
@@ -127,7 +132,11 @@ fn corpus_formulas_match_hancell() {
                 t.volatile_mismatched += 1;
             } else {
                 t.mismatched += 1;
-                let sheet = wb.sheets.get(r.sheet).map(|s| s.name.as_str()).unwrap_or("?");
+                let sheet = wb
+                    .sheets
+                    .get(r.sheet)
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("?");
                 failures.push(format!(
                     "{rel} {sheet}!{} ={}  계산 {:?}  한셀 {:?}",
                     r.cell, r.formula, r.value, r.cached

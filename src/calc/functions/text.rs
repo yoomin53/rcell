@@ -9,19 +9,28 @@
 //! ([`crate::calc::cp949`]): 한글·한자·전각은 2바이트, 949 에 없는 글자와 U+0080–U+00FF 는 1바이트,
 //! 바이트 경계에 걸린 글자 반쪽은 공백 하나.
 
-use crate::calc::fm::Fm;
 use super::math::{Rounding, round_digits};
 use super::{Arg, FnSpec, MANY, R, V, bool_or, f, flatten, num_arg, num_or, opt, text_arg};
 use crate::calc::criteria::wildcard_match;
 use crate::calc::eval::Ctx;
+use crate::calc::fm::Fm;
 use crate::calc::value::{self, ErrorKind, Value};
 use crate::model::CellValue;
 
 const VR: &[Arg] = &[Arg::R, Arg::V, Arg::R];
 
 pub const FNS: &[FnSpec] = &[
-    f("LEN", 1, 1, V, |c, a| Value::Number(try_v!(text_arg(c, a, 0)).chars().count() as f64)),
-    f("LENB", 1, 1, V, |c, a| Value::Number(try_v!(text_arg(c, a, 0)).chars().map(byte_len).sum::<usize>() as f64)),
+    f("LEN", 1, 1, V, |c, a| {
+        Value::Number(try_v!(text_arg(c, a, 0)).chars().count() as f64)
+    }),
+    f("LENB", 1, 1, V, |c, a| {
+        Value::Number(
+            try_v!(text_arg(c, a, 0))
+                .chars()
+                .map(byte_len)
+                .sum::<usize>() as f64,
+        )
+    }),
     f("LEFT", 1, 2, V, |c, a| left_right(c, a, true, false)),
     f("RIGHT", 1, 2, V, |c, a| left_right(c, a, false, false)),
     f("LEFTB", 1, 2, V, |c, a| left_right(c, a, true, true)),
@@ -29,12 +38,21 @@ pub const FNS: &[FnSpec] = &[
     f("MID", 3, 3, V, |c, a| mid(c, a, false)),
     f("MIDB", 3, 3, V, |c, a| mid(c, a, true)),
     // 글자마다 한 글자로 바뀔 때만 (UPPER("ß") = "ß", 대조 실험 text)
-    f("LOWER", 1, 1, V, |c, a| Value::from(map_case(&try_v!(text_arg(c, a, 0)), false))),
-    f("UPPER", 1, 1, V, |c, a| Value::from(map_case(&try_v!(text_arg(c, a, 0)), true))),
+    f("LOWER", 1, 1, V, |c, a| {
+        Value::from(map_case(&try_v!(text_arg(c, a, 0)), false))
+    }),
+    f("UPPER", 1, 1, V, |c, a| {
+        Value::from(map_case(&try_v!(text_arg(c, a, 0)), true))
+    }),
     f("PROPER", 1, 1, V, proper),
     f("TRIM", 1, 1, V, |c, a| {
         let t = try_v!(text_arg(c, a, 0));
-        Value::from(t.split(' ').filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" "))
+        Value::from(
+            t.split(' ')
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
     }),
     f("CLEAN", 1, 1, V, |c, a| {
         let t = try_v!(text_arg(c, a, 0));
@@ -87,7 +105,10 @@ pub const FNS: &[FnSpec] = &[
     }),
     f("VALUE", 1, 1, V, |c, a| match &a[0] {
         // "TRUE" 는 1 (한셀). 논리 값 인수는 #VALUE!
-        Value::Text(s) => match value::parse_bool_text(s).map(|b| b as u8 as f64).or_else(|| value::parse_number(s, c.date1904())) {
+        Value::Text(s) => match value::parse_bool_text(s)
+            .map(|b| b as u8 as f64)
+            .or_else(|| value::parse_number(s, c.date1904()))
+        {
             Some(n) => Value::Number(n),
             None => Value::Error(ErrorKind::Value),
         },
@@ -139,9 +160,15 @@ pub const FNS: &[FnSpec] = &[
             None => Value::Error(ErrorKind::Value),
         }
     }),
-    f("ASC", 1, 1, V, |c, a| Value::from(to_halfwidth(&try_v!(text_arg(c, a, 0))))),
-    f("DBCS", 1, 1, V, |c, a| Value::from(to_fullwidth(&try_v!(text_arg(c, a, 0))))),
-    f("JUNJA", 1, 1, V, |c, a| Value::from(to_fullwidth(&try_v!(text_arg(c, a, 0))))),
+    f("ASC", 1, 1, V, |c, a| {
+        Value::from(to_halfwidth(&try_v!(text_arg(c, a, 0))))
+    }),
+    f("DBCS", 1, 1, V, |c, a| {
+        Value::from(to_fullwidth(&try_v!(text_arg(c, a, 0))))
+    }),
+    f("JUNJA", 1, 1, V, |c, a| {
+        Value::from(to_fullwidth(&try_v!(text_arg(c, a, 0))))
+    }),
     // PHONETIC: 범위 안 글 칸을 이어 붙인다 (숫자 칸은 빼고), 참조가 아니면 #NAME? (대조 실험 text)
     f("PHONETIC", 1, 1, R, |c, a| match &a[0] {
         Value::Ref(_) => {
@@ -185,8 +212,11 @@ fn byte_slice(chars: &[char], from: usize, to: usize) -> String {
 fn map_case(s: &str, upper: bool) -> String {
     s.chars()
         .map(|c| {
-            let mut it: Box<dyn Iterator<Item = char>> =
-                if upper { Box::new(c.to_uppercase()) } else { Box::new(c.to_lowercase()) };
+            let mut it: Box<dyn Iterator<Item = char>> = if upper {
+                Box::new(c.to_uppercase())
+            } else {
+                Box::new(c.to_lowercase())
+            };
             match (it.next(), it.next()) {
                 (Some(x), None) => x,
                 _ => c,
@@ -205,7 +235,11 @@ fn left_right(ctx: &mut Ctx, a: &[Value], left: bool, bytes: bool) -> Value {
     if bytes {
         let total: usize = chars.iter().map(|c| byte_len(*c)).sum();
         let n = (n as usize).min(total);
-        return Value::from(if left { byte_slice(&chars, 0, n) } else { byte_slice(&chars, total - n, total) });
+        return Value::from(if left {
+            byte_slice(&chars, 0, n)
+        } else {
+            byte_slice(&chars, total - n, total)
+        });
     }
     let take = (n as usize).min(chars.len());
     let s: String = if left {
@@ -356,7 +390,11 @@ fn replace(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
         let from = start as usize - 1;
         let mut out = byte_slice(&chars, 0, from.min(total));
         out.push_str(&new);
-        out.push_str(&byte_slice(&chars, from.saturating_add(n as usize).min(total), total));
+        out.push_str(&byte_slice(
+            &chars,
+            from.saturating_add(n as usize).min(total),
+            total,
+        ));
         return Value::from(out);
     }
     let (s, e) = {
@@ -433,9 +471,8 @@ fn find(ctx: &mut Ctx, a: &[Value], search: bool, bytes: bool) -> Value {
         hit
     } else {
         let nc: Vec<char> = needle.chars().collect();
-        (s..=hc.len().saturating_sub(nc.len()).max(s)).find(|&i| {
-            i + nc.len() <= hc.len() && hc[i..i + nc.len()] == nc[..]
-        })
+        (s..=hc.len().saturating_sub(nc.len()).max(s))
+            .find(|&i| i + nc.len() <= hc.len() && hc[i..i + nc.len()] == nc[..])
     };
     match found {
         Some(i) => {
@@ -465,7 +502,11 @@ fn numbervalue(ctx: &mut Ctx, a: &[Value]) -> Value {
         Some(v) => try_v!(ctx.text(v)).chars().next().unwrap_or(','),
         None => ',',
     };
-    let mut s: String = if dec == grp { t.to_string() } else { t.chars().filter(|&c| c != grp).collect() };
+    let mut s: String = if dec == grp {
+        t.to_string()
+    } else {
+        t.chars().filter(|&c| c != grp).collect()
+    };
     if dec != '.' {
         s = s.chars().map(|c| if c == dec { '.' } else { c }).collect();
     }
@@ -517,9 +558,21 @@ fn text(ctx: &mut Ctx, a: &[Value]) -> Value {
         _ => 0,
     };
     let out = crate::numfmt::format_padded(&v, &code, ctx.date1904());
-    let marks = out.text.chars().filter(|&c| c == crate::numfmt::PAD_CHAR).count();
-    let body: String = out.text.chars().filter(|&c| c != crate::numfmt::PAD_CHAR).collect();
-    Value::from(format!("{}{}", " ".repeat(pads.get(sec).copied().unwrap_or(0) + marks), body))
+    let marks = out
+        .text
+        .chars()
+        .filter(|&c| c == crate::numfmt::PAD_CHAR)
+        .count();
+    let body: String = out
+        .text
+        .chars()
+        .filter(|&c| c != crate::numfmt::PAD_CHAR)
+        .collect();
+    Value::from(format!(
+        "{}{}",
+        " ".repeat(pads.get(sec).copied().unwrap_or(0) + marks),
+        body
+    ))
 }
 
 /// 따옴표 밖의 "General"(대소문자 무시)을 날짜 기호로: G·g 는 지우고, e·E 는 연도 e, 다른 글자는 따옴표 글자
@@ -555,7 +608,9 @@ fn replace_general(code: &str) -> String {
 
 /// TEXT 의 서식 코드를 표시 엔진의 코드로 (위 규칙). (코드, 구역마다 앞에 붙일 공백 수) 또는 None (#VALUE!)
 fn text_code(code: &str) -> Option<(String, Vec<usize>)> {
-    const COLORS: [&str; 9] = ["black", "blue", "cyan", "green", "magenta", "red", "white", "yellow", "color"];
+    const COLORS: [&str; 9] = [
+        "black", "blue", "cyan", "green", "magenta", "red", "white", "yellow", "color",
+    ];
     let mut out = String::with_capacity(code.len() + 8);
     let mut pad = 0usize;
     let mut pads = vec![0usize];
@@ -571,14 +626,23 @@ fn text_code(code: &str) -> Option<(String, Vec<usize>)> {
         let c = chars[i];
         match c {
             '"' => {
-                let j = chars[i + 1..].iter().position(|&x| x == '"').map_or(chars.len(), |k| i + 1 + k);
+                let j = chars[i + 1..]
+                    .iter()
+                    .position(|&x| x == '"')
+                    .map_or(chars.len(), |k| i + 1 + k);
                 out.extend(&chars[i..(j + 1).min(chars.len())]);
                 i = j + 1;
                 continue;
             }
             '[' => {
-                let j = chars[i..].iter().position(|&x| x == ']').map_or(chars.len(), |k| i + k);
-                let inner: String = chars[i + 1..j.min(chars.len())].iter().collect::<String>().to_ascii_lowercase();
+                let j = chars[i..]
+                    .iter()
+                    .position(|&x| x == ']')
+                    .map_or(chars.len(), |k| i + k);
+                let inner: String = chars[i + 1..j.min(chars.len())]
+                    .iter()
+                    .collect::<String>()
+                    .to_ascii_lowercase();
                 if COLORS.iter().any(|k| inner.starts_with(k)) {
                     return None;
                 }
@@ -710,9 +774,17 @@ fn currency(ctx: &mut Ctx, a: &[Value], sym: &str) -> Value {
     let body = format_fixed(x.abs(), d as i32, true);
     let neg = round_digits(x, d, Rounding::HalfAway) < 0.0;
     if sym == "$" {
-        Value::from(if neg { format!("(${body})") } else { format!("${body}") })
+        Value::from(if neg {
+            format!("(${body})")
+        } else {
+            format!("${body}")
+        })
     } else {
-        Value::from(if neg { format!("-{sym}{body}") } else { format!("{sym}{body}") })
+        Value::from(if neg {
+            format!("-{sym}{body}")
+        } else {
+            format!("{sym}{body}")
+        })
     }
 }
 
@@ -749,7 +821,9 @@ pub fn number_string(n: u64, kind: u8) -> String {
         ),
         // 한셀은 參·拾 을 호환 한자(U+F96B, U+F973)로 쓴다 (KS X 1001 의 그 칸, 대조 실험 text)
         2 => (
-            &["", "壹", "貳", "\u{F96B}", "四", "伍", "\u{F9D1}", "七", "八", "九"],
+            &[
+                "", "壹", "貳", "\u{F96B}", "四", "伍", "\u{F9D1}", "七", "八", "九",
+            ],
             &["", "\u{F973}", "百", "阡"],
             &["", "萬", "億", "兆"],
         ),
@@ -804,7 +878,11 @@ fn numberstring(ctx: &mut Ctx, a: &[Value]) -> Value {
     }
     if kind == 3.0 {
         const D: [&str; 10] = ["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"];
-        let s: String = (n as u64).to_string().chars().map(|c| D[c.to_digit(10).unwrap_or(0) as usize]).collect();
+        let s: String = (n as u64)
+            .to_string()
+            .chars()
+            .map(|c| D[c.to_digit(10).unwrap_or(0) as usize])
+            .collect();
         return Value::from(s);
     }
     Value::from(number_string(n as u64, kind as u8))
@@ -826,7 +904,18 @@ fn bahttext(ctx: &mut Ctx, a: &[Value]) -> Value {
     let r = r.abs();
     let baht = r.trunc() as u64;
     let satang = ((r - r.trunc()) * 100.0).round() as u64;
-    const D: [&str; 10] = ["", "หนึ่ง", "สอง", "สาม", "สี่", "ห้า", "หก", "เจ็ด", "แปด", "เก้า"];
+    const D: [&str; 10] = [
+        "",
+        "หนึ่ง",
+        "สอง",
+        "สาม",
+        "สี่",
+        "ห้า",
+        "หก",
+        "เจ็ด",
+        "แปด",
+        "เก้า",
+    ];
     const P: [&str; 6] = ["", "สิบ", "ร้อย", "พัน", "หมื่น", "แสน"];
     fn say(n: u64) -> String {
         if n == 0 {

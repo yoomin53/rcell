@@ -23,24 +23,88 @@ const VVA: &[Arg] = &[Arg::V, Arg::V, Arg::V, Arg::A];
 
 pub const FNS: &[FnSpec] = &[
     f("ABS", 1, 1, V, |c, a| un(c, a, |x| Ok(x.abs()))),
-    f("SIGN", 1, 1, V, |c, a| un(c, a, |x| Ok(if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }))),
+    f("SIGN", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            Ok(if x > 0.0 {
+                1.0
+            } else if x < 0.0 {
+                -1.0
+            } else {
+                0.0
+            })
+        })
+    }),
     f("PI", 0, 0, V, |_, _| Value::Number(std::f64::consts::PI)),
-    f("SQRT", 1, 1, V, |c, a| un(c, a, |x| if x < 0.0 { Err(ErrorKind::Num) } else { Ok(x.sqrt()) })),
-    f("SQRTPI", 1, 1, V, |c, a| un(c, a, |x| if x < 0.0 { Err(ErrorKind::Num) } else { Ok((x * std::f64::consts::PI).sqrt()) })),
+    f("SQRT", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            if x < 0.0 {
+                Err(ErrorKind::Num)
+            } else {
+                Ok(x.sqrt())
+            }
+        })
+    }),
+    f("SQRTPI", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            if x < 0.0 {
+                Err(ErrorKind::Num)
+            } else {
+                Ok((x * std::f64::consts::PI).sqrt())
+            }
+        })
+    }),
     f("EXP", 1, 1, V, |c, a| un(c, a, |x| Ok(x.mexp()))),
-    f("LN", 1, 1, V, |c, a| un(c, a, |x| if x <= 0.0 { Err(ErrorKind::Num) } else { Ok(x.mln()) })),
-    f("LOG10", 1, 1, V, |c, a| un(c, a, |x| if x <= 0.0 { Err(ErrorKind::Num) } else { Ok(x.mlog10()) })),
+    f("LN", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            if x <= 0.0 {
+                Err(ErrorKind::Num)
+            } else {
+                Ok(x.mln())
+            }
+        })
+    }),
+    f("LOG10", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            if x <= 0.0 {
+                Err(ErrorKind::Num)
+            } else {
+                Ok(x.mlog10())
+            }
+        })
+    }),
     f("LOG", 1, 2, V, log),
     f("POWER", 2, 2, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
         let y = try_v!(num_arg(c, a, 1));
         crate::calc::eval::power(x, y)
     }),
-    f("SIN", 1, 1, V, |c, a| un(c, a, |x| trig_arg(x).map(libm::sin))),
-    f("COS", 1, 1, V, |c, a| un(c, a, |x| trig_arg(x).map(libm::cos))),
-    f("TAN", 1, 1, V, |c, a| un(c, a, |x| trig_arg(x).map(libm::tan))),
-    f("ASIN", 1, 1, V, |c, a| un(c, a, |x| if x.abs() > 1.0 { Err(ErrorKind::Num) } else { Ok(x.masin()) })),
-    f("ACOS", 1, 1, V, |c, a| un(c, a, |x| if x.abs() > 1.0 { Err(ErrorKind::Num) } else { Ok(x.macos()) })),
+    f("SIN", 1, 1, V, |c, a| {
+        un(c, a, |x| trig_arg(x).map(libm::sin))
+    }),
+    f("COS", 1, 1, V, |c, a| {
+        un(c, a, |x| trig_arg(x).map(libm::cos))
+    }),
+    f("TAN", 1, 1, V, |c, a| {
+        un(c, a, |x| trig_arg(x).map(libm::tan))
+    }),
+    f("ASIN", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            if x.abs() > 1.0 {
+                Err(ErrorKind::Num)
+            } else {
+                Ok(x.masin())
+            }
+        })
+    }),
+    f("ACOS", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            if x.abs() > 1.0 {
+                Err(ErrorKind::Num)
+            } else {
+                Ok(x.macos())
+            }
+        })
+    }),
     f("ATAN", 1, 1, V, |c, a| un(c, a, |x| Ok(x.matan()))),
     f("ATAN2", 2, 2, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
@@ -52,30 +116,82 @@ pub const FNS: &[FnSpec] = &[
     }),
     // 쌍곡 함수: 한셀은 e^x 를 pow(e, x) 로 구해 정의식 그대로 계산한다 (SINH(10) = 11013.232874703386,
     // SINH(1E-10) = 1.000000082740371E-10, ASINH(-1) ≠ −ASINH(1), 대조 실험 math). 넘치면 #NUM!.
-    f("SINH", 1, 1, V, |c, a| un(c, a, |x| Ok((ex(x) - ex(-x)) / 2.0))),
-    f("COSH", 1, 1, V, |c, a| un(c, a, |x| Ok((ex(x) + ex(-x)) / 2.0))),
-    f("TANH", 1, 1, V, |c, a| un(c, a, |x| {
-        let (p, q) = (ex(x), ex(-x));
-        let r = (p - q) / (p + q);
-        Ok(if r.is_nan() { x.signum() } else { r })
-    })),
-    f("ASINH", 1, 1, V, |c, a| un(c, a, |x| Ok((x + (x * x + 1.0).sqrt()).mln()))),
-    f("ACOSH", 1, 1, V, |c, a| un(c, a, |x| if x < 1.0 { Err(ErrorKind::Num) } else { Ok((x + (x * x - 1.0).sqrt()).mln()) })),
-    f("ATANH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() >= 1.0 { Err(ErrorKind::Num) } else { Ok(0.5 * ((1.0 + x) / (1.0 - x)).mln()) })),
-    f("COT", 1, 1, V, |c, a| un(c, a, |x| {
-        let x = trig_arg(x)?;
-        let t = x.mtan();
-        if t == 0.0 { Err(ErrorKind::Div0) } else { Ok(1.0 / t) }
-    })),
+    f("SINH", 1, 1, V, |c, a| {
+        un(c, a, |x| Ok((ex(x) - ex(-x)) / 2.0))
+    }),
+    f("COSH", 1, 1, V, |c, a| {
+        un(c, a, |x| Ok((ex(x) + ex(-x)) / 2.0))
+    }),
+    f("TANH", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            let (p, q) = (ex(x), ex(-x));
+            let r = (p - q) / (p + q);
+            Ok(if r.is_nan() { x.signum() } else { r })
+        })
+    }),
+    f("ASINH", 1, 1, V, |c, a| {
+        un(c, a, |x| Ok((x + (x * x + 1.0).sqrt()).mln()))
+    }),
+    f("ACOSH", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            if x < 1.0 {
+                Err(ErrorKind::Num)
+            } else {
+                Ok((x + (x * x - 1.0).sqrt()).mln())
+            }
+        })
+    }),
+    f("ATANH", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            if x.abs() >= 1.0 {
+                Err(ErrorKind::Num)
+            } else {
+                Ok(0.5 * ((1.0 + x) / (1.0 - x)).mln())
+            }
+        })
+    }),
+    f("COT", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            let x = trig_arg(x)?;
+            let t = x.mtan();
+            if t == 0.0 {
+                Err(ErrorKind::Div0)
+            } else {
+                Ok(1.0 / t)
+            }
+        })
+    }),
     // CSC(0)·CSCH(0) 은 #NUM! (1/0, 대조 실험 math)
-    f("CSC", 1, 1, V, |c, a| un(c, a, |x| Ok(1.0 / trig_arg(x)?.msin()))),
-    f("SEC", 1, 1, V, |c, a| un(c, a, |x| Ok(1.0 / trig_arg(x)?.mcos()))),
+    f("CSC", 1, 1, V, |c, a| {
+        un(c, a, |x| Ok(1.0 / trig_arg(x)?.msin()))
+    }),
+    f("SEC", 1, 1, V, |c, a| {
+        un(c, a, |x| Ok(1.0 / trig_arg(x)?.mcos()))
+    }),
     // COTH·CSCH·SECH 는 표준 tanh·sinh·cosh 의 역수 (COTH(1E+15) = 1, CSCH(1E+15) = 0)
-    f("COTH", 1, 1, V, |c, a| un(c, a, |x| if x == 0.0 { Err(ErrorKind::Div0) } else { Ok(1.0 / x.mtanh()) })),
+    f("COTH", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            if x == 0.0 {
+                Err(ErrorKind::Div0)
+            } else {
+                Ok(1.0 / x.mtanh())
+            }
+        })
+    }),
     f("CSCH", 1, 1, V, |c, a| un(c, a, |x| Ok(1.0 / x.msinh()))),
     f("SECH", 1, 1, V, |c, a| un(c, a, |x| Ok(1.0 / x.mcosh()))),
-    f("ACOT", 1, 1, V, |c, a| un(c, a, |x| Ok(std::f64::consts::FRAC_PI_2 - x.matan()))),
-    f("ACOTH", 1, 1, V, |c, a| un(c, a, |x| if x.abs() <= 1.0 { Err(ErrorKind::Num) } else { Ok(0.5 * ((x + 1.0) / (x - 1.0)).mln()) })),
+    f("ACOT", 1, 1, V, |c, a| {
+        un(c, a, |x| Ok(std::f64::consts::FRAC_PI_2 - x.matan()))
+    }),
+    f("ACOTH", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            if x.abs() <= 1.0 {
+                Err(ErrorKind::Num)
+            } else {
+                Ok(0.5 * ((x + 1.0) / (x - 1.0)).mln())
+            }
+        })
+    }),
     f("DEGREES", 1, 1, V, |c, a| un(c, a, |x| Ok(x.to_degrees()))),
     f("RADIANS", 1, 1, V, |c, a| un(c, a, |x| Ok(x.to_radians()))),
     f("INT", 1, 1, V, |c, a| un(c, a, |x| Ok(x.floor()))),
@@ -103,20 +219,26 @@ pub const FNS: &[FnSpec] = &[
         num((n / d).trunc())
     }),
     f("FACT", 1, 1, V, |c, a| un(c, a, fact)),
-    f("FACTDOUBLE", 1, 1, V, |c, a| un(c, a, |x| {
-        // FACTDOUBLE(-1) 은 #NUM!, FACTDOUBLE(-0.5) 는 1 (버린 값이 음수인가, 대조 실험 math)
-        let n = x.trunc();
-        if n < 0.0 { return Err(ErrorKind::Num); }
-        let mut r = 1.0f64;
-        let mut k = n;
-        // 300!! 이 f64 의 끝 근처 — 넘치면 #NUM!
-        while k > 1.0 {
-            r *= k;
-            if !r.is_finite() { return Err(ErrorKind::Num); }
-            k -= 2.0;
-        }
-        Ok(r)
-    })),
+    f("FACTDOUBLE", 1, 1, V, |c, a| {
+        un(c, a, |x| {
+            // FACTDOUBLE(-1) 은 #NUM!, FACTDOUBLE(-0.5) 는 1 (버린 값이 음수인가, 대조 실험 math)
+            let n = x.trunc();
+            if n < 0.0 {
+                return Err(ErrorKind::Num);
+            }
+            let mut r = 1.0f64;
+            let mut k = n;
+            // 300!! 이 f64 의 끝 근처 — 넘치면 #NUM!
+            while k > 1.0 {
+                r *= k;
+                if !r.is_finite() {
+                    return Err(ErrorKind::Num);
+                }
+                k -= 2.0;
+            }
+            Ok(r)
+        })
+    }),
     f("COMBIN", 2, 2, V, |c, a| {
         let n = try_v!(num_arg(c, a, 0)).trunc();
         let k = try_v!(num_arg(c, a, 1)).trunc();
@@ -146,9 +268,15 @@ pub const FNS: &[FnSpec] = &[
     f("SUMIF", 2, 3, RVR, sumif),
     pairs(f("SUMIFS", 3, MANY, RRV, sumifs), 2),
     f("SUMPRODUCT", 1, MANY, A, sumproduct),
-    f("SUMX2MY2", 2, 2, A, |c, a| sum_xy(c, a, |x, y| x * x - y * y)),
-    f("SUMX2PY2", 2, 2, A, |c, a| sum_xy(c, a, |x, y| x * x + y * y)),
-    f("SUMXMY2", 2, 2, A, |c, a| sum_xy(c, a, |x, y| (x - y) * (x - y))),
+    f("SUMX2MY2", 2, 2, A, |c, a| {
+        sum_xy(c, a, |x, y| x * x - y * y)
+    }),
+    f("SUMX2PY2", 2, 2, A, |c, a| {
+        sum_xy(c, a, |x, y| x * x + y * y)
+    }),
+    f("SUMXMY2", 2, 2, A, |c, a| {
+        sum_xy(c, a, |x, y| (x - y) * (x - y))
+    }),
     f("SERIESSUM", 4, 4, VVA, seriessum),
     f("SUBTOTAL", 1, MANY, VR, |c, a| subtotal(c, a, false)),
     f("SUBTOTALA", 1, MANY, VR, |c, a| subtotal(c, a, true)),
@@ -168,7 +296,9 @@ pub const FNS: &[FnSpec] = &[
         }
         Value::from(Array::new(n, n, d))
     }),
-    volatile(f("RAND", 0, 0, V, |c, _| Value::Number(c.engine().random()))),
+    volatile(f("RAND", 0, 0, V, |c, _| {
+        Value::Number(c.engine().random())
+    })),
     volatile(f("RANDBETWEEN", 2, 2, V, |c, a| {
         let lo = try_v!(num_arg(c, a, 0)).ceil();
         let hi = try_v!(num_arg(c, a, 1)).floor();
@@ -251,7 +381,11 @@ pub fn round_digits(x: f64, digits: f64, mode: Rounding) -> f64 {
         let f = 10f64.mpowi(-d);
         if !f.is_finite() {
             // ROUND·ROUNDDOWN(1.5,-400) = 0, ROUNDUP(1.5,-400) = #NUM! (대조 실험 math)
-            return if matches!(mode, Rounding::Up) { f64::NAN } else { 0.0 };
+            return if matches!(mode, Rounding::Up) {
+                f64::NAN
+            } else {
+                0.0
+            };
         }
         let y = round15(x / f);
         apply(y) * f
@@ -698,7 +832,11 @@ fn subtotal(ctx: &mut Ctx, a: &[Value], hancom_a: bool) -> Value {
             _ => return Value::Error(ErrorKind::NA),
         }
     }
-    let mode = if with_text { Agg::NumbersA } else { Agg::Numbers };
+    let mode = if with_text {
+        Agg::NumbersA
+    } else {
+        Agg::Numbers
+    };
     if kind == 3 {
         return Value::Number(vals.iter().filter(|v| !v.is_empty()).count() as f64);
     }
@@ -1015,7 +1153,10 @@ fn base(ctx: &mut Ctx, a: &[Value]) -> Value {
     let n = try_v!(num_arg(ctx, a, 0)).trunc();
     let radix = try_v!(num_arg(ctx, a, 1)).trunc();
     let min_len = try_v!(num_or(ctx, a, 2, 0.0)).trunc();
-    if !(0.0..9.007_199_254_740_992e15).contains(&n) || !(2.0..=36.0).contains(&radix) || !(0.0..=255.0).contains(&min_len) {
+    if !(0.0..9.007_199_254_740_992e15).contains(&n)
+        || !(2.0..=36.0).contains(&radix)
+        || !(0.0..=255.0).contains(&min_len)
+    {
         return Value::Error(ErrorKind::Num);
     }
     let mut s = to_radix(n as u64, radix as u32);
@@ -1031,7 +1172,11 @@ pub fn to_radix(mut n: u64, radix: u32) -> String {
     }
     let mut d = Vec::new();
     while n > 0 {
-        d.push(std::char::from_digit((n % radix as u64) as u32, radix).unwrap().to_ascii_uppercase());
+        d.push(
+            std::char::from_digit((n % radix as u64) as u32, radix)
+                .unwrap()
+                .to_ascii_uppercase(),
+        );
         n /= radix as u64;
     }
     d.iter().rev().collect()
@@ -1074,7 +1219,11 @@ fn randarray(ctx: &mut Ctx, a: &[Value]) -> Value {
     let data = (0..r * c)
         .map(|_| {
             let u = ctx.engine().random();
-            num(if whole { lo + (u * (hi - lo + 1.0)).floor() } else { lo + u * (hi - lo) })
+            num(if whole {
+                lo + (u * (hi - lo + 1.0)).floor()
+            } else {
+                lo + u * (hi - lo)
+            })
         })
         .collect();
     Value::from(Array::new(r, c, data))

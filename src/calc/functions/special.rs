@@ -232,8 +232,7 @@ pub fn norm_s_inv(p: f64) -> f64 {
             + 4.630_337_846_156_546)
             * r
             + 1.423_437_110_749_683_5)
-            / (((((((r * 1.050_750_071_644_416_9e-9 + 5.475_938_084_995_345e-4)
-                * r
+            / (((((((r * 1.050_750_071_644_416_9e-9 + 5.475_938_084_995_345e-4) * r
                 + 0.015_198_666_563_616_457)
                 * r
                 + 0.148_103_976_427_480_08)
@@ -259,8 +258,7 @@ pub fn norm_s_inv(p: f64) -> f64 {
             + 5.463_784_911_164_114)
             * r
             + 6.657_904_643_501_103)
-            / (((((((r * 2.044_263_103_389_939_7e-15 + 1.421_511_758_316_446e-7)
-                * r
+            / (((((((r * 2.044_263_103_389_939_7e-15 + 1.421_511_758_316_446e-7) * r
                 + 1.846_318_317_510_054_8e-5)
                 * r
                 + 7.868_691_311_456_133e-4)
@@ -460,9 +458,12 @@ pub fn gamma_p_inv(p: f64, a: f64) -> f64 {
         }
     }
     let x = solve_increasing(|x| gamma_p(a, x), p, 0.0, hi);
-    newton_refine(x, p, |x| gamma_p(a, x), |x| {
-        (-x + (a - 1.0) * x.mln() - ln_gamma(a)).mexp()
-    })
+    newton_refine(
+        x,
+        p,
+        |x| gamma_p(a, x),
+        |x| (-x + (a - 1.0) * x.mln() - ln_gamma(a)).mexp(),
+    )
 }
 
 /// I_x(a, b) = p 인 x
@@ -475,9 +476,12 @@ pub fn beta_i_inv(p: f64, a: f64, b: f64) -> f64 {
     }
     let x = solve_increasing(|x| beta_i(x, a, b), p, 0.0, 1.0);
     let lb = ln_beta(a, b);
-    let r = newton_refine(x, p, |x| beta_i(x, a, b), |x| {
-        ((a - 1.0) * x.mln() + (b - 1.0) * (1.0 - x).mln() - lb).mexp()
-    });
+    let r = newton_refine(
+        x,
+        p,
+        |x| beta_i(x, a, b),
+        |x| ((a - 1.0) * x.mln() + (b - 1.0) * (1.0 - x).mln() - lb).mexp(),
+    );
     r.clamp(0.0, 1.0)
 }
 
@@ -521,7 +525,11 @@ pub fn binom_coef(n: f64, k: f64) -> f64 {
             r = r * (n - k + i) / i;
             i += 1.0;
         }
-        return if r < 9.007_199_254_740_992e15 { r.round() } else { r };
+        return if r < 9.007_199_254_740_992e15 {
+            r.round()
+        } else {
+            r
+        };
     }
     (ln_gamma(n + 1.0) - ln_gamma(k + 1.0) - ln_gamma(n - k + 1.0)).mexp()
 }
@@ -560,7 +568,9 @@ pub fn t_cdf(t: f64, df: f64) -> f64 {
 
 /// t 분포 밀도
 pub fn t_pdf(t: f64, df: f64) -> f64 {
-    (ln_gamma((df + 1.0) / 2.0) - ln_gamma(df / 2.0) - 0.5 * (df * PI).mln()
+    (ln_gamma((df + 1.0) / 2.0)
+        - ln_gamma(df / 2.0)
+        - 0.5 * (df * PI).mln()
         - (df + 1.0) / 2.0 * (1.0 + t * t / df).mln())
     .mexp()
 }

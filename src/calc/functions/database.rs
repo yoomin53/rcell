@@ -64,7 +64,10 @@ fn matching_rows(ctx: &mut Ctx, db: &Array, crit: &Array) -> Result<Vec<usize>, 
         match crit.get(0, c) {
             Value::Text(h) => {
                 let f = value::fold(h);
-                cols.push((0..db.cols).find(|&k| matches!(db.get(0, k), Value::Text(x) if value::fold(x) == f)));
+                cols.push(
+                    (0..db.cols)
+                        .find(|&k| matches!(db.get(0, k), Value::Text(x) if value::fold(x) == f)),
+                );
             }
             Value::Empty => cols.push(None),
             _ => cols.push(None),
@@ -123,12 +126,22 @@ fn dfn(ctx: &mut Ctx, a: &[Value], kind: u8) -> Value {
             1 => vals[0].clone(),
             _ => Value::Error(ErrorKind::Num),
         },
-        2 => Value::Number(vals.iter().filter(|v| matches!(v, Value::Number(_))).count() as f64),
+        2 => Value::Number(
+            vals.iter()
+                .filter(|v| matches!(v, Value::Number(_)))
+                .count() as f64,
+        ),
         3 => Value::Number(vals.iter().filter(|v| !v.is_empty()).count() as f64),
         _ => {
             let nums: Vec<f64> = vals
                 .iter()
-                .filter_map(|v| if let Value::Number(n) = v { Some(*n) } else { None })
+                .filter_map(|v| {
+                    if let Value::Number(n) = v {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             match basic_aggregate(kind, &nums) {
                 Value::Number(n) => num(n),

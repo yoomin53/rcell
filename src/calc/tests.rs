@@ -180,7 +180,10 @@ fn dates() {
     assert_eq!(one("DATE(1900,2,29)"), n(60.0));
     assert_eq!(one("WEEKDAY(46314)"), n(2.0));
     assert_eq!(one("EOMONTH(46314,1)"), n(46356.0));
-    assert_eq!(one("DATEDIF(DATE(2020,1,15),DATE(2026,10,19),\"Y\")"), n(6.0));
+    assert_eq!(
+        one("DATEDIF(DATE(2020,1,15),DATE(2026,10,19),\"Y\")"),
+        n(6.0)
+    );
     assert_eq!(one("TODAY()"), n(46314.0));
     assert_eq!(one("YEAR(NOW())"), n(2026.0));
 }
@@ -188,7 +191,10 @@ fn dates() {
 #[test]
 fn names_sheets_and_chains() {
     let mut w = wb(vec![
-        sheet("첫 시트", &[("A1", "7"), ("A2", "=A1*2"), ("A3", "=A2+'둘'!A1")]),
+        sheet(
+            "첫 시트",
+            &[("A1", "7"), ("A2", "=A1*2"), ("A3", "=A2+'둘'!A1")],
+        ),
         sheet("둘", &[("A1", "=SUM('첫 시트'!A1:A2)")]),
     ]);
     w.defined_names.push(DefinedName {
@@ -219,7 +225,10 @@ fn long_chain_does_not_overflow() {
     for i in 2..=5000 {
         cells.push((format!("A{i}"), format!("=A{}+1", i - 1)));
     }
-    let refs: Vec<(&str, &str)> = cells.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let refs: Vec<(&str, &str)> = cells
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
     let w = wb(vec![sheet("S", &refs)]);
     assert_eq!(calc(&w, "A5000"), n(5000.0));
     // 역순 의존 (위 셀이 아래 셀을 참조)
@@ -227,14 +236,20 @@ fn long_chain_does_not_overflow() {
     for i in 1..5000 {
         cells.push((format!("A{i}"), format!("=A{}+1", i + 1)));
     }
-    let refs: Vec<(&str, &str)> = cells.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let refs: Vec<(&str, &str)> = cells
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
     let w = wb(vec![sheet("S", &refs)]);
     assert_eq!(calc(&w, "A1"), n(5000.0));
 }
 
 #[test]
 fn cycles_are_reported() {
-    let w = wb(vec![sheet("S", &[("A1", "=B1+1"), ("B1", "=A1+1"), ("C1", "=5")])]);
+    let w = wb(vec![sheet(
+        "S",
+        &[("A1", "=B1+1"), ("B1", "=A1+1"), ("C1", "=5")],
+    )]);
     let (_, report) = evaluate(&w, &CalcOptions::default());
     assert_eq!(report.cycles, 2);
     assert_eq!(calc(&w, "C1"), n(5.0));
@@ -279,7 +294,10 @@ fn structured_references() {
             ("C4", "30"),
             ("A5", "합계"),
             ("B5", "=SUBTOTAL(109,Table1[수량])"),
-            ("D2", "=Table1[[#This Row],[수량]]*Table1[[#This Row],[단가]]"),
+            (
+                "D2",
+                "=Table1[[#This Row],[수량]]*Table1[[#This Row],[단가]]",
+            ),
             ("D3", "=[@수량]*[@단가]"),
             ("E1", "=SUM(Table1[[수량]:[단가]])"),
             ("E2", "=ROWS(Table1[#All])"),
@@ -310,7 +328,11 @@ fn structured_references() {
     let w = wb(vec![s]);
     assert_eq!(calc(&w, "B5"), n(10.0));
     assert_eq!(calc(&w, "D2"), n(20.0));
-    assert_eq!(calc(&w, "D3"), e("#REF!"), "D 열은 표 밖이라 [@…] 의 표가 없다");
+    assert_eq!(
+        calc(&w, "D3"),
+        e("#REF!"),
+        "D 열은 표 밖이라 [@…] 의 표가 없다"
+    );
     assert_eq!(calc(&w, "E1"), n(70.0));
     assert_eq!(calc(&w, "E2"), n(5.0));
     assert_eq!(calc(&w, "E3"), n(3.0));
@@ -319,7 +341,11 @@ fn structured_references() {
     assert_eq!(calc(&w, "E6"), n(4.0));
     assert_eq!(calc(&w, "E7"), n(10.0));
     assert_eq!(calc(&w, "E8"), e("#REF!"));
-    assert_eq!(calc(&w, "E9"), e("#VALUE!"), "9행은 표의 데이터 행이 아니다");
+    assert_eq!(
+        calc(&w, "E9"),
+        e("#VALUE!"),
+        "9행은 표의 데이터 행이 아니다"
+    );
 }
 
 /// 모델의 배열 수식 (FormulaKind::Array + 범위): 범위 칸마다 결과
@@ -390,11 +416,23 @@ fn data_tables() {
             ..Default::default()
         }),
     };
-    s.cells.push(dt("E2", "E2:E3", DataTableInput { r1: Some("A1".into()), ..Default::default() }));
+    s.cells.push(dt(
+        "E2",
+        "E2:E3",
+        DataTableInput {
+            r1: Some("A1".into()),
+            ..Default::default()
+        },
+    ));
     s.cells.push(dt(
         "H2",
         "H2:I3",
-        DataTableInput { two_d: true, r1: Some("A1".into()), r2: Some("C1".into()), ..Default::default() },
+        DataTableInput {
+            two_d: true,
+            r1: Some("A1".into()),
+            r2: Some("C1".into()),
+            ..Default::default()
+        },
     ));
     s.cells.sort_by_key(|c| (c.r.row, c.r.col));
     let w = wb(vec![s]);

@@ -60,7 +60,9 @@ pub const FNS: &[FnSpec] = &[
         },
     }),
     f("FORMULATEXT", 1, 1, R, formulatext),
-    f("GETPIVOTDATA", 2, MANY, R, |_, _| Value::Error(ErrorKind::Value)),
+    f("GETPIVOTDATA", 2, MANY, R, |_, _| {
+        Value::Error(ErrorKind::Value)
+    }),
     f("RTD", 3, MANY, V, |_, _| Value::Error(ErrorKind::NA)),
     f("UNIQUE", 1, 3, &[Arg::A, Arg::V, Arg::V], unique),
     f("SORT", 1, 4, &[Arg::A, Arg::V, Arg::V, Arg::V], sort),
@@ -191,7 +193,13 @@ fn index(ctx: &mut Ctx, a: &[Value]) -> Value {
             } else {
                 (area.c0 + col as u32 - 1, area.c0 + col as u32 - 1)
             };
-            Value::Ref(Rc::new(vec![Area { r0, r1, c0, c1, ..area }]))
+            Value::Ref(Rc::new(vec![Area {
+                r0,
+                r1,
+                c0,
+                c1,
+                ..area
+            }]))
         }
         Value::Error(e) => Value::Error(*e),
         other => {
@@ -304,12 +312,17 @@ fn x_find(vals: &[Value], x: &Value, mm: f64, sm: f64) -> Option<usize> {
             let o = value::compare(v, x);
             let better = |b: usize| {
                 let ob = value::compare(v, &vals[b]);
-                if mm < 0.0 { ob == Ordering::Greater } else { ob == Ordering::Less }
+                if mm < 0.0 {
+                    ob == Ordering::Greater
+                } else {
+                    ob == Ordering::Less
+                }
             };
             if ((mm < 0.0 && o == Ordering::Less) || (mm > 0.0 && o == Ordering::Greater))
-                && best.is_none_or(better) {
-                    best = Some(i);
-                }
+                && best.is_none_or(better)
+            {
+                best = Some(i);
+            }
         }
     }
     best
@@ -332,7 +345,14 @@ fn vh_lookup(ctx: &mut Ctx, a: &[Value], vertical: bool) -> Value {
         return Value::Error(ErrorKind::Ref);
     }
     let keys: Vec<Value> = (0..len)
-        .map(|i| if vertical { arr.get(i, 0) } else { arr.get(0, i) }.clone())
+        .map(|i| {
+            if vertical {
+                arr.get(i, 0)
+            } else {
+                arr.get(0, i)
+            }
+            .clone()
+        })
         .collect();
     let found = if approx {
         approx_index(&keys, &x)
@@ -342,7 +362,12 @@ fn vh_lookup(ctx: &mut Ctx, a: &[Value], vertical: bool) -> Value {
     match found {
         Some(i) => {
             let k = n as usize - 1;
-            if vertical { arr.get(i, k) } else { arr.get(k, i) }.clone()
+            if vertical {
+                arr.get(i, k)
+            } else {
+                arr.get(k, i)
+            }
+            .clone()
         }
         None => Value::Error(ErrorKind::NA),
     }
@@ -356,12 +381,16 @@ fn lookup(ctx: &mut Ctx, a: &[Value]) -> Value {
             if arr.cols > arr.rows {
                 (
                     (0..arr.cols).map(|c| arr.get(0, c).clone()).collect(),
-                    (0..arr.cols).map(|c| arr.get(arr.rows - 1, c).clone()).collect(),
+                    (0..arr.cols)
+                        .map(|c| arr.get(arr.rows - 1, c).clone())
+                        .collect(),
                 )
             } else {
                 (
                     (0..arr.rows).map(|r| arr.get(r, 0).clone()).collect(),
-                    (0..arr.rows).map(|r| arr.get(r, arr.cols - 1).clone()).collect(),
+                    (0..arr.rows)
+                        .map(|r| arr.get(r, arr.cols - 1).clone())
+                        .collect(),
                 )
             }
         }
@@ -383,7 +412,10 @@ fn lookup(ctx: &mut Ctx, a: &[Value]) -> Value {
         }
     };
     match approx_index(&keys, &x) {
-        Some(i) => results.get(i).cloned().unwrap_or(Value::Error(ErrorKind::Ref)),
+        Some(i) => results
+            .get(i)
+            .cloned()
+            .unwrap_or(Value::Error(ErrorKind::Ref)),
         None => Value::Error(ErrorKind::NA),
     }
 }
@@ -412,12 +444,20 @@ fn xlookup(ctx: &mut Ctx, a: &[Value]) -> Value {
                 if i as u32 > ar.r1 - ar.r0 {
                     return Value::Error(ErrorKind::Value);
                 }
-                Area { r0: ar.r0 + i as u32, r1: ar.r0 + i as u32, ..ar }
+                Area {
+                    r0: ar.r0 + i as u32,
+                    r1: ar.r0 + i as u32,
+                    ..ar
+                }
             } else {
                 if i as u32 > ar.c1 - ar.c0 {
                     return Value::Error(ErrorKind::Value);
                 }
-                Area { c0: ar.c0 + i as u32, c1: ar.c0 + i as u32, ..ar }
+                Area {
+                    c0: ar.c0 + i as u32,
+                    c1: ar.c0 + i as u32,
+                    ..ar
+                }
             };
             Value::Ref(Rc::new(vec![sub]))
         }
@@ -512,8 +552,16 @@ fn offset(ctx: &mut Ctx, a: &[Value]) -> Value {
     }
     let r0 = area.r0 as f64 + dr;
     let c0 = area.c0 as f64 + dc;
-    let (r0, r1) = if h > 0.0 { (r0, r0 + h - 1.0) } else { (r0 + h + 1.0, r0) };
-    let (c0, c1) = if w > 0.0 { (c0, c0 + w - 1.0) } else { (c0 + w + 1.0, c0) };
+    let (r0, r1) = if h > 0.0 {
+        (r0, r0 + h - 1.0)
+    } else {
+        (r0 + h + 1.0, r0)
+    };
+    let (c0, c1) = if w > 0.0 {
+        (c0, c0 + w - 1.0)
+    } else {
+        (c0 + w + 1.0, c0)
+    };
     if r0 < 0.0 || c0 < 0.0 || r1 >= MAX_ROWS as f64 || c1 >= MAX_COLS as f64 {
         return Value::Error(ErrorKind::Ref);
     }
@@ -551,12 +599,20 @@ fn indirect(ctx: &mut Ctx, a: &[Value]) -> Value {
 /// R1C1 참조 (`R1C1`, `R[-1]C[2]`, `R1C1:R2C3`, `시트!R1C1`)
 fn r1c1(ctx: &mut Ctx, s: &str) -> Option<Value> {
     let (sheet, body) = match s.rfind('!') {
-        Some(p) => (Some(s[..p].trim_matches('\'').replace("''", "'")), &s[p + 1..]),
+        Some(p) => (
+            Some(s[..p].trim_matches('\'').replace("''", "'")),
+            &s[p + 1..],
+        ),
         None => (None, s),
     };
     let cur = ctx.sheet;
     let sheet_idx = match sheet {
-        Some(n) => ctx.engine().resolve_sheets(None, &SheetSpec::One(n), cur).ok()?.1,
+        Some(n) => {
+            ctx.engine()
+                .resolve_sheets(None, &SheetSpec::One(n), cur)
+                .ok()?
+                .1
+        }
         None => cur,
     };
     let one = |p: &str| -> Option<(u32, u32)> {
@@ -610,13 +666,21 @@ fn row_col(ctx: &mut Ctx, a: &[Value], row: bool) -> Value {
         Some(Value::Error(e)) => return Value::Error(*e),
         Some(_) => return Value::Error(ErrorKind::Value),
     };
-    let (lo, hi) = if row { (area.r0, area.r1) } else { (area.c0, area.c1) };
+    let (lo, hi) = if row {
+        (area.r0, area.r1)
+    } else {
+        (area.c0, area.c1)
+    };
     if ctx.array_mode && hi > lo {
         let e = ctx.effective_area(&area);
         let hi = if row { e.r1 } else { e.c1 };
         let data: Vec<Value> = (lo..=hi).map(|v| Value::Number(v as f64 + 1.0)).collect();
         let n = data.len();
-        return Value::from(if row { Array::new(n, 1, data) } else { Array::new(1, n, data) });
+        return Value::from(if row {
+            Array::new(n, 1, data)
+        } else {
+            Array::new(1, n, data)
+        });
     }
     Value::Number(lo as f64 + 1.0)
 }
@@ -639,7 +703,9 @@ fn dims(_ctx: &mut Ctx, a: &[Value], rows: bool) -> Value {
 /// 시트 이름에 따옴표가 필요한가
 pub fn quote_sheet(name: &str) -> String {
     let plain = !name.is_empty()
-        && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
         && !name.starts_with(|c: char| c.is_ascii_digit())
         && crate::calc::parser::parse(name).is_ok_and(|e| matches!(e, Expr::Name(_)));
     if plain {
@@ -675,8 +741,16 @@ fn address(ctx: &mut Ctx, a: &[Value]) -> Value {
             row as u32
         )
     } else {
-        let r = if ra { format!("R{}", row) } else { format!("R[{}]", row) };
-        let c = if ca { format!("C{}", col) } else { format!("C[{}]", col) };
+        let r = if ra {
+            format!("R{}", row)
+        } else {
+            format!("R[{}]", row)
+        };
+        let c = if ca {
+            format!("C{}", col)
+        } else {
+            format!("C[{}]", col)
+        };
         format!("{r}{c}")
     };
     match opt(a, 4) {
@@ -687,7 +761,11 @@ fn address(ctx: &mut Ctx, a: &[Value]) -> Value {
             } else {
                 // 따옴표 안의 작은따옴표를 겹치지 않는다 ('it's'!$C$2, 대조 실험 lookup)
                 let q = quote_sheet(&s);
-                let q = if q.starts_with('\'') { format!("'{s}'") } else { q };
+                let q = if q.starts_with('\'') {
+                    format!("'{s}'")
+                } else {
+                    q
+                };
                 Value::from(format!("{q}!{body}"))
             }
         }
@@ -715,12 +793,18 @@ fn unique(ctx: &mut Ctx, a: &[Value]) -> Value {
     let arr = try_v!(to_array(ctx, &a[0]));
     let by_col = try_v!(bool_or(ctx, a, 1, false));
     let once = try_v!(bool_or(ctx, a, 2, false));
-    let arr = if by_col { Rc::new(arr.transpose()) } else { arr };
+    let arr = if by_col {
+        Rc::new(arr.transpose())
+    } else {
+        arr
+    };
     let rows: Vec<Vec<Value>> = (0..arr.rows)
         .map(|r| (0..arr.cols).map(|c| arr.get(r, c).clone()).collect())
         .collect();
     let eq = |x: &Vec<Value>, y: &Vec<Value>| {
-        x.iter().zip(y).all(|(p, q)| value::lookup_eq(p, q) || (p.is_empty() && q.is_empty()))
+        x.iter()
+            .zip(y)
+            .all(|(p, q)| value::lookup_eq(p, q) || (p.is_empty() && q.is_empty()))
     };
     let mut out: Vec<Vec<Value>> = Vec::new();
     for (i, r) in rows.iter().enumerate() {
@@ -746,7 +830,11 @@ fn sort(ctx: &mut Ctx, a: &[Value]) -> Value {
     let idx = try_v!(num_or(ctx, a, 1, 1.0)).trunc();
     let order = try_v!(num_or(ctx, a, 2, 1.0)).trunc();
     let by_col = try_v!(bool_or(ctx, a, 3, false));
-    let arr = if by_col { Rc::new(arr.transpose()) } else { arr };
+    let arr = if by_col {
+        Rc::new(arr.transpose())
+    } else {
+        arr
+    };
     if idx < 1.0 || idx as usize > arr.cols || !(order == 1.0 || order == -1.0) {
         return Value::Error(ErrorKind::Value);
     }
@@ -777,14 +865,24 @@ fn filter(ctx: &mut Ctx, a: &[Value]) -> Value {
             }
         }
         if n == 0 {
-            return a.get(2).cloned().filter(|v| !v.is_empty()).unwrap_or(Value::Error(ErrorKind::Calc));
+            return a
+                .get(2)
+                .cloned()
+                .filter(|v| !v.is_empty())
+                .unwrap_or(Value::Error(ErrorKind::Calc));
         }
         return Value::from(Array::new(n, arr.cols, out));
     }
     if inc.rows == 1 && inc.cols == arr.cols {
-        let cols: Vec<usize> = (0..arr.cols).filter(|&c| keep(inc.get(0, c)).unwrap_or(false)).collect();
+        let cols: Vec<usize> = (0..arr.cols)
+            .filter(|&c| keep(inc.get(0, c)).unwrap_or(false))
+            .collect();
         if cols.is_empty() {
-            return a.get(2).cloned().filter(|v| !v.is_empty()).unwrap_or(Value::Error(ErrorKind::Calc));
+            return a
+                .get(2)
+                .cloned()
+                .filter(|v| !v.is_empty())
+                .unwrap_or(Value::Error(ErrorKind::Calc));
         }
         let mut out = Vec::new();
         for r in 0..arr.rows {

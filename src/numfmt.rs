@@ -34,7 +34,11 @@ thread_local! {
 pub const PAD_CHAR: char = '\u{E0FF}';
 
 fn pad_str() -> &'static str {
-    if PAD_MARK.with(|p| p.get()) { "\u{E0FF}" } else { " " }
+    if PAD_MARK.with(|p| p.get()) {
+        "\u{E0FF}"
+    } else {
+        " "
+    }
 }
 
 /// [`format`] 과 같되 `?` 자리 공백을 [`PAD_CHAR`] 로, 정수 값의 분수 자리도 그 글자로 채운다

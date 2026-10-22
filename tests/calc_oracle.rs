@@ -55,7 +55,10 @@ fn functions_match_hancell() {
         .expect("대조 결과 폴더")
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("cell")))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("cell"))
+        })
         .collect();
     files.sort();
     assert!(!files.is_empty(), "대조 결과 문서가 없음");
@@ -142,14 +145,22 @@ fn functions_match_hancell() {
         .filter(|(k, s)| hcell_name.get(*k) == Some(&s.0))
         .map(|(k, _)| k.as_str())
         .collect();
-    eprintln!("한셀이 모르는 함수 (모든 경우가 #NAME?, {}개): {}", unknown.len(), unknown.join(" "));
+    eprintln!(
+        "한셀이 모르는 함수 (모든 경우가 #NAME?, {}개): {}",
+        unknown.len(),
+        unknown.join(" ")
+    );
     let partial: Vec<String> = by_fn
         .iter()
         .filter(|(_, s)| s.0 != s.1)
         .map(|(k, s)| format!("{k} {}/{}", s.1, s.0))
         .collect();
     if !partial.is_empty() {
-        eprintln!("다른 경우가 있는 함수 ({}): {}", partial.len(), partial.join(", "));
+        eprintln!(
+            "다른 경우가 있는 함수 ({}): {}",
+            partial.len(),
+            partial.join(", ")
+        );
     }
     let limit: usize = std::env::var("RCELL_CALC_ORACLE_SHOW")
         .ok()

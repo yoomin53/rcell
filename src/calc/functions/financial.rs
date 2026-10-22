@@ -8,11 +8,11 @@
 //! 금액 부호는 스프레드시트 관례대로 받는 돈 +, 내는 돈 −. 날짜 기준(basis): 0 미국 30/360,
 //! 1 실제/실제, 2 실제/360, 3 실제/365, 4 유럽 30/360.
 
-use crate::calc::fm::Fm;
 use super::date::{days_30_360, year_frac};
 use super::{Agg, Arg, FnSpec, MANY, R, V, collect_numbers, f, flatten, num_arg, num_or, opt};
 use crate::calc::date::{days_in_month, serial_from_ymd, ymd_from_serial};
 use crate::calc::eval::Ctx;
+use crate::calc::fm::Fm;
 use crate::calc::value::{ErrorKind, Value, num, num_r};
 
 const VR: &[Arg] = &[Arg::V, Arg::R];
@@ -77,7 +77,11 @@ pub const FNS: &[FnSpec] = &[
             return Value::Error(ErrorKind::Div0);
         }
         let v = try_v!(collect_numbers(c, &a[1..], Agg::Numbers));
-        num(v.iter().enumerate().map(|(i, x)| x / (1.0 + r).mpowi(i as i32 + 1)).sum())
+        num(v
+            .iter()
+            .enumerate()
+            .map(|(i, x)| x / (1.0 + r).mpowi(i as i32 + 1))
+            .sum())
     }),
     f("XNPV", 3, 3, VRR, xnpv_fn),
     f("IRR", 1, 2, RV, irr),
@@ -287,7 +291,11 @@ pub const FNS: &[FnSpec] = &[
 const _UNUSED: (&[Arg], &[Arg]) = (R, RRV);
 
 fn three(ctx: &mut Ctx, a: &[Value]) -> Result<(f64, f64, f64), ErrorKind> {
-    Ok((num_arg(ctx, a, 0)?, num_arg(ctx, a, 1)?, num_arg(ctx, a, 2)?))
+    Ok((
+        num_arg(ctx, a, 0)?,
+        num_arg(ctx, a, 1)?,
+        num_arg(ctx, a, 2)?,
+    ))
 }
 
 fn pay_type(ctx: &mut Ctx, a: &[Value], i: usize) -> Result<f64, ErrorKind> {
@@ -375,7 +383,11 @@ fn rate(n: f64, p: f64, pv: f64, fv: f64, t: f64, guess: f64) -> Result<f64, Err
         }
         r = nr;
     }
-    if f(r).abs() < 1e-7 { Ok(r) } else { Err(ErrorKind::Num) }
+    if f(r).abs() < 1e-7 {
+        Ok(r)
+    } else {
+        Err(ErrorKind::Num)
+    }
 }
 
 pub fn ipmt(r: f64, per: f64, n: f64, pv: f64, fv_: f64, t: f64) -> Result<f64, ErrorKind> {
@@ -437,7 +449,11 @@ fn xnpv(r: f64, v: &[f64], d: &[f64]) -> f64 {
         .sum()
 }
 
-fn cash_and_dates(ctx: &mut Ctx, va: &Value, da: &Value) -> Result<(Vec<f64>, Vec<f64>), ErrorKind> {
+fn cash_and_dates(
+    ctx: &mut Ctx,
+    va: &Value,
+    da: &Value,
+) -> Result<(Vec<f64>, Vec<f64>), ErrorKind> {
     let vs = flatten(ctx, va);
     let ds = flatten(ctx, da);
     if vs.len() != ds.len() {
@@ -474,13 +490,24 @@ fn xnpv_fn(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn irr(ctx: &mut Ctx, a: &[Value]) -> Value {
     let v: Vec<f64> = flatten(ctx, &a[0])
         .into_iter()
-        .filter_map(|x| if let Value::Number(n) = x { Some(n) } else { None })
+        .filter_map(|x| {
+            if let Value::Number(n) = x {
+                Some(n)
+            } else {
+                None
+            }
+        })
         .collect();
     let g = try_v!(num_or(ctx, a, 1, 0.1));
     if !(v.iter().any(|&x| x > 0.0) && v.iter().any(|&x| x < 0.0)) {
         return Value::Error(ErrorKind::Num);
     }
-    let npv = |r: f64| -> f64 { v.iter().enumerate().map(|(i, x)| x / (1.0 + r).mpowi(i as i32)).sum() };
+    let npv = |r: f64| -> f64 {
+        v.iter()
+            .enumerate()
+            .map(|(i, x)| x / (1.0 + r).mpowi(i as i32))
+            .sum()
+    };
     let dnpv = |r: f64| -> f64 {
         v.iter()
             .enumerate()
@@ -506,7 +533,11 @@ fn newton(mut r: f64, f: impl Fn(f64) -> f64, df: impl Fn(f64) -> f64) -> Result
         }
         r = nr;
     }
-    if f(r).abs() < 1e-6 { Ok(r) } else { Err(ErrorKind::Num) }
+    if f(r).abs() < 1e-6 {
+        Ok(r)
+    } else {
+        Err(ErrorKind::Num)
+    }
 }
 
 fn xirr(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -531,7 +562,13 @@ fn xirr(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn mirr(ctx: &mut Ctx, a: &[Value]) -> Value {
     let v: Vec<f64> = flatten(ctx, &a[0])
         .into_iter()
-        .filter_map(|x| if let Value::Number(n) = x { Some(n) } else { None })
+        .filter_map(|x| {
+            if let Value::Number(n) = x {
+                Some(n)
+            } else {
+                None
+            }
+        })
         .collect();
     let fr = try_v!(num_arg(ctx, a, 1));
     let rr = try_v!(num_arg(ctx, a, 2));
@@ -562,13 +599,23 @@ fn db(ctx: &mut Ctx, a: &[Value]) -> Value {
     let life = try_v!(num_arg(ctx, a, 2));
     let per = try_v!(num_arg(ctx, a, 3)).trunc();
     let month = try_v!(num_or(ctx, a, 4, 12.0)).trunc();
-    if cost < 0.0 || salv < 0.0 || life <= 0.0 || per <= 0.0 || !(1.0..=12.0).contains(&month) || per > life + 1.0 {
+    if cost < 0.0
+        || salv < 0.0
+        || life <= 0.0
+        || per <= 0.0
+        || !(1.0..=12.0).contains(&month)
+        || per > life + 1.0
+    {
         return Value::Error(ErrorKind::Num);
     }
     if cost == 0.0 {
         return Value::Number(0.0);
     }
-    let rate = super::math::round_digits(1.0 - (salv / cost).mpow(1.0 / life), 3.0, super::math::Rounding::HalfAway);
+    let rate = super::math::round_digits(
+        1.0 - (salv / cost).mpow(1.0 / life),
+        3.0,
+        super::math::Rounding::HalfAway,
+    );
     let mut total = 0.0;
     let mut dep = cost * rate * month / 12.0;
     if per == 1.0 {
@@ -632,7 +679,9 @@ fn ddb(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     if per.fract() != 0.0 {
-        return num(ddb_book(cost, salv, life, per - 1.0, factor) - ddb_book(cost, salv, life, per, factor));
+        return num(
+            ddb_book(cost, salv, life, per - 1.0, factor) - ddb_book(cost, salv, life, per, factor)
+        );
     }
     num(ddb_period(cost, salv, life, per, factor))
 }
@@ -649,7 +698,14 @@ fn vdb(ctx: &mut Ctx, a: &[Value]) -> Value {
         Some(v) => try_v!(ctx.boolean(v)),
         None => false,
     };
-    if cost < 0.0 || salv < 0.0 || life <= 0.0 || start < 0.0 || end < start || end > life || factor <= 0.0 {
+    if cost < 0.0
+        || salv < 0.0
+        || life <= 0.0
+        || start < 0.0
+        || end < start
+        || end > life
+        || factor <= 0.0
+    {
         return Value::Error(ErrorKind::Num);
     }
     // 기간 단위로 나눠 합한다 (정수 경계마다)
@@ -665,7 +721,11 @@ fn vdb(ctx: &mut Ctx, a: &[Value]) -> Value {
             let frac = seg_end - t;
             let ddb = book * rate;
             let remaining = life - t;
-            let sl = if remaining > 0.0 { (book - salv) / remaining } else { 0.0 };
+            let sl = if remaining > 0.0 {
+                (book - salv) / remaining
+            } else {
+                0.0
+            };
             let per_dep = if !no_switch && (switched || sl > ddb) {
                 switched = true;
                 sl
@@ -760,7 +820,11 @@ fn year_basis(b: u8, s: f64, date1904: bool) -> f64 {
     match b {
         1 => {
             let y = ymd_from_serial(s, date1904).map(|x| x.0).unwrap_or(1900);
-            if crate::calc::date::is_leap(y) { 366.0 } else { 365.0 }
+            if crate::calc::date::is_leap(y) {
+                366.0
+            } else {
+                365.0
+            }
         }
         3 => 365.0,
         _ => 360.0,
@@ -807,7 +871,11 @@ fn coup(ctx: &mut Ctx, a: &[Value], what: u8) -> Value {
     match what {
         0 => num(day_count(pcd, s, b, d1904)),
         1 => num(e),
-        2 => num(if b == 0 || b == 4 { e - day_count(pcd, s, b, d1904) } else { ncd - s }),
+        2 => num(if b == 0 || b == 4 {
+            e - day_count(pcd, s, b, d1904)
+        } else {
+            ncd - s
+        }),
         3 => num(ncd),
         4 => num(n),
         _ => num(pcd),
@@ -961,10 +1029,18 @@ fn yieldmat(ctx: &mut Ctx, a: &[Value]) -> Value {
 /// (PRICEMAT(…,1) = 99.98029785136376, 대조 실험 financial)
 fn mat_fracs(iss: f64, s: f64, m: f64, b: u8, d1904: bool) -> Result<(f64, f64, f64), ErrorKind> {
     if b == 1 {
-        return Ok((year_frac(iss, m, 1, d1904)?, year_frac(iss, s, 1, d1904)?, year_frac(s, m, 1, d1904)?));
+        return Ok((
+            year_frac(iss, m, 1, d1904)?,
+            year_frac(iss, s, 1, d1904)?,
+            year_frac(s, m, 1, d1904)?,
+        ));
     }
     let bb = year_basis(b, s, d1904);
-    Ok((day_count(iss, m, b, d1904) / bb, day_count(iss, s, b, d1904) / bb, day_count(s, m, b, d1904) / bb))
+    Ok((
+        day_count(iss, m, b, d1904) / bb,
+        day_count(iss, s, b, d1904) / bb,
+        day_count(s, m, b, d1904) / bb,
+    ))
 }
 
 /// 실제/실제 경과 이자: 첫 이자일을 기준으로 센 이자 기간마다 (겹친 일수 / 기간 일수) 를 더한다
@@ -1009,7 +1085,11 @@ fn accrint(ctx: &mut Ctx, a: &[Value]) -> Value {
     let set = try_v!(date_arg(ctx, a, 2));
     let rate = try_v!(num_arg(ctx, a, 3));
     // 비운 액면 인수는 1000 (ACCRINT(…,0.1,,2), 대조 실험 financial)
-    let par = if matches!(a.get(4), Some(Value::Empty)) { 1000.0 } else { try_v!(num_or(ctx, a, 4, 1000.0)) };
+    let par = if matches!(a.get(4), Some(Value::Empty)) {
+        1000.0
+    } else {
+        try_v!(num_or(ctx, a, 4, 1000.0))
+    };
     let fr = try_v!(freq(ctx, a, 5));
     let b = try_v!(basis(ctx, a, 6));
     if rate <= 0.0 || par <= 0.0 || iss >= set {
@@ -1032,7 +1112,14 @@ fn amor(ctx: &mut Ctx, a: &[Value], degressive: bool) -> Value {
     let period = try_v!(num_arg(ctx, a, 4)).trunc();
     let rate = try_v!(num_arg(ctx, a, 5));
     let b = try_v!(basis(ctx, a, 6));
-    if b == 2 || rate <= 0.0 || cost < 0.0 || salv < 0.0 || salv > cost || period < 0.0 || first < purchased {
+    if b == 2
+        || rate <= 0.0
+        || cost < 0.0
+        || salv < 0.0
+        || salv > cost
+        || period < 0.0
+        || first < purchased
+    {
         return Value::Error(ErrorKind::Num);
     }
     let yf = try_v!(year_frac(purchased, first, b, ctx.date1904()));

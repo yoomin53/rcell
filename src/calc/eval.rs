@@ -31,7 +31,13 @@ pub struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    pub(crate) fn new(eng: &'a mut Engine, sheet: u32, row: u32, col: u32, array_mode: bool) -> Ctx<'a> {
+    pub(crate) fn new(
+        eng: &'a mut Engine,
+        sheet: u32,
+        row: u32,
+        col: u32,
+        array_mode: bool,
+    ) -> Ctx<'a> {
         Ctx {
             eng,
             sheet,
@@ -154,7 +160,11 @@ impl<'a> Ctx<'a> {
     pub fn scalar(&mut self, v: Value) -> Value {
         match v {
             Value::Ref(r) => self.intersect_ref(&r),
-            Value::Array(a) => a.data.first().cloned().unwrap_or(Value::Error(ErrorKind::Value)),
+            Value::Array(a) => a
+                .data
+                .first()
+                .cloned()
+                .unwrap_or(Value::Error(ErrorKind::Value)),
             other => other,
         }
     }
@@ -198,7 +208,10 @@ impl<'a> Ctx<'a> {
             return Value::Error(ErrorKind::Ref);
         }
         let scope = match &n.sheet {
-            Some(s) => match self.eng.resolve_sheets(None, &SheetSpec::One(s.clone()), self.sheet) {
+            Some(s) => match self
+                .eng
+                .resolve_sheets(None, &SheetSpec::One(s.clone()), self.sheet)
+            {
                 Ok((_, i, _)) => Some(i),
                 Err(e) => return Value::Error(e),
             },
@@ -507,7 +520,12 @@ impl<'a> Ctx<'a> {
     }
 
     /// 값 인수에 배열이 오면 원소마다 함수를 부른다
-    fn lift(&mut self, spec: &FnSpec, f: fn(&mut Ctx, &[Value]) -> Value, vals: Vec<Value>) -> Value {
+    fn lift(
+        &mut self,
+        spec: &FnSpec,
+        f: fn(&mut Ctx, &[Value]) -> Value,
+        vals: Vec<Value>,
+    ) -> Value {
         let mut rows = 1;
         let mut cols = 1;
         let mut first = true;
@@ -539,7 +557,11 @@ impl<'a> Ctx<'a> {
                 }
                 let out = f(self, &args);
                 data.push(match out {
-                    Value::Array(a) => a.data.first().cloned().unwrap_or(Value::Error(ErrorKind::Value)),
+                    Value::Array(a) => a
+                        .data
+                        .first()
+                        .cloned()
+                        .unwrap_or(Value::Error(ErrorKind::Value)),
                     Value::Ref(rf) => self.intersect_ref(&rf),
                     o => o,
                 });
@@ -568,7 +590,16 @@ pub fn is_reference_expr(e: &Expr) -> bool {
         Expr::Binary(BinaryOp::Range | BinaryOp::Union | BinaryOp::Intersect, _, _) => true,
         Expr::Call(c) => matches!(
             c.name.as_str(),
-            "INDEX" | "OFFSET" | "INDIRECT" | "IF" | "CHOOSE" | "IFERROR" | "IFNA" | "IFS" | "SWITCH" | "XLOOKUP"
+            "INDEX"
+                | "OFFSET"
+                | "INDIRECT"
+                | "IF"
+                | "CHOOSE"
+                | "IFERROR"
+                | "IFNA"
+                | "IFS"
+                | "SWITCH"
+                | "XLOOKUP"
         ),
         _ => false,
     }

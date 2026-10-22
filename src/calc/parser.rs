@@ -153,7 +153,10 @@ impl Lexer {
             let tok = match ch {
                 ' ' | '\t' | '\r' | '\n' | '\u{3000}' | '\u{a0}' => {
                     while self.i < self.c.len()
-                        && matches!(self.c[self.i], ' ' | '\t' | '\r' | '\n' | '\u{3000}' | '\u{a0}')
+                        && matches!(
+                            self.c[self.i],
+                            ' ' | '\t' | '\r' | '\n' | '\u{3000}' | '\u{a0}'
+                        )
                     {
                         self.i += 1;
                     }
@@ -508,7 +511,10 @@ impl Lexer {
         };
         // 항목 (괄호 안 글)과 항목 뒤 구분자
         let mut items: Vec<(String, Option<char>)> = Vec::new();
-        let mut t = TableRef { table, ..Default::default() };
+        let mut t = TableRef {
+            table,
+            ..Default::default()
+        };
         let mut body: &[char] = &inner;
         if body.first() == Some(&'@') {
             t.this_row = true;
@@ -1056,7 +1062,9 @@ mod tests {
         let e = parse("'[1]Sales Analysis'!$B$3").unwrap();
         assert!(matches!(e, Expr::Ref(RefExpr { book: Some(1), .. })));
         let e = parse("서식!$M$7").unwrap();
-        assert!(matches!(e, Expr::Ref(RefExpr { sheet: SheetSpec::One(ref s), .. }) if s == "서식"));
+        assert!(
+            matches!(e, Expr::Ref(RefExpr { sheet: SheetSpec::One(ref s), .. }) if s == "서식")
+        );
         let e = parse("MILEAGE_RATE*2").unwrap();
         assert!(matches!(e, Expr::Binary(BinaryOp::Mul, ref a, _) if matches!(**a, Expr::Name(_))));
         let e = parse("Sheet1!#REF!").unwrap();

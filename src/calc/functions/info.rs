@@ -14,16 +14,32 @@ const VR: &[Arg] = &[Arg::V, Arg::R];
 
 pub const FNS: &[FnSpec] = &[
     f("ISBLANK", 1, 1, V, |_, a| Value::Bool(a[0].is_empty())),
-    f("ISERR", 1, 1, V, |_, a| Value::Bool(matches!(a[0], Value::Error(e) if e != ErrorKind::NA))),
+    f("ISERR", 1, 1, V, |_, a| {
+        Value::Bool(matches!(a[0], Value::Error(e) if e != ErrorKind::NA))
+    }),
     f("ISERROR", 1, 1, V, |_, a| Value::Bool(a[0].is_error())),
-    f("ISNA", 1, 1, V, |_, a| Value::Bool(matches!(a[0], Value::Error(ErrorKind::NA)))),
-    f("ISLOGICAL", 1, 1, V, |_, a| Value::Bool(matches!(a[0], Value::Bool(_)))),
-    f("ISNUMBER", 1, 1, V, |_, a| Value::Bool(matches!(a[0], Value::Number(_)))),
-    f("ISTEXT", 1, 1, V, |_, a| Value::Bool(matches!(a[0], Value::Text(_)))),
-    f("ISNONTEXT", 1, 1, V, |_, a| Value::Bool(!matches!(a[0], Value::Text(_)))),
-    f("ISREF", 1, 1, R, |_, a| Value::Bool(matches!(a[0], Value::Ref(_)))),
+    f("ISNA", 1, 1, V, |_, a| {
+        Value::Bool(matches!(a[0], Value::Error(ErrorKind::NA)))
+    }),
+    f("ISLOGICAL", 1, 1, V, |_, a| {
+        Value::Bool(matches!(a[0], Value::Bool(_)))
+    }),
+    f("ISNUMBER", 1, 1, V, |_, a| {
+        Value::Bool(matches!(a[0], Value::Number(_)))
+    }),
+    f("ISTEXT", 1, 1, V, |_, a| {
+        Value::Bool(matches!(a[0], Value::Text(_)))
+    }),
+    f("ISNONTEXT", 1, 1, V, |_, a| {
+        Value::Bool(!matches!(a[0], Value::Text(_)))
+    }),
+    f("ISREF", 1, 1, R, |_, a| {
+        Value::Bool(matches!(a[0], Value::Ref(_)))
+    }),
     f("ISFORMULA", 1, 1, R, |c, a| match first_area(&a[0]) {
-        Some(ar) if ar.book == 0 => Value::Bool(c.engine().formula_at(ar.sheet, ar.r0, ar.c0).is_some()),
+        Some(ar) if ar.book == 0 => {
+            Value::Bool(c.engine().formula_at(ar.sheet, ar.r0, ar.c0).is_some())
+        }
         Some(_) => Value::Bool(false),
         // 참조가 아니면 오류 값이라도 #VALUE! (ISFORMULA(#N/A), 대조 실험 info)
         None => Value::Error(ErrorKind::Value),
@@ -50,7 +66,9 @@ pub const FNS: &[FnSpec] = &[
     f("NA", 0, 0, V, |_, _| Value::Error(ErrorKind::NA)),
     // 외부 함수 호출은 하지 않는다 (한셀도 #VALUE!, 대조 실험 newer)
     f("CALL", 1, MANY, V, |_, _| Value::Error(ErrorKind::Value)),
-    f("REGISTER.ID", 2, 3, V, |_, _| Value::Error(ErrorKind::Value)),
+    f("REGISTER.ID", 2, 3, V, |_, _| {
+        Value::Error(ErrorKind::Value)
+    }),
     f("ERROR.TYPE", 1, 1, V, error_type),
     f("ERRORTYPE", 1, 1, V, error_type),
     f("TYPE", 1, 1, R, |c, a| match &a[0] {
@@ -68,7 +86,9 @@ pub const FNS: &[FnSpec] = &[
     f("SHEET", 0, 1, R, sheet),
     f("SHEETS", 0, 1, R, |c, a| match a.first() {
         None | Some(Value::Empty) => Value::Number(c.engine().sheet_count() as f64),
-        Some(Value::Ref(r)) => Value::Number(r.iter().map(|x| (x.sheet_last - x.sheet + 1) as f64).sum()),
+        Some(Value::Ref(r)) => {
+            Value::Number(r.iter().map(|x| (x.sheet_last - x.sheet + 1) as f64).sum())
+        }
         Some(Value::Error(e)) => Value::Error(*e),
         Some(_) => Value::Error(ErrorKind::Value),
     }),
@@ -135,7 +155,11 @@ fn format_class(code: &str) -> String {
         .map(|(_, f)| f.chars().take_while(|&ch| ch == '0' || ch == '#').count())
         .unwrap_or(0);
     if lower.contains('y') || lower.contains('d') && !lower.contains('"') {
-        return if lower.contains('h') { "D4".into() } else { "D1".into() };
+        return if lower.contains('h') {
+            "D4".into()
+        } else {
+            "D1".into()
+        };
     }
     if lower.contains('h') || lower.contains('s') {
         return "D9".into();
@@ -197,11 +221,19 @@ fn cell(ctx: &mut Ctx, a: &[Value]) -> Value {
         "format" | "color" | "parentheses" => {
             let eng = ctx.engine();
             let xf = eng.cell_style(sheet, row, col) as usize;
-            let code = eng.xf_codes.get(xf).cloned().unwrap_or_else(|| "General".into());
+            let code = eng
+                .xf_codes
+                .get(xf)
+                .cloned()
+                .unwrap_or_else(|| "General".into());
             match what.as_str() {
                 "format" => {
                     let mut s = format_class(&code);
-                    if code.split(';').nth(1).is_some_and(|n| n.contains("[Red]") || n.contains("[red]")) {
+                    if code
+                        .split(';')
+                        .nth(1)
+                        .is_some_and(|n| n.contains("[Red]") || n.contains("[red]"))
+                    {
                         s.push('-');
                     }
                     if code.contains('(') {
@@ -210,9 +242,11 @@ fn cell(ctx: &mut Ctx, a: &[Value]) -> Value {
                     Value::from(s)
                 }
                 "color" => Value::Number(
-                    code.split(';').nth(1).is_some_and(|n| n.contains('[')) as u8 as f64,
+                    code.split(';').nth(1).is_some_and(|n| n.contains('[')) as u8 as f64
                 ),
-                _ => Value::Number(code.split(';').next().is_some_and(|p| p.contains('(')) as u8 as f64),
+                _ => Value::Number(
+                    code.split(';').next().is_some_and(|p| p.contains('(')) as u8 as f64,
+                ),
             }
         }
         "prefix" => {

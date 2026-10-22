@@ -151,7 +151,9 @@ impl Engine {
     pub fn new(wb: &Workbook, now: f64) -> Engine {
         let date1904 = wb.date1904;
         // 연도 없는 날짜 글(`1/15`)은 계산 시각의 해
-        crate::calc::date::set_this_year(crate::calc::date::ymd_from_serial(now, date1904).map(|d| d.0));
+        crate::calc::date::set_this_year(
+            crate::calc::date::ymd_from_serial(now, date1904).map(|d| d.0),
+        );
         let mut sheets = Vec::with_capacity(wb.sheets.len());
         let mut formulas = Vec::new();
         let mut sheet_index = HashMap::new();
@@ -230,10 +232,17 @@ impl Engine {
                     dt: f.data_table.as_ref().map(|d| {
                         let cell = |s: &Option<String>| {
                             s.as_deref()
-                                .and_then(|x| crate::model::CellRef::parse(x.replace('$', "").as_str()))
+                                .and_then(|x| {
+                                    crate::model::CellRef::parse(x.replace('$', "").as_str())
+                                })
                                 .map(|r| (r.row, r.col))
                         };
-                        DataTableSpec { two_d: d.two_d, row_input: d.row_input, r1: cell(&d.r1), r2: cell(&d.r2) }
+                        DataTableSpec {
+                            two_d: d.two_d,
+                            row_input: d.row_input,
+                            r1: cell(&d.r1),
+                            r2: cell(&d.r2),
+                        }
                     }),
                 });
             }
@@ -244,7 +253,12 @@ impl Engine {
                 fid,
                 styles,
                 formula_pos: Vec::new(),
-                hidden_rows: s.rows.iter().filter(|r| r.hidden).map(|r| r.index - 1).collect(),
+                hidden_rows: s
+                    .rows
+                    .iter()
+                    .filter(|r| r.hidden)
+                    .map(|r| r.index - 1)
+                    .collect(),
                 filter_mode: s.filter_mode || s.auto_filter.is_some(),
             };
             if !extra.is_empty() {
@@ -337,7 +351,9 @@ impl Engine {
                                 .map(|d| {
                                     d.cells
                                         .iter()
-                                        .map(|(r, v)| ((r.row, r.col), Value::from_cell(v, date1904)))
+                                        .map(|(r, v)| {
+                                            ((r.row, r.col), Value::from_cell(v, date1904))
+                                        })
                                         .collect()
                                 })
                                 .unwrap_or_default(),
@@ -438,16 +454,23 @@ impl Engine {
         self.names
             .iter()
             .find(|n| n.folded == f && n.scope == Some(want))
-            .or_else(|| self.names.iter().find(|n| n.folded == f && n.scope.is_none()))
+            .or_else(|| {
+                self.names
+                    .iter()
+                    .find(|n| n.folded == f && n.scope.is_none())
+            })
             .map(|n| n.expr.clone())
             // 이름이 없으면 표 이름: 표의 데이터 행 (`ROWS(Table1)`)
             .or_else(|| {
-                self.tables.iter().any(|t| t.names[0] == f || t.names[1] == f).then(|| {
-                    Rc::new(Expr::Table(crate::calc::ast::TableRef {
-                        table: name.to_string(),
-                        ..Default::default()
-                    }))
-                })
+                self.tables
+                    .iter()
+                    .any(|t| t.names[0] == f || t.names[1] == f)
+                    .then(|| {
+                        Rc::new(Expr::Table(crate::calc::ast::TableRef {
+                            table: name.to_string(),
+                            ..Default::default()
+                        }))
+                    })
             })
     }
 
@@ -520,7 +543,9 @@ impl Engine {
     }
 
     pub fn sheet_filtered(&self, sheet: u32) -> bool {
-        self.sheets.get(sheet as usize).is_some_and(|s| s.filter_mode)
+        self.sheets
+            .get(sheet as usize)
+            .is_some_and(|s| s.filter_mode)
     }
 
     /// 영역 안의 값이 있는 셀마다 (행 우선). 수식 셀은 먼저 계산한다.
@@ -735,7 +760,9 @@ impl Engine {
         for fid in order {
             self.run(fid);
         }
-        let tables: Vec<u32> = (0..self.formulas.len() as u32).filter(|&i| self.formulas[i as usize].dt.is_some()).collect();
+        let tables: Vec<u32> = (0..self.formulas.len() as u32)
+            .filter(|&i| self.formulas[i as usize].dt.is_some())
+            .collect();
         for fid in tables {
             self.compute_data_table(fid);
         }
@@ -773,9 +800,19 @@ impl Engine {
                     }
                     ((row0 - 1, col0 - 1), s)
                 } else if spec.row_input {
-                    ((r, col0 - 1), spec.r1.map(|i| vec![(i, (row0 - 1, c))]).unwrap_or_default())
+                    (
+                        (r, col0 - 1),
+                        spec.r1
+                            .map(|i| vec![(i, (row0 - 1, c))])
+                            .unwrap_or_default(),
+                    )
                 } else {
-                    ((row0 - 1, c), spec.r1.map(|i| vec![(i, (r, col0 - 1))]).unwrap_or_default())
+                    (
+                        (row0 - 1, c),
+                        spec.r1
+                            .map(|i| vec![(i, (r, col0 - 1))])
+                            .unwrap_or_default(),
+                    )
                 };
                 results.push(((r, c), self.what_if(sheet, edge, &sets, &affected)));
             }
@@ -805,7 +842,10 @@ impl Engine {
             })
             .collect();
         let hits = |a: &Area, s: u32, r: u32, c: u32| {
-            a.book == 0 && (a.sheet..=a.sheet_last).contains(&s) && (a.r0..=a.r1).contains(&r) && (a.c0..=a.c1).contains(&c)
+            a.book == 0
+                && (a.sheet..=a.sheet_last).contains(&s)
+                && (a.r0..=a.r1).contains(&r)
+                && (a.c0..=a.c1).contains(&c)
         };
         let mut on = vec![false; self.formulas.len()];
         let mut cells: Vec<(u32, u32, u32)> = inputs.iter().map(|&(r, c)| (sheet, r, c)).collect();
@@ -816,7 +856,10 @@ impl Engine {
                 if on[i] || self.formulas[i].dt.is_some() {
                     continue;
                 }
-                if list.iter().any(|a| cells.iter().any(|&(s, r, c)| hits(a, s, r, c))) {
+                if list
+                    .iter()
+                    .any(|a| cells.iter().any(|&(s, r, c)| hits(a, s, r, c)))
+                {
                     on[i] = true;
                     changed = true;
                     let f = &self.formulas[i];
@@ -829,11 +872,19 @@ impl Engine {
                 }
             }
         }
-        (0..self.formulas.len() as u32).filter(|&i| on[i as usize]).collect()
+        (0..self.formulas.len() as u32)
+            .filter(|&i| on[i as usize])
+            .collect()
     }
 
     /// 입력 셀 값을 잠시 바꾸고 가장자리 칸을 다시 계산한 값 (끝나면 모두 되돌린다)
-    fn what_if(&mut self, sheet: u32, edge: (u32, u32), sets: &[InputFrom], affected: &[u32]) -> Value {
+    fn what_if(
+        &mut self,
+        sheet: u32,
+        edge: (u32, u32),
+        sets: &[InputFrom],
+        affected: &[u32],
+    ) -> Value {
         // 넣을 값을 먼저 읽는다
         let vals: Vec<((u32, u32), Value)> = sets
             .iter()
@@ -910,12 +961,14 @@ impl Engine {
         col: u32,
     ) -> Result<Area, ErrorKind> {
         let def = if t.table.is_empty() {
-            self.tables
-                .iter()
-                .find(|d| d.sheet == sheet && (d.r0..=d.r1).contains(&row) && (d.c0..=d.c1).contains(&col))
+            self.tables.iter().find(|d| {
+                d.sheet == sheet && (d.r0..=d.r1).contains(&row) && (d.c0..=d.c1).contains(&col)
+            })
         } else {
             let k = value::fold(&t.table);
-            self.tables.iter().find(|d| d.names[0] == k || d.names[1] == k)
+            self.tables
+                .iter()
+                .find(|d| d.names[0] == k || d.names[1] == k)
         };
         let d = def.ok_or(ErrorKind::Ref)?;
         let data0 = d.r0 + d.header_rows;
@@ -959,7 +1012,10 @@ impl Engine {
                     let k = value::fold(n);
                     d.cols.iter().position(|c| *c == k).map(|i| d.c0 + i as u32)
                 };
-                let (x, y) = (find(a).ok_or(ErrorKind::Ref)?, find(b).ok_or(ErrorKind::Ref)?);
+                let (x, y) = (
+                    find(a).ok_or(ErrorKind::Ref)?,
+                    find(b).ok_or(ErrorKind::Ref)?,
+                );
                 (x.min(y), x.max(y))
             }
         };
@@ -1098,7 +1154,8 @@ impl Engine {
                         1 => {
                             // 되돌아가는 간선: 스택의 next..꼭대기가 순환
                             if let Some(p) = stack.iter().position(|&(x, _)| x == next) {
-                                cyclic.extend(stack[p..].iter().map(|&(x, _)| x).filter(|&x| x < nf));
+                                cyclic
+                                    .extend(stack[p..].iter().map(|&(x, _)| x).filter(|&x| x < nf));
                             }
                         }
                         _ => {}

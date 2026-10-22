@@ -12,8 +12,8 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::model::CellValue;
 use super::fm::Fm;
+use crate::model::CellValue;
 
 /// 오류 값.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -397,10 +397,17 @@ fn format_general(v: f64, round_large: bool) -> String {
         let (mant, e) = s.split_once('e').unwrap_or((&s, "0"));
         let d = mant.replace('.', "");
         let d = d[..keep.min(d.len())].trim_end_matches('0').to_string();
-        (if d.is_empty() { "0".to_string() } else { d }, e.parse().unwrap_or(0))
+        (
+            if d.is_empty() { "0".to_string() } else { d },
+            e.parse().unwrap_or(0),
+        )
     };
     let (r_digits, r_exp) = split(format!("{a:.14e}"), 15);
-    let (digits, exp) = if a >= 1e15 && !round_large { split(format!("{a:.15e}"), 15) } else { (r_digits.clone(), r_exp) };
+    let (digits, exp) = if a >= 1e15 && !round_large {
+        split(format!("{a:.15e}"), 15)
+    } else {
+        (r_digits.clone(), r_exp)
+    };
     let k = digits.len() as i32;
     let positional = if exp >= 0 {
         exp.max(a.mlog10().floor() as i32) < 20
@@ -408,7 +415,11 @@ fn format_general(v: f64, round_large: bool) -> String {
         k - 1 - exp <= 18
     };
     // 지수 꼴은 15자리 반올림 (2^69 → 5.90295810358706E+20)
-    let (digits, exp) = if positional { (digits, exp) } else { (r_digits, r_exp) };
+    let (digits, exp) = if positional {
+        (digits, exp)
+    } else {
+        (r_digits, r_exp)
+    };
     let k = digits.len() as i32;
     if positional {
         if exp >= 0 {
@@ -792,6 +803,9 @@ mod tests {
         assert_eq!(compare(&"abc".into(), &"ABC".into()), Equal);
         assert_eq!(compare(&Value::Empty, &Value::Number(0.0)), Equal);
         assert_eq!(compare(&Value::Empty, &"".into()), Equal);
-        assert_eq!(compare(&Value::Number(0.1 + 0.2), &Value::Number(0.3)), Equal);
+        assert_eq!(
+            compare(&Value::Number(0.1 + 0.2), &Value::Number(0.3)),
+            Equal
+        );
     }
 }

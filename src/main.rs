@@ -761,7 +761,8 @@ fn calc(file: &Path, show: bool, max: usize, output: Option<&Path>) -> rcell::Re
         ..Default::default()
     };
     let (results, report) = rcell::calc::evaluate(&wb, &opts);
-    let (mut same, mut differ, mut volatile_differ, mut no_cache) = (0usize, 0usize, 0usize, 0usize);
+    let (mut same, mut differ, mut volatile_differ, mut no_cache) =
+        (0usize, 0usize, 0usize, 0usize);
     let mut lines = Vec::new();
     for r in &results {
         match rcell::calc::matches_cached(&wb, r) {
@@ -773,7 +774,11 @@ fn calc(file: &Path, show: bool, max: usize, output: Option<&Path>) -> rcell::Re
                 } else {
                     differ += 1;
                 }
-                let sheet = wb.sheets.get(r.sheet).map(|s| s.name.as_str()).unwrap_or("?");
+                let sheet = wb
+                    .sheets
+                    .get(r.sheet)
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("?");
                 lines.push(format!(
                     "{sheet}!{}  ={}  계산 {:?}  파일 {:?}  [{:?}]",
                     r.cell, r.formula, r.value, r.cached, r.status

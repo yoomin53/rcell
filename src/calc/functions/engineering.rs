@@ -5,10 +5,10 @@
 
 //! 공학 함수: 진법 변환, 비트 연산, 복소수, 단위 변환, 베셀 함수, 오차 함수.
 
-use crate::calc::fm::Fm;
 use super::special as sp;
 use super::{FnSpec, MANY, R, V, f, flatten, num_arg, num_or, opt};
 use crate::calc::eval::Ctx;
+use crate::calc::fm::Fm;
 use crate::calc::value::{self, ErrorKind, Value, num};
 
 pub const FNS: &[FnSpec] = &[
@@ -54,9 +54,15 @@ pub const FNS: &[FnSpec] = &[
             None => num(sp::erf(lo)),
         }
     }),
-    f("ERF.PRECISE", 1, 1, V, |c, a| erf_nonneg(try_v!(num_arg(c, a, 0)), sp::erf)),
-    f("ERFC", 1, 1, V, |c, a| erf_nonneg(try_v!(num_arg(c, a, 0)), sp::erfc)),
-    f("ERFC.PRECISE", 1, 1, V, |c, a| erf_nonneg(try_v!(num_arg(c, a, 0)), sp::erfc)),
+    f("ERF.PRECISE", 1, 1, V, |c, a| {
+        erf_nonneg(try_v!(num_arg(c, a, 0)), sp::erf)
+    }),
+    f("ERFC", 1, 1, V, |c, a| {
+        erf_nonneg(try_v!(num_arg(c, a, 0)), sp::erfc)
+    }),
+    f("ERFC.PRECISE", 1, 1, V, |c, a| {
+        erf_nonneg(try_v!(num_arg(c, a, 0)), sp::erfc)
+    }),
     f("BESSELJ", 2, 2, V, |c, a| bessel(c, a, 'J')),
     f("BESSELY", 2, 2, V, |c, a| bessel(c, a, 'Y')),
     f("BESSELI", 2, 2, V, |c, a| bessel(c, a, 'I')),
@@ -79,50 +85,82 @@ pub const FNS: &[FnSpec] = &[
     f("IMREAL", 1, 1, V, |c, a| im1n(c, a, |z| Ok(z.0))),
     f("IMAGINARY", 1, 1, V, |c, a| im1n(c, a, |z| Ok(z.1))),
     f("IMABS", 1, 1, V, |c, a| im1n(c, a, |z| Ok(z.0.mhypot(z.1)))),
-    f("IMARGUMENT", 1, 1, V, |c, a| im1n(c, a, |z| {
-        if z.0 == 0.0 && z.1 == 0.0 { Err(ErrorKind::Div0) } else { Ok(z.1.matan2(z.0)) }
-    })),
-    f("IMCONJUGATE", 1, 1, V, |c, a| im1(c, a, |z| Ok((z.0, -z.1)))),
-    f("IMSQRT", 1, 1, V, |c, a| im1(c, a, |z| {
-        let r = z.0.mhypot(z.1).sqrt();
-        let t = z.1.matan2(z.0) / 2.0;
-        Ok((r * t.mcos(), r * t.msin()))
-    })),
+    f("IMARGUMENT", 1, 1, V, |c, a| {
+        im1n(c, a, |z| {
+            if z.0 == 0.0 && z.1 == 0.0 {
+                Err(ErrorKind::Div0)
+            } else {
+                Ok(z.1.matan2(z.0))
+            }
+        })
+    }),
+    f("IMCONJUGATE", 1, 1, V, |c, a| {
+        im1(c, a, |z| Ok((z.0, -z.1)))
+    }),
+    f("IMSQRT", 1, 1, V, |c, a| {
+        im1(c, a, |z| {
+            let r = z.0.mhypot(z.1).sqrt();
+            let t = z.1.matan2(z.0) / 2.0;
+            Ok((r * t.mcos(), r * t.msin()))
+        })
+    }),
     f("IMEXP", 1, 1, V, |c, a| im1(c, a, |z| Ok(cexp(z)))),
     f("IMLN", 1, 1, V, |c, a| im1(c, a, cln)),
-    f("IMLOG10", 1, 1, V, |c, a| im1(c, a, |z| {
-        let l = cln(z)?;
-        let k = std::f64::consts::LN_10;
-        Ok((l.0 / k, l.1 / k))
-    })),
-    f("IMLOG2", 1, 1, V, |c, a| im1(c, a, |z| {
-        let l = cln(z)?;
-        let k = std::f64::consts::LN_2;
-        Ok((l.0 / k, l.1 / k))
-    })),
+    f("IMLOG10", 1, 1, V, |c, a| {
+        im1(c, a, |z| {
+            let l = cln(z)?;
+            let k = std::f64::consts::LN_10;
+            Ok((l.0 / k, l.1 / k))
+        })
+    }),
+    f("IMLOG2", 1, 1, V, |c, a| {
+        im1(c, a, |z| {
+            let l = cln(z)?;
+            let k = std::f64::consts::LN_2;
+            Ok((l.0 / k, l.1 / k))
+        })
+    }),
     f("IMSIN", 1, 1, V, |c, a| im1(c, a, |z| Ok(csin(z)))),
     f("IMCOS", 1, 1, V, |c, a| im1(c, a, |z| Ok(ccos(z)))),
     // IMTAN·IMCOT·IMCSC·IMCSCH 는 두 배각 꼴: 분모 cos 2x + cosh 2y 등 (끝자리가 한셀과 같다, 대조 실험 engineering)
-    f("IMTAN", 1, 1, V, |c, a| im1(c, a, |z| {
-        let d = (2.0 * z.0).mcos() + (2.0 * z.1).mcosh();
-        Ok(((2.0 * z.0).msin() / d, (2.0 * z.1).msinh() / d))
-    })),
-    f("IMCOT", 1, 1, V, |c, a| im1(c, a, |z| {
-        let d = (2.0 * z.1).mcosh() - (2.0 * z.0).mcos();
-        Ok(((2.0 * z.0).msin() / d, -(2.0 * z.1).msinh() / d))
-    })),
-    f("IMSEC", 1, 1, V, |c, a| im1(c, a, |z| cdiv((1.0, 0.0), ccos(z)))),
-    f("IMCSC", 1, 1, V, |c, a| im1(c, a, |z| {
-        let d = (2.0 * z.1).mcosh() - (2.0 * z.0).mcos();
-        Ok((2.0 * z.0.msin() * z.1.mcosh() / d, -2.0 * z.0.mcos() * z.1.msinh() / d))
-    })),
+    f("IMTAN", 1, 1, V, |c, a| {
+        im1(c, a, |z| {
+            let d = (2.0 * z.0).mcos() + (2.0 * z.1).mcosh();
+            Ok(((2.0 * z.0).msin() / d, (2.0 * z.1).msinh() / d))
+        })
+    }),
+    f("IMCOT", 1, 1, V, |c, a| {
+        im1(c, a, |z| {
+            let d = (2.0 * z.1).mcosh() - (2.0 * z.0).mcos();
+            Ok(((2.0 * z.0).msin() / d, -(2.0 * z.1).msinh() / d))
+        })
+    }),
+    f("IMSEC", 1, 1, V, |c, a| {
+        im1(c, a, |z| cdiv((1.0, 0.0), ccos(z)))
+    }),
+    f("IMCSC", 1, 1, V, |c, a| {
+        im1(c, a, |z| {
+            let d = (2.0 * z.1).mcosh() - (2.0 * z.0).mcos();
+            Ok((
+                2.0 * z.0.msin() * z.1.mcosh() / d,
+                -2.0 * z.0.mcos() * z.1.msinh() / d,
+            ))
+        })
+    }),
     f("IMSINH", 1, 1, V, |c, a| im1(c, a, |z| Ok(csinh(z)))),
     f("IMCOSH", 1, 1, V, |c, a| im1(c, a, |z| Ok(ccosh(z)))),
-    f("IMSECH", 1, 1, V, |c, a| im1(c, a, |z| cdiv((1.0, 0.0), ccosh(z)))),
-    f("IMCSCH", 1, 1, V, |c, a| im1(c, a, |z| {
-        let d = (2.0 * z.0).mcosh() - (2.0 * z.1).mcos();
-        Ok((2.0 * z.0.msinh() * z.1.mcos() / d, -2.0 * z.0.mcosh() * z.1.msin() / d))
-    })),
+    f("IMSECH", 1, 1, V, |c, a| {
+        im1(c, a, |z| cdiv((1.0, 0.0), ccosh(z)))
+    }),
+    f("IMCSCH", 1, 1, V, |c, a| {
+        im1(c, a, |z| {
+            let d = (2.0 * z.0).mcosh() - (2.0 * z.1).mcos();
+            Ok((
+                2.0 * z.0.msinh() * z.1.mcos() / d,
+                -2.0 * z.0.mcosh() * z.1.msin() / d,
+            ))
+        })
+    }),
     f("IMPOWER", 2, 2, V, |c, a| {
         let (z, s) = try_v!(complex_arg(c, &a[0]));
         let p = try_v!(num_arg(c, a, 1));
@@ -139,11 +177,23 @@ pub const FNS: &[FnSpec] = &[
     }),
     // 0 으로 나누면 #DIV/0! (IMDIV("1","0"), 대조 실험 engineering)
     f("IMDIV", 2, 2, V, |c, a| {
-        im2(c, a, |x, y| if y == (0.0, 0.0) { Err(ErrorKind::Div0) } else { cdiv(x, y) })
+        im2(c, a, |x, y| {
+            if y == (0.0, 0.0) {
+                Err(ErrorKind::Div0)
+            } else {
+                cdiv(x, y)
+            }
+        })
     }),
-    f("IMSUB", 2, 2, V, |c, a| im2(c, a, |x, y| Ok((x.0 - y.0, x.1 - y.1)))),
-    f("IMSUM", 1, MANY, R, |c, a| imfold(c, a, (0.0, 0.0), |x, y| (x.0 + y.0, x.1 + y.1))),
-    f("IMPRODUCT", 1, MANY, R, |c, a| imfold(c, a, (1.0, 0.0), cmul)),
+    f("IMSUB", 2, 2, V, |c, a| {
+        im2(c, a, |x, y| Ok((x.0 - y.0, x.1 - y.1)))
+    }),
+    f("IMSUM", 1, MANY, R, |c, a| {
+        imfold(c, a, (0.0, 0.0), |x, y| (x.0 + y.0, x.1 + y.1))
+    }),
+    f("IMPRODUCT", 1, MANY, R, |c, a| {
+        imfold(c, a, (1.0, 0.0), cmul)
+    }),
 ];
 
 // ---------------------------------------------------------------------------
@@ -257,7 +307,13 @@ fn dec2(ctx: &mut Ctx, a: &[Value], radix: u32) -> Value {
 /// 비트 함수 인수: 소수점 아래를 버린다. BITAND 만 양의 소수 부분이 있으면 #NUM! (BITAND(0.5,1),
 /// BITAND(-0.5,1) = 0, BITOR(1.5,1) = 1, BITXOR(3.5,1) = 2). 버린 값은 0 이상 2^48 이하 (자리 이동
 /// 함수는 2^48 미만) — 대조 실험 engineering·misc3·misc4
-fn bit_arg(ctx: &mut Ctx, a: &[Value], i: usize, strict: bool, limit: f64) -> Result<u64, ErrorKind> {
+fn bit_arg(
+    ctx: &mut Ctx,
+    a: &[Value],
+    i: usize,
+    strict: bool,
+    limit: f64,
+) -> Result<u64, ErrorKind> {
     let x = num_arg(ctx, a, i)?;
     let n = x.trunc();
     if (strict && x - n > 0.0) || n < 0.0 || n > limit {
@@ -317,7 +373,10 @@ pub fn parse_complex(s: &str) -> Option<(C, char)> {
     } else {
         // 실수만
         return value::parse_number(s, false)
-            .filter(|_| s.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E')))
+            .filter(|_| {
+                s.chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
+            })
             .map(|v| ((v, 0.0), 'i'));
     };
     let body = &s[..s.len() - 1];
@@ -325,7 +384,9 @@ pub fn parse_complex(s: &str) -> Option<(C, char)> {
     let bytes = body.as_bytes();
     let mut split = None;
     for i in (0..bytes.len()).rev() {
-        if (bytes[i] == b'+' || bytes[i] == b'-') && !(i > 0 && (bytes[i - 1] == b'e' || bytes[i - 1] == b'E')) {
+        if (bytes[i] == b'+' || bytes[i] == b'-')
+            && !(i > 0 && (bytes[i - 1] == b'e' || bytes[i - 1] == b'E'))
+        {
             split = Some(i);
             break;
         }
@@ -334,7 +395,10 @@ pub fn parse_complex(s: &str) -> Option<(C, char)> {
         Some(0) | None => ("", body),
         Some(i) => (&body[..i], &body[i..]),
     };
-    let num_ok = |t: &str| t.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'));
+    let num_ok = |t: &str| {
+        t.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
+    };
     let re = if re_s.is_empty() {
         0.0
     } else {
@@ -493,7 +557,11 @@ fn ccosh(z: C) -> C {
 // ---------------------------------------------------------------------------
 
 fn erf_nonneg(x: f64, f: fn(f64) -> f64) -> Value {
-    if x < 0.0 { Value::Error(ErrorKind::Num) } else { num(f(x)) }
+    if x < 0.0 {
+        Value::Error(ErrorKind::Num)
+    } else {
+        num(f(x))
+    }
 }
 
 fn bessel(ctx: &mut Ctx, a: &[Value], kind: char) -> Value {
@@ -657,9 +725,17 @@ fn asymptotic_y(nu: f64, x: f64) -> f64 {
             break;
         }
         if (k as i32) % 2 == 1 {
-            q += if ((k as i32) / 2) % 2 == 0 { term } else { -term };
+            q += if ((k as i32) / 2) % 2 == 0 {
+                term
+            } else {
+                -term
+            };
         } else {
-            p += if ((k as i32) / 2) % 2 == 1 { -term } else { term };
+            p += if ((k as i32) / 2) % 2 == 1 {
+                -term
+            } else {
+                term
+            };
         }
         k += 1.0;
     }

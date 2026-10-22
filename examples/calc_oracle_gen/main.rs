@@ -82,7 +82,12 @@ fn sheet(name: &str, mut cells: Vec<Cell>) -> Sheet {
 fn data_sheet() -> Sheet {
     use D::*;
     let mut c = Vec::new();
-    column(&mut c, "A", 1, &nums(&[3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0]));
+    column(
+        &mut c,
+        "A",
+        1,
+        &nums(&[3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0]),
+    );
     column(
         &mut c,
         "B",
@@ -93,21 +98,42 @@ fn data_sheet() -> Sheet {
         &mut c,
         "C",
         1,
-        &[N(1.0), S("abc"), B(true), Blank, S("5"), N(2.5), B(false), S(""), N(0.0), N(-4.0)],
+        &[
+            N(1.0),
+            S("abc"),
+            B(true),
+            Blank,
+            S("5"),
+            N(2.5),
+            B(false),
+            S(""),
+            N(0.0),
+            N(-4.0),
+        ],
     );
     column(
         &mut c,
         "D",
         1,
-        &texts(&["apple", "Banana", "cherry", "date", "Elder", "fig", "grape", "apple", "kiwi", "lemon"]),
+        &texts(&[
+            "apple", "Banana", "cherry", "date", "Elder", "fig", "grape", "apple", "kiwi", "lemon",
+        ]),
     );
     column(
         &mut c,
         "E",
         1,
-        &nums(&[45000.0, 45031.5, 45100.25, 44927.0, 45292.0, 45657.0, 36526.0, 40000.0, 43831.0, 46314.0]),
+        &nums(&[
+            45000.0, 45031.5, 45100.25, 44927.0, 45292.0, 45657.0, 36526.0, 40000.0, 43831.0,
+            46314.0,
+        ]),
     );
-    column(&mut c, "F", 1, &nums(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]));
+    column(
+        &mut c,
+        "F",
+        1,
+        &nums(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]),
+    );
     column(
         &mut c,
         "G",
@@ -118,19 +144,59 @@ fn data_sheet() -> Sheet {
         &mut c,
         "H",
         1,
-        &[N(1.0), E("#N/A"), N(3.0), E("#DIV/0!"), N(5.0), E("#VALUE!"), N(7.0), E("#NUM!"), N(9.0), E("#REF!")],
+        &[
+            N(1.0),
+            E("#N/A"),
+            N(3.0),
+            E("#DIV/0!"),
+            N(5.0),
+            E("#VALUE!"),
+            N(7.0),
+            E("#NUM!"),
+            N(9.0),
+            E("#REF!"),
+        ],
     );
-    column(&mut c, "I", 1, &texts(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]));
+    column(
+        &mut c,
+        "I",
+        1,
+        &texts(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]),
+    );
     column(
         &mut c,
         "J",
         1,
-        &[B(true), B(false), B(true), B(true), B(false), B(false), B(true), B(false), B(true), B(true)],
+        &[
+            B(true),
+            B(false),
+            B(true),
+            B(true),
+            B(false),
+            B(false),
+            B(true),
+            B(false),
+            B(true),
+            B(true),
+        ],
     );
-    column(&mut c, "K", 1, &nums(&[2.0, 4.0, 5.0, 4.0, 5.0, 7.0, 8.0, 9.0, 10.0, 12.0]));
-    column(&mut c, "L", 1, &nums(&[1.5, 2.25, 3.0, 4.5, 6.0, 7.5, 9.0, 10.25, 12.0, 15.0]));
+    column(
+        &mut c,
+        "K",
+        1,
+        &nums(&[2.0, 4.0, 5.0, 4.0, 5.0, 7.0, 8.0, 9.0, 10.0, 12.0]),
+    );
+    column(
+        &mut c,
+        "L",
+        1,
+        &nums(&[1.5, 2.25, 3.0, 4.5, 6.0, 7.5, 9.0, 10.25, 12.0, 15.0]),
+    );
     // 행렬: M1:O3 정칙, M5:N6 정칙, M8:N9 특이
-    for (r, row) in [[2.0, 1.0, 1.0], [1.0, 3.0, 2.0], [1.0, 0.0, 0.0]].iter().enumerate() {
+    for (r, row) in [[2.0, 1.0, 1.0], [1.0, 3.0, 2.0], [1.0, 0.0, 0.0]]
+        .iter()
+        .enumerate()
+    {
         for (k, v) in row.iter().enumerate() {
             put(&mut c, &format!("{}{}", ["M", "N", "O"][k], r + 1), N(*v));
         }
@@ -150,26 +216,50 @@ fn data_sheet() -> Sheet {
         &mut c,
         "Q",
         1,
-        &texts(&["Name", "Kim", "Lee", "Park", "Choi", "Jung", "Kang", "Cho", "Yoon", "Jang", "Lim"]),
+        &texts(&[
+            "Name", "Kim", "Lee", "Park", "Choi", "Jung", "Kang", "Cho", "Yoon", "Jang", "Lim",
+        ]),
     );
     column(
         &mut c,
         "R",
         1,
-        &texts(&["Dept", "Sales", "IT", "Sales", "HR", "IT", "Sales", "HR", "IT", "Sales", "HR"]),
+        &texts(&[
+            "Dept", "Sales", "IT", "Sales", "HR", "IT", "Sales", "HR", "IT", "Sales", "HR",
+        ]),
     );
     column(&mut c, "S", 1, &[S("Age")]);
-    column(&mut c, "S", 2, &nums(&[34.0, 28.0, 45.0, 39.0, 31.0, 29.0, 52.0, 41.0, 36.0, 25.0]));
+    column(
+        &mut c,
+        "S",
+        2,
+        &nums(&[34.0, 28.0, 45.0, 39.0, 31.0, 29.0, 52.0, 41.0, 36.0, 25.0]),
+    );
     column(&mut c, "T", 1, &[S("Score")]);
-    column(&mut c, "T", 2, &nums(&[88.0, 92.0, 75.0, 81.0, 95.0, 67.0, 90.0, 72.0, 85.0, 78.0]));
+    column(
+        &mut c,
+        "T",
+        2,
+        &nums(&[88.0, 92.0, 75.0, 81.0, 95.0, 67.0, 90.0, 72.0, 85.0, 78.0]),
+    );
     column(&mut c, "V", 1, &[S("Dept"), S("Sales"), S("IT")]);
     column(&mut c, "W", 1, &[S("Age"), S(">30")]);
     column(&mut c, "Y", 1, &[S("Score"), S(">=85")]);
     column(&mut c, "V", 5, &[S("Name"), S("K")]);
     column(&mut c, "W", 5, &[S("Age"), S("<30")]);
     // 현금 흐름 AA1:AA6, 날짜 AB1:AB6
-    column(&mut c, "AA", 1, &nums(&[-1000.0, 300.0, 400.0, 400.0, 300.0, 200.0]));
-    column(&mut c, "AB", 1, &nums(&[44927.0, 45000.0, 45100.0, 45200.0, 45300.0, 45400.0]));
+    column(
+        &mut c,
+        "AA",
+        1,
+        &nums(&[-1000.0, 300.0, 400.0, 400.0, 300.0, 200.0]),
+    );
+    column(
+        &mut c,
+        "AB",
+        1,
+        &nums(&[44927.0, 45000.0, 45100.0, 45200.0, 45300.0, 45400.0]),
+    );
     // 확률 AC1:AD4, 구간 AE1:AE3, 휴일 AF1:AF2
     column(&mut c, "AC", 1, &nums(&[1.0, 2.0, 3.0, 4.0]));
     column(&mut c, "AD", 1, &nums(&[0.1, 0.2, 0.3, 0.4]));
@@ -179,10 +269,19 @@ fn data_sheet() -> Sheet {
     column(&mut c, "AG", 1, &texts(&["3+4i", "1-i", "-2.5j", "2"]));
     column(&mut c, "AH", 1, &[S("101"), S("FF"), N(777.0)]);
     // 논리·숫자처럼 보이는 글 AI1:AI5
-    column(&mut c, "AI", 1, &texts(&["TRUE", "FALSE", "0", " 5", "1E3"]));
+    column(
+        &mut c,
+        "AI",
+        1,
+        &texts(&["TRUE", "FALSE", "0", " 5", "1E3"]),
+    );
     // 한 행 자료 A12:J12 (HLOOKUP·가로 찾기)
     for (k, v) in [10.0, 20.0, 30.0, 40.0, 50.0].iter().enumerate() {
-        put(&mut c, &format!("{}12", ["A", "B", "C", "D", "E"][k]), N(*v));
+        put(
+            &mut c,
+            &format!("{}12", ["A", "B", "C", "D", "E"][k]),
+            N(*v),
+        );
     }
     for (k, v) in ["x1", "x2", "x3", "x4", "x5"].iter().enumerate() {
         put(&mut c, &format!("{}13", ["A", "B", "C", "D", "E"][k]), S(v));
@@ -193,8 +292,18 @@ fn data_sheet() -> Sheet {
 /// 숨긴 행(3, 6)과 부분합 셀이 있는 시트 `Hid`
 fn hidden_sheet() -> (Sheet, Vec<(String, String)>) {
     let mut c = Vec::new();
-    column(&mut c, "A", 1, &nums(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]));
-    column(&mut c, "C", 1, &nums(&[1.5, -2.0, 3.25, 4.0, 0.0, 6.5, 7.0, -8.0, 9.0, 10.0]));
+    column(
+        &mut c,
+        "A",
+        1,
+        &nums(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
+    );
+    column(
+        &mut c,
+        "C",
+        1,
+        &nums(&[1.5, -2.0, 3.25, 4.0, 0.0, 6.5, 7.0, -8.0, 9.0, 10.0]),
+    );
     let mut s = sheet("Hid", c);
     s.rows = [3u32, 6]
         .iter()
@@ -243,7 +352,8 @@ fn formula_cell(at: CellRef, text: &str, array: Option<&str>) -> Cell {
 fn build(cases: &[Case], date1904: bool) -> Workbook {
     let (mut hid, hid_formulas) = hidden_sheet();
     for (at, f) in hid_formulas {
-        hid.cells.push(formula_cell(CellRef::parse(&at).unwrap(), &f, None));
+        hid.cells
+            .push(formula_cell(CellRef::parse(&at).unwrap(), &f, None));
     }
     hid.cells.sort_by_key(|c| (c.r.row, c.r.col));
     // 경우 시트: B열에 차례로. 배열 수식은 h×w 칸을 차지하고 그다음 행부터 이어 간다.
@@ -326,12 +436,21 @@ fn build(cases: &[Case], date1904: bool) -> Workbook {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(out) = args.first().map(PathBuf::from) else {
-        eprintln!("사용: cargo run --release --example calc_oracle_gen -- <출력 폴더> [--only 분류] [--chunk N]");
+        eprintln!(
+            "사용: cargo run --release --example calc_oracle_gen -- <출력 폴더> [--only 분류] [--chunk N]"
+        );
         std::process::exit(2);
     };
-    let opt = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    let opt = |k: &str| {
+        args.iter()
+            .position(|a| a == k)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
     let only = opt("--only");
-    let chunk: usize = opt("--chunk").and_then(|n| n.parse().ok()).unwrap_or(usize::MAX);
+    let chunk: usize = opt("--chunk")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(usize::MAX);
     std::fs::create_dir_all(&out).expect("출력 폴더");
     let mut total = 0;
     for (name, cases, date1904) in cases::catalog() {

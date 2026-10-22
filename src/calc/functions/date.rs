@@ -77,7 +77,9 @@ pub const FNS: &[FnSpec] = &[
         value_r(year_frac(s, e, b as u8, c.date1904()))
     }),
     f("NETWORKDAYS", 2, 3, VVR, |c, a| networkdays(c, a, false)),
-    f("NETWORKDAYS.INTL", 2, 4, VVVR, |c, a| networkdays(c, a, true)),
+    f("NETWORKDAYS.INTL", 2, 4, VVVR, |c, a| {
+        networkdays(c, a, true)
+    }),
     f("WORKDAY", 2, 3, VVR, |c, a| workday(c, a, false)),
     f("WORKDAY.INTL", 2, 4, VVVR, |c, a| workday(c, a, true)),
 ];
@@ -243,7 +245,11 @@ fn add_months(ctx: &mut Ctx, a: &[Value], eom: bool) -> Value {
     let nm = (total.rem_euclid(12) + 1) as u32;
     // EOMONTH 은 실제 달력(1900년 2월은 28일: EOMONTH(60,0) = 59), EDATE 는 2월 29일이 있는 1900년
     // 달력으로 날을 줄인다 (EDATE(31,1) = 60) — 대조 실험 date·misc3
-    let dim = if eom && ny == 1900 && nm == 2 { 28 } else { days_in_month(ny, nm) };
+    let dim = if eom && ny == 1900 && nm == 2 {
+        28
+    } else {
+        days_in_month(ny, nm)
+    };
     let nd = if eom { dim } else { d.min(dim).max(1) };
     // 1899-12-31 은 0 (EOMONTH(0,0) = EDATE(0,0) = 0)
     if !d1904 && (ny, nm, nd) == (1899, 12, 31) {
@@ -329,7 +335,8 @@ fn datedif(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let d1904 = ctx.date1904();
-    let (Some((y1, m1, d1)), Some((y2, m2, d2))) = (ymd_from_serial(s, d1904), ymd_from_serial(e, d1904))
+    let (Some((y1, m1, d1)), Some((y2, m2, d2))) =
+        (ymd_from_serial(s, d1904), ymd_from_serial(e, d1904))
     else {
         return Value::Error(ErrorKind::Num);
     };

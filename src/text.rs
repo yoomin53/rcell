@@ -60,7 +60,9 @@ pub fn xstring_decode(s: &str) -> std::borrow::Cow<'_, str> {
 /// [`xstring_decode`] 의 반대: XML 이 못 담는 제어 문자와, 그대로 두면 이스케이프로 읽힐 `_xHHHH_` 의 `_` 를
 /// `_xHHHH_` 로 쓴다.
 pub fn xstring_encode(s: &str) -> std::borrow::Cow<'_, str> {
-    let needs = s.chars().any(|c| (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r'))
+    let needs = s
+        .chars()
+        .any(|c| (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r'))
         || (s.contains("_x") && (0..s.len()).any(|i| xescape_at(s.as_bytes(), i).is_some()));
     if !needs {
         return std::borrow::Cow::Borrowed(s);

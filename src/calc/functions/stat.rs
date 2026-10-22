@@ -8,12 +8,12 @@
 use crate::calc::fm::Fm;
 use std::rc::Rc;
 
-use super::math::{grid, ifs_mask, resized};
 use super::hcnum as hc;
+use super::math::{grid, ifs_mask, resized};
 use super::special as sp;
 use super::{
-    A, Agg, Arg, FnSpec, MANY, R, V, bool_or, collect_numbers, f, flatten, num_arg, num_or, opt, pairs,
-    paired_numbers, to_array,
+    A, Agg, Arg, FnSpec, MANY, R, V, bool_or, collect_numbers, f, flatten, num_arg, num_or, opt,
+    paired_numbers, pairs, to_array,
 };
 use crate::calc::eval::Ctx;
 use crate::calc::value::{self, Array, ErrorKind, Value, num};
@@ -48,9 +48,15 @@ pub const FNS: &[FnSpec] = &[
     f("VAR.P", 1, MANY, R, |c, a| agg(c, a, Agg::Numbers, 11)),
     f("VARA", 1, MANY, R, |c, a| agg(c, a, Agg::NumbersA, 10)),
     f("VARPA", 1, MANY, R, |c, a| agg(c, a, Agg::NumbersA, 11)),
-    f("MEDIAN", 1, MANY, R, |c, a| median(&try_v!(collect_numbers(c, a, Agg::Numbers)))),
-    f("MODE", 1, MANY, R, |c, a| mode_sngl(&try_v!(collect_numbers(c, a, Agg::Numbers)))),
-    f("MODE.SNGL", 1, MANY, R, |c, a| mode_sngl(&try_v!(collect_numbers(c, a, Agg::Numbers)))),
+    f("MEDIAN", 1, MANY, R, |c, a| {
+        median(&try_v!(collect_numbers(c, a, Agg::Numbers)))
+    }),
+    f("MODE", 1, MANY, R, |c, a| {
+        mode_sngl(&try_v!(collect_numbers(c, a, Agg::Numbers)))
+    }),
+    f("MODE.SNGL", 1, MANY, R, |c, a| {
+        mode_sngl(&try_v!(collect_numbers(c, a, Agg::Numbers)))
+    }),
     f("MODE.MULT", 1, MANY, R, mode_mult),
     f("DEVSQ", 1, MANY, R, |c, a| {
         let v = try_v!(collect_numbers(c, a, Agg::Numbers));
@@ -102,9 +108,15 @@ pub const FNS: &[FnSpec] = &[
     f("PERCENTILE", 2, 2, AV, |c, a| pct(c, a, percentile_inc)),
     f("PERCENTILE.INC", 2, 2, AV, |c, a| pct(c, a, percentile_inc)),
     f("PERCENTILE.EXC", 2, 2, AV, |c, a| pct(c, a, percentile_exc)),
-    f("QUARTILE", 2, 2, AV, |c, a| pct(c, a, |v, q| quartile(v, q, true))),
-    f("QUARTILE.INC", 2, 2, AV, |c, a| pct(c, a, |v, q| quartile(v, q, true))),
-    f("QUARTILE.EXC", 2, 2, AV, |c, a| pct(c, a, |v, q| quartile(v, q, false))),
+    f("QUARTILE", 2, 2, AV, |c, a| {
+        pct(c, a, |v, q| quartile(v, q, true))
+    }),
+    f("QUARTILE.INC", 2, 2, AV, |c, a| {
+        pct(c, a, |v, q| quartile(v, q, true))
+    }),
+    f("QUARTILE.EXC", 2, 2, AV, |c, a| {
+        pct(c, a, |v, q| quartile(v, q, false))
+    }),
     f("PERCENTRANK", 2, 3, AV, |c, a| percentrank(c, a, true)),
     f("PERCENTRANK.INC", 2, 3, AV, |c, a| percentrank(c, a, true)),
     f("PERCENTRANK.EXC", 2, 3, AV, |c, a| percentrank(c, a, false)),
@@ -136,7 +148,9 @@ pub const FNS: &[FnSpec] = &[
     f("COVARIANCE.P", 2, 2, A, |c, a| covar(c, a, false)),
     f("COVARIANCE.S", 2, 2, A, |c, a| covar(c, a, true)),
     f("SLOPE", 2, 2, A, |c, a| regression(c, &a[0], &a[1], 0, 0.0)),
-    f("INTERCEPT", 2, 2, A, |c, a| regression(c, &a[0], &a[1], 1, 0.0)),
+    f("INTERCEPT", 2, 2, A, |c, a| {
+        regression(c, &a[0], &a[1], 1, 0.0)
+    }),
     f("STEYX", 2, 2, A, |c, a| regression(c, &a[0], &a[1], 2, 0.0)),
     f("FORECAST", 3, 3, VAA, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
@@ -146,10 +160,18 @@ pub const FNS: &[FnSpec] = &[
         let x = try_v!(num_arg(c, a, 0));
         regression(c, &a[1], &a[2], 3, x)
     }),
-    f("LINEST", 1, 4, &[Arg::A, Arg::A, Arg::V, Arg::V], |c, a| linest(c, a, false)),
-    f("LOGEST", 1, 4, &[Arg::A, Arg::A, Arg::V, Arg::V], |c, a| linest(c, a, true)),
-    f("TREND", 1, 4, &[Arg::A, Arg::A, Arg::A, Arg::V], |c, a| trend(c, a, false)),
-    f("GROWTH", 1, 4, &[Arg::A, Arg::A, Arg::A, Arg::V], |c, a| trend(c, a, true)),
+    f("LINEST", 1, 4, &[Arg::A, Arg::A, Arg::V, Arg::V], |c, a| {
+        linest(c, a, false)
+    }),
+    f("LOGEST", 1, 4, &[Arg::A, Arg::A, Arg::V, Arg::V], |c, a| {
+        linest(c, a, true)
+    }),
+    f("TREND", 1, 4, &[Arg::A, Arg::A, Arg::A, Arg::V], |c, a| {
+        trend(c, a, false)
+    }),
+    f("GROWTH", 1, 4, &[Arg::A, Arg::A, Arg::A, Arg::V], |c, a| {
+        trend(c, a, true)
+    }),
     f("FREQUENCY", 2, 2, A, frequency),
     f("PROB", 3, 4, AAV, prob),
     f("FISHER", 1, 1, V, |c, a| {
@@ -159,7 +181,9 @@ pub const FNS: &[FnSpec] = &[
         }
         num(0.5 * ((1.0 + x) / (1.0 - x)).mln())
     }),
-    f("FISHERINV", 1, 1, V, |c, a| num(try_v!(num_arg(c, a, 0)).mtanh())),
+    f("FISHERINV", 1, 1, V, |c, a| {
+        num(try_v!(num_arg(c, a, 0)).mtanh())
+    }),
     f("PERMUT", 2, 2, V, |c, a| {
         let n = try_v!(num_arg(c, a, 0)).trunc();
         let k = try_v!(num_arg(c, a, 1)).trunc();
@@ -193,7 +217,11 @@ pub const FNS: &[FnSpec] = &[
             return Value::Error(ErrorKind::Num);
         }
         // 양수는 6항 란초시 근사의 exp (GAMMA(30.5) = 4.822696933622876E+31, 대조 실험 stat)
-        num(round9(if x > 0.0 { hc::gammln(x).mexp() } else { sp::gamma(x) }))
+        num(round9(if x > 0.0 {
+            hc::gammln(x).mexp()
+        } else {
+            sp::gamma(x)
+        }))
     }),
     f("GAMMALN", 1, 1, V, gammaln),
     f("GAMMALN.PRECISE", 1, 1, V, gammaln),
@@ -206,17 +234,25 @@ pub const FNS: &[FnSpec] = &[
         }
         num(round9(0.5 - 0.5 * hc::erfcc(z / std::f64::consts::SQRT_2)))
     }),
-    f("PHI", 1, 1, V, |c, a| num(round9(sp::norm_s_pdf(try_v!(num_arg(c, a, 0)))))),
+    f("PHI", 1, 1, V, |c, a| {
+        num(round9(sp::norm_s_pdf(try_v!(num_arg(c, a, 0)))))
+    }),
     // 정규 분포
     f("NORM.DIST", 4, 4, V, norm_dist),
     f("NORMDIST", 4, 4, V, norm_dist),
     f("NORM.S.DIST", 2, 2, V, |c, a| {
         let z = try_v!(num_arg(c, a, 0));
         let cum = try_v!(bool_or(c, a, 1, true));
-        num(if cum { hc::norm_cdf(z) } else { hc::norm_pdf(z) })
+        num(if cum {
+            hc::norm_cdf(z)
+        } else {
+            hc::norm_pdf(z)
+        })
     }),
     // NORMSDIST 만은 정확하다 (대조 실험 norm4)
-    f("NORMSDIST", 1, 1, V, |c, a| num(sp::norm_s_cdf(try_v!(num_arg(c, a, 0))))),
+    f("NORMSDIST", 1, 1, V, |c, a| {
+        num(sp::norm_s_cdf(try_v!(num_arg(c, a, 0))))
+    }),
     f("NORM.INV", 3, 3, V, norm_inv),
     f("NORMINV", 3, 3, V, norm_inv),
     f("NORM.S.INV", 1, 1, V, norm_s_inv),
@@ -264,7 +300,11 @@ pub const FNS: &[FnSpec] = &[
         if x < 0.0 || !(1.0..=1e10).contains(&df) || (x == 0.0 && !cum) {
             return Value::Error(ErrorKind::Num);
         }
-        num(round9(if cum { hc::gammp(df / 2.0, x / 2.0) } else { sp::chisq_pdf(x, df) }))
+        num(round9(if cum {
+            hc::gammp(df / 2.0, x / 2.0)
+        } else {
+            sp::chisq_pdf(x, df)
+        }))
     }),
     f("CHISQ.DIST.RT", 2, 2, V, chi_rt),
     f("CHIDIST", 2, 2, V, chi_rt),
@@ -292,7 +332,11 @@ pub const FNS: &[FnSpec] = &[
         if x == 0.0 && !cum {
             return Value::Number(0.0);
         }
-        num(round9(if cum { hc::f_cdf(x, d1, d2) } else { sp::f_pdf(x, d1, d2) }))
+        num(round9(if cum {
+            hc::f_cdf(x, d1, d2)
+        } else {
+            sp::f_pdf(x, d1, d2)
+        }))
     }),
     f("F.DIST.RT", 3, 3, V, f_rt),
     f("FDIST", 3, 3, V, f_rt),
@@ -316,7 +360,11 @@ pub const FNS: &[FnSpec] = &[
         if !(1.0..1e10).contains(&df) {
             return Value::Error(ErrorKind::Num);
         }
-        num(round9(if cum { hc::t_cdf(x, df) } else { sp::t_pdf(x, df) }))
+        num(round9(if cum {
+            hc::t_cdf(x, df)
+        } else {
+            sp::t_pdf(x, df)
+        }))
     }),
     // T.DIST.2T·T.DIST.RT 는 밀도를 수치 적분한다 (hcnum, 대조 실험 dist4·tdist5)
     f("T.DIST.2T", 2, 2, V, |c, a| {
@@ -385,9 +433,21 @@ pub fn basic_aggregate(kind: u8, v: &[f64]) -> Value {
             }
         }
         2 | 3 => Value::Number(n),
-        4 => num(v.iter().copied().fold(f64::NEG_INFINITY, f64::max).max(if v.is_empty() { 0.0 } else { f64::NEG_INFINITY })),
-        5 => num(if v.is_empty() { 0.0 } else { v.iter().copied().fold(f64::INFINITY, f64::min) }),
-        6 => num(if v.is_empty() { 0.0 } else { v.iter().product() }),
+        4 => num(v
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max)
+            .max(if v.is_empty() { 0.0 } else { f64::NEG_INFINITY })),
+        5 => num(if v.is_empty() {
+            0.0
+        } else {
+            v.iter().copied().fold(f64::INFINITY, f64::min)
+        }),
+        6 => num(if v.is_empty() {
+            0.0
+        } else {
+            v.iter().product()
+        }),
         7 | 8 | 10 | 11 => variance(kind, v, true),
         9 => num(v.iter().sum()),
         _ => Value::Error(ErrorKind::Value),
@@ -432,9 +492,17 @@ pub fn naive_var(v: &[f64], sample: bool, clamp: bool) -> f64 {
         q += x * x;
     }
     let d = n * q - s * s;
-    let var = if sample { d / (n * (n - 1.0)) } else { d / (n * n) };
+    let var = if sample {
+        d / (n * (n - 1.0))
+    } else {
+        d / (n * n)
+    };
     // 넘쳐서 NaN 이 되면 0 (VAR(1E+300,1E+300) = 0, 대조 실험 stat)
-    if var.is_nan() || (clamp && var < 0.0) { 0.0 } else { var }
+    if var.is_nan() || (clamp && var < 0.0) {
+        0.0
+    } else {
+        var
+    }
 }
 
 fn count(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -450,7 +518,13 @@ fn count(ctx: &mut Ctx, a: &[Value]) -> Value {
                     });
                 }
             }
-            Value::Array(arr) => n += arr.data.iter().filter(|v| matches!(v, Value::Number(_))).count(),
+            Value::Array(arr) => {
+                n += arr
+                    .data
+                    .iter()
+                    .filter(|v| matches!(v, Value::Number(_)))
+                    .count()
+            }
             Value::Number(_) | Value::Bool(_) | Value::Empty => n += 1,
             Value::Text(t) => {
                 if value::parse_number(t, ctx.date1904()).is_some() {
@@ -485,7 +559,9 @@ fn countblank(ctx: &mut Ctx, a: &[Value]) -> Value {
             let mut total = 0f64;
             let mut filled = 0f64;
             for area in r.iter() {
-                total += area.rows() as f64 * area.cols() as f64 * (area.sheet_last - area.sheet + 1) as f64;
+                total += area.rows() as f64
+                    * area.cols() as f64
+                    * (area.sheet_last - area.sheet + 1) as f64;
                 ctx.for_each_in_area(area, |_, _, v| {
                     if !matches!(v, Value::Text(t) if t.is_empty()) {
                         filled += 1.0;
@@ -678,7 +754,13 @@ pub fn percentile_exc(v: &[f64], k: f64) -> Value {
     let i = r.floor();
     let frac = r - i;
     // 1부터 센 i 번째와 i+1 번째 (범위 밖은 0)
-    let at = |j: f64| if j >= 1.0 && j <= n { s[j as usize - 1] } else { 0.0 };
+    let at = |j: f64| {
+        if j >= 1.0 && j <= n {
+            s[j as usize - 1]
+        } else {
+            0.0
+        }
+    };
     let (a, b) = (at(i), at(i + 1.0));
     if frac == 0.0 {
         return num(a);
@@ -749,7 +831,11 @@ fn percentrank(ctx: &mut Ctx, a: &[Value], inclusive: bool) -> Value {
     // PERCENTRANK·PERCENTRANK.INC 는 반올림, .EXC 는 버림. 결과는 정수 × 10^-자릿수
     // (PERCENTRANK(…,4) = 5/9 → 0.556, PERCENTRANK.EXC(…,2.7,4) = 0.33630000000000004, 대조 실험 stat)
     let p = 10f64.mpowi(sig as i32);
-    let k = if inclusive { (r * p).round() } else { (r * p).floor() };
+    let k = if inclusive {
+        (r * p).round()
+    } else {
+        (r * p).floor()
+    };
     num(k * 10f64.mpowi(-(sig as i32)))
 }
 
@@ -838,7 +924,9 @@ fn countif(ctx: &mut Ctx, a: &[Value]) -> Value {
             let mut total = 0f64;
             let mut filled = 0f64;
             for area in r.iter() {
-                total += area.rows() as f64 * area.cols() as f64 * (area.sheet_last - area.sheet + 1) as f64;
+                total += area.rows() as f64
+                    * area.cols() as f64
+                    * (area.sheet_last - area.sheet + 1) as f64;
                 ctx.for_each_in_area(area, |_, _, v| {
                     filled += 1.0;
                     if c.matches(v) {
@@ -892,7 +980,11 @@ fn averageif(ctx: &mut Ctx, a: &[Value]) -> Value {
 
 /// AVERAGEIFS·MAXIFS·MINIFS (대상 범위, (조건 범위, 조건)…)
 fn target_ifs(ctx: &mut Ctx, a: &[Value], kind: u8) -> Value {
-    if a.len() % 2 != 1 || std::iter::once(&a[0]).chain(a[1..].iter().step_by(2)).any(|v| !matches!(v, Value::Ref(_))) {
+    if a.len() % 2 != 1
+        || std::iter::once(&a[0])
+            .chain(a[1..].iter().step_by(2))
+            .any(|v| !matches!(v, Value::Ref(_)))
+    {
         return Value::Error(ErrorKind::Value);
     }
     let pairs: Vec<(&Value, &Value)> = a[1..].chunks(2).map(|p| (&p[0], &p[1])).collect();
@@ -1168,7 +1260,11 @@ fn linest(ctx: &mut Ctx, a: &[Value], log: bool) -> Value {
     for _ in 2..cols {
         data.push(Value::Error(ErrorKind::NA));
     }
-    data.push(if fstat.is_finite() { num(fstat) } else { Value::Error(ErrorKind::Num) });
+    data.push(if fstat.is_finite() {
+        num(fstat)
+    } else {
+        Value::Error(ErrorKind::Num)
+    });
     data.push(num(df));
     for _ in 2..cols {
         data.push(Value::Error(ErrorKind::NA));
@@ -1254,9 +1350,13 @@ fn trend(ctx: &mut Ctx, a: &[Value], log: bool) -> Value {
             if k == 1 {
                 vec![nums]
             } else if na.cols == k {
-                (0..k).map(|c| (0..na.rows).map(|r| nums[r * k + c]).collect()).collect()
+                (0..k)
+                    .map(|c| (0..na.rows).map(|r| nums[r * k + c]).collect())
+                    .collect()
             } else {
-                (0..k).map(|r| (0..na.cols).map(|c| nums[r * na.cols + c]).collect()).collect()
+                (0..k)
+                    .map(|r| (0..na.cols).map(|c| nums[r * na.cols + c]).collect())
+                    .collect()
             }
         }
     };
@@ -1276,11 +1376,23 @@ fn trend(ctx: &mut Ctx, a: &[Value], log: bool) -> Value {
 fn frequency(ctx: &mut Ctx, a: &[Value]) -> Value {
     let data: Vec<f64> = flatten(ctx, &a[0])
         .into_iter()
-        .filter_map(|v| if let Value::Number(n) = v { Some(n) } else { None })
+        .filter_map(|v| {
+            if let Value::Number(n) = v {
+                Some(n)
+            } else {
+                None
+            }
+        })
         .collect();
     let bins: Vec<f64> = flatten(ctx, &a[1])
         .into_iter()
-        .filter_map(|v| if let Value::Number(n) = v { Some(n) } else { None })
+        .filter_map(|v| {
+            if let Value::Number(n) = v {
+                Some(n)
+            } else {
+                None
+            }
+        })
         .collect();
     let mut order: Vec<usize> = (0..bins.len()).collect();
     order.sort_by(|&i, &j| bins[i].total_cmp(&bins[j]));
@@ -1292,7 +1404,11 @@ fn frequency(ctx: &mut Ctx, a: &[Value]) -> Value {
         }
     }
     let n = counts.len();
-    Value::from(Array::new(n, 1, counts.into_iter().map(Value::Number).collect()))
+    Value::from(Array::new(
+        n,
+        1,
+        counts.into_iter().map(Value::Number).collect(),
+    ))
 }
 
 fn prob(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -1344,7 +1460,11 @@ fn norm_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let z = (x - m) / s;
-    num(if cum { hc::norm_cdf(z) } else { hc::norm_pdf(z) / s })
+    num(if cum {
+        hc::norm_cdf(z)
+    } else {
+        hc::norm_pdf(z) / s
+    })
 }
 
 fn norm_inv(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -1369,7 +1489,11 @@ fn lognorm_dist(ctx: &mut Ctx, a: &[Value], has_cum: bool) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
     let m = try_v!(num_arg(ctx, a, 1));
     let s = try_v!(num_arg(ctx, a, 2));
-    let cum = if has_cum { try_v!(bool_or(ctx, a, 3, true)) } else { true };
+    let cum = if has_cum {
+        try_v!(bool_or(ctx, a, 3, true))
+    } else {
+        true
+    };
     if x <= 0.0 || s <= 0.0 {
         return Value::Error(ErrorKind::Num);
     }
@@ -1443,7 +1567,11 @@ fn expon_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x < 0.0 || l <= 0.0 {
         return Value::Error(ErrorKind::Num);
     }
-    num(if cum { 1.0 - (-l * x).mexp() } else { l * (-l * x).mexp() })
+    num(if cum {
+        1.0 - (-l * x).mexp()
+    } else {
+        l * (-l * x).mexp()
+    })
 }
 
 fn weibull(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -1506,7 +1634,11 @@ fn beta_dist(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
             try_v!(num_or(ctx, a, 5, 1.0)),
         )
     } else {
-        (true, try_v!(num_or(ctx, a, 3, 0.0)), try_v!(num_or(ctx, a, 4, 1.0)))
+        (
+            true,
+            try_v!(num_or(ctx, a, 3, 0.0)),
+            try_v!(num_or(ctx, a, 4, 1.0)),
+        )
     };
     if al <= 0.0 || be <= 0.0 || x < lo || x > hi || lo >= hi {
         return Value::Error(ErrorKind::Num);
@@ -1566,7 +1698,11 @@ fn binom_inv(ctx: &mut Ctx, a: &[Value], strict: bool) -> Value {
     let mut k = 0.0;
     while k <= n {
         s += sp::binom_pmf(k, n, p);
-        if if strict { s > alpha } else { s >= alpha * (1.0 - 1e-15) } {
+        if if strict {
+            s > alpha
+        } else {
+            s >= alpha * (1.0 - 1e-15)
+        } {
             return num(k);
         }
         k += 1.0;
@@ -1602,7 +1738,11 @@ fn negbinom(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
     let fl = try_v!(num_arg(ctx, a, 0)).trunc();
     let s = try_v!(num_arg(ctx, a, 1)).trunc();
     let p = try_v!(num_arg(ctx, a, 2));
-    let cum = if new { try_v!(bool_or(ctx, a, 3, true)) } else { false };
+    let cum = if new {
+        try_v!(bool_or(ctx, a, 3, true))
+    } else {
+        false
+    };
     // 확률 1 도 받는다 (NEGBINOM.DIST(10,5,1,TRUE) = 1, 대조 실험 dist)
     if fl < 0.0 || s < 1.0 || p <= 0.0 || p > 1.0 {
         return Value::Error(ErrorKind::Num);
@@ -1620,13 +1760,25 @@ fn hypgeom(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
     let n = try_v!(num_arg(ctx, a, 1)).trunc();
     let m = try_v!(num_arg(ctx, a, 2)).trunc();
     let big = try_v!(num_arg(ctx, a, 3)).trunc();
-    let cum = if new { try_v!(bool_or(ctx, a, 4, true)) } else { false };
-    if k < 0.0 || n < 0.0 || m < 0.0 || big < 0.0 || k > n || k > m || n > big || m > big || n - k > big - m {
+    let cum = if new {
+        try_v!(bool_or(ctx, a, 4, true))
+    } else {
+        false
+    };
+    if k < 0.0
+        || n < 0.0
+        || m < 0.0
+        || big < 0.0
+        || k > n
+        || k > m
+        || n > big
+        || m > big
+        || n - k > big - m
+    {
         return Value::Error(ErrorKind::Num);
     }
-    let pmf = |x: f64| {
-        sp::binom_coef(m, x) * sp::binom_coef(big - m, n - x) / sp::binom_coef(big, n)
-    };
+    let pmf =
+        |x: f64| sp::binom_coef(m, x) * sp::binom_coef(big - m, n - x) / sp::binom_coef(big, n);
     if cum {
         let lo = (n - (big - m)).max(0.0);
         let mut s = 0.0;
@@ -1808,7 +1960,8 @@ fn ttest(ctx: &mut Ctx, a: &[Value]) -> Value {
             if se2 == 0.0 {
                 return Value::Error(ErrorKind::Div0);
             }
-            let df = se2 * se2 / ((v1 / n1).mpowi(2) / (n1 - 1.0) + (v2 / n2).mpowi(2) / (n2 - 1.0));
+            let df =
+                se2 * se2 / ((v1 / n1).mpowi(2) / (n1 - 1.0) + (v2 / n2).mpowi(2) / (n2 - 1.0));
             (diff / se2.sqrt(), df)
         }
     };

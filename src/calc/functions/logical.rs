@@ -108,7 +108,14 @@ fn or(ctx: &mut Ctx, a: &[Value]) -> Value {
 }
 
 fn xor(ctx: &mut Ctx, a: &[Value]) -> Value {
-    Value::Bool(try_v!(logicals(ctx, a, true)).iter().filter(|&&b| b).count() % 2 == 1)
+    Value::Bool(
+        try_v!(logicals(ctx, a, true))
+            .iter()
+            .filter(|&&b| b)
+            .count()
+            % 2
+            == 1,
+    )
 }
 
 /// 생략한 인수는 0
@@ -154,7 +161,12 @@ fn if_(ctx: &mut Ctx, args: &[Expr]) -> Value {
 }
 
 /// 배열 조건과 두 값(배열이거나 스칼라)을 원소마다
-fn elementwise3(c: &Array, t: &Value, f: &Value, g: impl Fn(&Value, &Value, &Value) -> Value) -> Value {
+fn elementwise3(
+    c: &Array,
+    t: &Value,
+    f: &Value,
+    g: impl Fn(&Value, &Value, &Value) -> Value,
+) -> Value {
     let dims = |v: &Value| match v {
         Value::Array(a) => (a.rows, a.cols),
         _ => (1, 1),
@@ -188,7 +200,11 @@ fn catch(ctx: &mut Ctx, args: &[Expr], hit: fn(ErrorKind) -> bool) -> Value {
     let v = ctx.eval_value(&args[0]);
     match v {
         Value::Array(a) => {
-            if !a.data.iter().any(|x| matches!(x, Value::Error(e) if hit(*e))) {
+            if !a
+                .data
+                .iter()
+                .any(|x| matches!(x, Value::Error(e) if hit(*e)))
+            {
                 return Value::Array(a);
             }
             let alt = branch_value(ctx, &args[1]);
@@ -252,8 +268,10 @@ fn switch(ctx: &mut Ctx, args: &[Expr]) -> Value {
 fn same_kind(a: &Value, b: &Value) -> bool {
     matches!(
         (a, b),
-        (Value::Number(_) | Value::Empty, Value::Number(_) | Value::Empty)
-            | (Value::Text(_), Value::Text(_))
+        (
+            Value::Number(_) | Value::Empty,
+            Value::Number(_) | Value::Empty
+        ) | (Value::Text(_), Value::Text(_))
             | (Value::Bool(_), Value::Bool(_))
     )
 }

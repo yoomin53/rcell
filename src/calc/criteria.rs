@@ -117,7 +117,9 @@ impl Criterion {
                 c.prefix = database && !explicit;
                 c
             }
-            Value::Array(a) => Self::parse_mode(a.data.first().unwrap_or(&Value::Empty), date1904, database),
+            Value::Array(a) => {
+                Self::parse_mode(a.data.first().unwrap_or(&Value::Empty), date1904, database)
+            }
             Value::Ref(_) => mk(CritOp::Eq, CritVal::Err(ErrorKind::Value), false),
         }
     }
@@ -156,7 +158,10 @@ impl Criterion {
                 Value::Text(t) if !self.database => {
                     // = · <> 는 글끼리: 조건의 숫자 글과 칸의 글이 같은가 (COUNTIF(…,5) 는 글 "5" 를 세고
                     // 글 "1E3" 은 1000 으로 세지 않는다, 대조 실험 misc4)
-                    let want = self.num_text.clone().unwrap_or_else(|| value::number_to_text(*n));
+                    let want = self
+                        .num_text
+                        .clone()
+                        .unwrap_or_else(|| value::number_to_text(*n));
                     let same = value::fold(t) == value::fold(&want);
                     match self.op {
                         CritOp::Eq => same,
