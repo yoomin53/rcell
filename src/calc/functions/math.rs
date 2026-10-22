@@ -183,6 +183,7 @@ pub const FNS: &[FnSpec] = &[
     f("BASE", 2, 3, V, base),
     f("DECIMAL", 2, 2, V, decimal),
     f("SEQUENCE", 1, 4, V, sequence),
+    volatile(f("RANDARRAY", 0, 5, V, randarray)),
 ];
 
 /// 숫자 하나 → 숫자 하나
@@ -1051,6 +1052,32 @@ fn decimal(ctx: &mut Ctx, a: &[Value]) -> Value {
         }
     }
     num(v)
+}
+
+/// RANDARRAY([행], [열], [최소], [최대], [정수]): 행·열 1 미만이나 최소 > 최대는 #VALUE!
+fn randarray(ctx: &mut Ctx, a: &[Value]) -> Value {
+    let rows = try_v!(num_or(ctx, a, 0, 1.0)).trunc();
+    let cols = try_v!(num_or(ctx, a, 1, 1.0)).trunc();
+    let lo = try_v!(num_or(ctx, a, 2, 0.0));
+    let hi = try_v!(num_or(ctx, a, 3, 1.0));
+    let whole = match opt(a, 4) {
+        Some(v) if !v.is_empty() => try_v!(ctx.boolean(v)),
+        _ => false,
+    };
+    if rows < 1.0 || cols < 1.0 || lo > hi || (whole && (lo.fract() != 0.0 || hi.fract() != 0.0)) {
+        return Value::Error(ErrorKind::Value);
+    }
+    if rows * cols > 4_000_000.0 {
+        return Value::Error(ErrorKind::Num);
+    }
+    let (r, c) = (rows as usize, cols as usize);
+    let data = (0..r * c)
+        .map(|_| {
+            let u = ctx.engine().random();
+            num(if whole { lo + (u * (hi - lo + 1.0)).floor() } else { lo + u * (hi - lo) })
+        })
+        .collect();
+    Value::from(Array::new(r, c, data))
 }
 
 fn sequence(ctx: &mut Ctx, a: &[Value]) -> Value {

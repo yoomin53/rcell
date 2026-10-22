@@ -252,7 +252,7 @@ VALUETOTEXT, VSTACK, WON, XMATCH. rcell 은 `CalcOptions::excel_functions` 를 �
 
 | 함수 | 관찰 |
 |---|---|
-| T.INV·CHISQ.INV·F.INV·CONFIDENCE.T | 근사 누적을 푸는 방식을 아직 모른다 (`CHISQ.INV(0.5,100)` 이 7E-4 틀린다). rcell 은 정확한 역함수 |
+| T.INV·CHISQ.INV·F.INV·CONFIDENCE.T | 푸는 방식을 아직 모른다. T.INV 의 남는 차이는 톱니 꼴(누적 차이가 7E-7 까지 커졌다가 반복이 하나 늘며 0 으로)이라 \|F − p\| < 1E-6 쯤에서 멈추는 반복으로 보인다. 자유도 1 은 π 를 3.141592654 로 쓴 듯한 6.5E-11 차이. CHISQ.INV(0.5,100) 은 7E-4 틀린다. rcell 은 정확한 역함수 |
 | 정규·t 꼬리의 아주 작은 값 | 위 적분의 합을 더하는 순서·반올림이 달라 0.5 − y 의 끝자리가 다르다 (`NORM.S.DIST(−30,TRUE)` 처럼 값이 1E-8 쯤이면 상대 1E-9 차이) |
 | BESSELI 의 아주 작은 값 | 한셀 적분의 반올림 오차 1E-17 쯤 (`BESSELI(0,1)` = −8E-20, rcell 0) |
 | BESSELY | x 가 15 쯤부터 거듭제곱 급수가 자릿수를 잃는다 (`BESSELY(50,0)` = 113.3) — 같은 식을 찾지 못했다 |
@@ -260,4 +260,13 @@ VALUETOTEXT, VSTACK, WON, XMATCH. rcell 은 `CalcOptions::excel_functions` 를 �
 | RATE·XIRR·YIELD | 해에 가까워 멈추는 조건이 달라 1E-9 쯤 다르다. RATE 는 해가 0 이면 한셀이 2.4E-9 같은 값을 낸다 (rcell #NUM!) |
 | ODDFPRICE·ODDFYIELD·ODDLPRICE·ODDLYIELD | 한셀 값이 엑셀 도움말 예(113.60)와도 다르다 (113.6086) — 식을 찾지 못했다 |
 | IRR | 범위에 글·논리 칸이 섞인 `IRR(Data!C1:C10)` 이 한셀은 #NUM! |
-| MINVERSE(특이 행렬) | #NUM! 이 아니라 숫자를 낸다 |
+| MINVERSE(특이 행렬)·MDETERM | 특이 행렬도 숫자를 낸다 (`MINVERSE({1,2;2,4})` = {0,−0.5;0.5,0.25}), `MDETERM({1,2,3;4,5,6;7,8,9})` = −3.9968E-15 — 소거 순서를 찾지 못했다 |
+| XLOOKUP | 넷째 인수 없이 못 찾으면 0 이 아니라 앞서 계산한 다른 XLOOKUP 의 값(`"nf"`)이나 엉뚱한 칸 값이 나온다 — 한셀의 오류로 보고 따르지 않는다 |
+| INFO("directory") | 문서 폴더 (실험 환경마다 다르다) |
+
+## 7. 맞춘 정도
+
+- 말뭉치 (`tests/calc_corpus.rs`): 한셀이 저장한 1617 문서의 수식 칸 31297 개 모두 일치 (캐시를 믿을 수 없는 80 문서 제외).
+- 함수 대조 실험 (`tests/calc_oracle.rs`, 휘발성 제외 22642 경우): 21496 일치 (94.94%), 503 함수 가운데 471 개는 모든
+  경우가 같다. 남은 1146 경우는 위 표의 것이다: 정규·t 꼬리 끝자리 490, T.INV·CHISQ.INV·F.INV·CONFIDENCE.T 525, BESSELY·BESSELI
+  77, 재무 반복 19, XLOOKUP·MINVERSE·MDETERM 25, 그 밖 10 (수식 글을 다시 쓰는 데서 생긴 3 경우 포함).
