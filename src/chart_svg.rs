@@ -26,8 +26,10 @@ use crate::writer::esc;
 
 type ColorFn<'a> = &'a dyn Fn(&DrawColor) -> Option<String>;
 
-/// 축 선·눈금의 기본 색 (한셀 화면)
+/// 축 선·눈금·눈금선의 기본 색 (한셀 화면)
 const AXIS_GRAY: &str = "#868686";
+/// 레거시(VtChart) 차트의 축 선·눈금선 색 (`VtAxis.axisPen`·`majorGridPen`, 한셀 화면)
+const LEGACY_GRAY: &str = "#808080";
 /// 기본 글자 크기 (pt)
 const BASE_PT: f64 = 9.0;
 /// 꺾은선 기본 굵기 (px, 2.25pt)
@@ -1008,14 +1010,38 @@ fn nice_unit(range: f64, n: f64) -> f64 {
     }
 }
 
-/// 자동 범위: 0 을 포함하고, 끝에 `room` 비율 여유(2차원 5%, 3차원 0 — chart_col3d 의 20~60 이 0~60)를 두어 주 단위로 맞춘다. 축 지정값이 이긴다
+/// 값 축 자동 눈금의 규칙 (한셀 화면, 높이 실험 — docs/format/screen.md 6절)
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TickRule {
+    /// XML 차트의 세로 값 축: 간격 수 ≤ clamp(⌊축 길이 / 25px⌋, 3, 10) 인 가장 작은 단위 (1·2·5 × 10ⁿ).
+    /// 끝값은 데이터 끝 + 단위/4 를 덮는 배수 (`room` 이 거짓이면 데이터 끝을 덮는 배수 — 3차원·100%)
+    Xml { room: bool },
+    /// 가로 값 축 (가로 막대·분산형의 x): 눈금 사이 40px 남짓, 끝에 5% 여유 (`room` 이 거짓이면 없이)
+    Horizontal { room: bool },
+    /// 레거시(VtChart) 차트: 간격 수 ≤ clamp(⌊축 길이 / 15.5px⌋, 2, 10) 인 가장 작은 단위. 끝값은 데이터 끝과
+    /// 5.5px 넘게 떨어진 배수 (`room` 이 거짓이면 데이터 끝을 덮는 배수)
+    Legacy { room: bool },
+}
+
+impl TickRule {
+    /// 단위를 고를 때 허용하는 간격 수
+    fn max_intervals(self, len_px: f64) -> f64 {
+        match self {
+            TickRule::Xml { .. } => (len_px / 25.0).floor().clamp(3.0, 10.0),
+            TickRule::Legacy { .. } => (len_px / 15.5).floor().clamp(2.0, 10.0),
+            TickRule::Horizontal { .. } => (len_px / 40.0).clamp(2.0, 10.0),
+        }
+    }
+}
+
+/// 자동 범위: 0 을 포함하고 (폭이 끝값의 1/6 넘으면), 규칙([`TickRule`])대로 주 단위와 끝값을 고른다. 축 지정값이 이긴다
 fn make_scale(
     lo: f64,
     hi: f64,
     axis: Option<&ChartAxis>,
     len_px: f64,
     zero_based: bool,
-    room: f64,
+    rule: TickRule,
 ) -> Scale {
     let sc = axis.map(|a| &a.scaling);
     let reverse = sc.and_then(|s| s.orientation.as_deref()) == Some("maxMin");
@@ -1050,25 +1076,68 @@ fn make_scale(
     let fixed_max = sc.and_then(|s| s.max);
     let lo = fixed_min.unwrap_or(lo);
     let hi = fixed_max.unwrap_or(hi);
-    // 눈금 사이가 40px 남짓
-    let target = (len_px / 40.0).clamp(2.0, 10.0);
-    // 주 단위는 여유를 빼고 고른다 (0~130 → 20 단위 0~140)
     let span = hi - lo;
-    let major = axis
-        .and_then(|a| a.major_unit)
-        .filter(|u| *u > 0.0)
-        .unwrap_or_else(|| nice_unit(span, target));
-    let min = fixed_min.unwrap_or_else(|| {
-        if lo >= 0.0 && zero_based {
-            0.0
-        } else {
-            ((lo - (hi - lo) * room) / major).floor() * major
-        }
-    });
-    let max = fixed_max.unwrap_or_else(|| {
-        let m = ((hi + (hi - lo) * room) / major).ceil() * major;
-        if hi <= 0.0 && zero_based { 0.0 } else { m }
-    });
+    // 단위 u 의 끝값 (최소, 최대)
+    let ends = |u: f64| -> (f64, f64) {
+        // 데이터 끝을 덮는 배수 (부동소수 오차는 빼고)
+        let up = |v: f64, pad: f64| ((v + pad) / u - 1e-9).ceil() * u;
+        let down = |v: f64, pad: f64| ((v - pad) / u + 1e-9).floor() * u;
+        let min = fixed_min.unwrap_or_else(|| {
+            if lo >= 0.0 && zero_based {
+                0.0
+            } else {
+                match rule {
+                    TickRule::Xml { room: true } => down(lo, u / 4.0),
+                    TickRule::Horizontal { room: true } => down(lo, span * 0.05),
+                    _ => down(lo, 0.0),
+                }
+            }
+        });
+        let max = fixed_max.unwrap_or_else(|| {
+            if hi <= 0.0 && zero_based {
+                return 0.0;
+            }
+            match rule {
+                TickRule::Xml { room: true } => up(hi, u / 4.0),
+                TickRule::Horizontal { room: true } => up(hi, span * 0.05),
+                TickRule::Legacy { room: true } => {
+                    // 데이터 끝이 축 끝에서 5.5px 넘게 아래
+                    let mut m = up(hi, 0.0);
+                    while (m - hi) / (m - min).max(f64::MIN_POSITIVE) * len_px < 5.5 {
+                        m += u;
+                    }
+                    m
+                }
+                _ => up(hi, 0.0),
+            }
+        });
+        (min, max)
+    };
+    let major = match axis.and_then(|a| a.major_unit).filter(|u| *u > 0.0) {
+        Some(u) => u,
+        None => match rule {
+            // 주 단위는 여유를 빼고 고른다 (0~130 → 20 단위 0~140)
+            TickRule::Horizontal { .. } => nice_unit(span, rule.max_intervals(len_px)),
+            _ => {
+                let n = rule.max_intervals(len_px);
+                let mut base = 10f64.powf((span / n).log10().floor() - 1.0);
+                let mut found = None;
+                'search: for _ in 0..40 {
+                    for step in [1.0, 2.0, 5.0] {
+                        let u = base * step;
+                        let (mn, mx) = ends(u);
+                        if ((mx - mn) / u - 1e-6).ceil() <= n {
+                            found = Some(u);
+                            break 'search;
+                        }
+                    }
+                    base *= 10.0;
+                }
+                found.unwrap_or_else(|| nice_unit(span, n))
+            }
+        },
+    };
+    let (min, max) = ends(major);
     Scale {
         min,
         max: if max > min { max } else { min + major },
@@ -1080,7 +1149,12 @@ fn make_scale(
 
 /// 눈금 레이블 글: 축 표시 형식 (원본 연결이면 계열 캐시의 형식) → 일반
 fn tick_label(v: f64, axis: Option<&ChartAxis>, linked: Option<&str>, percent: bool) -> String {
-    if percent && axis.and_then(|a| a.num_fmt.as_ref()).is_none() {
+    // 100% 누적: 원본에 연결된 형식(셀의 G/표준)이면 0% (c2_e3_*_pct 의 한셀 화면)
+    if percent
+        && axis
+            .and_then(|a| a.num_fmt.as_ref())
+            .is_none_or(|f| f.source_linked == Some(true))
+    {
         return format!("{:.0}%", v * 100.0);
     }
     // 원본 연결 형식의 G/표준 은 일반 서식으로, 축에 정한 G/표준 은 표시 형식 그대로 (연호 G + 글자 — 한셀 화면의
@@ -1268,8 +1342,22 @@ fn draw_axis_chart(
 
     // 그림 영역: 직접 배치 또는 축 레이블 자리를 빼고
     let (vlo, vhi, percent) = value_range(&primary);
-    let room = if first.three_d { 0.0 } else { 0.05 };
-    let probe = make_scale(vlo, vhi, val_ax, inner.h.max(inner.w) * 0.8, !xy, room);
+    // 끝 여유: 3차원은 없고 (chart_col3d 의 20~60 이 0~60), 100% 누적은 100% 에서 끝난다
+    let room = !first.three_d && !percent;
+    let legacy = ch.legacy.is_some();
+    let vrule = if legacy {
+        TickRule::Legacy { room }
+    } else if horizontal {
+        TickRule::Horizontal { room }
+    } else {
+        TickRule::Xml { room }
+    };
+    let xrule = if legacy {
+        TickRule::Legacy { room }
+    } else {
+        TickRule::Horizontal { room }
+    };
+    let probe = make_scale(vlo, vhi, val_ax, inner.h.max(inner.w) * 0.8, !xy, vrule);
     let val_labels: Vec<String> = probe
         .ticks()
         .iter()
@@ -1367,7 +1455,7 @@ fn draw_axis_chart(
                     }
                 }
             }
-            let xs = make_scale(lo.min(hi), hi.max(lo), cat_ax, plot.w, true, room);
+            let xs = make_scale(lo.min(hi), hi.max(lo), cat_ax, plot.w, true, xrule);
             xs.ticks().last().map_or(0.0, |v| {
                 cat_font.width(&tick_label(*v, cat_ax, cat_fmt.as_deref(), false))
             })
@@ -1400,10 +1488,16 @@ fn draw_axis_chart(
 
     // 값 축 범위 (그림 영역 크기로 다시)
     let vlen = if horizontal { plot.w } else { plot.h };
-    let scale = make_scale(vlo, vhi, val_ax, vlen, !xy, room);
+    let scale = make_scale(vlo, vhi, val_ax, vlen, !xy, vrule);
     let sec_scale = sec_ax.map(|a| {
-        let (lo, hi, _) = value_range(&secondary);
-        make_scale(lo, hi, Some(a), vlen, true, room)
+        let (lo, hi, sp) = value_range(&secondary);
+        let room = !first.three_d && !sp;
+        let rule = match vrule {
+            TickRule::Legacy { .. } => TickRule::Legacy { room },
+            TickRule::Horizontal { .. } => TickRule::Horizontal { room },
+            TickRule::Xml { .. } => TickRule::Xml { room },
+        };
+        make_scale(lo, hi, Some(a), vlen, true, rule)
     });
     // x 값 축 (분산형·거품형)
     let xscale = if xy {
@@ -1420,7 +1514,7 @@ fn draw_axis_chart(
             lo = 0.0;
             hi = 1.0;
         }
-        Some(make_scale(lo, hi, cat_ax, plot.w, true, room))
+        Some(make_scale(lo, hi, cat_ax, plot.w, true, xrule))
     } else {
         None
     };
@@ -1463,7 +1557,7 @@ fn draw_axis_chart(
         }
     };
 
-    // 눈금선
+    // 눈금선: 지정이 없으면 축 선과 같은 회색 (레거시는 808080, 화소에 맞춘다 — XML 차트는 계산한 자리에 흐리게)
     let grid = |a: Option<&ChartAxis>, major: bool| -> Option<Stroke> {
         let a = a?;
         let l = if major {
@@ -1471,7 +1565,10 @@ fn draw_axis_chart(
         } else {
             a.minor_gridlines.as_ref()
         }?;
-        cx.line_of(l.sp_pr.as_ref(), Some(("#D9D9D9", 1.0)))
+        cx.line_of(
+            l.sp_pr.as_ref(),
+            Some((if legacy { LEGACY_GRAY } else { AXIS_GRAY }, 1.0)),
+        )
     };
     if let Some(gs) = grid(val_ax, false) {
         let minor = val_ax
@@ -1481,7 +1578,7 @@ fn draw_axis_chart(
             let mut v = scale.min;
             while v <= scale.max && (v - scale.min) / minor < 500.0 {
                 let p = vpos(&scale, v);
-                grid_line(out, horizontal, p, &plot, &gs);
+                grid_line(out, horizontal, p, &plot, &gs, legacy);
                 v += minor;
             }
         }
@@ -1489,14 +1586,14 @@ fn draw_axis_chart(
     if let Some(gs) = grid(val_ax, true) {
         for v in scale.ticks() {
             let p = vpos(&scale, v);
-            grid_line(out, horizontal, p, &plot, &gs);
+            grid_line(out, horizontal, p, &plot, &gs, legacy);
         }
     }
     if let Some(gs) = grid(cat_ax, true) {
         if let Some(xs) = &xscale {
             for v in xs.ticks() {
                 let p = plot.x + xs.t(v) * plot.w;
-                grid_line(out, true, p, &plot, &gs);
+                grid_line(out, true, p, &plot, &gs, legacy);
             }
         } else {
             for k in 0..=n_cat {
@@ -1506,7 +1603,7 @@ fn draw_axis_chart(
                 } else {
                     plot.x + off
                 };
-                grid_line(out, !horizontal, p, &plot, &gs);
+                grid_line(out, !horizontal, p, &plot, &gs, legacy);
             }
         }
     }
@@ -1796,8 +1893,10 @@ fn draw_axis_chart(
     }
 }
 
-fn grid_line(out: &mut Svg, vertical: bool, p: f64, plot: &Rect, st: &Stroke) {
-    let p = p.round() + 0.5;
+/// 눈금선 하나. `snap` 이면 화소 가운데에 (레거시), 아니면 계산한 자리 그대로 (한셀 XML 차트는 흐리게 그린다 —
+/// 한 화소에 걸치면 진한 회색, 두 화소에 걸치면 연한 회색 둘)
+fn grid_line(out: &mut Svg, vertical: bool, p: f64, plot: &Rect, st: &Stroke, snap: bool) {
+    let p = if snap { p.round() + 0.5 } else { p + 0.5 };
     if vertical {
         out.line(p, plot.y, p, plot.y + plot.h, st);
     } else {
@@ -2552,7 +2651,7 @@ fn draw_radar(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font
     let (cx0, cy0) = (inner.x + inner.w / 2.0, inner.y + inner.h / 2.0);
     let (lo, hi, _) = value_range(&[g]);
     let (_, val_ax) = group_axes(ch, g);
-    let sc = make_scale(lo, hi, val_ax, r, true, 0.05);
+    let sc = make_scale(lo, hi, val_ax, r, true, TickRule::Horizontal { room: true });
     let ang = |k: usize| -std::f64::consts::FRAC_PI_2 + k as f64 * std::f64::consts::TAU / n as f64;
     let pt = |k: usize, v: f64| {
         let rr = sc.t(v).clamp(0.0, 1.0) * r;
@@ -2648,9 +2747,40 @@ mod tests {
     #[test]
     fn auto_scale_has_headroom_like_hancell() {
         // 한셀 화면: 최댓값 60 → 70, 130 → 140 (그림 영역 높이 270px 남짓)
-        let s = make_scale(20.0, 60.0, None, 270.0, true, 0.05);
+        let xml = TickRule::Xml { room: true };
+        let s = make_scale(20.0, 60.0, None, 270.0, true, xml);
         assert_eq!((s.min, s.max, s.major), (0.0, 70.0, 10.0));
-        let s = make_scale(0.0, 130.0, None, 270.0, true, 0.05);
+        let s = make_scale(0.0, 130.0, None, 270.0, true, xml);
         assert_eq!((s.min, s.max, s.major), (0.0, 140.0, 20.0));
+    }
+
+    #[test]
+    fn tick_density_follows_axis_length() {
+        // 높이 실험 (값 축 길이 px → 끝값/단위): 간격 수 ≤ ⌊길이/25⌋ (3~10), 끝은 데이터 끝 + 단위/4
+        let xml = TickRule::Xml { room: true };
+        let at = |hi: f64, len: f64, rule: TickRule| {
+            let s = make_scale(hi / 9.0, hi, None, len, true, rule);
+            (s.max, s.major)
+        };
+        assert_eq!(at(9.0, 68.0, xml), (15.0, 5.0));
+        assert_eq!(at(90.0, 108.0, xml), (150.0, 50.0));
+        assert_eq!(at(90.0, 148.0, xml), (100.0, 20.0));
+        assert_eq!(at(90.0, 288.0, xml), (100.0, 10.0));
+        assert_eq!(at(300.0, 188.0, xml), (350.0, 50.0));
+        assert_eq!(at(7.5, 198.0, xml), (8.0, 2.0));
+        assert_eq!(at(7.5, 208.0, xml), (8.0, 1.0));
+        assert_eq!(at(9.5, 248.0, xml), (10.0, 2.0));
+        assert_eq!(at(9.5, 258.0, xml), (10.0, 1.0));
+        assert_eq!(at(3.5, 208.0, xml), (4.0, 0.5));
+        // 레거시: 간격 수 ≤ ⌊길이/15.5⌋, 끝은 데이터 끝과 5.5px 넘게
+        let leg = TickRule::Legacy { room: true };
+        assert_eq!(at(90.0, 191.0, leg), (100.0, 10.0));
+        assert_eq!(at(9.0, 111.0, leg), (10.0, 2.0));
+        assert_eq!(at(7.5, 81.0, leg), (10.0, 2.0));
+        assert_eq!(at(7.5, 101.0, leg), (8.0, 2.0));
+        assert_eq!(at(60.0, 271.0, leg), (70.0, 10.0));
+        // 100% 누적은 100% 에서 끝난다
+        let s = make_scale(0.0, 1.0, None, 268.0, true, TickRule::Xml { room: false });
+        assert_eq!((s.max, s.major), (1.0, 0.1));
     }
 }

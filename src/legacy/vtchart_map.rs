@@ -17,7 +17,8 @@ use crate::model::{
     Cell, CellValue, Chart, ChartAxis, ChartCache, ChartColor, ChartData, ChartDataLabels,
     ChartFill, ChartFont, ChartGroupProps, ChartLayout, ChartLine, ChartLines, ChartManualLayout,
     ChartMarker, ChartNumFmt, ChartPara, ChartPoint, ChartRich, ChartRun, ChartScaling,
-    ChartSeries, ChartShapeProps, ChartTitle, ChartTx, ChartView3D, HncChartStyle, Sheet, Styles,
+    ChartSeries, ChartShapeProps, ChartTitle, ChartTx, ChartView3D, HncChartStyle, LegacyChartView,
+    Sheet, Styles,
 };
 
 /// 한셀이 빈 글꼴 이름 대신 쓰는 글꼴 (제목·축 제목, 관측)
@@ -1017,6 +1018,20 @@ pub(crate) fn map(rec: &VtRecord, book: &Book<'_>) -> Chart {
             layout_index: Some(-1),
             color_index: Some(0),
             style_index: Some(0),
+        }),
+        // 한셀 화면은 레거시 차트를 저장값(VtChart)대로 그린다 — 모델에 옮기지 않는 값을 함께 둔다
+        legacy: Some(LegacyChartView {
+            chart_type,
+            fills: pool
+                .iter()
+                .map(|e| {
+                    e.and_then(|e| e.group("brush"))
+                        .and_then(|b| b.color("fill"))
+                        .map_or_else(String::new, |c| c.hex().to_ascii_uppercase())
+                })
+                .collect(),
+            rotation: plot.and_then(|p| p.f32("rotation")).map_or(0.0, f64::from),
+            elevation: plot.and_then(|p| p.f32("elevation")).map_or(0.0, f64::from),
         }),
         ..Default::default()
     };
