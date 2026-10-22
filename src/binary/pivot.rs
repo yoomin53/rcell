@@ -17,10 +17,10 @@ use crate::xml::Element;
 
 /// 레코드 쓰기 ([MS-XLSB] 2.1.4 의 가변 길이 종류·크기)
 #[derive(Default)]
-struct W(Vec<u8>);
+pub(crate) struct W(pub(crate) Vec<u8>);
 
 impl W {
-    fn rec(&mut self, t: u16, data: &[u8]) {
+    pub(crate) fn rec(&mut self, t: u16, data: &[u8]) {
         if t < 0x80 {
             self.0.push(t as u8);
         } else {
@@ -39,38 +39,38 @@ impl W {
         }
         self.0.extend_from_slice(data);
     }
-    fn e(&mut self, t: u16) {
+    pub(crate) fn e(&mut self, t: u16) {
         self.rec(t, &[]);
     }
 }
 
 /// 레코드 내용 만들기
 #[derive(Default)]
-struct B(Vec<u8>);
+pub(crate) struct B(pub(crate) Vec<u8>);
 
 impl B {
-    fn u8(&mut self, v: u8) -> &mut Self {
+    pub(crate) fn u8(&mut self, v: u8) -> &mut Self {
         self.0.push(v);
         self
     }
-    fn u16(&mut self, v: u16) -> &mut Self {
+    pub(crate) fn u16(&mut self, v: u16) -> &mut Self {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
-    fn u32(&mut self, v: u32) -> &mut Self {
+    pub(crate) fn u32(&mut self, v: u32) -> &mut Self {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
-    fn i32(&mut self, v: i32) -> &mut Self {
+    pub(crate) fn i32(&mut self, v: i32) -> &mut Self {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
-    fn f64(&mut self, v: f64) -> &mut Self {
+    pub(crate) fn f64(&mut self, v: f64) -> &mut Self {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
     /// XLWideString
-    fn wstr(&mut self, s: &str) -> &mut Self {
+    pub(crate) fn wstr(&mut self, s: &str) -> &mut Self {
         let u: Vec<u16> = s.encode_utf16().collect();
         self.u32(u.len() as u32);
         for x in u {
@@ -79,7 +79,7 @@ impl B {
         self
     }
     /// XLNullableWideString
-    fn nwstr(&mut self, s: Option<&str>) -> &mut Self {
+    pub(crate) fn nwstr(&mut self, s: Option<&str>) -> &mut Self {
         match s {
             Some(s) => self.wstr(s),
             None => self.u32(0xFFFF_FFFF),
@@ -272,6 +272,11 @@ impl DateTime {
             s: (secs % 60) as u8,
         }
     }
+}
+
+/// 8바이트 날짜(해 u16, 달 u16, 날·시·분·초 u8 — PCDIDateTime, 레거시 SXDTR 도 같은 꼴) → 1900 날짜 체계 일련번호
+pub(crate) fn date_serial(b: &[u8]) -> Option<f64> {
+    DateTime::read(&mut Rd::new(b)).map(|d| d.serial())
 }
 
 // ---------------------------------------------------------------------------
@@ -862,7 +867,8 @@ fn item_record(w: &mut W, it: &Item) {
 }
 
 /// 항목 목록을 레코드로: 한셀은 수만 있는 공유 항목은 수 묶음(BrtBeginPCDIRun 0x0001), 날짜만이면 날짜 묶음(0x0020),
-/// 묶음 항목(groupItems)의 글만 있으면 글 묶음(0x0002), 나머지는 항목마다 레코드 하나를 쓴다 (피벗 실험 pa·pg·v_group)
+/// 묶음 항목(groupItems)의 글만 있거나 공유 항목의 글이 255개를 넘으면 글 묶음(0x0002), 나머지는 항목마다 레코드 하나를 쓴다
+/// (피벗 실험 pa·pg·v_group·w_big)
 fn items_records(w: &mut W, items: &[Item], string_runs: bool) {
     let all = |f: fn(&Item) -> bool| !items.is_empty() && items.iter().all(f);
     if all(|i| matches!(i, Item::Num(_))) {
@@ -1150,7 +1156,8 @@ pub(crate) fn cache_to_bin(
                 b.f64(min.unwrap_or(0.0)).f64(max.unwrap_or(0.0));
             }
             w.rec(189, &b.0);
-            items_records(&mut w, &items, false);
+            // 글만 있는 공유 항목은 255개를 넘으면 글 묶음 (피벗 실험 w_big: 300개는 묶음, 3개는 하나씩)
+            items_records(&mut w, &items, items.len() > 255);
             w.e(190);
             kind = FieldKind {
                 items: !items.is_empty(),
@@ -1255,7 +1262,9 @@ fn b01(v: bool) -> &'static str {
 
 /// 피벗 표 레코드 파트 → 한셀이 쓰는 꼴의 `pivotTableDefinition` XML. 한셀의 바이너리 읽기처럼 x14 확장
 /// (`hideValuesRow="1" altText=""`)을 늘 붙인다 (피벗 실험: 확장이 없는 원본의 바이너리도 .xlsb 읽기 결과에는 있다)
-pub(crate) fn table_to_xml(data: &[u8]) -> Option<String> {
+/// `include_new` 는 레거시 읽기만 쓴다: 필드마다 `includeNewItemsInFilter` (한셀 바이너리에는 이 값의 자리가 없다 — fFilterInclusive
+/// 비트는 한셀이 늘 켜고 읽을 때 쓰지 않는다)
+pub(crate) fn table_to_xml(data: &[u8], include_new: Option<&[bool]>) -> Option<String> {
     let recs = super::biff12::records(data);
     let view = recs.iter().find(|r| r.rtype == 280)?;
     let mut r = Rd::new(view.data);
@@ -1570,6 +1579,9 @@ pub(crate) fn table_to_xml(data: &[u8]) -> Option<String> {
                 }
                 if flag_value(ff2, VD_FLAGS2, "measureFilter") {
                     f.push_str(" measureFilter=\"1\"");
+                }
+                if include_new.is_some_and(|v| v.get(out_fields.len()) == Some(&true)) {
+                    f.push_str(" includeNewItemsInFilter=\"1\"");
                 }
                 if citm != 10 {
                     let _ = write!(f, " itemPageCount=\"{citm}\"");
@@ -2470,32 +2482,79 @@ pub(crate) fn read_binary_caches(
         let Some((def_xml, rec_xml)) = cache_to_xml(&def, records.as_deref()) else {
             continue;
         };
-        let k = map.len() + 1;
-        let name = format!("xl/pivotCache/pivotCacheDefinition{k}.xml");
-        if let Some(x) = rec_xml {
-            let rname = format!("pivotCacheRecords{k}.xml");
-            push_raw(
-                raw,
-                crate::package::rels_part_for(&name),
-                None,
-                one_rel("pivotCacheRecords", &rname),
-            );
-            push_raw(
-                raw,
-                format!("xl/pivotCache/{rname}"),
-                Some(CT_RECORDS),
-                x.into_bytes(),
-            );
-        }
-        push_raw(raw, name.clone(), Some(CT_CACHE), def_xml.into_bytes());
-        links.push(crate::model::PartLink {
-            rel_type: r.rel_type.clone(),
-            part: name.clone(),
-            cache_id: ids.iter().find(|(_, id)| *id == r.id).map(|x| x.0),
-        });
+        let name = add_cache_parts(
+            raw,
+            links,
+            map.len() + 1,
+            def_xml,
+            rec_xml,
+            ids.iter().find(|(_, id)| *id == r.id).map(|x| x.0),
+        );
         map.push((r.target.clone(), name));
     }
     Ok(map)
+}
+
+/// 캐시 XML 을 원본 파트(`xl/pivotCache/pivotCacheDefinitionK.xml` + 관계 + 레코드)와 통합 문서 관계로 둔다. 돌려주는
+/// 값은 정의 파트 이름 (바이너리·레거시 읽기가 함께 쓴다)
+pub(crate) fn add_cache_parts(
+    raw: &mut Vec<crate::model::RawPart>,
+    links: &mut Vec<crate::model::PartLink>,
+    k: usize,
+    def_xml: String,
+    rec_xml: Option<String>,
+    cache_id: Option<u32>,
+) -> String {
+    let name = format!("xl/pivotCache/pivotCacheDefinition{k}.xml");
+    if let Some(x) = rec_xml {
+        let rname = format!("pivotCacheRecords{k}.xml");
+        push_raw(
+            raw,
+            crate::package::rels_part_for(&name),
+            None,
+            one_rel("pivotCacheRecords", &rname),
+        );
+        push_raw(
+            raw,
+            format!("xl/pivotCache/{rname}"),
+            Some(CT_RECORDS),
+            x.into_bytes(),
+        );
+    }
+    push_raw(raw, name.clone(), Some(CT_CACHE), def_xml.into_bytes());
+    links.push(crate::model::PartLink {
+        rel_type: format!("{REL}/pivotCacheDefinition"),
+        part: name.clone(),
+        cache_id,
+    });
+    name
+}
+
+/// 피벗 표 XML 을 원본 파트(`xl/pivotTables/pivotTableN.xml` + 캐시 정의로 가는 관계)와 시트 관계로 둔다
+pub(crate) fn add_table_part(
+    raw: &mut Vec<crate::model::RawPart>,
+    links: &mut Vec<crate::model::PartLink>,
+    n: usize,
+    xml: String,
+    cache: &str,
+) {
+    let name = format!("xl/pivotTables/pivotTable{n}.xml");
+    let target = format!(
+        "../pivotCache/{}",
+        cache.rsplit('/').next().unwrap_or(cache)
+    );
+    push_raw(
+        raw,
+        crate::package::rels_part_for(&name),
+        None,
+        one_rel("pivotCacheDefinition", &target),
+    );
+    push_raw(raw, name.clone(), Some(CT_TABLE), xml.into_bytes());
+    links.push(crate::model::PartLink {
+        rel_type: format!("{REL}/pivotTable"),
+        part: name,
+        cache_id: None,
+    });
 }
 
 /// 바이너리 원본 시트의 피벗 표 (시트 관계 `pivotTable`) → XML 원본 파트(`xl/pivotTables/pivotTableN.xml`, N 은 문서
@@ -2521,27 +2580,11 @@ pub(crate) fn read_binary_tables(
         let (Some(cache), Some(data)) = (cache, pkg.read_bytes(&r.target)?) else {
             continue;
         };
-        let Some(xml) = table_to_xml(&data) else {
+        let Some(xml) = table_to_xml(&data, None) else {
             continue;
         };
         *next += 1;
-        let name = format!("xl/pivotTables/pivotTable{next}.xml");
-        let target = format!(
-            "../pivotCache/{}",
-            cache.rsplit('/').next().unwrap_or(&cache)
-        );
-        push_raw(
-            raw,
-            crate::package::rels_part_for(&name),
-            None,
-            one_rel("pivotCacheDefinition", &target),
-        );
-        push_raw(raw, name.clone(), Some(CT_TABLE), xml.into_bytes());
-        links.push(crate::model::PartLink {
-            rel_type: r.rel_type.clone(),
-            part: name,
-            cache_id: None,
-        });
+        add_table_part(raw, links, *next, xml, &cache);
     }
     Ok(())
 }

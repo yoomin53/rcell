@@ -119,7 +119,7 @@ bCharSet u8, 예약 u8, cch u8, flag u8, 이름 UTF-16[cch]`.
 | 70 | i32 | 글자 위치 (%) | `hs:offset` |
 | 74 | COLORREF | 취소선 색 | `hs:strikeoutColor` |
 
-COLORREF 는 `0x00BBGGRR` 이다. `0xFFFFFFFF` = 지정 안 함, `0xDFFFFFFF` = 자동 (관측).
+COLORREF 는 `0x00BBGGRR` 이다. `0xFFFFFFFF` = 지정 안 함, `0xDFFFFFFF` = 자동, `0x80800002` = 색인 65 (피벗 서식의 테두리 — XML `indexed="65"`; 한셀의 바이너리 저장은 이 값의 아래 세 바이트를 RGB `020080` 으로 쓴다) (관측).
 
 한셀은 외곽선 종류(오프셋 14)가 있으면 실선이 아니어도 ECMA 외곽선(`x:outline`)을 켠다. grbit 0x10 은 실선일 때만
 켜져 있으므로 둘 중 하나라도 있으면 외곽선이다 (글꼴 대조 실험). 그림자 종류(오프셋 18)는 `x:shadow` 를 켜지 않는다.
@@ -470,6 +470,8 @@ XTI 가 외부 SUPBOOK 을 가리키면 XML 표기로 `[n]시트!A1` 이 된다.
 | 하이퍼링크의 화면 설명 | 저장되지 않는다. 다시 열면 주소(대상, 없으면 위치)가 설명이 된다 (6절 HLINKTOOLTIP) |
 | 표 | 자동 필터 조건이 저장되지 않는다 (0xB006). 요약 행 밖의 구조적 참조 수식(`SUM(Table1[가])`, `[#This Row]` 계산 열 …)이나 요약 행 사용자 수식이 있는 레거시 저장본을 한셀은 다시 열다 멈춘다 (RPC_E_SERVERFAULT — 요약 행 함수만 있는 표는 연다). 다시 열 때 같은 내용이 된 차등 서식을 합쳐 표의 `totalsRowDxfId` 등 번호가 바뀌고, 요약 행이 있는 표의 열에 `totalsRowDxfId` 를 붙인다 |
 | 조건부 서식의 x14 확장 | 데이터 막대의 테두리·그라데이션·음수 색·축, `autoMin`/`autoMax`, 사용자 지정 아이콘, x14 구역의 수식 규칙은 저장되지 않는다. 남는 방향(오른쪽에서 왼쪽)도 다시 열 때 읽지 않는다 (6.3절) |
+| 피벗 | 표의 표시 속성 여러 개(`showItems`·`showDrill` …·`indent`·`showHeaders`·`chartFormat`), 총합계·행/열 머리글 글, 표 스타일의 머리글·줄무늬 표시, 캐시의 `refreshedBy`·`refreshedDate`·`missingItemsLimit`·`upgradeOnRefresh`, 캐시 필드의 표시 형식이 저장되지 않는다. 다시 열 때 `pageWrap` 을 두 배로, 태그를 페이지 스타일로도 읽고, 항목이 255개를 넘는 필드의 레코드 번호를 잘못 읽는다 (10절) |
+| 색인 65 테두리 | 다시 열 때 몇몇 오른쪽 테두리를 흰색(`ffffff`)으로 읽는다 (피벗 서식의 테두리 — 파일에는 다른 쪽과 같은 `0x80800002`) |
 
 ## 9. 검증 방법
 
@@ -477,3 +479,53 @@ XTI 가 외부 SUPBOOK 을 가리키면 XML 표기로 `[n]시트!A1` 이 된다.
 2. `tools/probe/convert.ps1` — 한셀이 레거시 파일을 열어 XML 로 다시 저장 (정답).
 3. `rcell diff X.legacy.cell X.legacy.as.cell --ignore-font-scale` — rcell 의 해석과 비교.
 4. 값을 바꿔 가며 조작한 XML 을 한셀로 레거시 변환해 필드 오프셋을 확정 (`rcell patch`).
+
+## 10. 피벗 (`src/legacy/pivot.rs`)
+
+피벗 실험: COM 으로 만든 피벗 문서 11개와 그 XML 의 피벗 속성을 하나씩 바꾼 조작 문서 42개(v_*, w_* — 하나만 바꾼 표 수준
+비트 8개 포함, 항목 300개 필드 하나)를 한셀이 레거시로 저장한 것을 XML 저장본·한셀의 레거시 읽기(`X.legacy.as.cell`)와
+맞댔다. 레코드는 [MS-XLS] 의 BIFF8 피벗 레코드를 따르되 한셀은 행 번호·항목 수·캐시 항목 번호를 u32 로 넓히고, 글은
+글자 수 u16 + 플래그 바이트(늘 0) + UTF-16 이다.
+
+**전역** (캐시마다, 차례대로 캐시 번호 0, 1, …): `SXSTREAMID`(0x00D5: 스트림 번호 u16), `SXVS`(0x00E3: 원본 종류 u16, 1
+시트), `DCONREF`(0x0051: 첫·끝 행 u32, 첫·끝 열 u16, 파일 글자 수 u16 + 글 — 이 문서의 시트는 첫 글자 0x0002 + 시트 이름)
+또는 `DCONNAME`(0x0052: 이름 글, 파일 글자 수 u16 — 0 이면 이 문서).
+
+**캐시 스트림** `/_SX_DB_CUR/000N` (N = 스트림 번호, 16진수 네 자리):
+
+| 레코드 | 칸 |
+|---|---|
+| `SXDB` (0x00C6) | 레코드 수 u32, 스트림 번호 u16, 플래그 u16 (0x01 `saveData`, 0x02 `invalid`, 0x04 `refreshOnLoad`, 0x08 `optimizeMemory`, 0x10 `backgroundQuery`, 0x20 `enableRefresh`), u16, 원본 필드 수 u16, 전체 필드 수 u16 (계산 필드 포함), u16, 원본 종류 u16, 고친 사람 글자 수 u16 + 플래그 바이트 |
+| `SXDBEX` (0x0122) | 새로 고친 날짜 f64 (한셀은 0), 수식 수 u32 |
+| `SXFDB` (0x00C7) | 플래그 u16, 부모 u16, 기준 u16, 보이는 항목 수 u16, 묶음 항목 수 u16, 6바이트, 공유 항목 수 u32, 이름. 플래그: 0x01 늘, 0x08 부모 있음, 0x10 범위 묶음, 0x20 수, 0x40 정수, 0x80 글 섞임(`containsString`·`containsSemiMixedTypes`), 0x100 최소·최대, 0x200 레코드의 항목 번호가 u32 (항목 300개 필드, w_big — 아니면 u8), 0x400 날짜 아닌 값, 0x800 날짜, 0x8000 계산 필드. 빈 칸(`containsBlank`)·섞임(`containsMixedTypes` = 수 + 글)은 항목에서 정한다. 표시 형식은 없다 |
+| `SXFDBTYPE` (0x01BB) | SQL 형식 u16 |
+| 항목 | `SXSTRING`(0x00CD: 글), `SXNUM`(0x00C9: f64), `SXBOOL`(0x00CA: u16), `SXERR`(0x00CB: u16), `SXDTR`(0x00CE: 해 u16, 달 u16, 날·시·분·초 u8 — XLSB 의 날짜와 같다), `SXNIL`(0x00CF). 필드마다 묶음 항목, [`SXRNG`(0x00D8: 0x01 autoStart, 0x02 autoEnd, 비트 2–4 단위) + 시작·끝·간격], 공유 항목 순 (v_group) |
+| `SXFMLA` (0x00F9) | 계산 필드 수식: cce u16, 이름 수 u16, 토큰열 — 필드 이름은 `PtgSxName`(0x18 0x1D + u32, XLSB 와 같다). 뒤의 `SXNAME`(0x00F6: 플래그 u16, 캐시 필드 번호 u16, 함수 u16, 쌍 수 u16)이 이름 목록 (v_calc) |
+| `SXDBB` (0x00C8) | 레코드마다 원본 필드의 공유 항목 번호 (u8, 필드 플래그 0x200 이면 u32) |
+
+**시트** (피벗 표마다): `SXVIEW`(0x00B0), 0x00B3, 필드마다 `SXVD`(0x00B1) + 항목 `SXVI`(0x00B2)… + `SXVDEX`(0x0100), `SXIVD`(0x00B4,
+행·열 필드), `SXPI`(0x00B6), `SXDI`(0x00C5)…, `SXLI`(0x00B5, 행·열 두 개), `SXEX`(0x00F1), [서식 `SXFORMAT`(0x00FB)·`SXRULE`(0x00F0)·
+`SXFILT`(0x00F2)·`SXITM`(0x00F5)].
+
+| 레코드 | 칸 |
+|---|---|
+| `SXVIEW` | 범위 (첫·끝 행 u32, 첫·끝 열 u16), 머리글 행 u32, 데이터 행 u32, 데이터 열 u16 (절대 좌표), 캐시 번호 u16, 예약 u16, 값 축 u16 (1 행, 2 열), 값 자리 i16, 필드 수 u16 ×5 (전체·행·열·페이지·데이터), 행 줄 수 u32, 열 줄 수 u16, 플래그 u16 (0x01 `rowGrandTotals`, 0x02 `colGrandTotals`, 0x08 `useAutoFormatting`, 0x200 `applyWidthHeightFormats`), 자동 서식 u16, 이름·값 머리글 글자 수 u16, 글 둘 |
+| 0x00B3 | 플래그 u16: 0x01 `compact`, 0x02 `outline`, 0x04 `outlineData`, 0x08 `compactData`, 0x10 `gridDropZones` (하나씩 바꾼 w_tc0·w_to0·w_tod0·w_grid) |
+| `SXVD` | 축 u16 (1 행, 2 열, 4 페이지, 8 데이터), 부분합 수 u16, 부분합 플래그 u16 (0x01 기본, 0x02 sum, 0x04 countA, 0x08 average, 0x10 max, 0x20 min, 0x40 product, 0x80 count, 0x100 stdDev, 0x200 stdDevP, 0x400 var, 0x800 varP), 항목 수 u32, 이름 |
+| `SXVI` | 종류 u16 ([MS-XLS] 순서: 0 data, 1 default, 2 sum, 3 countA, 4 count, 5 average, 6 max, 7 min, 8 product, 9 stdDev, 10 stdDevP, 11 var, 12 varP, 13 grand, 14 blank), 플래그 u16 (0x01 `h`, 0x02 `sd="0"`), 캐시 항목 i32, 이름 |
+| `SXVDEX` | 플래그 24비트 ([MS-XLS]: 비트 1–4 dragToRow·Col·Page·dragOff, 5 dragToData 금지, 7 serverField, 9 자동 정렬, 10 오름 — 수동 정렬도 켠다, 11 autoShow, 12 topAutoShow, 13 계산 필드, 14 insertPageBreak, 15 hideNewItems) + 자동 표시 수 u8, 자동 정렬 데이터 필드 u16, 자동 표시 데이터 필드 i16 (`rankBy`), 표시 형식 u16, **한셀 플래그 u16** (0x01 `showAll`, 0x02 `outline`, 0x04 `compact`, 0x08 `subtotalTop`, 0x10 `insertBlankRow`, 0x20 `includeNewItemsInFilter`), 부분합 글자 수 u16, 예약 8, 부분합 글 |
+| `SXIVD` | 필드 번호 i16 ×n (−2 값) — 행 필드가 있으면 먼저, 열 필드가 있으면 다음 |
+| `SXPI` | 페이지 필드마다 8바이트: 필드 u16, 항목 i32 (−1 모두), 개체 u16 |
+| `SXDI` | 필드 u16, 함수 u16 (0 sum, 1 count, 2 average …), 값 표시 u16, 기준 필드 i16, 기준 항목 u16, 표시 형식 u16, 이름 |
+| `SXLI` | 줄마다: 앞 줄과 같은 수 u16 (`r`), 종류 u16, 항목 수 u16, 플래그 u16 (비트 1–8 데이터 필드 `i`, 0x200 부분합, 0x800 총합계), 항목 번호 u32 × (그 축의 필드 수) — XML 의 `x` 는 [같은 수, 항목 수) 구간 (pd) |
+| `SXEX` | 서식 수 u16, 오류·빈 칸·태그 글자 수 u16, 선택 수 u16, 페이지 필드 행·열 수 u16, 플래그 u32 (0x01 `pageOverThenDown`, 비트 1–8 `pageWrap`, 0x200 늘, 0x10000 `enableWizard`, 0x20000 `enableDrill`, 0x40000 `enableFieldProperties`, 0x80000 `preserveFormatting`, 0x100000 `mergeItem`, 0x200000 `showError`, 0x400000 `showMissing`, 0x800000 `subtotalHiddenItems` — w_merge·w_subhid·w_pw1), 페이지·표·빈 자리 스타일 글자 수 u16, 글 (오류, 빈 칸, 태그, 페이지 스타일, 표 스타일, 빈 자리 스타일) |
+
+rcell 은 이 레코드를 바이너리 피벗 레코드로 옮겨 [cell-binary.md](cell-binary.md) 5.5절의 XML 을 쓴다 — 한셀의 레거시 읽기가 쓰는
+XML 과 같은 꼴이다. 레거시에 없는 값은 한셀이 읽을 때 쓰는 값으로: 표 스타일의 머리글·끝 열 켬·줄무늬 끔, `itemPrintTitles="1"`,
+나머지 표시 속성은 OOXML 기본값, 캐시 필드 표시 형식 0. 한셀의 읽기를 따라 빈 자리 스타일이 없으면 표 스타일을, 페이지 스타일이
+없으면 태그를 쓰고 (pa·v_cap), `pageWrap` 은 두 배로 (w_pw1), 값 자리 −1 은 데이터 필드가 하나일 때만 쓴다 (pa·pi 대 pc·pe).
+다른 점: 항목이 255개를 넘는 필드가 있는 캐시의 레코드를 rcell 은 바르게 읽는다 (한셀의 레거시 읽기는 번호가 어긋난다 — w_big), 피벗
+서식(`SXFORMAT`…)은 읽지 않는다 (v_fmt — 한셀의 바이너리 저장도 버린다). 검증 (레거시가 있는 피벗 문서 54개): rcell 이 레거시에서
+쓴 피벗 XML 파트가 49개는 한셀의 레거시 읽기와 같고, 나머지 5개는 v_fmt 의 서식, 한셀이 XML 에 쓰지 않는 `sortType`(v_sorta·v_sortd)과
+항목 없는 필드의 `defaultSubtotal="0"`(v_calc), w_big 의 레코드만 다르다. 한셀 대조(한셀이 rcell XML 을 읽은 것 대 한셀이 레거시를 읽은
+것, `rcell diff`)는 54개 모두 피벗 차이 0 이다.

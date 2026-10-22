@@ -13,6 +13,7 @@ pub mod biff;
 pub mod escher;
 pub mod formula;
 pub mod ftab;
+pub(crate) mod pivot;
 pub mod props;
 pub mod reader;
 pub(crate) mod vtchart;
@@ -34,6 +35,8 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
     }
     let stream = container::read_entry(bytes, "/Workbook")?;
     let mut wb = reader::read_workbook_stream(&stream)?;
+    // 피벗: 캐시 스트림(_SX_DB_CUR)과 시트의 피벗 레코드 → XML 피벗 파트
+    pivot::read(bytes, &stream, &mut wb);
     // 문서 속성: 목록은 이름의 제어 문자를  로 표기한다 (container::display_path)
     if has("/\\x05SummaryInformation") {
         let s = container::read_entry(bytes, "/\u{5}SummaryInformation")?;

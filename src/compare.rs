@@ -1572,8 +1572,8 @@ fn raw_xml(w: &Workbook, part: &str) -> Option<Element> {
     crate::xml::parse(s.trim_start_matches('\u{feff}'), part).ok()
 }
 
-/// 피벗 표 (XML 원본에서 그대로 옮긴 파트): 이름, 위치, 캐시의 원본·필드, 필드 축, 행·열·페이지·데이터 필드,
-/// 스타일. 데이터 필드의 함수는 없으면 sum (한셀은 늘 쓴다)
+/// 피벗 표 (모델의 XML 파트): 이름, 위치, 캐시의 원본·필드(공유 항목 수, 계산 필드 수식), 필드 축·숨긴 항목·부분합,
+/// 행·열·페이지(고른 항목)·데이터 필드, 스타일, 총합계, 값 머리글. 데이터 필드의 함수는 없으면 sum (한셀은 늘 쓴다)
 fn pivots_key(w: &Workbook, sh: &Sheet) -> String {
     let mut v: Vec<String> = sh
         .part_links
@@ -1601,11 +1601,18 @@ fn pivot_key(w: &Workbook, part: &str) -> String {
                 });
                 format!("{}{ws}", a(s, "type"))
             });
+            // 필드 이름, 공유 항목 수, 계산 필드 수식
             let fields: Vec<String> = c
                 .sml_child("cacheFields")
                 .into_iter()
                 .flat_map(|f| f.sml_children("cacheField"))
-                .map(|f| a(f, "name"))
+                .map(|f| {
+                    let n = f
+                        .sml_child("sharedItems")
+                        .map_or(0, |s| s.elements().count());
+                    let fm = f.attr("formula").map_or(String::new(), |x| format!("={x}"));
+                    format!("{}#{n}{fm}", a(f, "name"))
+                })
                 .collect();
             format!("{src} [{}]", fields.join(","))
         });
@@ -1623,13 +1630,38 @@ fn pivot_key(w: &Workbook, part: &str) -> String {
         .into_iter()
         .flat_map(|f| f.sml_children("pivotField"))
         .map(|f| {
+            // 축, 데이터 필드, 숨긴 항목, 부분합 (기본 부분합이 없거나 다른 함수)
+            let hidden: Vec<String> = f
+                .sml_child("items")
+                .into_iter()
+                .flat_map(|i| i.sml_children("item"))
+                .enumerate()
+                .filter(|(_, i)| i.attr_bool("h") == Some(true))
+                .map(|(k, _)| k.to_string())
+                .collect();
+            let subs: Vec<&str> = f
+                .sml_child("items")
+                .into_iter()
+                .flat_map(|i| i.sml_children("item"))
+                .filter_map(|i| i.attr("t"))
+                .collect();
             format!(
-                "{}{}",
+                "{}{}{}{}",
                 f.attr("axis").unwrap_or("-"),
                 if f.attr_bool("dataField") == Some(true) {
                     "+data"
                 } else {
                     ""
+                },
+                if hidden.is_empty() {
+                    String::new()
+                } else {
+                    format!(" 숨김{}", hidden.join("/"))
+                },
+                if subs.is_empty() || subs == ["default"] {
+                    String::new()
+                } else {
+                    format!(" 부분합{}", subs.join("/"))
                 }
             )
         })
@@ -1655,16 +1687,36 @@ fn pivot_key(w: &Workbook, part: &str) -> String {
             )
         })
         .collect();
+    // 페이지 필드: 필드와 고른 항목
+    let pages: Vec<String> = root
+        .sml_child("pageFields")
+        .into_iter()
+        .flat_map(|f| f.sml_children("pageField"))
+        .map(|p| match p.attr("item") {
+            Some(i) => format!("{}:{i}", a(p, "fld")),
+            None => a(p, "fld"),
+        })
+        .collect();
+    let grand = |n: &str| {
+        if root.attr_bool(n) == Some(false) {
+            "0"
+        } else {
+            "1"
+        }
+    };
     format!(
-        "{} @{loc} 캐시={cache} 필드=[{}] 행=[{}] 열=[{}] 페이지=[{}] 데이터=[{}] 스타일={}",
+        "{} @{loc} 캐시={cache} 필드=[{}] 행=[{}] 열=[{}] 페이지=[{}] 데이터=[{}] 스타일={} 총합계={}{} 값={}",
         a(&root, "name"),
         fields.join(","),
         list("rowFields", "field", "x"),
         list("colFields", "field", "x"),
-        list("pageFields", "pageField", "fld"),
+        pages.join(","),
         data.join(";"),
         root.sml_child("pivotTableStyleInfo")
-            .map_or(String::new(), |s| a(s, "name"))
+            .map_or(String::new(), |s| a(s, "name")),
+        grand("rowGrandTotals"),
+        grand("colGrandTotals"),
+        a(&root, "dataCaption")
     )
 }
 

@@ -374,13 +374,13 @@ fn bad(what: &str) -> Error {
 // 논리 레코드 (CONTINUE 병합)
 // ---------------------------------------------------------------------------
 
-struct Logical {
-    rtype: u16,
-    offset: usize,
-    data: Vec<u8>,
+pub(crate) struct Logical {
+    pub(crate) rtype: u16,
+    pub(crate) offset: usize,
+    pub(crate) data: Vec<u8>,
 }
 
-fn logical_records(stream: &[u8]) -> Vec<Logical> {
+pub(crate) fn logical_records(stream: &[u8]) -> Vec<Logical> {
     let mut out: Vec<Logical> = Vec::new();
     for Record {
         offset,
@@ -424,6 +424,12 @@ fn colorref(v: u32) -> Option<Color> {
         0xFFFF_FFFF => None,
         0xDFFF_FFFF => Some(Color {
             indexed: Some(64),
+            ..Default::default()
+        }),
+        // 색인 65 (시스템 전경): 피벗 표 서식의 테두리 — XML `indexed="65"` 가 레거시에서 이 값이고, 한셀의 레거시 읽기는
+        // 다시 색인 65 로 읽는다 (피벗 실험 pa…: 한셀의 바이너리 저장은 같은 값의 아래 세 바이트를 RGB 020080 으로 쓴다)
+        0x8080_0002 => Some(Color {
+            indexed: Some(65),
             ..Default::default()
         }),
         _ => {
@@ -704,7 +710,7 @@ fn parse_xf(data: &[u8], palette: &[u32]) -> Option<XfParts> {
         Some(BorderEdge {
             style: BORDER_STYLES.get(dg as usize).map(|s| s.to_string()),
             color: colorref(rgb)
-                .filter(|c| c.rgb.is_some())
+                .filter(|c| c.rgb.is_some() || c.indexed == Some(65))
                 .or_else(|| palette_color(icv as u16, palette)),
         })
     };
