@@ -213,7 +213,7 @@ pub const FNS: &[FnSpec] = &[
     f("NORM.S.DIST", 2, 2, V, |c, a| {
         let z = try_v!(num_arg(c, a, 0));
         let cum = try_v!(bool_or(c, a, 1, true));
-        num(if cum { hc::norm_cdf(z) } else { sp::norm_s_pdf(z) })
+        num(if cum { hc::norm_cdf(z) } else { hc::norm_pdf(z) })
     }),
     // NORMSDIST 만은 정확하다 (대조 실험 norm4)
     f("NORMSDIST", 1, 1, V, |c, a| num(sp::norm_s_cdf(try_v!(num_arg(c, a, 0))))),
@@ -1344,7 +1344,7 @@ fn norm_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let z = (x - m) / s;
-    num(if cum { hc::norm_cdf(z) } else { sp::norm_s_pdf(z) / s })
+    num(if cum { hc::norm_cdf(z) } else { hc::norm_pdf(z) / s })
 }
 
 fn norm_inv(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -1380,7 +1380,7 @@ fn lognorm_dist(ctx: &mut Ctx, a: &[Value], has_cum: bool) -> Value {
     } else if cum {
         sp::norm_s_cdf(z)
     } else {
-        sp::norm_s_pdf(z) / (s * x)
+        hc::norm_pdf(z) / (s * x)
     })
 }
 

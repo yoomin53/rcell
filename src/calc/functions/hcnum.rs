@@ -219,6 +219,11 @@ pub fn integrate(f: impl Fn(f64) -> f64, x: f64) -> f64 {
     prev
 }
 
+/// 정규 밀도 e^{-z²/2}/2.506628275 (√(2π) 를 10자리로, NORM.S.DIST(2,FALSE) = 0.053990966505240066, 대조 실험 dist·norm4)
+pub fn norm_pdf(z: f64) -> f64 {
+    (-z * z / 2.0).mexp() / 2.506_628_275
+}
+
 /// 정규 누적 Φ(z) (한셀 근사)
 pub fn norm_cdf(z: f64) -> f64 {
     if z == 0.0 {
