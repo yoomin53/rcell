@@ -9,6 +9,8 @@
 //   3. 한셀 (edit-oracle.ps1): 사본에 같은 대본 → X.S.hcell.cell, 그리고 X.S.rcell.cell 을 열어 다시 저장
 //      → X.S.rcell.as.cell (rcell 이 쓴 것을 한셀이 읽은 결과)
 //   4. rcell diff X.S.hcell.cell X.S.rcell.as.cell — 둘이 같으면 rcell 의 편집이 한셀과 같다
+//   5. 차이가 나면 한셀 결과도 다시 저장해(X.S.hcell.as.cell) 한셀이 다시 연 결과끼리 한 번 더 비교한다
+//      (한셀은 문서를 열면서 기록 없는 행을 자동 높이로 맞추는 등 고치는 것이 있다)
 //
 // 사용: node tools/probe/edit-e2e.js <corpus 폴더> <작업 폴더> [--skip-hcell] [--diff-only] [--reuse-hcell] [--only 이름]
 //   --reuse-hcell : 한셀 편집 결과(X.S.hcell.cell)는 그대로 두고 rcell 쪽과 한셀 다시 저장만 새로 한다
@@ -127,6 +129,7 @@ if (!skipHcell) {
 let same = 0, total = 0, items = 0;
 const bySCRIPT = {};
 const lines = [];
+const differ = [];
 for (const j of jobs) {
   const a = j.out;
   const b = a.replace(/\.hcell\.cell$/, ".rcell.as.cell");
@@ -151,11 +154,38 @@ for (const j of jobs) {
     continue;
   }
   const diffs = out ? out.split(/\n(?=\S)/).filter((d) => !d.startsWith("… 외")) : [];
+  differ.push({ key, sname, a, b });
   items += diffs.length;
   lines.push(`${key}: 차이 ${diffs.length}`);
   for (const d of diffs.slice(0, 5)) lines.push("    " + d.replace(/\n/g, "\n    "));
 }
+// 한셀은 문서를 열면서 고치는 것이 있다 (기록 없는 행을 자동 높이로 맞추고 그 행에 걸린 도형 표지를 옮기는 등).
+// 한셀이 직접 편집한 결과는 다시 열지 않았으므로, 차이가 난 것은 한셀 결과도 다시 저장해(X.S.hcell.as.cell)
+// 한셀이 다시 연 결과끼리 한 번 더 비교한다
+if (differ.length && !skipHcell) {
+  const list = differ.map((d) => ({ in: d.a, script: "", out: d.a.replace(/\.hcell\.cell$/, ".hcell.as.cell") }));
+  fs.writeFileSync(path.join(work, "resave-hcell.json"), JSON.stringify(list, null, 1));
+  execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", oracle, "-List", path.join(work, "resave-hcell.json"), "-Resave"], {
+    stdio: "inherit",
+  });
+}
+let same2 = 0;
+const by2 = {};
+for (const d of differ) {
+  const a2 = d.a.replace(/\.hcell\.cell$/, ".hcell.as.cell");
+  if (!fs.existsSync(a2)) continue;
+  const r = spawnSync(exe, ["diff", a2, d.b], { encoding: "utf8", maxBuffer: 1 << 26 });
+  if (r.status === 0) {
+    same2++;
+    by2[d.sname] = (by2[d.sname] || 0) + 1;
+    lines.push(`${d.key}: 한셀이 다시 연 결과끼리는 같음`);
+  }
+}
 fs.writeFileSync(path.join(work, "report.txt"), lines.join("\n") + "\n");
 console.log(lines.slice(0, 200).join("\n"));
-for (const [k, v] of Object.entries(bySCRIPT)) console.log(`  ${k}: ${v.same}/${v.total}`);
-console.log(`\n편집 대조: ${total}건 중 같음 ${same}, 차이 항목 ${items} (자세한 것: ${path.join(work, "report.txt")})`);
+for (const [k, v] of Object.entries(bySCRIPT)) {
+  console.log(`  ${k}: ${v.same}/${v.total} (한셀이 다시 연 결과끼리 ${v.same + (by2[k] || 0)})`);
+}
+console.log(
+  `\n편집 대조: ${total}건 중 같음 ${same}, 한셀이 다시 연 결과끼리 같음 ${same + same2}, 차이 항목 ${items} (자세한 것: ${path.join(work, "report.txt")})`,
+);

@@ -849,3 +849,268 @@ fn json_edits() {
     );
     assert_eq!(wb.sheets[2].name, "자료");
 }
+
+/// 한셀이 만든 문서의 기본 테두리: 선은 없고 색만 — 왼쪽·오른쪽·아래 검정, 위 자동
+fn hcell_book() -> Workbook {
+    let mut st = styles();
+    let none = |rgb: Option<&str>| {
+        Some(crate::model::BorderEdge {
+            style: None,
+            color: Some(match rgb {
+                Some(h) => crate::model::Color {
+                    rgb: Some(h.into()),
+                    ..Default::default()
+                },
+                None => crate::model::Color {
+                    auto: true,
+                    ..Default::default()
+                },
+            }),
+        })
+    };
+    st.borders[0] = crate::model::Border {
+        left: none(Some("FF000000")),
+        right: none(Some("FF000000")),
+        top: none(None),
+        bottom: none(Some("FF000000")),
+        ..Default::default()
+    };
+    Workbook {
+        sheets: vec![Sheet {
+            name: "Sheet1".into(),
+            ..Default::default()
+        }],
+        styles: st,
+        ..Default::default()
+    }
+}
+
+/// 칸 하나의 변에 가는 선을 바로 넣는다 (이웃은 건드리지 않는다 — 실험 문서의 처음 상태: 한셀이 COM 으로 색까지
+/// 준 칸은 나머지 변의 색이 자동이다)
+fn put_edge(wb: &mut Workbook, a1: &str, side: &str, rgb: Option<&str>) {
+    let at = CellRef::parse(a1).unwrap();
+    let old = style_at(&wb.sheets[0], at);
+    let mut xf = wb.styles.xf(old).cloned().unwrap_or_default();
+    if xf.border_id == 0 {
+        let auto = || {
+            Some(crate::model::BorderEdge {
+                style: None,
+                color: Some(crate::model::Color {
+                    auto: true,
+                    ..Default::default()
+                }),
+            })
+        };
+        wb.styles.borders.push(crate::model::Border {
+            left: auto(),
+            right: auto(),
+            top: auto(),
+            bottom: auto(),
+            ..Default::default()
+        });
+        xf.border_id = wb.styles.borders.len() as u32 - 1;
+    }
+    let e = Some(Some(crate::model::BorderEdge {
+        style: Some("thin".into()),
+        color: Some(match rgb {
+            Some(h) => style::rgb(h).unwrap(),
+            None => crate::model::Color {
+                auto: true,
+                ..Default::default()
+            },
+        }),
+    }));
+    let mut set = style::EdgeSet::default();
+    match side {
+        "L" => set.left = e,
+        "R" => set.right = e,
+        "T" => set.top = e,
+        _ => set.bottom = e,
+    }
+    style::patch_border(&mut wb.styles, &mut xf, &set);
+    let new = style::intern_xf(&mut wb.styles, xf);
+    cell_mut(&mut wb.sheets[0], at).style = new;
+}
+
+/// 칸의 네 변 `왼쪽 오른쪽 위 아래` (선 없음 `-`, 색 `000000`·`auto`)
+fn edges(wb: &Workbook, a1: &str) -> String {
+    let st = style_at(&wb.sheets[0], CellRef::parse(a1).unwrap());
+    let b = wb
+        .styles
+        .xf(st)
+        .and_then(|x| wb.styles.borders.get(x.border_id as usize))
+        .cloned()
+        .unwrap_or_default();
+    let one = |e: &Option<crate::model::BorderEdge>| match e {
+        Some(e) if e.style.as_deref().is_some_and(|s| s != "none") => match e.color.as_ref() {
+            Some(c) if !c.auto => c.rgb.clone().unwrap_or_default()[2..].to_ascii_lowercase(),
+            _ => "auto".to_string(),
+        },
+        _ => "-".to_string(),
+    };
+    format!(
+        "{} {} {} {}",
+        one(&b.left),
+        one(&b.right),
+        one(&b.top),
+        one(&b.bottom)
+    )
+}
+
+// 테두리 대조 실험 (한셀 COM `Borders(묶음).LineStyle`, 색을 주지 않고)의 결과
+#[test]
+fn borders_like_hcell() {
+    let all = |wb: &mut Workbook, r: &str| {
+        border(
+            wb,
+            0,
+            parse_range(r).unwrap(),
+            BorderPreset::All,
+            "thin",
+            None,
+        )
+        .unwrap()
+    };
+    // 묶음 첫 칸의 색: 기본 테두리면 위만 자동, 나머지 검정
+    let mut wb = hcell_book();
+    all(&mut wb, "G2:I4");
+    assert_eq!(edges(&wb, "G2"), "000000 000000 auto 000000");
+    assert_eq!(edges(&wb, "I4"), "000000 000000 000000 000000");
+    // 묶음 첫 칸에 선이 있으면 그 색이 묶음 전체에 간다. 안쪽 세로선은 첫 행의 칸 사이 선이 제각각이면 끝 칸
+    // 왼쪽 변의 색, 안쪽 가로선은 첫 행 아래 변의 색이 제각각이면 자동
+    let mut wb = hcell_book();
+    put_edge(&mut wb, "D2", "R", Some("FF0000"));
+    put_edge(&mut wb, "B2", "L", Some("0000FF"));
+    put_edge(&mut wb, "B2", "T", Some("00FF00"));
+    put_edge(&mut wb, "B2", "R", Some("FFA500"));
+    put_edge(&mut wb, "B2", "B", Some("FFC0CB"));
+    put_edge(&mut wb, "B4", "B", Some("808080"));
+    all(&mut wb, "B2:D4");
+    assert_eq!(edges(&wb, "B2"), "0000ff auto 00ff00 auto");
+    assert_eq!(edges(&wb, "D3"), "auto ff0000 auto auto");
+    assert_eq!(edges(&wb, "C4"), "auto auto auto 808080");
+    // 오른쪽 이웃의 맞닿은 선: 새 선과 같으면 두고(양쪽에 남는다) 다르면 지운다
+    let mut wb = hcell_book();
+    put_edge(&mut wb, "D7", "L", Some("000000"));
+    put_edge(&mut wb, "D8", "L", Some("0000FF"));
+    all(&mut wb, "B7:C8");
+    assert_eq!(edges(&wb, "C7"), "000000 000000 auto 000000");
+    assert_eq!(edges(&wb, "D7"), "000000 - - -");
+    assert_eq!(edges(&wb, "D8"), "- - - -");
+    // 위 이웃의 아래 선이 있으면 위 묶음의 색은 그 선의 색
+    let mut wb = hcell_book();
+    put_edge(&mut wb, "B10", "B", Some("000000"));
+    put_edge(&mut wb, "C10", "B", None);
+    all(&mut wb, "B11:C12");
+    assert_eq!(edges(&wb, "B11"), "000000 000000 000000 000000");
+    assert_eq!(edges(&wb, "B10"), "- - - 000000");
+    assert_eq!(edges(&wb, "C10"), "- - - -");
+    // 묶음의 칸 사이가 모두 이미 같은 선이면 그 묶음은 그대로 둔다
+    let mut wb = hcell_book();
+    put_edge(&mut wb, "H12", "L", Some("000000"));
+    put_edge(&mut wb, "H13", "L", Some("000000"));
+    all(&mut wb, "F12:G13");
+    assert_eq!(edges(&wb, "G12"), "000000 - auto 000000");
+    assert_eq!(edges(&wb, "H13"), "000000 - - -");
+}
+
+// 병합 대조 실험: 첫 값 칸(C24)의 값과 서식이 왼쪽 위 칸으로 오되 테두리는 왼쪽 위 칸의 것을 두고, 병합 안쪽의
+// 칸 사이 선은 지운다
+#[test]
+fn merge_like_hcell() {
+    let mut wb = hcell_book();
+    wb.styles.fonts.push(crate::model::Font {
+        bold: true,
+        ..wb.styles.fonts[0].clone()
+    });
+    put_edge(&mut wb, "B24", "L", None);
+    put_edge(&mut wb, "C24", "L", None);
+    put_edge(&mut wb, "C24", "T", None);
+    put_edge(&mut wb, "D25", "B", None);
+    let c24 = CellRef::parse("C24").unwrap();
+    let st = style_at(&wb.sheets[0], c24);
+    let mut xf = wb.styles.xf(st).cloned().unwrap();
+    xf.font_id = 1;
+    let bold = style::intern_xf(&mut wb.styles, xf);
+    let c = cell_mut(&mut wb.sheets[0], c24);
+    c.style = bold;
+    c.value = CellValue::Text("x".into());
+    merge(&mut wb, 0, parse_range("B24:D25").unwrap(), true).unwrap();
+    let b24 = wb.sheets[0].cell(CellRef::parse("B24").unwrap()).unwrap();
+    assert_eq!(b24.value, CellValue::Text("x".into()));
+    let xf = wb.styles.xf(b24.style).unwrap();
+    assert_eq!(xf.font_id, 1);
+    assert_eq!(
+        xf.alignment.as_ref().and_then(|a| a.horizontal.as_deref()),
+        Some("center")
+    );
+    assert_eq!(edges(&wb, "B24"), "auto - - -");
+    assert_eq!(edges(&wb, "C24"), "- - auto -");
+    assert_eq!(edges(&wb, "D25"), "- - - auto");
+    assert!(wb.sheets[0].cell(c24).is_some_and(|c| c.value.is_empty()));
+}
+
+// 열 너비·행 높이 대조 실험: 바뀐 칸 안의 표지 오프셋은 (칸 px − 1) 의 비율로 옮기고 px 로 반올림한다
+#[test]
+fn anchors_follow_resized_cells_like_hcell() {
+    let mut wb = hcell_book();
+    wb.styles.fonts[0] = crate::model::Font {
+        name: Some("Arial".into()),
+        size: Some(10.0),
+        ..Default::default()
+    };
+    let s = &mut wb.sheets[0];
+    s.cols.push(ColInfo {
+        min: 2,
+        max: 2,
+        width: Some(4.0),
+        custom_width: true,
+        ..Default::default()
+    });
+    s.rows.push(RowInfo {
+        index: 3,
+        height: Some(30.0),
+        custom_height: true,
+        ..Default::default()
+    });
+    const PX: i64 = crate::units::EMU_PER_PX;
+    for (i, off) in [1i64, 18, 25, 27].into_iter().enumerate() {
+        s.shapes.push(Shape {
+            kind: ShapeKind::Shape,
+            anchor: Anchor {
+                from: Marker {
+                    col: 1,
+                    col_off: off * PX,
+                    row: 2,
+                    row_off: off * PX,
+                },
+                to: Some(Marker {
+                    col: 3,
+                    col_off: 0,
+                    row: 5 + i as u32,
+                    row_off: 0,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+    // B 열 28px → 131px (Arial 10): 1·18·25·27px → 5·87·120·130px
+    apply(
+        &mut wb,
+        &serde_json::from_str(r#"{"op":"colWidth","col":"B","width":18}"#).unwrap(),
+    )
+    .unwrap();
+    // 3행 40px → 60px: 1·18·25·27px → 2·27·38·41px
+    apply(
+        &mut wb,
+        &serde_json::from_str(r#"{"op":"rowHeight","row":3,"height":45}"#).unwrap(),
+    )
+    .unwrap();
+    let got: Vec<(i64, i64)> = wb.sheets[0]
+        .shapes
+        .iter()
+        .map(|s| (s.anchor.from.col_off / PX, s.anchor.from.row_off / PX))
+        .collect();
+    assert_eq!(got, [(5, 2), (87, 27), (120, 38), (130, 41)]);
+}

@@ -381,7 +381,7 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
         } => {
             let i = si(wb, sheet)?;
             let c = parse_col(col)?;
-            let stored = stored_col_width(wb, *width);
+            let stored = stored_col_width(*width);
             set_col_width(wb, i, c, c + count.max(&1) - 1, stored)?;
             Ok(i)
         }
@@ -1101,11 +1101,10 @@ pub fn delete_cols(wb: &mut Workbook, si: usize, at: u32, n: u32) -> crate::Resu
 
 /// 한셀 COM `ColumnWidth`(글자 수) → 저장하는 열 너비: 1/256 로 자르고 199/256 을 더한다 — 글꼴과 상관없다
 /// (대조 실험: 20 → 20.77734375, 8.43 → 9.20703125, Arial 10 문서에서도 18 → 18.77734375)
-pub fn stored_col_width(wb: &Workbook, chars: f64) -> f64 {
+pub fn stored_col_width(chars: f64) -> f64 {
     if chars < 1.0 {
         return (chars * 256.0).floor() / 256.0;
     }
-    let _ = wb;
     ((chars * 256.0).floor() + 199.0) / 256.0
 }
 
@@ -1546,93 +1545,166 @@ pub fn border(
     }
     let skip = format_skips(&wb.sheets[si], range);
     let mut plan: Vec<(CellRef, style::EdgeSet)> = Vec::new();
+    if preset == BorderPreset::None {
+        let set = style::edges_for(preset, &e, true, true, true, true);
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                let at = CellRef { row: r, col: c };
+                if !skip(at) {
+                    plan.push((at, set.clone()));
+                }
+            }
+        }
+        apply_border_plan(wb, si, plan);
+        structure::update_dimension(&mut wb.sheets[si]);
+        return Ok(());
+    }
+    use Side::{Bottom, Left, Right, Top};
+    let cr = |row: u32, col: u32| CellRef { row, col };
+    let sheet = &wb.sheets[si];
+    let styles = &wb.styles;
+    // 변 묶음 (한셀 COM Borders 의 여섯 묶음): 왼쪽, 위, 아래, 오른쪽, 안쪽 세로, 안쪽 가로
+    let on: [bool; 6] = match preset {
+        BorderPreset::All => [true, true, true, true, c1 > c0, r1 > r0],
+        BorderPreset::Outline => [true, true, true, true, false, false],
+        BorderPreset::Inside => [false, false, false, false, c1 > c0, r1 > r0],
+        BorderPreset::Left => [true, false, false, false, false, false],
+        BorderPreset::Top => [false, true, false, false, false, false],
+        BorderPreset::Bottom => [false, false, true, false, false, false],
+        BorderPreset::Right => [false, false, false, true, false, false],
+        BorderPreset::None => [false; 6],
+    };
+    // 색을 주지 않으면 묶음마다 첫 칸의 그 변 색 — 선이 있으면 선 색(이웃 칸의 맞닿은 선 포함), 없으면 칸 서식에
+    // 남은 색. 한셀 문서의 기본 테두리는 왼쪽·오른쪽·아래 검정, 위 자동이다 (테두리 대조 실험)
+    let colors: [crate::model::Color; 6] = match &e.color {
+        Some(c) => std::array::from_fn(|_| c.clone()),
+        None => {
+            // 안쪽 선은 건너뛰는 칸(범위 밖으로 걸친 병합)이 없는 첫 행에서 본다
+            let rr = (r0..=r1)
+                .find(|&r| (c0..=c1).all(|c| !skip(cr(r, c))))
+                .unwrap_or(r0);
+            // 안쪽 세로: 그 행의 칸 사이 선이 모두 같은 색이면 그 색, 아니면 끝 칸 왼쪽 변의 색
+            let lines: Vec<Option<crate::model::BorderEdge>> = (c0..c1)
+                .map(|c| line_between(sheet, styles, cr(rr, c), Right))
+                .collect();
+            let inside_v = match lines.first() {
+                Some(Some(first))
+                    if lines.iter().all(|l| {
+                        l.as_ref()
+                            .is_some_and(|l| same_color(&edge_color(l), &edge_color(first)))
+                    }) =>
+                {
+                    edge_color(first)
+                }
+                _ => record_color(sheet, styles, cr(rr, c1), Left),
+            };
+            // 안쪽 가로: 그 행 칸들의 서식에 남은 아래 변 색이 모두 같으면 그 색, 아니면 자동 (아래 칸의 위 선은 보지
+            // 않는다)
+            let below: Vec<crate::model::Color> = (c0..=c1)
+                .map(|c| record_color(sheet, styles, cr(rr, c), Bottom))
+                .collect();
+            let inside_h = if below.iter().all(|x| same_color(x, &below[0])) {
+                below[0].clone()
+            } else {
+                auto_color()
+            };
+            [
+                side_color(sheet, styles, cr(r0, c0), Left),
+                side_color(sheet, styles, cr(r0, c0), Top),
+                side_color(sheet, styles, cr(r1, c0), Bottom),
+                side_color(sheet, styles, cr(r0, c1), Right),
+                inside_v,
+                inside_h,
+            ]
+        }
+    };
+    let want: [crate::model::BorderEdge; 6] = std::array::from_fn(|g| crate::model::BorderEdge {
+        style: e.style.clone(),
+        color: Some(colors[g].clone()),
+    });
+    // 묶음의 칸 사이 선이 모두 이미 같은 선이면 그 묶음은 그대로 둔다 (한셀 — 이웃 칸의 선이 같아도)
+    let same_all = |cells: &mut dyn Iterator<Item = (CellRef, Side)>,
+                    w: &crate::model::BorderEdge| {
+        let mut ok = true;
+        for (at, side) in cells {
+            if !line_between(sheet, styles, at, side).is_some_and(|l| same_line(&l, w)) {
+                ok = false;
+                break;
+            }
+        }
+        ok
+    };
+    let mut apply = on;
+    if on[0] {
+        apply[0] = !same_all(&mut (r0..=r1).map(|r| (cr(r, c0), Left)), &want[0]);
+    }
+    if on[1] {
+        apply[1] = !same_all(&mut (c0..=c1).map(|c| (cr(r0, c), Top)), &want[1]);
+    }
+    if on[2] {
+        apply[2] = !same_all(&mut (c0..=c1).map(|c| (cr(r1, c), Bottom)), &want[2]);
+    }
+    if on[3] {
+        apply[3] = !same_all(&mut (r0..=r1).map(|r| (cr(r, c1), Right)), &want[3]);
+    }
+    if on[4] {
+        apply[4] = !same_all(
+            &mut (r0..=r1).flat_map(|r| (c0..c1).map(move |c| (cr(r, c), Right))),
+            &want[4],
+        );
+    }
+    if on[5] {
+        apply[5] = !same_all(
+            &mut (r0..r1).flat_map(|r| (c0..=c1).map(move |c| (cr(r, c), Bottom))),
+            &want[5],
+        );
+    }
+    let mut neighbors: Vec<(CellRef, style::EdgeSet)> = Vec::new();
     for r in r0..=r1 {
         for c in c0..=c1 {
-            let at = CellRef { row: r, col: c };
+            let at = cr(r, c);
             if skip(at) {
                 continue;
             }
-            let mut set = style::edges_for(preset, &e, r == r0, r == r1, c == c0, c == c1);
-            if set.is_empty() {
-                continue;
-            }
-            if e.color.is_none() {
-                // 안쪽 선(범위 가운데의 칸 사이)은 검정, 바깥 선은 칸의 원래 색 (테두리 대조 실험)
-                let black = || {
-                    Some(crate::model::Color {
-                        rgb: Some("FF000000".into()),
-                        ..Default::default()
-                    })
-                };
-                for (inner, slot) in [
-                    (r > r0, &mut set.top),
-                    (r < r1, &mut set.bottom),
-                    (c > c0, &mut set.left),
-                    (c < c1, &mut set.right),
-                ] {
-                    if inner && let Some(Some(edge)) = slot {
-                        edge.color = black();
+            let pick = |outer: bool, go: usize, gi: usize| -> Option<usize> {
+                let g = if outer { go } else { gi };
+                apply[g].then_some(g)
+            };
+            let mut set = style::EdgeSet::default();
+            for (side, g) in [
+                (Left, pick(c == c0, 0, 4)),
+                (Top, pick(r == r0, 1, 5)),
+                (Bottom, pick(r == r1, 2, 5)),
+                (Right, pick(c == c1, 3, 4)),
+            ] {
+                let Some(g) = g else { continue };
+                *side.slot(&mut set) = Some(Some(want[g].clone()));
+                // 범위 가장자리: 이웃 칸의 맞닿은 선은 새 선과 다르면 지우고 같으면 둔다 (한셀은 칸 사이 선을 하나로
+                // 다룬다 — B10 위 선을 그으면 B9 의 아래 선이 없어진다, 테두리 대조 실험)
+                if g < 4
+                    && let Some(n) = side.step(at)
+                {
+                    let theirs = border_ref(sheet, styles, n).and_then(|b| side.opposite().of(b));
+                    if is_line(theirs) && !theirs.is_some_and(|t| same_line(t, &want[g])) {
+                        let mut ns = style::EdgeSet::default();
+                        *side.opposite().slot(&mut ns) = Some(None);
+                        neighbors.push((n, ns));
                     }
                 }
             }
-            plan.push((at, set));
-        }
-    }
-    // 범위 가장자리에 선을 그으면 범위 밖 이웃 칸의 맞닿은 선은 지운다 — 한셀은 칸 사이 선을 하나로 다룬다
-    // (B10 위 선을 그으면 B9 의 아래 선이 없어진다, 테두리 대조 실험)
-    let mut outside: Vec<(CellRef, style::EdgeSet)> = Vec::new();
-    for (at, set) in &plan {
-        let mut push = |r: i64, c: i64, f: &dyn Fn(&mut style::EdgeSet)| {
-            if r < 0 || c < 0 || r >= refs::MAX_ROWS as i64 || c >= refs::MAX_COLS as i64 {
-                return;
+            if !set.is_empty() {
+                plan.push((at, set));
             }
-            let mut n = style::EdgeSet::default();
-            f(&mut n);
-            outside.push((
-                CellRef {
-                    row: r as u32,
-                    col: c as u32,
-                },
-                n,
-            ));
-        };
-        let (r, c) = (at.row as i64, at.col as i64);
-        if at.row == r0 && matches!(set.top, Some(Some(_))) {
-            push(r - 1, c, &|n| n.bottom = Some(None));
-        }
-        if at.row == r1 && matches!(set.bottom, Some(Some(_))) {
-            push(r + 1, c, &|n| n.top = Some(None));
-        }
-        if at.col == c0 && matches!(set.left, Some(Some(_))) {
-            push(r, c - 1, &|n| n.right = Some(None));
-        }
-        if at.col == c1 && matches!(set.right, Some(Some(_))) {
-            push(r, c + 1, &|n| n.left = Some(None));
         }
     }
-    let has_edge = |wb: &Workbook, at: CellRef, n: &style::EdgeSet| -> bool {
-        let st = style_at(&wb.sheets[si], at);
-        let Some(b) = wb
-            .styles
-            .xf(st)
-            .and_then(|x| wb.styles.borders.get(x.border_id as usize))
-        else {
-            return false;
-        };
-        let on = |e: &Option<crate::model::BorderEdge>| {
-            e.as_ref()
-                .is_some_and(|e| e.style.as_deref().is_some_and(|s| s != "none"))
-        };
-        (n.bottom.is_some() && on(&b.bottom))
-            || (n.top.is_some() && on(&b.top))
-            || (n.left.is_some() && on(&b.left))
-            || (n.right.is_some() && on(&b.right))
-    };
-    for (at, n) in outside {
-        if has_edge(wb, at, &n) {
-            plan.push((at, n));
-        }
-    }
+    plan.extend(neighbors);
+    apply_border_plan(wb, si, plan);
+    structure::update_dimension(&mut wb.sheets[si]);
+    Ok(())
+}
+
+/// 칸 서식 바꾸기 목록을 차례로 적용한다 (같은 서식·같은 바꾸기는 한 번만 계산)
+fn apply_border_plan(wb: &mut Workbook, si: usize, plan: Vec<(CellRef, style::EdgeSet)>) {
     let mut memo: std::collections::HashMap<(u32, String), u32> = std::collections::HashMap::new();
     for (at, set) in plan {
         let old = style_at(&wb.sheets[si], at);
@@ -1651,8 +1723,143 @@ pub fn border(
             cell_mut(&mut wb.sheets[si], at).style = new;
         }
     }
-    structure::update_dimension(&mut wb.sheets[si]);
-    Ok(())
+}
+
+/// 칸의 변
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Side {
+    fn opposite(self) -> Side {
+        match self {
+            Side::Left => Side::Right,
+            Side::Right => Side::Left,
+            Side::Top => Side::Bottom,
+            Side::Bottom => Side::Top,
+        }
+    }
+
+    /// 이 변 너머의 칸 (시트 밖이면 None)
+    fn step(self, at: CellRef) -> Option<CellRef> {
+        let (row, col) = (at.row, at.col);
+        match self {
+            Side::Left => col.checked_sub(1).map(|col| CellRef { row, col }),
+            Side::Right => (col + 1 < refs::MAX_COLS).then_some(CellRef { row, col: col + 1 }),
+            Side::Top => row.checked_sub(1).map(|row| CellRef { row, col }),
+            Side::Bottom => (row + 1 < refs::MAX_ROWS).then_some(CellRef { row: row + 1, col }),
+        }
+    }
+
+    fn of(self, b: &crate::model::Border) -> Option<&crate::model::BorderEdge> {
+        match self {
+            Side::Left => b.left.as_ref(),
+            Side::Right => b.right.as_ref(),
+            Side::Top => b.top.as_ref(),
+            Side::Bottom => b.bottom.as_ref(),
+        }
+    }
+
+    fn slot(self, s: &mut style::EdgeSet) -> &mut Option<Option<crate::model::BorderEdge>> {
+        match self {
+            Side::Left => &mut s.left,
+            Side::Right => &mut s.right,
+            Side::Top => &mut s.top,
+            Side::Bottom => &mut s.bottom,
+        }
+    }
+}
+
+fn border_ref<'a>(
+    sheet: &Sheet,
+    styles: &'a crate::model::Styles,
+    at: CellRef,
+) -> Option<&'a crate::model::Border> {
+    styles
+        .xf(style_at(sheet, at))
+        .and_then(|x| styles.borders.get(x.border_id as usize))
+}
+
+fn is_line(e: Option<&crate::model::BorderEdge>) -> bool {
+    e.is_some_and(|e| e.style.as_deref().is_some_and(|s| s != "none"))
+}
+
+/// 칸 사이의 선: 칸의 변에 선이 있으면 그것, 없으면 이웃 칸의 맞닿은 변의 선
+fn line_between(
+    sheet: &Sheet,
+    styles: &crate::model::Styles,
+    at: CellRef,
+    side: Side,
+) -> Option<crate::model::BorderEdge> {
+    let own = border_ref(sheet, styles, at).and_then(|b| side.of(b));
+    if is_line(own) {
+        return own.cloned();
+    }
+    let n = side.step(at)?;
+    let theirs = border_ref(sheet, styles, n).and_then(|b| side.opposite().of(b));
+    if is_line(theirs) {
+        theirs.cloned()
+    } else {
+        None
+    }
+}
+
+fn auto_color() -> crate::model::Color {
+    crate::model::Color {
+        auto: true,
+        ..Default::default()
+    }
+}
+
+fn edge_color(e: &crate::model::BorderEdge) -> crate::model::Color {
+    e.color.clone().unwrap_or_else(auto_color)
+}
+
+/// 칸 서식에 남은 변의 색 (선이 없어도 색은 있을 수 있다 — 없으면 자동)
+fn record_color(
+    sheet: &Sheet,
+    styles: &crate::model::Styles,
+    at: CellRef,
+    side: Side,
+) -> crate::model::Color {
+    border_ref(sheet, styles, at)
+        .and_then(|b| side.of(b))
+        .and_then(|e| e.color.clone())
+        .unwrap_or_else(auto_color)
+}
+
+/// 변의 색: 칸 사이에 선이 있으면 그 선의 색, 없으면 칸 서식에 남은 색
+fn side_color(
+    sheet: &Sheet,
+    styles: &crate::model::Styles,
+    at: CellRef,
+    side: Side,
+) -> crate::model::Color {
+    match line_between(sheet, styles, at, side) {
+        Some(l) => edge_color(&l),
+        None => record_color(sheet, styles, at, side),
+    }
+}
+
+fn same_color(a: &crate::model::Color, b: &crate::model::Color) -> bool {
+    let key = |c: &crate::model::Color| {
+        (
+            c.auto,
+            c.rgb.as_ref().map(|s| s.to_ascii_uppercase()),
+            c.theme,
+            c.indexed,
+            c.tint.map(|t| (t * 1e6).round() as i64),
+        )
+    };
+    key(a) == key(b)
+}
+
+fn same_line(a: &crate::model::BorderEdge, b: &crate::model::BorderEdge) -> bool {
+    a.style == b.style && same_color(&edge_color(a), &edge_color(b))
 }
 
 /// 병합 (왼쪽 위 칸의 값만 남는다 — 한셀). 겹치는 병합은 먼저 푼다
@@ -1693,9 +1900,22 @@ pub fn merge(wb: &mut Workbook, si: usize, range: CellRange, center: bool) -> cr
         if let Some((at, value, formula)) = first
             && at != tl
         {
+            // 값 칸의 서식(글꼴·채우기·맞춤·표시 형식)도 함께 오고, 테두리는 왼쪽 위 칸의 것을 둔다 (병합 대조 실험)
+            let from = style_at(sheet, at);
+            let own = style_at(sheet, tl);
+            let own_border = wb.styles.xf(own).map(|x| (x.border_id, x.apply_border));
+            let style = match (wb.styles.xf(from).cloned(), own_border) {
+                (Some(mut xf), Some((border_id, apply_border))) if from != own => {
+                    xf.border_id = border_id;
+                    xf.apply_border = apply_border;
+                    style::intern_xf(&mut wb.styles, xf)
+                }
+                _ => from,
+            };
             let c = cell_mut(sheet, tl);
             c.value = value;
             c.formula = formula;
+            c.style = style;
         }
         for c in &mut sheet.cells {
             if range.contains(c.r) && c.r != tl {
@@ -1705,6 +1925,8 @@ pub fn merge(wb: &mut Workbook, si: usize, range: CellRange, center: bool) -> cr
         }
         sheet.merges.push(range);
     }
+    // 병합 안쪽의 칸 사이 선은 지운다 (한셀 — 병합 대조 실험)
+    clear_inner_edges(wb, si, range);
     if center {
         let p = FormatPatch {
             h_align: Some("center".into()),
@@ -1713,6 +1935,60 @@ pub fn merge(wb: &mut Workbook, si: usize, range: CellRange, center: bool) -> cr
         format(wb, si, range, &p)?;
     }
     Ok(())
+}
+
+/// 범위 안쪽의 칸 사이 선(바깥 선이 아닌 변)을 지운다
+fn clear_inner_edges(wb: &mut Workbook, si: usize, range: CellRange) {
+    let (r0, c0, r1, c1) = (
+        range.start.row,
+        range.start.col,
+        range.end.row,
+        range.end.col,
+    );
+    if (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64 > 100_000 {
+        return;
+    }
+    let mut memo: std::collections::HashMap<(u32, u8), u32> = std::collections::HashMap::new();
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            let at = CellRef { row: r, col: c };
+            let old = style_at(&wb.sheets[si], at);
+            let kind = (r > r0) as u8
+                | ((r < r1) as u8) << 1
+                | ((c > c0) as u8) << 2
+                | ((c < c1) as u8) << 3;
+            let has = wb
+                .styles
+                .xf(old)
+                .and_then(|x| wb.styles.borders.get(x.border_id as usize))
+                .is_some_and(|b| {
+                    let on = |e: &Option<crate::model::BorderEdge>| {
+                        e.as_ref()
+                            .is_some_and(|e| e.style.as_deref().is_some_and(|s| s != "none"))
+                    };
+                    (r > r0 && on(&b.top))
+                        || (r < r1 && on(&b.bottom))
+                        || (c > c0 && on(&b.left))
+                        || (c < c1 && on(&b.right))
+                });
+            if !has {
+                continue;
+            }
+            let new = *memo.entry((old, kind)).or_insert_with(|| {
+                let mut xf = wb.styles.xf(old).cloned().unwrap_or_default();
+                let set = style::EdgeSet {
+                    top: (r > r0).then_some(None),
+                    bottom: (r < r1).then_some(None),
+                    left: (c > c0).then_some(None),
+                    right: (c < c1).then_some(None),
+                    clear_diagonal: false,
+                };
+                style::patch_border(&mut wb.styles, &mut xf, &set);
+                style::intern_xf(&mut wb.styles, xf)
+            });
+            cell_mut(&mut wb.sheets[si], at).style = new;
+        }
+    }
 }
 
 /// 병합 풀기 (범위와 겹치는 병합 모두)

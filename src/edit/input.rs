@@ -92,9 +92,6 @@ pub fn category(code: &str) -> Cat {
     if has('%') {
         return Cat::Percent;
     }
-    if plain.contains("e+") || plain.contains("e-") {
-        return Cat::Scientific;
-    }
     if has('/') {
         return Cat::Fraction;
     }
