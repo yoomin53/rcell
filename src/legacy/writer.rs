@@ -1486,8 +1486,9 @@ impl Resolve for Tables<'_> {
     }
 }
 
-/// SUPBOOK 가상 경로 ([MS-XLS] 2.5.277) — 관계 Target 에서 거꾸로 (읽기의 `virtual_path`)
-fn encode_virtual_path(target: &str, path_missing: bool) -> String {
+/// SUPBOOK 가상 경로 ([MS-XLS] 2.5.277) — 관계 Target 에서 거꾸로 (읽기의 `virtual_path`). 대상의 드라이브가 저장할
+/// 문서의 드라이브(`doc_drive`)와 같으면 드라이브 대신 U+0002 (같은 드라이브의 루트) — 한셀은 문서 위치 기준으로 쓴다
+fn encode_virtual_path(target: &str, path_missing: bool, doc_drive: Option<char>) -> String {
     let decode = |s: &str| -> String {
         let b = s.as_bytes();
         let mut out = Vec::new();
@@ -1515,6 +1516,14 @@ fn encode_virtual_path(target: &str, path_missing: bool) -> String {
         // file:///C:/a/b.xls → U+0001 C a U+0003 b.xls
         let mut it = r.splitn(2, ":/");
         match (it.next(), it.next()) {
+            (Some(d), Some(rest))
+                if d.len() == 1
+                    && doc_drive
+                        .is_some_and(|x| d.eq_ignore_ascii_case(x.encode_utf8(&mut [0; 4]))) =>
+            {
+                out.push('\u{2}');
+                rest.to_string()
+            }
             (Some(d), Some(rest)) if d.len() == 1 => {
                 out.push('\u{1}');
                 out.push_str(d);
@@ -1833,6 +1842,31 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
+/// 쓰기 설정
+#[derive(Debug, Clone, Default)]
+pub struct WriteOptions {
+    /// 저장할 문서가 있는 드라이브 (`C` …). 외부 연결의 경로가 같은 드라이브면 SUPBOOK 가상 경로에 드라이브 대신
+    /// 'U+0002 같은 드라이브의 루트' 를 쓴다 (한셀: 문서 위치 기준 — 서식 파일 9개의 `file:///C:/Hancell…`)
+    pub doc_drive: Option<char>,
+}
+
+impl WriteOptions {
+    /// 저장할 파일 경로에서 드라이브를 찾는다
+    pub fn for_path(path: &std::path::Path) -> WriteOptions {
+        let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let doc_drive = match abs.components().next() {
+            Some(std::path::Component::Prefix(p)) => match p.kind() {
+                std::path::Prefix::Disk(d) | std::path::Prefix::VerbatimDisk(d) => {
+                    Some((d as char).to_ascii_uppercase())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        WriteOptions { doc_drive }
+    }
+}
+
 /// 통합 문서 → 레거시 OLE2 파일
 pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
     write_with_report(wb).map(|(b, _)| b)
@@ -1840,8 +1874,13 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
 
 /// [`write`] 와 같고, 경고 목록을 함께 돌려준다
 pub fn write_with_report(wb: &Workbook) -> Result<(Vec<u8>, Report)> {
+    write_with_options(wb, &WriteOptions::default())
+}
+
+/// 설정을 주어 쓴다 ([`WriteOptions`]), 경고 목록을 함께 돌려준다
+pub fn write_with_options(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)> {
     let mut report = Report::default();
-    let stream = workbook_stream(wb, &mut report)?;
+    let stream = workbook_stream_with(wb, opts, &mut report)?;
     let summary = super::props::write_summary(&wb.properties, wb.total_time);
     let modified = wb
         .properties
@@ -1909,6 +1948,14 @@ pub(crate) fn with_comment_cells(wb: &Workbook) -> Option<Workbook> {
 
 /// `/Workbook` 스트림
 pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
+    workbook_stream_with(wb, &WriteOptions::default(), report)
+}
+
+fn workbook_stream_with(
+    wb: &Workbook,
+    opts: &WriteOptions,
+    report: &mut Report,
+) -> Result<Vec<u8>> {
     if wb.sheets.is_empty() {
         return Err(Error::InvalidValue {
             context: "레거시 쓰기".into(),
@@ -1948,8 +1995,11 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
         tables.supbook(Some(n));
     }
 
-    // 이름 수식 (참조 클래스, 3차원)
-    for i in 0..tables.names.len() {
+    // 이름 수식 (참조 클래스, 3차원). 통합 문서 범위 이름을 먼저 부호화한다 — XTI 가 그 차례로 생긴다 (관측:
+    // Trade_Show_Budget 의 전역 이름 [2]Intro 가 지역 이름 [1]… 보다 앞 XTI)
+    let mut name_order: Vec<usize> = (0..tables.names.len()).collect();
+    name_order.sort_by_key(|&i| tables.names[i].local.is_some());
+    for i in name_order {
         let f = tables.names[i].formula.clone();
         if f.is_empty() {
             continue;
@@ -2412,7 +2462,7 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
                 }
                 Some(n) => {
                     let link = &wb.external_links[n - 1];
-                    let path = encode_virtual_path(&link.target, link.path_missing);
+                    let path = encode_virtual_path(&link.target, link.path_missing, opts.doc_drive);
                     b.u16(link.sheet_names.len() as u16)
                         .u16(units(&path) as u16)
                         .u8(0)
@@ -3463,10 +3513,15 @@ mod tests {
 
     #[test]
     fn virtual_paths_round_trip() {
-        let p = encode_virtual_path("file:///C:/a%20b/c.xls", false);
+        let p = encode_virtual_path("file:///C:/a%20b/c.xls", false, None);
         assert_eq!(p, "\u{1}\u{1}Ca b\u{3}c.xls");
+        // 같은 드라이브의 문서: 드라이브 대신 루트 (한셀 서식 파일의 `\x01\x02Hancell…`)
+        let p = encode_virtual_path("file:///C:/a%20b/c.xls", false, Some('C'));
+        assert_eq!(p, "\u{1}\u{2}a b\u{3}c.xls");
+        let p = encode_virtual_path("file:///D:/a/c.xls", false, Some('C'));
+        assert_eq!(p, "\u{1}\u{1}Da\u{3}c.xls");
         assert_eq!(
-            encode_virtual_path("RecoveredExternalLink1", true),
+            encode_virtual_path("RecoveredExternalLink1", true, None),
             "RecoveredExternalLink1"
         );
     }

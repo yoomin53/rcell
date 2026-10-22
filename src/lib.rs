@@ -162,7 +162,9 @@ pub fn save_as(wb: &Workbook, path: impl AsRef<Path>, format: SaveFormat) -> Res
         SaveFormat::Cell => writer::write(wb, writer::Flavor::Cell)?,
         SaveFormat::Xlsx => writer::write(wb, writer::Flavor::Xlsx)?,
         SaveFormat::Binary => binary::writer::write(wb, &Default::default())?,
-        SaveFormat::Legacy => legacy::write(wb)?,
+        SaveFormat::Legacy => {
+            legacy::write_with_options(wb, &legacy::WriteOptions::for_path(path.as_ref()))?.0
+        }
     };
     std::fs::write(path, bytes)?;
     Ok(())

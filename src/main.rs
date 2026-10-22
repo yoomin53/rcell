@@ -734,7 +734,10 @@ fn convert(
             Ok(())
         }
         rcell::SaveFormat::Legacy => {
-            let (bytes, report) = rcell::legacy::write_with_report(&wb)?;
+            let (bytes, report) = rcell::legacy::write_with_options(
+                &wb,
+                &rcell::legacy::WriteOptions::for_path(output),
+            )?;
             for w in &report.warnings {
                 eprintln!("경고: {w}");
             }

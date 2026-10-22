@@ -26,7 +26,7 @@ pub(crate) mod vtchart;
 pub(crate) mod vtchart_map;
 pub mod writer;
 
-pub use writer::{Report, write_with_report};
+pub use writer::{Report, WriteOptions, write_with_options, write_with_report};
 
 /// 통합 문서를 레거시 OLE2 바이트로 쓴다 (한셀 `xlCell8`, -2005 와 같은 꼴).
 pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
