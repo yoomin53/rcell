@@ -378,6 +378,11 @@ pub(crate) fn after_cells(
             out.rec_buf(0x00E5, &mut b);
         }
     }
+    // 한컴 차트: 레코드마다 끝 표시 0x7EF8 (ff ff ff ff), 다른 그리기 개체보다 먼저 (관측: 서식 파일 차트 5개)
+    for rec in &ctx.enc.charts {
+        out.rec(0x7EF0, rec);
+        out.rec(0x7EF8, &[0xFF; 4]);
+    }
     ctx.art.sheet_drawing(out, ctx)?;
     for h in &sheet.hyperlinks {
         hlink(out, h, ctx.sheet, ctx.wb.styles.from_legacy);

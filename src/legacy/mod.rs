@@ -22,8 +22,10 @@ pub mod props;
 pub mod reader;
 pub mod recdiff;
 mod sheetx;
+pub(crate) mod vtbuild;
 pub(crate) mod vtchart;
 pub(crate) mod vtchart_map;
+pub(crate) mod vtwrite;
 pub mod writer;
 
 pub use writer::{Report, WriteOptions, write_with_options, write_with_report};
@@ -36,6 +38,54 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
 use crate::container;
 use crate::error::{Error, Result};
 use crate::model::Workbook;
+
+/// 진단: 레거시 파일의 한컴 차트 레코드(0x7EF0)마다 Vt 아카이브를 `경로 = 값` 줄로 (리버스 엔지니어링용)
+pub fn chart_dumps(bytes: &[u8]) -> Result<Vec<String>> {
+    let stream = container::read_entry(bytes, "/Workbook")?;
+    let recs = biff::records(&stream);
+    // 원본 범위 수식의 ixti 는 시트 순서 번호 (cell-legacy-chart.md 2절): BOUNDSHEET 이름
+    let names: Vec<String> = recs
+        .iter()
+        .filter(|r| r.rtype == 0x0085 && r.data.len() > 8)
+        .map(|r| {
+            // 이름은 플래그와 상관없이 UTF-16 (reader 와 같다)
+            let d = &r.data[6..];
+            let cch = d[0] as usize;
+            crate::text::utf16le(d.get(2..2 + cch * 2).unwrap_or(&[]))
+        })
+        .collect();
+    // 항목·계열 수식의 ixti 는 XTI 번호: 내부 SUPBOOK(`시트 수, 01 04`)을 가리키는 시트 하나짜리 XTI → 시트 번호
+    let internal: Vec<bool> = recs
+        .iter()
+        .filter(|r| r.rtype == 0x01AE)
+        .map(|r| r.data.get(2..4) == Some(&[0x01, 0x04][..]))
+        .collect();
+    let xti: Vec<Option<u16>> = recs
+        .iter()
+        .find(|r| r.rtype == 0x0017)
+        .map(|r| {
+            let (xtis, _) = r.data.get(2..).unwrap_or(&[]).as_chunks::<6>();
+            xtis.iter()
+                .map(|x| {
+                    let v = |k: usize| u16::from_le_bytes([x[k], x[k + 1]]);
+                    (internal.get(v(0) as usize) == Some(&true) && v(2) == v(4)).then_some(v(2))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let sheets = vtchart::Sheets {
+        names: &names,
+        xti: Some(&xti),
+    };
+    Ok(recs
+        .iter()
+        .filter(|r| r.rtype == vtchart::RECORD_TYPE)
+        .map(|r| match vtchart::parse_with(r.data, sheets) {
+            Ok(rec) => vtchart::dump(&rec),
+            Err(e) => format!("읽기 실패: {e}\n"),
+        })
+        .collect())
+}
 
 /// OLE2 바이트에서 레거시 통합 문서를 읽는다.
 pub fn read(bytes: &[u8]) -> Result<Workbook> {

@@ -185,8 +185,16 @@ pub(crate) fn anchor_px(off: i64) -> i64 {
 /// 모델 앵커 → 레거시 (col1, dx1, rw1, dy1, col2, dx2, rw2, dy2). dx 는 (열 픽셀 − 1)의 1/32768, dy 는 (행 픽셀 − 1)의
 /// 1/8192 (6.2절, 읽기의 반대). 오프셋은 정수 픽셀로 올리고, 칸 끝까지면 dx 32767·dy 8191 로 자른다 (관측)
 fn legacy_anchor(a: &Anchor, ctx: &SheetCtx) -> [u32; 8] {
-    let mdw = crate::units::max_digit_width(ctx.wb);
-    let sheet = ctx.sheet;
+    legacy_anchor_ws(a, ctx.wb, ctx.sheet)
+}
+
+/// [`legacy_anchor`] — 통합 문서와 시트로 (차트 레코드 0x7EF0 의 앵커도 같은 단위다)
+pub(crate) fn legacy_anchor_ws(
+    a: &Anchor,
+    wb: &crate::model::Workbook,
+    sheet: &crate::model::Sheet,
+) -> [u32; 8] {
+    let mdw = crate::units::max_digit_width(wb);
     let col_d = |c: u32, off: i64| -> u32 {
         let eff = crate::units::sheet_col_px(sheet, c, mdw).saturating_sub(1) as f64;
         let px = anchor_px(off) as f64;
@@ -411,6 +419,14 @@ impl Art {
             }
         }
         art
+    }
+
+    /// 차트 레코드(0x7EF0)의 차트 번호 바탕: 문서에 그리기(MSODRAWINGGROUP)가 있으면 그 시트의 OBJ 수 — 시트의 k 번째
+    /// 차트(1부터)는 바탕 + k. 그리기가 없으면 None (번호 0). 차트 번호 대조 실험: 차트 둘만 → 0, 0; 같은 시트에
+    /// 사각형 하나 → 2, 3, 둘 → 3, 4; 다른 시트에만 사각형 (그 시트가 앞이든 뒤든) → 1, 2, 3
+    pub fn chart_base(&self, si: usize) -> Option<u16> {
+        let any = self.dgid.iter().any(Option::is_some) || !self.blips.is_empty();
+        any.then(|| self.csp.get(si).map_or(0, |&c| c.saturating_sub(1)) as u16)
     }
 
     /// MSODRAWINGGROUP 내용 (그리기가 하나도 없으면 None)

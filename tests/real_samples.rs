@@ -190,7 +190,8 @@ fn binary_reading_matches_xml_twin() {
 
 /// 레거시 쓰기 왕복: rcell(X) → 레거시 → rcell 이 다시 읽은 것이, X 에 레거시의 손실(`legacy::lossy::legacy_view`:
 /// 창 잠금, 요약 위치, 외부 값 캐시, 줄 간격 atLeast, HWPUNIT 여백, 머리글 기본 글꼴 코드, 도형 선 기본값,
-/// 차트 내용)을 적용한 것과 같아야 한다. 입력은 말뭉치의 XML 원본(X.cell)과 한셀의 레거시(X.legacy.cell) 둘 다.
+/// 차트는 Vt 아카이브가 담는 것만)을 적용한 것과 같아야 한다. 입력은 말뭉치의 XML 원본(X.cell)과 한셀의
+/// 레거시(X.legacy.cell) 둘 다. 차트 수식의 XTI 는 실제 쓰기·읽기만 거친다.
 #[test]
 fn legacy_writer_round_trip() {
     let Some(dir) = std::env::var_os("RCELL_CORPUS").map(PathBuf::from) else {
@@ -235,7 +236,7 @@ fn legacy_writer_round_trip() {
 
 /// rcell 이 쓴 레거시를 한셀이 열어 XML 로 다시 저장한 것(HCell(rcell(X)))이 한셀이 자기 레거시를 읽은 것
 /// (X.legacy.as.cell = HCell(HCell 레거시))과 같아야 한다. 한셀이 레거시에서 못 읽는 것은 레거시 판정과 같은
-/// 옵션으로 뺀다. 차트 내용은 아직 쓰지 않으므로 정답에서 차트를 뺀다.
+/// 옵션으로 뺀다. 차트(0x7EF0)도 비교한다.
 ///
 /// `RCELL_LEGACY_ORACLE` = rcell 이 쓴 `폴더_X.legacy.cell` 을 한셀로 다시 저장한 `폴더_X.legacy.as.cell` 이 있는 폴더
 /// (`rcell convert X.cell 폴더_X.legacy.cell --format legacy` 뒤 `tools/probe/resave.ps1 -Filter *.legacy.cell`).
@@ -269,12 +270,8 @@ fn legacy_writer_output_is_read_identically_by_hancell() {
         if !truth.exists() {
             continue;
         }
-        let mut a = rcell::open(&truth).expect("한셀이 읽은 한셀 레거시");
+        let a = rcell::open(&truth).expect("한셀이 읽은 한셀 레거시");
         let b = rcell::open(&resaved).expect("한셀이 읽은 rcell 레거시");
-        for s in &mut a.sheets {
-            s.shapes
-                .retain(|x| x.kind != rcell::model::ShapeKind::Chart);
-        }
         let diffs = rcell::compare::compare(&a, &b, opts);
         checked += 1;
         eprintln!("{:>4} 차이  {}", diffs.len(), resaved.display());

@@ -9,7 +9,7 @@
 //! (`tests/real_samples.rs`)은 원본에 이것을 적용한 것과 rcell 이 쓴 레거시를 다시 읽은 것을 비교한다.
 //! 하나하나가 한셀의 레거시 저장·읽기와 같은 손실이다 (`docs/format/cell-legacy.md` 8절, 10절).
 
-use crate::model::{Paint, ShapeKind, Workbook};
+use crate::model::{Paint, Shape, ShapeKind, Workbook};
 
 /// 한셀처럼 여백을 HWPUNIT(1/7200 인치)로 잘라 f32 로 쓰고(쓰기), 다시 잘라 읽는다(읽기)
 fn hwp_round_trip(v: f64) -> f64 {
@@ -435,9 +435,8 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
         // 요약 행·열 위치: 한셀은 WSBOOL 을 0x04C1 로 쓴다
         s.summary_above = false;
         s.summary_left = false;
-        // 차트 내용(0x7EF0 Vt 아카이브)은 아직 쓰지 않는다
-        s.shapes.retain(|x| x.kind != ShapeKind::Chart);
-        for x in &mut s.shapes {
+        // 차트는 끝에서 (charts_view)
+        for x in s.shapes.iter_mut().filter(|x| x.kind != ShapeKind::Chart) {
             shape_view(x);
         }
         // 메모 상자: 셀과 함께 옮기지 않으면 크기도 바꾸지 않는다 (앵커 플래그 3). 자리의 픽셀 오프셋은 열·행
@@ -588,7 +587,59 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
         }
     }
     super::reader::prune_external_links(&mut w);
+    charts_view(wb, &mut w);
     w
+}
+
+/// 차트: 쓰기와 같은 0x7EF0 레코드를 지어 읽기와 같이 다시 읽은 것 ([`super::writer::chart_record`],
+/// [`super::vtchart_map::map`]) — 레거시 차트(Vt 아카이브)가 담지 못하는 속성은 빠지고 담는 것은 한셀의 기본값이
+/// 붙는다. 차트 도형은 시트의 다른 도형보다 앞에 오고(읽기: 한셀은 차트를 먼저 둔다) 이름 없이 앵커와 차트만
+/// 남는다. 차트 모델이 없는 차트 도형은 쓰지 않는다
+fn charts_view(orig: &Workbook, w: &mut Workbook) {
+    let names: Vec<String> = w.sheets.iter().map(|s| s.name.clone()).collect();
+    let mdw = crate::units::max_digit_width(w);
+    let mut per_sheet: Vec<Vec<Shape>> = Vec::with_capacity(w.sheets.len());
+    for (si, s) in w.sheets.iter().enumerate() {
+        let src = orig.sheets.get(si).unwrap_or(s);
+        let book = super::vtchart_map::Book {
+            sheets: &w.sheets,
+            styles: &w.styles,
+        };
+        let charts = s
+            .shapes
+            .iter()
+            .filter_map(|x| match (&x.chart, x.kind) {
+                (Some(c), ShapeKind::Chart) => Some((x, c)),
+                _ => None,
+            })
+            .map(|(x, c)| {
+                // ixti 는 시트 번호 그대로 지어 그대로 푼다 (XTI 는 실제 쓰기·읽기가 맞춘다)
+                let rec =
+                    super::writer::chart_record(orig, src, &x.anchor, c, &names, 0, &mut |i| {
+                        i as u16
+                    });
+                let a = super::art::legacy_anchor_ws(&x.anchor, orig, src);
+                Shape {
+                    anchor: super::reader::legacy_anchor(a, 0, s, mdw),
+                    kind: ShapeKind::Chart,
+                    chart: super::vtchart::parse(&rec, &names)
+                        .ok()
+                        .map(|r| super::vtchart_map::map(&r, &book)),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        per_sheet.push(charts);
+    }
+    for (s, charts) in w.sheets.iter_mut().zip(per_sheet) {
+        let rest: Vec<Shape> = s
+            .shapes
+            .drain(..)
+            .filter(|x| x.kind != ShapeKind::Chart)
+            .collect();
+        s.shapes = charts;
+        s.shapes.extend(rest);
+    }
 }
 
 /// 수식 글의 구조적 참조를 레거시 읽기의 꼴로 ([`legacy_view`]). 따옴표 안은 건드리지 않는다

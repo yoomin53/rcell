@@ -123,7 +123,7 @@ enum Cmd {
         /// SST 문자열 차례를 보지 않는다 (문자열을 내용 차례로 맞춘 뒤 비교)
         #[arg(long)]
         ignore_sst_order: bool,
-        /// 한셀이 저장할 때마다 달라지는 값을 보지 않는다: SST 차례와 TXO 첫 u16 의 0x0200
+        /// 한셀이 저장할 때마다 달라지는 값을 보지 않는다: SST 차례, TXO 첫 u16 의 0x0200, 차트 VtString 의 pad
         #[arg(long)]
         ignore_volatile: bool,
     },
@@ -186,6 +186,8 @@ enum Cmd {
     },
     /// 레거시 .cell 시트의 그리기(OfficeArt) 도형 목록 — 리버스 엔지니어링용
     Escher { file: PathBuf },
+    /// 레거시 .cell 의 한컴 차트(0x7EF0) Vt 아카이브를 `경로 = 값` 줄로 — 리버스 엔지니어링용
+    Vtdump { file: PathBuf },
     /// 레코드 목록: 레거시 .cell 의 /Workbook, 또는 바이너리 .cell 의 파트(--part) — 리버스 엔지니어링용
     Records {
         file: PathBuf,
@@ -234,6 +236,7 @@ fn main() -> ExitCode {
             part,
         } => records(&file, bytes, only.as_deref(), part.as_deref()),
         Cmd::Escher { file } => escher(&file),
+        Cmd::Vtdump { file } => vtdump(&file),
         Cmd::Patch {
             input,
             output,
@@ -275,6 +278,7 @@ fn main() -> ExitCode {
             rcell::legacy::recdiff::Options {
                 ignore_sst_order: ignore_sst_order || ignore_volatile,
                 ignore_txo_flag: ignore_volatile,
+                ignore_vt_pad: ignore_volatile,
             },
         ),
         Cmd::Diff {
@@ -581,6 +585,15 @@ fn hex_preview(data: &[u8], preview: usize) -> String {
 }
 
 /// 시트(BOF 단위)마다 MSODRAWING 을 이어 붙여 OfficeArt 도형과 OBJ 종류를 보여 준다.
+fn vtdump(file: &Path) -> rcell::Result<()> {
+    let bytes = std::fs::read(file)?;
+    for (i, d) in rcell::legacy::chart_dumps(&bytes)?.iter().enumerate() {
+        println!("=== 차트 {i}");
+        print!("{d}");
+    }
+    Ok(())
+}
+
 fn escher(file: &Path) -> rcell::Result<()> {
     let bytes = std::fs::read(file)?;
     let stream = rcell::container::read_entry(&bytes, "/Workbook")?;

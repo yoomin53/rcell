@@ -331,8 +331,8 @@ DIB 는 BITMAPFILEHEADER 를 붙여 BMP 로 꺼낸다. 한셀은 그림을 저�
 
 **한컴 차트 0x7EF0** (+ 끝 표시 0x7EF8 `ff ff ff ff`): `u32, u16, 차트 번호 u16` 다음에 ClientAnchor 와 같은 22바이트 앵커,
 그 뒤에 원본 범위 수식, 차트 내용("Vt" 객체 저장, 뿌리 VtChart), 항목·계열 수식 — [`cell-legacy-chart.md`](cell-legacy-chart.md)
-(`src/legacy/vtchart.rs` 가 읽고 `src/legacy/vtchart_map.rs` 가 한셀의 읽기와 같은 차트 모델로 바꾼다 — 같은 문서 9절).
-한셀은 차트를 다른 그리기 개체보다 먼저 둔다.
+(`src/legacy/vtchart.rs` 가 읽고 `src/legacy/vtchart_map.rs` 가 한셀의 읽기와 같은 차트 모델로 바꾼다 — 같은 문서 9절,
+쓰기는 10.10절과 같은 문서 10절). 한셀은 차트를 다른 그리기 개체보다 먼저 둔다.
 
 ## 6.3 조건부 서식·데이터 유효성 — 조작한 XML 원본과 대조
 
@@ -523,7 +523,7 @@ XTI 가 외부 SUPBOOK 을 가리키면 XML 표기로 `[n]시트!A1` 이 된다.
    한 문서는 `rcell diff --legacy-view X 쓴.legacy.cell` 로 본다.
 6. **레코드 비교** — `rcell rec-diff A B [--ignore-sst-order | --ignore-volatile]`: BOF 구간마다 레코드 차례를 Myers
    차분으로 맞추고 내용을 비교한다 (BOUNDSHEET 위치, FRT 예약 8바이트는 지운다). `--ignore-volatile` 은 한셀이 저장할
-   때마다 달라지는 SST 차례와 TXO 첫 u16 의 0x0200 을 보지 않는다 (10.10절). 기준은 세 가지다:
+   때마다 달라지는 SST 차례, TXO 첫 u16 의 0x0200, 차트 VtString 의 pad 바이트를 보지 않는다 (10.11절). 기준은 세 가지다:
    한셀이 메모리의 문서를 저장한 X.legacy.cell, 한셀이 X.cell 을 열어 저장한 것(**hx**, XML 입력의 정답 —
    한셀은 XML 을 열 때 서식 표를 고쳐 만든다, 10.4절), 레거시 입력이면 X.legacy.cell 그 자체.
 7. **한셀 판정** — `tests/real_samples.rs::legacy_writer_output_is_read_identically_by_hancell`: rcell 이 쓴 레거시를
@@ -729,11 +729,27 @@ U+0002 (같은 드라이브의 루트 — 서식 파일 9개의 `\x01\x02Hancell
 - **하이퍼링크**: 표시 이름이 없으면 범위 첫 셀의 글을 표시 이름으로 (`hlstmfSiteGaveDisplayName | hlstmfHasDisplayName`),
   URL 에 hlstmfIsAbsolute 를 켜지 않고, 화면 설명(HLINKTOOLTIP)은 쓰지 않는다 (6절).
 
-### 10.10 아직 쓰지 않는 것과 남은 차이
+### 10.10 차트
+
+차트 도형마다 0x7EF0 + 끝 표시 0x7EF8 (`ff ff ff ff`) 을 시트의 그리기(MSODRAWING) 바로 앞에 쓴다 (`writer::chart_record`,
+나무는 `legacy::vtbuild`, 직렬화는 `legacy::vtwrite` — [`cell-legacy-chart.md`](cell-legacy-chart.md) 10절).
+
+- **수식의 ixti**: 원본 범위는 **시트 번호**, 항목·계열 값·이름은 **XTI 번호** — XTI 는 항목, 계열마다 값·이름 차례로
+  생긴다 (차트 수식 ixti 대조 실험: 첫 시트의 차트가 둘째 시트를 가리키면 한셀은 원본 범위 ixti 1, 항목·계열 ixti 0,
+  EXTERNSHEET 는 XTI 하나 (내부, 1, 1)). 말뭉치의 차트 415개 참조는 두 번호가 우연히 같다.
+- **차트 번호**(머리의 u16): 문서에 그리기(MSODRAWINGGROUP)가 없으면 0, 있으면 그 시트의 OBJ 수 + 시트 안 차트 차례(1부터)
+  (차트 번호 대조 실험: 차트 둘 → 0, 0; 같은 시트에 사각형 하나 → 2, 3, 둘 → 3, 4; 다른 시트에만 사각형 넷 → 1, 2, 3, 그
+  시트가 앞이든 뒤든. 서식 파일 CM_and_BreakEven_Analysis 4–8 = 사각형 셋 뒤, Marketing_Budget 1–3).
+- **앵커**: 그리기와 같은 ClientAnchor 단위 (10.8절), 플래그 0x0606.
+- 레거시 보기(`lossy::legacy_view`)는 같은 레코드를 지어 레거시 읽기로 다시 읽은 차트를 둔다 — 차트 도형은 시트의 다른
+  도형보다 앞, 이름 없음.
+
+### 10.11 아직 쓰지 않는 것과 남은 차이
 
 | 항목 | 상태 |
 |---|---|
-| 차트 (0x7EF0 Vt 아카이브, 0x7EF8, 차트 수식의 SUPBOOK·EXTERNSHEET) | 쓰지 않는다 — 레거시로 쓰면 차트가 사라진다 (`lossy::legacy_view`) |
+| 차트 VtString 의 pad 바이트 | 한셀이 초기화하지 않은 바이트를 쓴다 — rcell 은 0 (`rec-diff --ignore-volatile` 은 보지 않는다) |
+| 레거시 차트가 담지 못하는 차트 속성 | 제목 글꼴·채우기·축 눈금 범위 … 는 한셀처럼 버린다 ([`cell-legacy-chart.md`](cell-legacy-chart.md) 6절) |
 | SST 문자열 차례 | 한셀의 해시 표 차례 — 파일에서 정할 수 없다 (`rec-diff --ignore-sst-order` 로 견준다) |
 | TXO 첫 u16 0x0200 | 한셀이 저장할 때마다 다르다 (10.8절, `rec-diff --ignore-volatile`) |
 | 레거시 입력의 글 상자 회전 잠금 | 레거시 읽기가 한셀처럼 글 상자를 늘 회전 잠금으로 읽어(6.2절) 파일의 0x0100 비트인지 모델에 남지 않는다 — 다시 쓰면 0x007F 에 켜진다 |

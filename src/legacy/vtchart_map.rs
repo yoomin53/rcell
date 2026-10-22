@@ -27,7 +27,7 @@ const GENERAL_KO: &str = "G/표준";
 /// 선이 없을 때 한셀이 쓰는 두께 (EMU)
 const THIN: i64 = 9525;
 
-/// 차트 수식이 가리키는 셀을 읽는 통합 문서. 시트 번호는 ixti (BOUNDSHEET 순서, 표본 관측)
+/// 차트 수식이 가리키는 셀을 읽는 통합 문서. 시트 번호는 수식 참조의 푼 시트 (`ChartRef::sheet`, BOUNDSHEET 순서)
 pub(crate) struct Book<'a> {
     pub sheets: &'a [Sheet],
     pub styles: &'a Styles,
@@ -35,8 +35,8 @@ pub(crate) struct Book<'a> {
 
 impl Book<'_> {
     /// 셀 (시트의 셀은 행·열 순서로 정렬되어 있다)
-    fn cell(&self, ixti: u16, row: u32, col: u32) -> Option<&Cell> {
-        let cells = &self.sheets.get(ixti as usize)?.cells;
+    fn cell(&self, sheet: u16, row: u32, col: u32) -> Option<&Cell> {
+        let cells = &self.sheets.get(sheet as usize)?.cells;
         cells
             .binary_search_by(|c| (c.r.row, c.r.col).cmp(&(row, col)))
             .ok()
@@ -61,7 +61,7 @@ impl Book<'_> {
             if k < n {
                 let row = u64::from(r.rw_first) + k / cols;
                 let col = u64::from(r.col_first) + k % cols;
-                return Some((r.ixti, row as u32, col as u32));
+                return r.sheet.map(|s| (s, row as u32, col as u32));
             }
             k -= n;
         }
@@ -72,7 +72,7 @@ impl Book<'_> {
     fn cells_in(&self, f: &ChartFormula) -> Vec<&Cell> {
         let mut out = Vec::new();
         for r in &f.refs {
-            let Some(sheet) = self.sheets.get(r.ixti as usize) else {
+            let Some(sheet) = r.sheet.and_then(|s| self.sheets.get(s as usize)) else {
                 continue;
             };
             let (c1, c2) = (u32::from(r.col_first), u32::from(r.col_last));
@@ -363,7 +363,7 @@ fn axis_num_fmt(tf: Obj<'_>, rec: &VtRecord, book: &Book<'_>) -> Option<ChartNum
         let code = values
             .refs
             .first()
-            .and_then(|r| book.cell(r.ixti, r.rw_first, u32::from(r.col_first)))
+            .and_then(|r| book.cell(r.sheet?, r.rw_first, u32::from(r.col_first)))
             .map_or_else(|| GENERAL_KO.into(), |c| book.format(c));
         return Some(ChartNumFmt {
             format_code: code,

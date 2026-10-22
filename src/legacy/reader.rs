@@ -1345,6 +1345,14 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
             ))
         })
         .collect();
+    // 차트 항목·계열 수식의 XTI → 내부 시트 번호 (vtchart::Sheets)
+    let chart_xti: Vec<Option<u16>> = xti
+        .iter()
+        .map(|&(book, first, last)| {
+            (matches!(supbooks.get(book as usize), Some(Book::Internal)) && first == last)
+                .then_some(first)
+        })
+        .collect();
     // XTI 별 외부 이름: 추가 기능 함수는 이름 그대로, 외부 문서 이름은 `[n]!이름`
     let xti_names: Vec<Vec<String>> = xti
         .iter()
@@ -1464,7 +1472,7 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         }
         wb.sheets.push(sheet);
     }
-    attach_charts(&mut wb, &pending_charts);
+    attach_charts(&mut wb, &pending_charts, &chart_xti);
     // CF 의 DXFN 에만 남은 차등 서식 표시 형식·맞춤, 그리고 보호 (한셀은 0x088D 표에 표시 형식·맞춤을 쓰지 않고
     // 보호 값은 틀리게 쓴다 — 차등 서식 대조 실험)
     let mut next_id = wb
@@ -1521,10 +1529,10 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
     Ok(wb)
 }
 
-/// 한컴 차트 레코드(0x7EF0)를 차트 모델로 바꿔 그 차트 도형에 붙인다. 수식의 ixti 는 시트 순서 번호이고
-/// (표본 관측, docs/format/cell-legacy-chart.md 2절), 캐시의 표시 형식·빈 칸은 참조한 셀에서 온다. 읽을 수 없는
-/// 레코드의 도형은 앵커만 남는다.
-fn attach_charts(wb: &mut Workbook, pending: &[(usize, Vec<Vec<u8>>)]) {
+/// 한컴 차트 레코드(0x7EF0)를 차트 모델로 바꿔 그 차트 도형에 붙인다. 수식의 ixti 는 원본 범위면 시트 순서 번호,
+/// 항목·계열이면 XTI 번호이고 (`xti`: XTI → 내부 시트 번호, docs/format/cell-legacy-chart.md 2절), 캐시의 표시
+/// 형식·빈 칸은 참조한 셀에서 온다. 읽을 수 없는 레코드의 도형은 앵커만 남는다.
+fn attach_charts(wb: &mut Workbook, pending: &[(usize, Vec<Vec<u8>>)], xti: &[Option<u16>]) {
     if pending.is_empty() {
         return;
     }
@@ -1537,7 +1545,11 @@ fn attach_charts(wb: &mut Workbook, pending: &[(usize, Vec<Vec<u8>>)]) {
         };
         for (si, records) in pending {
             for (k, data) in records.iter().enumerate() {
-                if let Ok(rec) = super::vtchart::parse(data, &names) {
+                let sheets = super::vtchart::Sheets {
+                    names: &names,
+                    xti: Some(xti),
+                };
+                if let Ok(rec) = super::vtchart::parse_with(data, sheets) {
                     mapped.push((*si, k, super::vtchart_map::map(&rec, &book)));
                 }
             }
@@ -3277,7 +3289,7 @@ fn legacy_comment_shape(
 
 /// 레거시 앵커 → 모델. dx 는 (열 픽셀 − 1)의 1/32768, dy 는 (행 픽셀 − 1)의 1/8192 이고
 /// 픽셀 단위로 반올림한다 (한셀 대조, docs/format/cell-legacy.md).
-fn legacy_anchor(a: [u32; 8], flag: u16, sheet: &Sheet, mdw: u32) -> Anchor {
+pub(crate) fn legacy_anchor(a: [u32; 8], flag: u16, sheet: &Sheet, mdw: u32) -> Anchor {
     let [c1, dx1, r1, dy1, c2, dx2, r2, dy2] = a;
     let col_off =
         |c: u32, dx: u32| anchor_col_px(sheet, c, dx, mdw) as i64 * crate::units::EMU_PER_PX;

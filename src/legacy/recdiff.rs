@@ -183,6 +183,26 @@ pub struct Options {
     /// TXO 첫 u16 의 0x0200 을 보지 않는다: 한셀은 같은 문서를 저장할 때마다 이 비트를 다르게 쓴다
     /// (X.legacy.cell 과 hx 대조, 10.8절)
     pub ignore_txo_flag: bool,
+    /// 한컴 차트(0x7EF0) Vt 아카이브의 VtString pad 바이트를 보지 않는다: 한셀이 초기화하지 않은 바이트를 쓴다
+    /// (cell-legacy-chart.md 3.4절)
+    pub ignore_vt_pad: bool,
+}
+
+/// 0x7EF0 의 VtString pad 바이트를 0 으로 (읽을 수 없는 레코드는 그대로)
+fn mask_vt_pads(sections: &mut [Vec<Rec>]) {
+    for r in sections.iter_mut().flatten() {
+        if r.rtype != super::vtchart::RECORD_TYPE {
+            continue;
+        }
+        let Ok(rec) = super::vtchart::parse(&r.data, &[]) else {
+            continue;
+        };
+        for &p in &rec.archive.pads {
+            if let Some(b) = r.data.get_mut(p) {
+                *b = 0;
+            }
+        }
+    }
 }
 
 /// TXO(0x01B6) 첫 u16 의 0x0200 을 지운다
@@ -266,6 +286,10 @@ pub fn compare_with(a: &[u8], b: &[u8], opts: Options) -> RecDiff {
     if opts.ignore_txo_flag {
         mask_txo_flag(&mut sa);
         mask_txo_flag(&mut sb);
+    }
+    if opts.ignore_vt_pad {
+        mask_vt_pads(&mut sa);
+        mask_vt_pads(&mut sb);
     }
     let mut r = RecDiff::default();
     for k in 0..sa.len().max(sb.len()) {
@@ -427,6 +451,44 @@ mod tests {
         assert_eq!(compare(&a, &b).changed, 1);
         let opts = Options {
             ignore_txo_flag: true,
+            ..Default::default()
+        };
+        assert_eq!(compare_with(&a, &b, opts).changed, 0);
+    }
+
+    #[test]
+    fn vt_string_pad_can_be_ignored() {
+        use crate::legacy::vtwrite::{W, WObj, write_archive};
+        // 칸 하나가 글자인 데이터 표만 있는 차트: pad 바이트만 다른 두 레코드
+        let grid = WObj::new("VtDataGrid").set(
+            crate::legacy::vtchart::BASE,
+            W::Emb(Box::new(
+                WObj::new("VtMatrix").u16("width", 1).u16("height", 1).set(
+                    "cells",
+                    W::Arr(vec![W::New(Box::new(
+                        WObj::new("VtString").set("text", W::Str("가".into())),
+                    ))]),
+                ),
+            )),
+        );
+        let chart = WObj::new("VtChart").set("dataGrid", W::New(Box::new(grid)));
+        let rec = crate::legacy::vtbuild::record(
+            0,
+            [0; 8],
+            &[0, 0],
+            &write_archive(&chart),
+            &[0, 0],
+            &[],
+        );
+        let parsed = crate::legacy::vtchart::parse(&rec, &[]).unwrap();
+        assert_eq!(parsed.archive.pads.len(), 1);
+        let mut other = rec.clone();
+        other[parsed.archive.pads[0]] = 0x5B;
+        let a = stream(&[(0x0809, &[1]), (0x7EF0, &rec)]);
+        let b = stream(&[(0x0809, &[1]), (0x7EF0, &other)]);
+        assert_eq!(compare(&a, &b).changed, 1);
+        let opts = Options {
+            ignore_vt_pad: true,
             ..Default::default()
         };
         assert_eq!(compare_with(&a, &b, opts).changed, 0);

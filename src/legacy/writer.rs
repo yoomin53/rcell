@@ -1775,7 +1775,7 @@ fn table_record(range: &CellRange, d: &crate::model::DataTableInput) -> Vec<u8> 
 
 /// 시트마다 미리 부호화한 것
 #[derive(Default)]
-struct SheetEnc {
+pub(crate) struct SheetEnc {
     /// (행, 열) → 수식
     formulas: HashMap<(u32, u32), EncFormula>,
     /// 조건부 서식 (서식 번호, 규칙 번호) → (수식 1, 수식 2)
@@ -1784,6 +1784,151 @@ struct SheetEnc {
     dv: Vec<(Vec<u8>, Vec<u8>)>,
     /// CF12 기준 값의 수식: (서식 번호, 규칙 번호, 기준 값 번호) → 토큰열 ([`cfvo_formula`])
     cfvo: HashMap<(usize, usize, usize), Vec<u8>>,
+    /// 한컴 차트 레코드 0x7EF0 의 내용 (차트 도형 차례)
+    pub(crate) charts: Vec<Vec<u8>>,
+}
+
+/// 시트의 차트 도형마다 0x7EF0 레코드 (docs/format/cell-legacy-chart.md, `vtbuild`). `base` 는 차트 번호 바탕
+/// ([`super::art::Art::chart_base`])
+fn encode_charts(
+    wb: &Workbook,
+    sheet: &Sheet,
+    tables: &mut Tables,
+    base: Option<u16>,
+) -> Vec<Vec<u8>> {
+    let names = tables.sheet_names.clone();
+    let mut out = Vec::new();
+    for shape in &sheet.shapes {
+        let (Some(c), crate::model::ShapeKind::Chart) = (&shape.chart, shape.kind) else {
+            continue;
+        };
+        let chart_index = base.map_or(0, |b| b + out.len() as u16 + 1);
+        let mut xti = |si: usize| tables.xti(None, si, si);
+        out.push(chart_record(
+            wb,
+            sheet,
+            &shape.anchor,
+            c,
+            &names,
+            chart_index,
+            &mut xti,
+        ));
+    }
+    out
+}
+
+/// 차트 하나의 0x7EF0 레코드. `xti` 는 항목·계열 수식이 가리키는 시트 번호 → ixti (원본 범위의 ixti 는 시트 번호
+/// 그대로 — 차트 수식 ixti 대조 실험). 레거시 보기([`super::lossy::legacy_view`])도 이것으로 차트를 다시 읽는다
+pub(crate) fn chart_record(
+    wb: &Workbook,
+    sheet: &Sheet,
+    anchor: &crate::model::Anchor,
+    c: &crate::model::Chart,
+    sheet_names: &[String],
+    chart_index: u16,
+    xti: &mut dyn FnMut(usize) -> u16,
+) -> Vec<u8> {
+    use super::vtbuild::{ChartTok, GridData};
+    let sheet_of = |n: &str| {
+        sheet_names
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(n) || s == n)
+    };
+    let parse = |t: Option<&String>| -> Option<Vec<ChartTok>> {
+        super::vtbuild::parse_chart_formula(t?, &sheet_of)
+    };
+    let cat = c.series.iter().find_map(|s| parse(s.cat_ref.as_ref()));
+    // 값 참조를 풀 수 없는 계열(`#REF`)은 꼬리에 쓰지 않는다 (서식 파일 Marketing_Budget)
+    let bubble = c.kind == "bubble";
+    // 계열마다 (값 참조, 이름 참조·글자)
+    type Refs = Option<Vec<ChartTok>>;
+    let mut series: Vec<(Refs, Refs)> = Vec::new();
+    for s in &c.series {
+        let Some(values) = parse(s.val_ref.as_ref()) else {
+            continue;
+        };
+        let name = parse(s.name_ref.as_ref()).or_else(|| match &s.tx {
+            Some(crate::model::ChartTx::Value(v)) => Some(vec![ChartTok::Str(v.clone())]),
+            _ => None,
+        });
+        series.push((Some(values), name));
+        // 거품형: 거품 크기는 값·이름이 빈 다음 계열 (c2_e6_bubble)
+        if bubble {
+            series.push((None, None));
+        }
+    }
+    let first = |v: &Option<Vec<ChartTok>>| v.as_ref().and_then(|t| t.first().cloned());
+    let src_series: Vec<(Option<ChartTok>, Option<ChartTok>)> =
+        series.iter().map(|(v, n)| (first(v), first(n))).collect();
+    // 원본 범위가 없는 차트: 글자 이름, 거품형, 여러 영역 참조
+    let literal_name = series.iter().any(|(_, n)| {
+        n.as_ref()
+            .is_some_and(|t| t.iter().any(|x| matches!(x, ChartTok::Str(_))))
+    });
+    let source_toks = if bubble
+        || literal_name
+        || cat.as_ref().is_some_and(|t| t.len() > 1)
+        || series
+            .iter()
+            .any(|(v, _)| v.as_ref().is_some_and(|t| t.len() > 1))
+    {
+        Vec::new()
+    } else {
+        super::vtbuild::source_range(cat.as_ref().and_then(|t| t.first()), &src_series)
+    };
+    // 원본 범위의 ixti 는 시트 번호, 항목·계열마다 값·이름의 ixti 는 XTI 번호 (이 차례로 생긴다 — 차트 수식 ixti
+    // 대조 실험, cell-legacy-chart.md 2절)
+    let source = super::vtbuild::chart_formula(&source_toks, &mut |si| si as u16);
+    let categories = super::vtbuild::chart_formula(cat.as_deref().unwrap_or(&[]), xti);
+    let tail: Vec<(Vec<u8>, Vec<u8>)> = series
+        .iter()
+        .map(|(v, n)| {
+            (
+                super::vtbuild::chart_formula(v.as_deref().unwrap_or(&[]), xti),
+                super::vtbuild::chart_formula(n.as_deref().unwrap_or(&[]), xti),
+            )
+        })
+        .collect();
+    // 데이터 표: 계열마다 열 (거품형은 거품 크기 열이 뒤따른다), 이름 없는 열은 `계열N`
+    let mut names = Vec::new();
+    let mut values = Vec::new();
+    for s in &c.series {
+        names.push(
+            s.name
+                .clone()
+                .unwrap_or_else(|| format!("계열{}", names.len() + 1)),
+        );
+        values.push(s.values.clone());
+        if bubble {
+            names.push(format!("계열{}", names.len() + 1));
+            let sizes = s
+                .bubble_size
+                .as_ref()
+                .map(|d| {
+                    d.dense()
+                        .into_iter()
+                        .map(|v| v.and_then(|t| t.parse().ok()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            values.push(sizes);
+        }
+    }
+    let grid = GridData {
+        categories: c
+            .series
+            .iter()
+            .find(|s| !s.categories.is_empty())
+            .map(|s| s.categories.clone())
+            .unwrap_or_default(),
+        has_names: c.series.iter().any(|s| s.name.is_some()),
+        bubble,
+        names,
+        values,
+    };
+    let archive = super::vtbuild::archive(c, &grid);
+    let anchor = super::art::legacy_anchor_ws(anchor, wb, sheet);
+    super::vtbuild::record(chart_index, anchor, &source, &archive, &categories, &tail)
 }
 
 /// CF12 기준 값을 수식(토큰열)으로 쓰는가: 수식 기준 값, 그리고 x14 구역에서 온 숫자 값 (한셀은 x14 구역에서 읽은
@@ -2018,10 +2163,14 @@ fn workbook_stream_with(
         }
     }
 
-    // 시트 수식
+    // 그림 저장소·시트 그리기 번호 (차트 번호가 시트의 OBJ 수에 기댄다)
+    let mut art = super::art::Art::new(wb);
+    // 시트 수식, 차트 (0x7EF0 — 차트 수식의 XTI 를 만든다)
     let mut encs: Vec<SheetEnc> = Vec::new();
     for (si, sheet) in wb.sheets.iter().enumerate() {
-        encs.push(encode_sheet(sheet, si, &mut tables, report));
+        let mut e = encode_sheet(sheet, si, &mut tables, report);
+        e.charts = encode_charts(wb, sheet, &mut tables, art.chart_base(si));
+        encs.push(e);
     }
     // 표 (0xB005…0xB00D) — 요약 행 수식이 XTI 를 만들 수 있어 SUPBOOK 앞에 부호화한다
     let list_records = table_records(wb, &mut tables, report);
@@ -2446,7 +2595,6 @@ fn workbook_stream_with(
     }
     out.rec(0xA101, &wb.hancom.calc_id.unwrap_or(1).to_le_bytes());
     // 그림 저장소
-    let mut art = super::art::Art::new(wb);
     art.text_para = text_para;
     art.note_para = note_para;
     if let Some(dgg) = art.drawing_group() {
@@ -2878,7 +3026,7 @@ pub(crate) struct SheetCtx<'a> {
     pub sheet: &'a Sheet,
     styles: &'a StyleLayout,
     fonts: &'a FontLayout,
-    enc: &'a SheetEnc,
+    pub(crate) enc: &'a SheetEnc,
     pub art: &'a super::art::Art,
 }
 

@@ -1136,6 +1136,8 @@ pub(crate) struct Archive {
     pub end: usize,
     /// 구조는 맞지만 값이 예상과 다른 것 (VtColor 종류, VtString 모양, 배열 개수 …)
     pub warnings: Vec<String>,
+    /// VtString 의 pad 바이트 자리 (레코드 안 위치) — 한셀이 초기화하지 않아 저장마다 다르다
+    pub pads: Vec<usize>,
 }
 
 impl Archive {
@@ -1212,6 +1214,57 @@ impl Archive {
 
 fn non_null(items: &[Value]) -> usize {
     items.iter().filter(|v| !v.is_null()).count()
+}
+
+#[cfg(test)]
+impl Archive {
+    /// 쓰기 나무로 (다시 쓰면 같은 바이트가 되는지 보는 시험용). `payload` 는 레코드 전체
+    pub(crate) fn to_wobj(&self, payload: &[u8]) -> super::vtwrite::WObj {
+        self.node_wobj(&self.nodes[self.root], payload)
+    }
+
+    fn node_wobj(&self, node: &Node, payload: &[u8]) -> super::vtwrite::WObj {
+        let class = self.classes[node.class].def.name;
+        let mut o = super::vtwrite::WObj::new(class);
+        o.fields = node
+            .fields
+            .iter()
+            .map(|f| (f.name, self.value_w(&f.value, payload)))
+            .collect();
+        o
+    }
+
+    fn value_w(&self, v: &Value, payload: &[u8]) -> super::vtwrite::W {
+        use super::vtwrite::W;
+        match v {
+            Value::U8(x) => W::U8(*x),
+            Value::U16(x) => W::U16(*x),
+            Value::I16(x) => W::I16(*x),
+            Value::U32(x) => W::U32(*x),
+            Value::I32(x) => W::I32(*x),
+            Value::F32(x) => W::F32(*x),
+            Value::F64(x) => W::F64(*x),
+            Value::Color(c) => W::Color(
+                (u32::from(c.rgb[0]) << 16) | (u32::from(c.rgb[1]) << 8) | u32::from(c.rgb[2]),
+                c.flags,
+            ),
+            Value::Ptr(None) => W::Null,
+            Value::Ptr(Some(p)) if p.back_ref => W::Back(p.id),
+            Value::Ptr(Some(p)) => W::New(Box::new(
+                self.node_wobj(&self.nodes[self.by_id[p.id as usize]], payload),
+            )),
+            Value::Embedded(i) => W::Emb(Box::new(self.node_wobj(&self.nodes[*i], payload))),
+            Value::Group(fields) => W::Group(
+                fields
+                    .iter()
+                    .map(|f| (f.name, self.value_w(&f.value, payload)))
+                    .collect(),
+            ),
+            Value::Array(items) => W::Arr(items.iter().map(|x| self.value_w(x, payload)).collect()),
+            Value::Str(s) => W::RawStr(payload[s.raw.clone()].to_vec()),
+            Value::Bytes(b) => W::Bytes(b.clone()),
+        }
+    }
 }
 
 /// 필드 읽기. 객체는 자기 필드에 없으면 기반 클래스 부분을 차례로 찾는다
@@ -1412,6 +1465,7 @@ struct ArchiveReader<'p> {
     depth: usize,
     max_depth: usize,
     warnings: Vec<String>,
+    pads: Vec<usize>,
 }
 
 /// `payload[start..start + len]` 의 아카이브. 뿌리는 VtChart 이고 길이 필드 자리에서 끝나야 한다
@@ -1425,6 +1479,7 @@ fn parse_archive(payload: &[u8], start: usize, len: usize) -> Res<Archive> {
         depth: 0,
         max_depth: 0,
         warnings: Vec::new(),
+        pads: Vec::new(),
     };
     let Some(root) = a.read_ptr(&["VtChart"])? else {
         return Err(VtError {
@@ -1454,6 +1509,7 @@ fn parse_archive(payload: &[u8], start: usize, len: usize) -> Res<Archive> {
         max_depth: a.max_depth,
         end: a.r.pos,
         warnings: a.warnings,
+        pads: a.pads,
     };
     arch.self_check();
     Ok(arch)
@@ -1598,7 +1654,12 @@ impl ArchiveReader<'_> {
 
     fn read_spec(&mut self, s: &'static Spec, out: &mut Vec<Field>) -> Res<()> {
         let (name, value) = match s {
-            S::U8(n) => (*n, Value::U8(self.r.u8()?)),
+            S::U8(n) => {
+                if *n == "pad" {
+                    self.pads.push(self.r.pos);
+                }
+                (*n, Value::U8(self.r.u8()?))
+            }
             S::U16(n) => (*n, Value::U16(self.r.u16()?)),
             S::I16(n) => (*n, Value::I16(self.r.i16()?)),
             S::U32(n) => (*n, Value::U32(self.r.u32()?)),
@@ -1741,6 +1802,8 @@ pub(crate) enum Token {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChartRef {
     pub ixti: u16,
+    /// ixti 를 푼 시트 번호 (BOUNDSHEET 순서). 풀 수 없으면 None (글은 `#REF`)
+    pub sheet: Option<u16>,
     pub rw_first: u32,
     pub rw_last: u32,
     pub col_first: u16,
@@ -1769,9 +1832,32 @@ pub(crate) struct SeriesFormulas {
     pub name: ChartFormula,
 }
 
-/// 시트 부분: ixti 를 시트 목록 번호로 본다 (표본 관측). 목록 밖이면 `#REF`
-fn sheet_text(ixti: u16, sheet_names: &[String]) -> String {
-    match sheet_names.get(ixti as usize) {
+/// 수식의 ixti 를 시트 번호로 푸는 방법. 원본 범위의 ixti 는 곧 시트 번호이고, 항목·계열 수식의 ixti 는
+/// EXTERNSHEET 의 XTI 번호다 (차트 수식 ixti 대조 실험: 첫 시트의 차트가 둘째 시트 `Data` 를 가리키는 문서를 한셀이
+/// 레거시로 저장하면 원본 범위 ixti 1, 항목·계열 ixti 0, EXTERNSHEET 는 XTI 하나 (내부, 1, 1))
+#[derive(Clone, Copy)]
+pub(crate) struct Sheets<'a> {
+    /// BOUNDSHEET 순서 시트 이름
+    pub names: &'a [String],
+    /// XTI 번호 → 내부 시트 번호 (내부 문서의 시트 하나가 아니면 None). None 이면 XTI 표를 모르는 것으로 보고
+    /// 항목·계열의 ixti 도 시트 번호로 본다 (진단·시험용)
+    pub xti: Option<&'a [Option<u16>]>,
+}
+
+impl Sheets<'_> {
+    /// 원본 범위면 ixti 그대로, 아니면 XTI 표로. 시트 목록 밖이면 None
+    fn resolve(&self, ixti: u16, source: bool) -> Option<u16> {
+        let sheet = match self.xti {
+            Some(t) if !source => t.get(ixti as usize).copied().flatten()?,
+            _ => ixti,
+        };
+        ((sheet as usize) < self.names.len()).then_some(sheet)
+    }
+}
+
+/// 시트 부분: 푼 시트의 이름, 풀 수 없으면 `#REF`
+fn sheet_text(sheet: Option<u16>, sheet_names: &[String]) -> String {
+    match sheet.and_then(|s| sheet_names.get(s as usize)) {
         Some(n) => quote_sheet(n),
         None => "#REF".into(),
     }
@@ -1788,13 +1874,13 @@ fn cell_text(row: u32, col: u16) -> String {
     )
 }
 
-/// cce u16 + 토큰
-fn read_formula(r: &mut Rd<'_>, sheet_names: &[String]) -> Res<ChartFormula> {
+/// cce u16 + 토큰. `source` 는 원본 범위 수식 (ixti 가 시트 번호)
+fn read_formula(r: &mut Rd<'_>, sheets: Sheets<'_>, source: bool) -> Res<ChartFormula> {
     let offset = r.pos;
     let cce = r.u16()?;
     let start = r.pos;
     r.take(cce as usize)?;
-    let mut f = parse_formula(Rd::new(r.b, start, r.pos), sheet_names)?;
+    let mut f = parse_formula(Rd::new(r.b, start, r.pos), sheets, source)?;
     f.offset = offset;
     f.cce = cce;
     Ok(f)
@@ -1804,7 +1890,8 @@ fn read_formula(r: &mut Rd<'_>, sheet_names: &[String]) -> Res<ChartFormula> {
 /// RPN 에서 피연산자는 원문과 같은 순서로 나온다 — 합집합은 스택 위 이웃한 두 구간을 잇고(사이에 `,`),
 /// 괄호는 구간 양끝에 붙는다. 그래서 문자열을 거듭 이어 붙이지 않고 끝에서 한 번에 만든다
 /// (괄호가 수만 개 겹쳐도 선형).
-fn parse_formula(mut r: Rd<'_>, sheet_names: &[String]) -> Res<ChartFormula> {
+fn parse_formula(mut r: Rd<'_>, sheets: Sheets<'_>, source: bool) -> Res<ChartFormula> {
+    let sheet_names = sheets.names;
     let mut f = ChartFormula::default();
     // 피연산자마다 (글, 여는 괄호 수, 닫는 괄호 수), 스택은 피연산자 번호 구간
     let mut operands: Vec<(String, u32, u32)> = Vec::new();
@@ -1815,9 +1902,11 @@ fn parse_formula(mut r: Rd<'_>, sheet_names: &[String]) -> Res<ChartFormula> {
         let text = match ptg {
             0x3A | 0x5A | 0x7A => {
                 let (ixti, row, col) = (r.u16()?, r.u32()?, r.u16()?);
-                let text = format!("{}!{}", sheet_text(ixti, sheet_names), cell_text(row, col));
+                let sheet = sheets.resolve(ixti, source);
+                let text = format!("{}!{}", sheet_text(sheet, sheet_names), cell_text(row, col));
                 f.refs.push(ChartRef {
                     ixti,
+                    sheet,
                     rw_first: row,
                     rw_last: row,
                     col_first: col & 0x3FFF,
@@ -1834,16 +1923,18 @@ fn parse_formula(mut r: Rd<'_>, sheet_names: &[String]) -> Res<ChartFormula> {
             }
             0x3B | 0x5B | 0x7B => {
                 let ixti = r.u16()?;
+                let sheet = sheets.resolve(ixti, source);
                 let (rw_first, rw_last) = (r.u32()?, r.u32()?);
                 let (col_first, col_last) = (r.u16()?, r.u16()?);
                 let text = format!(
                     "{}!{}:{}",
-                    sheet_text(ixti, sheet_names),
+                    sheet_text(sheet, sheet_names),
                     cell_text(rw_first, col_first),
                     cell_text(rw_last, col_last)
                 );
                 f.refs.push(ChartRef {
                     ixti,
+                    sheet,
                     rw_first,
                     rw_last,
                     col_first: col_first & 0x3FFF,
@@ -1996,9 +2087,20 @@ impl VtRecord {
     }
 }
 
-/// 0x7EF0 논리 레코드(CONTINUE 합침) 하나를 읽는다. `sheet_names` 는 수식의 ixti 순서 시트 이름
-/// (표본에서는 통합 문서의 시트 목록 그대로).
+/// 0x7EF0 논리 레코드(CONTINUE 합침) 하나를 읽는다 — XTI 표를 모를 때 (항목·계열의 ixti 도 시트 번호로 본다:
+/// 진단·시험용). 문서를 읽을 때는 [`parse_with`]
 pub(crate) fn parse(payload: &[u8], sheet_names: &[String]) -> Result<VtRecord, VtError> {
+    parse_with(
+        payload,
+        Sheets {
+            names: sheet_names,
+            xti: None,
+        },
+    )
+}
+
+/// 0x7EF0 논리 레코드(CONTINUE 합침) 하나를 읽는다. 수식의 ixti 는 [`Sheets`] 로 푼다
+pub(crate) fn parse_with(payload: &[u8], sheets: Sheets<'_>) -> Result<VtRecord, VtError> {
     let mut r = Rd::new(payload, 0, payload.len());
     let version = r.u32()?;
     let kind = r.u16()?;
@@ -2022,7 +2124,7 @@ pub(crate) fn parse(payload: &[u8], sheet_names: &[String]) -> Result<VtRecord, 
             kind: VtErrorKind::NotChart { version, kind },
         });
     }
-    let source = read_formula(&mut r, sheet_names)?;
+    let source = read_formula(&mut r, sheets, true)?;
     let blob_len = r.u32()?;
     let start = r.pos;
     if blob_len as usize > r.left() {
@@ -2033,12 +2135,12 @@ pub(crate) fn parse(payload: &[u8], sheet_names: &[String]) -> Result<VtRecord, 
     }
     let archive = parse_archive(payload, start, blob_len as usize)?;
     r.take(blob_len as usize)?;
-    let categories = read_formula(&mut r, sheet_names)?;
+    let categories = read_formula(&mut r, sheets, false)?;
     let n = r.u16()?;
     let mut series = Vec::new();
     for _ in 0..n {
-        let values = read_formula(&mut r, sheet_names)?;
-        let name = read_formula(&mut r, sheet_names)?;
+        let values = read_formula(&mut r, sheets, false)?;
+        let name = read_formula(&mut r, sheets, false)?;
         series.push(SeriesFormulas { values, name });
     }
     if r.left() > 0 {
@@ -2060,6 +2162,122 @@ pub(crate) fn parse(payload: &[u8], sheet_names: &[String]) -> Result<VtRecord, 
         series,
         len: payload.len(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// 진단: 나무를 줄로
+// ---------------------------------------------------------------------------
+
+/// 레코드를 `경로 = 값` 줄로 (리버스 엔지니어링·쓰기 대조용). 새 객체는 `#번호 클래스`, 앞 객체 참조는
+/// `@번호`, 기반 부분은 경로에 `:클래스` 를 붙인다
+pub(crate) fn dump(rec: &VtRecord) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let e = &rec.envelope;
+    let a = &e.anchor;
+    let _ = writeln!(
+        out,
+        "envelope = v{} kind {:#x} chart {} anchor {:#06x} ({},{})+({},{}) .. ({},{})+({},{}) reserved {:?} u16_a {:#x}",
+        e.version,
+        e.kind,
+        e.chart_index,
+        a.flags,
+        a.col1,
+        a.row1,
+        a.dx1,
+        a.dy1,
+        a.col2,
+        a.row2,
+        a.dx2,
+        a.dy2,
+        e.reserved,
+        e.u16_a
+    );
+    let _ = writeln!(out, "source = {}", rec.source.text);
+    let _ = writeln!(out, "categories = {}", rec.categories.text);
+    for (i, s) in rec.series.iter().enumerate() {
+        let _ = writeln!(out, "series[{i}] = {} | {}", s.values.text, s.name.text);
+    }
+    let arch = &rec.archive;
+    let _ = writeln!(out, "root = #0 VtChart");
+    dump_fields(arch, &arch.nodes[arch.root].fields, "", &mut out);
+    out
+}
+
+fn dump_value(arch: &Archive, path: &str, v: &Value, out: &mut String) {
+    use std::fmt::Write as _;
+    match v {
+        Value::U8(x) => {
+            let _ = writeln!(out, "{path} = {x}");
+        }
+        Value::U16(x) => {
+            let _ = writeln!(out, "{path} = {x}");
+        }
+        Value::I16(x) => {
+            let _ = writeln!(out, "{path} = {x}");
+        }
+        Value::U32(x) => {
+            let _ = writeln!(out, "{path} = {x}");
+        }
+        Value::I32(x) => {
+            let _ = writeln!(out, "{path} = {x}");
+        }
+        Value::F32(x) => {
+            let _ = writeln!(out, "{path} = {x:?}f");
+        }
+        Value::F64(x) => {
+            let _ = writeln!(out, "{path} = {x:?}d");
+        }
+        Value::Color(c) => {
+            let _ = writeln!(out, "{path} = {}/{:#04x} k{}", c.hex(), c.flags, c.kind);
+        }
+        Value::Ptr(None) => {
+            let _ = writeln!(out, "{path} = null");
+        }
+        Value::Ptr(Some(p)) if p.back_ref => {
+            let _ = writeln!(out, "{path} = @{}", p.id);
+        }
+        Value::Ptr(Some(p)) => {
+            let Some(&ni) = arch.by_id.get(p.id as usize) else {
+                return;
+            };
+            let node = &arch.nodes[ni];
+            let class = arch.classes.get(node.class).map_or("?", |c| c.def.name);
+            let _ = writeln!(out, "{path} = #{} {class}", p.id);
+            dump_fields(arch, &node.fields, path, out);
+        }
+        Value::Embedded(ni) => {
+            let node = &arch.nodes[*ni];
+            let class = arch.classes.get(node.class).map_or("?", |c| c.def.name);
+            dump_fields(arch, &node.fields, &format!("{path}:{class}"), out);
+        }
+        Value::Group(fields) => dump_fields(arch, fields, path, out),
+        Value::Array(items) => {
+            let _ = writeln!(out, "{path} = [{}]", items.len());
+            for (i, it) in items.iter().enumerate() {
+                dump_value(arch, &format!("{path}[{i}]"), it, out);
+            }
+        }
+        Value::Str(s) => {
+            let _ = writeln!(out, "{path} = {:?}", s.text.as_deref().unwrap_or("?"));
+        }
+        Value::Bytes(b) => {
+            let _ = writeln!(out, "{path} = bytes {b:02x?}");
+        }
+    }
+}
+
+fn dump_fields(arch: &Archive, fields: &[Field], path: &str, out: &mut String) {
+    for f in fields {
+        let p = if f.name == BASE {
+            path.to_string()
+        } else if path.is_empty() {
+            f.name.to_string()
+        } else {
+            format!("{path}.{}", f.name)
+        };
+        dump_value(arch, &p, &f.value, out);
+    }
 }
 
 #[cfg(test)]
@@ -2179,7 +2397,14 @@ mod tests {
 
     fn formula(tokens: &[u8]) -> Res<ChartFormula> {
         let f = fmla(tokens);
-        read_formula(&mut Rd::new(&f, 0, f.len()), &names())
+        read_formula(
+            &mut Rd::new(&f, 0, f.len()),
+            Sheets {
+                names: &names(),
+                xti: None,
+            },
+            false,
+        )
     }
 
     /// 원본 범위: C1:C3 ∪ 'My Sheet'!A1:A3
@@ -2281,6 +2506,43 @@ mod tests {
         record(&source(), &sample_archive(), &tail())
     }
 
+    /// 원본 범위의 ixti 는 시트 번호, 항목·계열의 ixti 는 XTI 번호 (차트 수식 ixti 대조 실험의 꼴: XTI 0 = 둘째 시트)
+    #[test]
+    fn tail_formulas_resolve_through_xti() {
+        let src = [area(1, 0, 2, 2, 2), area(1, 0, 2, 0, 0), vec![0x10]].concat();
+        let p = record(&src, &sample_archive(), &tail());
+        let xti = [Some(1u16)];
+        let sheets = Sheets {
+            names: &names(),
+            xti: Some(&xti),
+        };
+        let rec = parse_with(&p, sheets).unwrap();
+        assert_eq!(
+            rec.source.text,
+            "('My Sheet'!$C$1:$C$3,'My Sheet'!$A$1:$A$3)"
+        );
+        assert_eq!(rec.categories.text, "'My Sheet'!$A$2:$A$3");
+        assert_eq!(rec.series[0].values.refs[0].sheet, Some(1));
+        assert_eq!(rec.series[0].values.refs[0].ixti, 0);
+        // XTI 표 밖, 외부 문서의 XTI 는 #REF
+        let none = [None];
+        let rec = parse_with(
+            &p,
+            Sheets {
+                names: &names(),
+                xti: Some(&none),
+            },
+        )
+        .unwrap();
+        assert_eq!(rec.categories.text, "#REF!$A$2:$A$3");
+        assert_eq!(rec.categories.refs[0].sheet, None);
+        // XTI 표를 모르면 ixti 를 시트 번호로
+        assert_eq!(
+            parse(&p, &names()).unwrap().categories.text,
+            "Sheet1!$A$2:$A$3"
+        );
+    }
+
     /// 아카이브만 바꾼 레코드의 오류
     fn archive_err(build: impl FnOnce(&mut W)) -> VtError {
         let mut w = W::default();
@@ -2336,6 +2598,7 @@ mod tests {
             f.refs[1],
             ChartRef {
                 ixti: 0,
+                sheet: Some(0),
                 rw_first: 0,
                 rw_last: 5,
                 col_first: 0,
@@ -2433,7 +2696,15 @@ mod tests {
         assert!(truncated(kind(&[0x17, 5])));
         // cce 가 남은 바이트보다 길다
         let short = [9u8, 0, 0x3A];
-        let e = read_formula(&mut Rd::new(&short, 0, 3), &[]).unwrap_err();
+        let e = read_formula(
+            &mut Rd::new(&short, 0, 3),
+            Sheets {
+                names: &[],
+                xti: None,
+            },
+            false,
+        )
+        .unwrap_err();
         assert_eq!((e.offset, e.kind), (2, VtErrorKind::Truncated { need: 9 }));
     }
 
