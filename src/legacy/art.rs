@@ -231,7 +231,7 @@ struct Blip {
 enum Obj<'a> {
     Button { col: u32, row: u32 },
     Shape(&'a Shape),
-    Note(usize, &'a Comment),
+    Note(&'a Comment),
 }
 
 pub(crate) struct Art {
@@ -295,8 +295,8 @@ fn sheet_objects(sheet: &crate::model::Sheet) -> Vec<Obj<'_>> {
     // 메모: 그리기 차례(VML 도형 차례)대로, 차례가 없으면 모델 차례
     let mut notes: Vec<(usize, &Comment)> = sheet.comments.iter().enumerate().collect();
     notes.sort_by_key(|(i, c)| (c.z_order.is_none(), c.z_order, *i));
-    for (i, c) in notes {
-        v.push(Obj::Note(i, c));
+    for (_, c) in notes {
+        v.push(Obj::Note(c));
     }
     v
 }
@@ -510,6 +510,8 @@ impl Art {
         let mut parts: Vec<Part> = Vec::new();
         let mut spid = dgid * 0x400;
         let mut obj_id = 0u16;
+        // 그리기 차례의 메모 번호 (1부터) — VML 의 자동 id(`_x0000_s…`)는 한셀이 "메모 N" 으로 바꾼다
+        let mut note_no = 0usize;
         for o in &objs {
             match o {
                 Obj::Button { col, row } => {
@@ -563,7 +565,7 @@ impl Art {
                         &mut |sp, obj, txo| parts.push(Part { sp, obj, txo }),
                     );
                 }
-                Obj::Note(i, c) => {
+                Obj::Note(c) => {
                     spid += 1;
                     obj_id += 1;
                     let mut fsp = Buf::new();
@@ -599,10 +601,14 @@ impl Art {
                         p.set(0x0206, 25399);
                         p.set(0x023F, 0x0002_0002);
                     }
+                    // 이름: VML id (한셀이 쓴 "메모 N"), 자동 id(`_x0000_s1025` …)나 이름이 없으면 그리기 차례의
+                    // "메모 N" (메모 대조 실험: Excel 꼴 id 다섯 개 → 메모 1–5)
+                    note_no += 1;
                     let name = c
                         .shape_name
                         .clone()
-                        .unwrap_or_else(|| format!("메모 {}", i + 1));
+                        .filter(|n| !n.starts_with("_x0000_"))
+                        .unwrap_or_else(|| format!("메모 {note_no}"));
                     p.string(0x0380, &name);
                     if !c.visible {
                         p.set(0x03BF, 0x0002_0002);
@@ -939,7 +945,7 @@ impl Art {
                 Obj::Shape(s) => count_shapes(s) as u16,
                 _ => 1,
             };
-            if let Obj::Note(_, c) = o {
+            if let Obj::Note(c) = o {
                 let mut b = Buf::new();
                 b.u32(c.cell.row)
                     .u16(c.cell.col as u16)

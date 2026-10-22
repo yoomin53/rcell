@@ -223,7 +223,8 @@ fn shape_view(s: &mut crate::model::Shape) {
 
 /// 레거시로 저장했다가 다시 연 모습
 pub fn legacy_view(wb: &Workbook) -> Workbook {
-    let mut w = wb.clone();
+    // 셀이 없는 메모 자리에는 빈 셀이 생긴다 (writer::with_comment_cells)
+    let mut w = super::writer::with_comment_cells(wb).unwrap_or_else(|| wb.clone());
     // 창 잠금: 한셀은 WINDOWPROTECT 를 늘 0 으로 쓴다
     if let Some(p) = &mut w.protection {
         p.lock_windows = false;
@@ -310,12 +311,37 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
         for x in &mut s.shapes {
             shape_view(x);
         }
-        // 메모 상자: 셀과 함께 옮기지 않으면 크기도 바꾸지 않는다 (앵커 플래그 3)
+        // 메모 상자: 셀과 함께 옮기지 않으면 크기도 바꾸지 않는다 (앵커 플래그 3). 자리의 픽셀 오프셋은 열·행
+        // 단위(1/32768·1/8192)로 바꿨다 다시 읽은 값 — 숨긴 행·열 안의 오프셋은 0 (한셀 레거시도 같다: 메모 실험의
+        // 숨긴 7행)
+        let mdw = crate::units::max_digit_width(wb);
+        let sheet_copy = s.clone();
         for c in &mut s.comments {
-            if let Some(b) = &mut c.shape
-                && !b.move_with_cells
-            {
-                b.size_with_cells = false;
+            if let Some(b) = &mut c.shape {
+                if !b.move_with_cells {
+                    b.size_with_cells = false;
+                }
+                let a = &mut b.anchor;
+                for (cell, off, unit, col) in [
+                    (a[0], 1, 32768.0, true),
+                    (a[2], 3, 8192.0, false),
+                    (a[4], 5, 32768.0, true),
+                    (a[6], 7, 8192.0, false),
+                ] {
+                    let px = if col {
+                        crate::units::sheet_col_px(&sheet_copy, cell, mdw)
+                    } else {
+                        crate::units::sheet_row_px(&sheet_copy, cell)
+                    };
+                    let eff = px.saturating_sub(1) as f64;
+                    a[off] = if eff <= 0.0 {
+                        0
+                    } else {
+                        let max = if col { 0x7FFF } else { 0x1FFF };
+                        let d = ((a[off] as f64 * unit / eff).round() as i64).clamp(0, max);
+                        (d as f64 * eff / unit).round() as u32
+                    };
+                }
             }
         }
         // 하이퍼링크의 화면 설명은 저장되지 않는다 (HLINKTOOLTIP 을 쓰지 않는다). `file:` 주소는 파일 모니커의
@@ -331,6 +357,15 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
             if let Some(d) = c.formula.as_mut().and_then(|f| f.data_table.as_mut()) {
                 d.del1 = false;
                 d.del2 = false;
+            }
+        }
+        // 표: 자동 필터 조건과 계산 열 수식은 저장되지 않는다 (8절)
+        for t in &mut s.tables {
+            if let Some(af) = &mut t.auto_filter {
+                af.columns.clear();
+            }
+            for c in &mut t.columns {
+                c.calculated_formula = None;
             }
         }
         // 조건부 서식의 x14 확장: 데이터 막대는 방향(오른쪽에서 왼쪽)만 CFDatabar 에 남고, 사용자 지정 아이콘은
@@ -398,8 +433,91 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
             }
         }
     }
+    // 구조적 참조는 PtgList 로 저장되어 읽기의 꼴로 바뀐다: 표 이름만은 `표[]`, `[#Headers],[#Data]` 는
+    // `[#Data],[#Headers]` 차례 (formula::structured_ref)
+    let names: Vec<String> = w
+        .sheets
+        .iter()
+        .flat_map(|s| &s.tables)
+        .map(|t| t.display_name.clone())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if !names.is_empty() {
+        for s in &mut w.sheets {
+            for c in &mut s.cells {
+                if let Some(f) = &mut c.formula {
+                    f.text = canonical_structured_refs(&f.text, &names);
+                }
+            }
+            for t in &mut s.tables {
+                for c in &mut t.columns {
+                    if let Some(f) = &mut c.totals_formula {
+                        *f = canonical_structured_refs(f, &names);
+                    }
+                }
+            }
+        }
+    }
     super::reader::prune_external_links(&mut w);
     w
+}
+
+/// 수식 글의 구조적 참조를 레거시 읽기의 꼴로 ([`legacy_view`]). 따옴표 안은 건드리지 않는다
+pub(crate) fn canonical_structured_refs(text: &str, tables: &[String]) -> String {
+    let c: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 4);
+    let mut i = 0;
+    let word = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '.';
+    while i < c.len() {
+        if c[i] == '"' {
+            // 문자열 상수 그대로
+            out.push('"');
+            i += 1;
+            while i < c.len() {
+                out.push(c[i]);
+                if c[i] == '"' {
+                    if c.get(i + 1) == Some(&'"') {
+                        out.push('"');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if word(c[i]) && (i == 0 || !word(c[i - 1])) {
+            let start = i;
+            while i < c.len() && word(c[i]) {
+                i += 1;
+            }
+            let w: String = c[start..i].iter().collect();
+            out.push_str(&w);
+            let is_table = tables.iter().any(|t| t.eq_ignore_ascii_case(&w));
+            if is_table
+                && c.get(i) != Some(&'[')
+                && c.get(i) != Some(&'(')
+                && c.get(i) != Some(&'!')
+            {
+                out.push_str("[]");
+            }
+            if is_table && c.get(i) == Some(&'[') {
+                let from = "[[#Headers],[#Data]";
+                let n = from.chars().count();
+                let head: String = c[i..].iter().take(n).collect();
+                if head.eq_ignore_ascii_case(from) {
+                    out.push_str("[[#Data],[#Headers]");
+                    i += n;
+                }
+            }
+            continue;
+        }
+        out.push(c[i]);
+        i += 1;
+    }
+    out
 }
 
 #[cfg(test)]

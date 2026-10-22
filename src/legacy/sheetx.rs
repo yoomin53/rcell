@@ -392,6 +392,15 @@ pub(crate) fn after_cells(
         .unwrap_or_else(|| sheet.name.clone());
     out.rec_buf(0x01BA, Buf::new().str16(&code));
     feat_header(out, sheet);
+    // 이 시트의 표: 0xB00A (표 번호), 자동 필터가 있으면 0xB006 + 0xB007 (열 수) — 필터 조건은 쓰지 않는다
+    // (표 대조 실험의 한셀 레거시)
+    for t in &sheet.tables {
+        out.rec(0xB00A, &t.id.to_le_bytes());
+        if t.auto_filter.is_some() {
+            out.rec(0xB006, &[]);
+            out.rec(0xB007, &(t.columns.len() as u16).to_le_bytes());
+        }
+    }
     out.rec(0x000A, &[]);
     Ok(())
 }

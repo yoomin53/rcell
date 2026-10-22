@@ -1392,6 +1392,16 @@ impl Tables<'_> {
 }
 
 impl Resolve for Tables<'_> {
+    fn table(&mut self, name: &str) -> Option<(u32, usize, Vec<String>)> {
+        self.wb.sheets.iter().enumerate().find_map(|(si, s)| {
+            s.tables
+                .iter()
+                .find(|t| {
+                    t.display_name.eq_ignore_ascii_case(name) || t.name.eq_ignore_ascii_case(name)
+                })
+                .map(|t| (t.id, si, t.columns.iter().map(|c| c.name.clone()).collect()))
+        })
+    }
     fn sheet(&self, name: &str) -> Option<usize> {
         self.sheet_names
             .iter()
@@ -1595,6 +1605,124 @@ struct EncFormula {
     extra: Option<(u16, Vec<u8>)>,
 }
 
+/// XLWideString 꼴 (글자 수 u32 + UTF-16) — 표 레코드의 이름들. 없으면 0 (레거시는 빈 글로 쓴다)
+fn nwstr(b: &mut Buf, s: Option<&str>) {
+    let s = s.unwrap_or("");
+    b.u32(units(s) as u32).utf16(s);
+}
+
+/// 전역의 표 레코드 (표 대조 실험, 바이너리 BrtBeginList 와 같은 꼴): 표마다 0xB005 (RfX u32 ×4, 종류, 번호, 머리글·요약
+/// 행 수, 플래그 0x01 요약 행을 보인 적 있음, 차등 서식 6개, 연결, 이름·표시 이름·설명·셀 스타일 3개), 열마다 0xB00B
+/// (번호, 요약 함수, 차등 서식 3개, 쿼리 필드, 고유 이름·이름·요약 글·셀 스타일 3개, 요약 행 수식 표지 0x02 + fArray +
+/// cce + 토큰), 0xB00C (줄무늬·첫/끝 열 플래그 u16 + 스타일 이름), 0xB00D
+fn table_records(wb: &Workbook, tables: &mut Tables, report: &mut Report) -> Vec<(u16, Vec<u8>)> {
+    const ILTA: [&str; 10] = [
+        "none",
+        "average",
+        "count",
+        "countNums",
+        "max",
+        "min",
+        "sum",
+        "stdDev",
+        "var",
+        "custom",
+    ];
+    let dxf = |d: Option<u32>| d.unwrap_or(u32::MAX);
+    let mut out = Vec::new();
+    for (si, sheet) in wb.sheets.iter().enumerate() {
+        for t in &sheet.tables {
+            let Some(range) = CellRange::parse(&t.range) else {
+                continue;
+            };
+            let mut b = Buf::new();
+            b.u32(range.start.row)
+                .u32(range.end.row)
+                .u32(range.start.col)
+                .u32(range.end.col);
+            b.u32(match t.table_type.as_deref() {
+                Some("xml") => 1,
+                Some("queryTable") => 2,
+                _ => 0,
+            });
+            b.u32(t.id)
+                .u32(t.header_rows)
+                .u32(t.totals_rows)
+                .u32(u32::from(t.totals_shown));
+            for d in t.dxfs {
+                b.u32(dxf(d));
+            }
+            b.u32(t.connection_id.unwrap_or(0));
+            nwstr(&mut b, Some(&t.name));
+            nwstr(&mut b, Some(&t.display_name));
+            nwstr(&mut b, t.comment.as_deref());
+            for s in &t.cell_styles {
+                nwstr(&mut b, s.as_deref());
+            }
+            out.push((0xB005, b.take()));
+            for (k, c) in t.columns.iter().enumerate() {
+                let mut b = Buf::new();
+                let ilta = c
+                    .totals_function
+                    .as_deref()
+                    .and_then(|f| ILTA.iter().position(|x| *x == f))
+                    .unwrap_or(0) as u32;
+                b.u32(c.id).u32(ilta);
+                for d in c.dxfs {
+                    b.u32(dxf(d));
+                }
+                b.u32(c.query_table_field_id.unwrap_or(0));
+                nwstr(&mut b, c.unique_name.as_deref());
+                nwstr(&mut b, Some(&c.name));
+                nwstr(&mut b, c.totals_label.as_deref());
+                for _ in 0..3 {
+                    nwstr(&mut b, None);
+                }
+                // 요약 행 사용자 수식: 표지 0x02, fArray 0, cce, 토큰 (기준 셀 = 요약 행의 그 열)
+                let tokens = c.totals_formula.as_deref().and_then(|f| {
+                    let opts = encode::Options {
+                        base: CellRef {
+                            row: range.end.row,
+                            col: range.start.col + k as u32,
+                        },
+                        sheet: Some(si),
+                        ..Default::default()
+                    };
+                    match encode::encode(f, opts, tables) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            report
+                                .warnings
+                                .push(enc_err(&format!("표 {} 요약 행", t.display_name), e));
+                            None
+                        }
+                    }
+                });
+                match tokens {
+                    Some(v) => {
+                        b.u8(0x02).u8(0).u16(v.len() as u16).bytes(&v);
+                    }
+                    None => {
+                        b.u8(0);
+                    }
+                }
+                out.push((0xB00B, b.take()));
+            }
+            let mut b = Buf::new();
+            let st = t.style.clone().unwrap_or_default();
+            let flags = u16::from(st.first_column)
+                | (u16::from(st.last_column) << 1)
+                | (u16::from(st.row_stripes) << 2)
+                | (u16::from(st.column_stripes) << 3);
+            b.u16(flags);
+            nwstr(&mut b, st.name.as_deref());
+            out.push((0xB00C, b.take()));
+            out.push((0xB00D, Vec::new()));
+        }
+    }
+    out
+}
+
 /// PtgTbl: 데이터 표의 왼쪽 위 셀 (행 u32, 열 u16)
 fn tbl_token(m: CellRef) -> Vec<u8> {
     let mut b = Buf::new();
@@ -1744,6 +1872,41 @@ fn enc_err(at: &str, e: EncodeError) -> String {
     format!("{at}: 수식을 부호화하지 못했습니다 — {e}")
 }
 
+/// 셀이 없는 메모 자리에 빈 셀(서식 0)을 둔 통합 문서. 한셀은 메모마다 셀을 만든다 (메모 대조 실험: 값 없는 셀의
+/// 메모 다섯 개가 BLANK XF 15 로 저장된다). 그런 메모가 없으면 None
+pub(crate) fn with_comment_cells(wb: &Workbook) -> Option<Workbook> {
+    let missing = |s: &Sheet| {
+        s.comments
+            .iter()
+            .any(|c| !s.cells.iter().any(|x| x.r == c.cell))
+    };
+    if !wb.sheets.iter().any(missing) {
+        return None;
+    }
+    let mut w = wb.clone();
+    for s in &mut w.sheets {
+        let add: Vec<CellRef> = s
+            .comments
+            .iter()
+            .map(|c| c.cell)
+            .filter(|r| !s.cells.iter().any(|x| x.r == *r))
+            .collect();
+        if add.is_empty() {
+            continue;
+        }
+        for r in add {
+            s.cells.push(Cell {
+                r,
+                style: 0,
+                value: CellValue::Empty,
+                formula: None,
+            });
+        }
+        s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    }
+    Some(w)
+}
+
 /// `/Workbook` 스트림
 pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
     if wb.sheets.is_empty() {
@@ -1752,6 +1915,8 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
             value: "시트가 없습니다".into(),
         });
     }
+    let augmented = with_comment_cells(wb);
+    let wb = augmented.as_ref().unwrap_or(wb);
     let styles = layout_styles(wb);
     let fonts = layout_fonts(wb, &styles);
     let formats = layout_formats(wb);
@@ -1808,6 +1973,8 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
     for (si, sheet) in wb.sheets.iter().enumerate() {
         encs.push(encode_sheet(sheet, si, &mut tables, report));
     }
+    // 표 (0xB005…0xB00D) — 요약 행 수식이 XTI 를 만들 수 있어 SUPBOOK 앞에 부호화한다
+    let list_records = table_records(wb, &mut tables, report);
 
     // 전역
     let mut out = Out { buf: Vec::new() };
@@ -1887,12 +2054,24 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
     out.rec(0x0900, &[1, 0]);
     out.rec(0x000E, &[1, 0]);
 
-    // 글꼴
+    // 글꼴. 덧붙인 메모 런 글꼴에 색이 없으면 검정(색 번호 8)으로 쓴다 (메모 대조 실험: 돋움 9 기울임 → icv 8)
+    let extra: Vec<Font> = fonts
+        .extra
+        .iter()
+        .map(|f| {
+            let mut f = f.clone();
+            f.color.get_or_insert_with(|| Color {
+                rgb: Some("FF000000".into()),
+                ..Default::default()
+            });
+            f
+        })
+        .collect();
     let all_fonts = fonts
         .records
         .iter()
         .map(|&i| &wb.styles.fonts[i])
-        .chain(&fonts.extra);
+        .chain(&extra);
     for (k, f) in all_fonts.enumerate() {
         let legacy = if k >= 4 { k + 1 } else { k };
         // 레거시 번호 0–3 과 5 (= 레코드 0–4) 가 상용구
@@ -2302,6 +2481,9 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
             m.u8(0).utf16(c);
             out.rec_buf(0x0894, &mut m);
         }
+    }
+    for (rt, body) in &list_records {
+        out.rec(*rt, body);
     }
 
     // 시트를 먼저 써서 SST 사용 수를 센다

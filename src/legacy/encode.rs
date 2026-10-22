@@ -54,6 +54,10 @@ pub trait Resolve {
     fn func_name(&mut self, name: &str) -> u32;
     /// 새 함수(Excel 2007 이후)를 썼다 — 한셀은 번호로 쓰는 IFERROR 도 `_xlfn.` 이름을 남긴다 (관측)
     fn note_future(&mut self, _name: &str) {}
+    /// 표 이름 → (표 번호, 표가 있는 시트, 열 이름들). 구조적 참조(PtgList)에 쓴다
+    fn table(&mut self, _name: &str) -> Option<(u32, usize, Vec<String>)> {
+        None
+    }
 }
 
 /// 부호화 설정
@@ -218,6 +222,8 @@ enum Tok {
     Name(Prefix, String),
     /// 함수 이름 (뒤에 `(`)
     Func(String),
+    /// 구조적 참조 `표[…]`: (표 이름, 대괄호 안의 글)
+    List(String, String),
     Op(&'static str),
     LParen,
     RParen,
@@ -604,6 +610,30 @@ impl Lexer {
                 self.i = e;
                 match self.peek() {
                     Some('(') => return Ok(Some(Tok::Func(w))),
+                    Some('[') => {
+                        // 구조적 참조: 짝이 맞는 ] 까지 (열 이름 안의 특수 문자는 ' 로 가린다)
+                        let start = self.i + 1;
+                        let mut depth = 0usize;
+                        let mut k = self.i;
+                        loop {
+                            match self.c.get(k) {
+                                None => return err("구조적 참조의 ] 가 없습니다"),
+                                Some('\'') => k += 1,
+                                Some('[') => depth += 1,
+                                Some(']') => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            k += 1;
+                        }
+                        let spec = self.text(start, k);
+                        self.i = k + 1;
+                        return Ok(Some(Tok::List(w, spec)));
+                    }
                     Some('!') => {
                         self.i += 1;
                         return self
@@ -693,6 +723,8 @@ enum Node {
     Missing,
     Ref(RefTok),
     Name(Prefix, String),
+    /// 구조적 참조: (표 이름, 대괄호 안의 글)
+    List(String, String),
     Func(String, Vec<Node>),
     Unary(&'static str, Box<Node>),
     Percent(Box<Node>),
@@ -794,6 +826,7 @@ impl Parser {
             Some(Tok::Err(e)) => Ok(Node::Err(e)),
             Some(Tok::Ref(r)) => Ok(Node::Ref(r)),
             Some(Tok::Name(p, n)) => Ok(Node::Name(p, n)),
+            Some(Tok::List(t, spec)) => Ok(Node::List(t, spec)),
             Some(Tok::Func(name)) => {
                 if self.bump() != Some(Tok::LParen) {
                     return err("함수 이름 뒤에 ( 가 없습니다");
@@ -833,6 +866,78 @@ impl Parser {
             t => err(format!("뜻밖의 낱말 {t:?}")),
         }
     }
+}
+
+/// 구조적 참조의 대괄호 안 → (행 종류 비트, 열 이름 0–2개). `수량`, `#All`, `[#This Row],[수량]`,
+/// `[#Data],[가]:[나]`, `[[가]:[나]]`(바깥 대괄호를 벗긴 것) … 열 이름 안의 `'` 는 다음 글자를 가린다
+fn parse_list_spec(spec: &str) -> Result<(u8, Vec<String>), EncodeError> {
+    let special = |s: &str| -> Option<u8> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "#all" => 0x01,
+            "#headers" => 0x02,
+            "#data" => 0x04,
+            "#totals" => 0x08,
+            "#this row" => 0x10,
+            _ => return None,
+        })
+    };
+    let unescape = |s: &str| -> String {
+        let mut out = String::new();
+        let mut it = s.chars();
+        while let Some(c) = it.next() {
+            if c == '\'' {
+                if let Some(n) = it.next() {
+                    out.push(n);
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    };
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    if !spec.starts_with('[') {
+        return Ok(match special(spec) {
+            Some(r) => (r, Vec::new()),
+            None => (0, vec![unescape(spec)]),
+        });
+    }
+    // [항목] 들을 차례로: 쉼표는 건너뛰고, ':' 는 열 범위
+    let c: Vec<char> = spec.chars().collect();
+    let mut items: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            '[' => {
+                let mut k = i + 1;
+                let mut s = String::new();
+                while k < c.len() && c[k] != ']' {
+                    if c[k] == '\'' && k + 1 < c.len() {
+                        s.push('\'');
+                        k += 1;
+                    }
+                    s.push(c[k]);
+                    k += 1;
+                }
+                items.push(s);
+                i = k + 1;
+            }
+            ',' | ' ' | ':' => i += 1,
+            other => return err(format!("구조적 참조의 글자 {other:?}")),
+        }
+    }
+    let mut rows = 0u8;
+    let mut names = Vec::new();
+    for it in items {
+        match special(it.trim()) {
+            Some(r) => rows |= r,
+            None => names.push(unescape(&it)),
+        }
+    }
+    Ok((rows, names))
 }
 
 fn parse(text: &str) -> Result<Node, EncodeError> {
@@ -1110,7 +1215,18 @@ impl Emitter<'_> {
             }
             Node::Missing => self.u8(0x16),
             Node::Ref(r) => self.reference(r, operand_class(expected, forced))?,
-            Node::Name(p, name) => self.name(p, name, operand_class(expected, forced))?,
+            Node::Name(p, name) => {
+                // 표 이름만 쓴 것(`COUNTA(Table1)`)은 열 없는 구조적 참조 (표 대조 실험: 플래그 0)
+                match self
+                    .res
+                    .table(name)
+                    .filter(|_| p.first.is_none() && p.book.is_none())
+                {
+                    Some(_) => self.list(name, "")?,
+                    None => self.name(p, name, operand_class(expected, forced))?,
+                }
+            }
+            Node::List(t, spec) => self.list(t, spec)?,
             Node::Paren(x) => {
                 self.emit(x, expected, forced)?;
                 self.u8(0x15);
@@ -1164,6 +1280,40 @@ impl Emitter<'_> {
             }
             Node::Func(name, args) => self.func(name, args, expected, forced)?,
         }
+        Ok(())
+    }
+
+    /// 구조적 참조 → PtgList (0x18 0x19, 한컴·XLSB 같은 꼴 — 표 대조 실험): ixti u16, 플래그 u16 (열 0 없음·1 하나·
+    /// 2 범위, (행 종류 << 2): 0x01 `#All`, 0x02 `#Headers`, 0x04 `#Data`, 0x08 `#Totals`, 0x10 `#This Row` (+0x0400)),
+    /// 표 번호 u32, 첫 열 u16, 끝 열 u16 (하나면 0). 읽기의 `structured_ref` 의 반대
+    fn list(&mut self, table: &str, spec: &str) -> Result<(), EncodeError> {
+        let (id, sheet, cols) = self
+            .res
+            .table(table)
+            .ok_or_else(|| EncodeError(format!("표 {table} 가 없습니다")))?;
+        let (rows, names) = parse_list_spec(spec)?;
+        let col = |n: &str| -> Result<u16, EncodeError> {
+            cols.iter()
+                .position(|c| c.eq_ignore_ascii_case(n))
+                .map(|i| i as u16)
+                .ok_or_else(|| EncodeError(format!("표 {table} 에 열 {n} 이 없습니다")))
+        };
+        let (count, c1, c2) = match names.as_slice() {
+            [] => (0u16, 0u16, 0u16),
+            [a] => (1, col(a)?, 0),
+            [a, b, ..] => (2, col(a)?, col(b)?),
+        };
+        let mut flags = count | (u16::from(rows) << 2);
+        if rows & 0x10 != 0 {
+            flags |= 0x0400;
+        }
+        let ixti = self.res.xti(None, sheet, sheet);
+        self.out.extend_from_slice(&[0x18, 0x19]);
+        self.u16(ixti);
+        self.u16(flags);
+        self.u32(id);
+        self.u16(c1);
+        self.u16(c2);
         Ok(())
     }
 
