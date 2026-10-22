@@ -76,6 +76,10 @@ pub struct Options {
     /// 배열 수식 (ARRAY): 함수 인자 안의 값 자리는 배열 클래스. 맨 위는 셀 수식과 같다 (수식 대조 실험:
     /// `{B1:B3*2}` → 0x45, `{SUM(B1:B3*2)}` → 0x65 + tAttrSum, `{TRANSPOSE(B1:B2)}` → 0x65 0x41 0x53 0x00)
     pub array: bool,
+    /// 조건부 서식·데이터 유효성 수식: 참조 인자(R) 자리에 온 식의 값 토큰은 배열 클래스 — 자리에 바로 온 참조는
+    /// 참조 클래스 그대로 (클래스 대조 실험: CF `AND(A1>1,B1<2)` 의 A1 0x6C, `MAX(A1+1,B1)` 의 B1 0x2C,
+    /// `LARGE(R,MIN(2,COUNT(R)))` 의 COUNT 0x62·MIN 0x42. 셀 수식은 그대로 값 클래스)
+    pub ref_array: bool,
 }
 
 impl Default for Options {
@@ -87,6 +91,7 @@ impl Default for Options {
             force_3d: false,
             root: Class::Val,
             array: false,
+            ref_array: false,
         }
     }
 }
@@ -1374,6 +1379,9 @@ impl Emitter<'_> {
             }
         };
         let in_array = self.opts.array;
+        // 조건부 서식·유효성: IF·CHOOSE 의 첫 인자도 배열 (cfdv_x 하위 20% 틀 `IF(INT(COUNT(R)*20%)>0,…)` 의 COUNT 0x62)
+        let ref_array = self.opts.ref_array;
+        let first_forced = ref_array && matches!(info.index, 1 | 100);
         let param = |i: usize| -> (Class, bool) {
             let c = info
                 .params
@@ -1384,7 +1392,11 @@ impl Emitter<'_> {
             match c {
                 b'O' => (token_class, forced || in_array),
                 b'A' => (Class::Arr, true),
-                other => (class_of(other), forced || in_array),
+                b'R' => (Class::Ref, forced || in_array || ref_array),
+                other => (
+                    class_of(other),
+                    forced || in_array || (first_forced && i == 0),
+                ),
             }
         };
         // SUM 인자 하나 → tAttrSum

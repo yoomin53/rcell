@@ -222,6 +222,131 @@ fn shape_view(s: &mut crate::model::Shape) {
 }
 
 /// 레거시로 저장했다가 다시 연 모습
+/// 차등 서식을 레거시에 남는 꼴로 (`dxf::dxf_props`·`cf::dxf_bytes` 의 규칙, 차등 서식 대조 실험 1–3): 글꼴 크기는
+/// 정수 pt, 위 첨자는 한컴 `hs:superscript` 만, ECMA 외곽선·그림자·condense·extend 대신 한컴 종류, 한컴 밑줄·취소선
+/// 종류가 BIFF 밑줄·취소선이 된다. 대각선 테두리, 무늬 `none`, 꺼진 보호(`locked="0"`), 남는 속성이 없는 글꼴·테두리·
+/// 채우기는 없어진다. 내장 번호의 표시 형식은 내장 코드로 읽힌다
+fn dxf_view(d: &mut crate::model::Dxf, wb: &Workbook) {
+    // 테마·색 번호는 RGB 로 저장된다
+    let rgb = |c: &mut Option<crate::model::Color>| {
+        if let Some(x) = c
+            && !x.auto
+            && x.rgb.is_none()
+            && let Some(v) = super::writer::rgb_of(x, wb)
+        {
+            *x = crate::model::Color {
+                rgb: Some(format!("ff{v:06x}")),
+                ..Default::default()
+            };
+        }
+    };
+    if let Some(f) = &mut d.font {
+        rgb(&mut f.color);
+    }
+    if let Some(fl) = &mut d.fill {
+        rgb(&mut fl.fg_color);
+        rgb(&mut fl.bg_color);
+    }
+    if let Some(b) = &mut d.border {
+        for e in [
+            &mut b.left,
+            &mut b.right,
+            &mut b.top,
+            &mut b.bottom,
+            &mut b.vertical,
+            &mut b.horizontal,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            rgb(&mut e.color);
+        }
+    }
+    if let Some(f) = &mut d.font {
+        let h = f.hancom.clone();
+        let h = h.as_ref();
+        let hs_ul = h.and_then(|h| h.underline_type.clone());
+        let hs_strike = h
+            .and_then(|h| h.strikeout_type.as_deref())
+            .is_some_and(|t| t != "0");
+        let outline = h.and_then(|h| h.outline_type.clone());
+        let shadow = h.and_then(|h| h.shadow_type.clone());
+        let superscript = h.and_then(|h| h.superscript) == Some(true);
+        // 0x088D 에 남는 속성이 하나라도 있나 (dxf_props 와 같은 조건)
+        let visible = f.name.as_deref().is_some_and(|n| !n.is_empty())
+            || f.bold
+            || f.underline.is_some()
+            || hs_ul.is_some()
+            || superscript
+            || f.italic
+            || f.strike
+            || hs_strike
+            || outline.is_some()
+            || shadow.is_some()
+            || f.size.is_some()
+            || f.color.is_some();
+        if !visible {
+            d.font = None;
+        } else {
+            f.size = f.size.map(|s| s.max(0.0).floor());
+            f.vert_align = superscript.then(|| "superscript".to_string());
+            f.outline = outline.as_deref() == Some("solid");
+            f.shadow = shadow.is_some_and(|s| s != "none");
+            f.condense = false;
+            f.extend = false;
+            if f.underline.as_deref() == Some("none") {
+                f.underline = None;
+            }
+            if f.underline.is_none() && hs_ul.as_deref() == Some("1") {
+                f.underline = Some("single".into());
+            }
+            if hs_strike {
+                f.strike = true;
+            }
+        }
+    }
+    if let Some(b) = &mut d.border {
+        b.diagonal = None;
+        b.diagonal_up = false;
+        b.diagonal_down = false;
+        let some = |e: &Option<crate::model::BorderEdge>| e.is_some();
+        if ![
+            &b.left,
+            &b.right,
+            &b.top,
+            &b.bottom,
+            &b.vertical,
+            &b.horizontal,
+        ]
+        .into_iter()
+        .any(some)
+        {
+            d.border = None;
+        }
+    }
+    if let Some(fl) = &mut d.fill
+        && fl.gradient.is_none()
+        && fl.pattern_type.as_deref() == Some("none")
+    {
+        fl.pattern_type = None;
+        if fl.fg_color.is_none() && fl.bg_color.is_none() {
+            d.fill = None;
+        }
+    }
+    if let Some(p) = &d.protection
+        && !p.locked.unwrap_or(true)
+        && p.hidden != Some(true)
+    {
+        d.protection = None;
+    }
+    if let Some(n) = &mut d.num_fmt
+        && n.id < 164
+        && let Some(code) = crate::numfmt::builtin(n.id)
+    {
+        n.code = code.to_string();
+    }
+}
+
 pub fn legacy_view(wb: &Workbook) -> Workbook {
     // 셀이 없는 메모 자리에는 빈 셀이 생긴다 (writer::with_comment_cells)
     let mut w = super::writer::with_comment_cells(wb).unwrap_or_else(|| wb.clone());
@@ -290,6 +415,10 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
         if strike {
             f.strike = true;
         }
+    }
+    let theme_wb = w.clone();
+    for d in &mut w.styles.dxfs {
+        dxf_view(d, &theme_wb);
     }
     let font = wb
         .styles

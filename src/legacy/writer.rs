@@ -240,7 +240,7 @@ pub(crate) fn nearest_icv(rgb: u32) -> u16 {
 }
 
 /// 팔레트 번호: 없으면 `none`, 자동 64
-fn icv_of(c: Option<&Color>, wb: &Workbook, none: u16) -> u16 {
+pub(crate) fn icv_of(c: Option<&Color>, wb: &Workbook, none: u16) -> u16 {
     let Some(c) = c else { return none };
     if c.auto || c.indexed == Some(64) {
         return 0x40;
@@ -2800,6 +2800,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                     base,
                     sheet: Some(si),
                     relative: true,
+                    ref_array: true,
                     ..Default::default()
                 };
                 match encode::encode(t, opts, tables) {
@@ -2845,6 +2846,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                 base,
                 sheet: Some(si),
                 relative: true,
+                ref_array: true,
                 ..Default::default()
             };
             match encode::encode(t, opts, tables) {

@@ -141,6 +141,8 @@ impl<'a> Rd<'a> {
 #[derive(Default)]
 struct Dxfn {
     num_fmt: Option<String>,
+    /// 내장 표시 형식 번호 (DXFNumIFmt)
+    num_fmt_id: Option<u32>,
     alignment: Option<Alignment>,
     protection: Option<Protection>,
     /// CFEX 의 XFExtNoFRT 에만 있는 그라데이션
@@ -168,7 +170,9 @@ fn parse_dxfn(d: &[u8]) -> Option<Dxfn> {
             };
             out.num_fmt = code.filter(|c| !c.is_empty());
         } else {
-            r.take(2)?;
+            // DXFNumIFmt: 예약 u8, 내장 번호 u8 (차등 서식 대조 실험 3 — `#,##0` → 3)
+            let b = r.take(2)?;
+            out.num_fmt_id = Some(b[1] as u32);
         }
     }
     if flags & 0x0400_0000 != 0 {
@@ -1481,6 +1485,15 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
         {
             d.num_fmt = Some(NumFmt { id: next_id, code });
             next_id += 1;
+        }
+        if let Some(id) = x.num_fmt_id
+            && d.num_fmt.is_none()
+            && let Some(code) = crate::numfmt::builtin(id)
+        {
+            d.num_fmt = Some(NumFmt {
+                id,
+                code: code.to_string(),
+            });
         }
         if d.alignment.is_none() {
             d.alignment = x.alignment;

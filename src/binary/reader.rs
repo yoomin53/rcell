@@ -771,7 +771,14 @@ pub(crate) fn parse_dxf(d: &[u8], legacy: bool) -> crate::model::Dxf {
             0x05 => font.get_or_insert_with(Default::default).color = dxf_color(&mut x),
             // 테두리: 위, 아래, 왼쪽, 오른쪽, 대각선, 안쪽 세로, 안쪽 가로, 대각선 방향 두 가지
             0x06..=0x0C => {
-                let e = dxf_edge(&mut x);
+                let mut e = dxf_edge(&mut x);
+                // 레거시: 색 없는 선은 RGBA `FF FF FF FF` (차등 서식 대조 실험 3)
+                if legacy
+                    && v.get(4..8) == Some(&[0xFF; 4][..])
+                    && let Some(edge) = &mut e
+                {
+                    edge.color = None;
+                }
                 let b = border.get_or_insert_with(Default::default);
                 match ty {
                     0x06 => b.top = e,
