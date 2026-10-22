@@ -482,8 +482,9 @@ fn view_bin(recs: &[&super::reader::Logical]) -> Option<(Vec<u8>, Vec<bool>, usi
     let ipos = r.u16()? as i16;
     let (cdim, cdim_rw, cdim_col, cdim_pg, cdim_data) =
         (r.u16()?, r.u16()?, r.u16()?, r.u16()?, r.u16()?);
-    // 값 자리: −1 은 데이터 필드가 하나면 XML 에 4294967295, 둘 이상(값 필드가 축에 있음)이면 쓰지 않는다 (pa·pi 대 pc·pe)
-    let ipos = if ipos < 0 && cdim_data > 1 {
+    // 값 자리 −1: 한셀의 레거시 읽기는 값 필드가 열에 있을 때(데이터 필드 둘 이상, 값 축 2)만 쓰지 않고, 데이터 필드가 하나이거나
+    // 값 필드가 행에 있으면 4294967295 를 쓴다 (pa·pi 대 pc·pe)
+    let ipos = if ipos < 0 && cdim_data > 1 && axis4 == 2 {
         0xFFFF
     } else {
         i32::from(ipos) as u32
