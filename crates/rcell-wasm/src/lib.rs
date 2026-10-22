@@ -61,8 +61,12 @@ fn run(r: rcell::Result<Vec<u8>>) -> u64 {
 /// `ptr`/`len` 은 `rcell_alloc` 으로 받은 유효한 범위여야 한다.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rcell_render(ptr: *const u8, len: usize) -> u64 {
-    run(rcell::from_bytes(input(ptr, len))
-        .map(|wb| rcell::render::workbook_fragment(&wb, Default::default()).into_bytes()))
+    let bytes = input(ptr, len);
+    // 스파크라인처럼 모델에 없는 그리기 정보는 원본 패키지에서 다시 읽는다 (XML 문서만)
+    let extras = rcell::render::Extras::from_bytes(&bytes);
+    run(rcell::from_bytes(bytes).map(|wb| {
+        rcell::render::workbook_fragment_with(&wb, Default::default(), &extras).into_bytes()
+    }))
 }
 
 /// 파일 바이트 → 문서 요약 JSON (셀 목록 제외).

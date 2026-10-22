@@ -80,6 +80,12 @@ enum Cmd {
         /// 처음 보일 시트 (이름 또는 0부터 시작하는 번호, 생략하면 선택된 시트)
         #[arg(long)]
         sheet: Option<String>,
+        /// 행·열 머리글을 그리지 않는다
+        #[arg(long)]
+        no_headers: bool,
+        /// 빈 칸으로라도 채울 최소 크기 (px, 예: 1600x900). 0x0 이면 쓰는 범위만
+        #[arg(long)]
+        fill: Option<String>,
     },
     /// 형식 변환: XML/바이너리/레거시 .cell → XML .cell. 출력 이름이 .xlsx 면 Excel, .bin.cell·.xlsb 면
     /// 바이너리 .cell (한셀 xlCellb)
@@ -216,7 +222,15 @@ fn main() -> ExitCode {
             file,
             output,
             sheet,
-        } => html(&file, output.as_deref(), sheet.as_deref()),
+            no_headers,
+            fill,
+        } => html(
+            &file,
+            output.as_deref(),
+            sheet.as_deref(),
+            no_headers,
+            fill.as_deref(),
+        ),
         Cmd::Convert {
             input,
             output,
@@ -798,7 +812,13 @@ fn calc(file: &Path, show: bool, max: usize, output: Option<&Path>) -> rcell::Re
     Ok(differ == 0)
 }
 
-fn html(file: &Path, output: Option<&Path>, sheet: Option<&str>) -> rcell::Result<()> {
+fn html(
+    file: &Path,
+    output: Option<&Path>,
+    sheet: Option<&str>,
+    no_headers: bool,
+    fill: Option<&str>,
+) -> rcell::Result<()> {
     let wb = open_doc(file)?;
     let title = file
         .file_name()
@@ -809,11 +829,24 @@ fn html(file: &Path, output: Option<&Path>, sheet: Option<&str>) -> rcell::Resul
             .ok()
             .or_else(|| wb.sheets.iter().position(|x| x.name == s))
     });
-    let opts = rcell::render::Options {
+    let mut opts = rcell::render::Options {
         active_sheet,
+        headers: !no_headers,
         ..Default::default()
     };
-    let page = rcell::render::workbook_html(&wb, &title, opts);
+    if let Some(f) = fill {
+        let (w, h) = f
+            .split_once(['x', 'X'])
+            .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
+            .ok_or_else(|| rcell::Error::InvalidValue {
+                context: "--fill (너비x높이)".into(),
+                value: f.into(),
+            })?;
+        opts.fill = (w, h);
+    }
+    // 스파크라인 등 모델에 없는 그리기 정보는 원본에서 다시 읽는다 (XML 문서만)
+    let extras = rcell::render::Extras::from_bytes(&std::fs::read(file)?);
+    let page = rcell::render::workbook_html_with(&wb, &title, opts, &extras);
     match output {
         Some(p) => std::fs::write(p, page)?,
         None => println!("{page}"),
