@@ -625,7 +625,8 @@ BIFF8 Ptg 에 한셀 폭(행 u32, 열 u16 의 14비트, PtgStr 길이 u16)을 �
 20비트(음수는 2²⁰ 보수). 맨 위의 쉼표는 합집합(PtgMemFunc 로 감싼다). 정의되지 않은 이름은 수식 없는 NAME 을 만들고,
 `_xlfn.` 함수는 grbit 0x000B 의 NAME, 사용자 함수는 PtgName + FuncVar 255. SUPBOOK 은 외부 연결을 모델 차례로 먼저,
 EXTERNSHEET 의 XTI 는 쓰일 때 만든다 — 이름 수식은 통합 문서 범위 이름을 먼저, 그다음 시트 범위 이름 (Trade_Show_Budget:
-전역 이름의 `[2]Intro` 가 XTI 0). 외부 연결의 가상 경로는 대상의 드라이브가 저장할 문서의 드라이브와 같으면 드라이브 대신
+전역 이름의 `[2]Intro` 가 XTI 0). 어떤 XTI 도 가리키지 않는 외부 연결은 SUPBOOK 을 쓰지 않고 XTI 의 SUPBOOK 번호를 당긴다
+(서식 파일 Marketing_Budget: 수식·이름·차트 어디에도 `[2]` 가 없는 externalLink2 `Template` 을 한셀은 쓰지 않는다). 외부 연결의 가상 경로는 대상의 드라이브가 저장할 문서의 드라이브와 같으면 드라이브 대신
 U+0002 (같은 드라이브의 루트 — 서식 파일 9개의 `\x01\x02Hancell…`; `legacy::WriteOptions::doc_drive`, CLI·`save_legacy` 는
 저장 경로에서 찾는다). 함수 토큰은 참조를 돌려주면 자리의 클래스, 값·배열을 돌려주면 값(배열 자리면 배열).
 

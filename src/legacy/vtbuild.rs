@@ -990,6 +990,20 @@ pub(crate) fn chart_formula(toks: &[ChartTok], xti: &mut dyn FnMut(usize) -> u16
     b
 }
 
+/// 원본 범위 수식: ixti 는 시트 번호. 참조가 하나뿐이면 값 클래스 — 영역 0x5B (c2_e10_str_cat: 한셀 레코드 77개의
+/// 원본 범위 중 참조 하나짜리는 이것뿐이고 0x5B, 합집합의 피연산자는 모두 0x3B·0x3A), 칸 0x5A (추정)
+pub(crate) fn source_formula(toks: &[ChartTok]) -> Vec<u8> {
+    let mut b = chart_formula(toks, &mut |si| si as u16);
+    if toks.len() == 1
+        && matches!(toks[0], ChartTok::Area { .. })
+        && let Some(ptg) = b.get_mut(2)
+    {
+        // 참조 클래스 0x20 → 값 클래스 0x40
+        *ptg = (*ptg & 0x1F) | 0x40;
+    }
+    b
+}
+
 /// 0x7EF0 레코드: 판 1, 종류 0x67, 차트 번호, 앵커 22바이트 (flags 0x0606), 예약 11, 0x0011, 원본 범위 수식, 아카이브
 /// 길이 + 아카이브, 항목 수식, 계열 수, 계열마다 값 수식 + 이름 수식 (docs/format/cell-legacy-chart.md 1절)
 pub(crate) fn record(

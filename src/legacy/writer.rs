@@ -1878,7 +1878,7 @@ pub(crate) fn chart_record(
     };
     // 원본 범위의 ixti 는 시트 번호, 항목·계열마다 값·이름의 ixti 는 XTI 번호 (이 차례로 생긴다 — 차트 수식 ixti
     // 대조 실험, cell-legacy-chart.md 2절)
-    let source = super::vtbuild::chart_formula(&source_toks, &mut |si| si as u16);
+    let source = super::vtbuild::source_formula(&source_toks);
     let categories = super::vtbuild::chart_formula(cat.as_deref().unwrap_or(&[]), xti);
     let tail: Vec<(Vec<u8>, Vec<u8>)> = series
         .iter()
@@ -2600,9 +2600,23 @@ fn workbook_stream_with(
     if let Some(dgg) = art.drawing_group() {
         out.rec(0x00EB, &dgg);
     }
-    // SUPBOOK / EXTERNSHEET (참조가 있을 때만)
+    // SUPBOOK / EXTERNSHEET (참조가 있을 때만). 어떤 XTI 도 가리키지 않는 외부 연결은 쓰지 않는다 — 한셀은 XML 의
+    // 쓰이지 않는 외부 연결을 버린다 (서식 파일 Marketing_Budget 의 externalLink2 `Template`: 수식·이름·차트 어디에도
+    // `[2]` 가 없다). XTI 의 SUPBOOK 번호는 남은 차례로 고친다
     if !tables.xti.is_empty() {
+        let used: Vec<bool> = (0..tables.supbooks.len())
+            .map(|i| tables.xti.iter().any(|x| x.0 as usize == i))
+            .collect();
+        let mut renum = vec![0u16; tables.supbooks.len()];
+        let mut next = 0u16;
+        for (i, &u) in used.iter().enumerate() {
+            renum[i] = next;
+            next += u16::from(u);
+        }
         for (i, sb) in tables.supbooks.iter().enumerate() {
+            if !used[i] {
+                continue;
+            }
             let mut b = Buf::new();
             match sb {
                 None => {
@@ -2620,13 +2634,12 @@ fn workbook_stream_with(
                     }
                 }
             }
-            let _ = i;
             out.rec_buf(0x01AE, &mut b);
         }
         let mut b = Buf::new();
         b.u16(tables.xti.len() as u16);
         for &(sb, a, c) in &tables.xti {
-            b.u16(sb).u16(a).u16(c);
+            b.u16(renum[sb as usize]).u16(a).u16(c);
         }
         out.rec_buf(0x0017, &mut b);
     }
