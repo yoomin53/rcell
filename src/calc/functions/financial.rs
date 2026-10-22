@@ -556,7 +556,8 @@ fn mirr(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn db(ctx: &mut Ctx, a: &[Value]) -> Value {
     let cost = try_v!(num_arg(ctx, a, 0));
     let salv = try_v!(num_arg(ctx, a, 1));
-    let life = try_v!(num_arg(ctx, a, 2)).trunc();
+    // 수명은 소수 그대로, 기간은 버린다 (DB(1000000,100000,6.5,2) = 209196, 대조 실험 financial)
+    let life = try_v!(num_arg(ctx, a, 2));
     let per = try_v!(num_arg(ctx, a, 3)).trunc();
     let month = try_v!(num_or(ctx, a, 4, 12.0)).trunc();
     if cost < 0.0 || salv < 0.0 || life <= 0.0 || per <= 0.0 || !(1.0..=12.0).contains(&month) || per > life + 1.0 {
@@ -585,17 +586,36 @@ fn db(ctx: &mut Ctx, a: &[Value]) -> Value {
     num(dep)
 }
 
+/// 정수 기간의 상각액: 장부가 × 율 과 장부가 − 잔존가 가운데 작은 것 (잔존가가 더 크면 음수,
+/// DDB(100,200,5,1) = −100, 대조 실험 financial)
 fn ddb_period(cost: f64, salv: f64, life: f64, per: f64, factor: f64) -> f64 {
     let rate = (factor / life).min(1.0);
     let mut book = cost;
     let mut dep = 0.0;
     let mut p = 1.0;
     while p <= per {
-        dep = (book * rate).min((book - salv).max(0.0));
+        dep = (book * rate).min(book - salv);
         book -= dep;
         p += 1.0;
     }
     dep
+}
+
+/// t 기간 뒤 장부가: 정수 기간 장부가 사이를 직선으로 잇는다
+fn ddb_book(cost: f64, salv: f64, life: f64, t: f64, factor: f64) -> f64 {
+    let rate = (factor / life).min(1.0);
+    let mut book = cost;
+    let mut p = 1.0;
+    while p <= t.floor() {
+        book -= (book * rate).min(book - salv);
+        p += 1.0;
+    }
+    let f = t - t.floor();
+    if f == 0.0 {
+        return book;
+    }
+    let next = book - (book * rate).min(book - salv);
+    book + (next - book) * f
 }
 
 fn ddb(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -604,16 +624,13 @@ fn ddb(ctx: &mut Ctx, a: &[Value]) -> Value {
     let life = try_v!(num_arg(ctx, a, 2));
     let per = try_v!(num_arg(ctx, a, 3));
     let factor = try_v!(num_or(ctx, a, 4, 2.0));
-    if cost < 0.0 || salv < 0.0 || life <= 0.0 || per <= 0.0 || factor <= 0.0 || per > life {
+    // 기간이 1 보다 작으면 #NUM!, 소수 기간은 직선으로 이은 장부가의 차
+    // (DDB(2400,300,10,2.5) = 345.5999999999999, DDB(2400,300,10,0.5) = #NUM!, 대조 실험 financial)
+    if cost < 0.0 || salv < 0.0 || life <= 0.0 || per < 1.0 || factor <= 0.0 || per > life {
         return Value::Error(ErrorKind::Num);
     }
     if per.fract() != 0.0 {
-        // 분수 기간: 정수 기간과 같은 꼴의 공식
-        let rate = (factor / life).min(1.0);
-        let old = cost * (1.0 - rate).mpow(per - 1.0);
-        let new = cost * (1.0 - rate).mpow(per);
-        let d = if new < salv { (old - salv).max(0.0) } else { old - new };
-        return num(d);
+        return num(ddb_book(cost, salv, life, per - 1.0, factor) - ddb_book(cost, salv, life, per, factor));
     }
     num(ddb_period(cost, salv, life, per, factor))
 }
@@ -680,7 +697,8 @@ fn dollar_frac(ctx: &mut Ctx, a: &[Value], de: bool) -> Value {
     }
     let int = x.trunc();
     let frac = x - int;
-    let p = 10f64.mpow(f.mlog10().ceil());
+    // 10 의 거듭제곱은 적어도 10 (DOLLARDE(1.1,1) = 2.000000000000001, 대조 실험 financial)
+    let p = 10f64.mpow(f.mlog10().ceil().max(1.0));
     if de {
         num(int + frac * p / f)
     } else {

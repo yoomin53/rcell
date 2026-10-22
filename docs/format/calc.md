@@ -113,7 +113,9 @@ CLI: `rcell calc 문서.cell [--diff]` — 다시 계산해 저장하거나, `--
 | CHIDIST·FDIST·TDIST (.RT 포함) | 자유도의 소수 부분을 버리지 않는다 |
 | 엑셀 2010 새 함수 | SKEW.P, COVARIANCE.S, GAMMA, PHI, GAUSS, CHISQ.DIST, F.DIST, T.DIST, BINOM.DIST.RANGE, CHISQ.TEST 는 결과를 소수 9자리로 반올림한다: round(x·10⁹)·10⁻⁹ (`0.38180178600000003`) |
 | 밀도의 x = 0 | GAMMA.DIST·F.DIST 는 0, WEIBULL·CHISQ.DIST 는 #NUM! |
-| GAMMA | 171 이상 #NUM! |
+| GAMMA | 171 이상 #NUM!. 양수는 6항 란초시 근사의 exp (`GAMMA(30.5)` = 4.822696933622876E+31) |
+| BINOM.DIST.RANGE | 누적 확률(불완전 베타 근사, 아래 근사 계산)의 차를 소수 9자리로 |
+| F.TEST·FTEST | 2 × min(q, 1 − q), q 는 오른쪽 꼬리(FDIST). 왼쪽 꼬리가 아주 작으면 1 − q 에서 자릿수를 잃은 값 그대로 (`1.6671777736121385E-8`) |
 | PERMUTATIONA(0,0)·COMBINA(0,0) | 0 · #NUM! |
 | SUBTOTALA (한컴) | 계산은 SUBTOTAL 과 같고(숫자만), 숨긴 행 처리가 반대: 1–11 이 숨긴 행을 빼고 101–111 이 넣는다 |
 
@@ -140,6 +142,17 @@ CLI: `rcell calc 문서.cell [--diff]` — 다시 계산해 저장하거나, `--
 | SUBTOTAL | 참조가 아닌 인수·여러 시트·여러 영역은 #N/A |
 | ARABIC·DECIMAL | 공백을 지우지 않는다 (#VALUE!·#NUM!) |
 | BITAND·BITOR·BITXOR | 소수 부분이 0.5 보다 크면 #NUM!, 아니면 버린다 (`BITOR(1.5,1)` = 1). 인수 ≤ 2^48, 결과 < 2^48. 자리 이동 함수는 그냥 버린다 |
+
+### 공학·재무
+
+| 함수 | 한셀 |
+|---|---|
+| BIN2DEC·OCT2…·HEX2… | 논리 값과 앞뒤 공백이 든 글은 #NUM! (`BIN2DEC(" 101")`) |
+| DEC2BIN·DEC2OCT·DEC2HEX | 빈 칸 참조는 #N/A |
+| IM… | 빈 글 "" 은 #NUM!, i 와 j 를 섞으면 #NUM!, IMDIV 의 0 나누기 #DIV/0!. IMTAN·IMCOT 는 (sin 2x ± i sinh 2y)/(cos 2x + cosh 2y)·(cosh 2y − cos 2x), IMCSC·IMCSCH 도 같은 두 배각 분모 꼴 — 끝자리가 이 식대로다 |
+| DB | 수명의 소수 부분을 버리지 않는다 (기간은 버린다): `DB(1000000,100000,6.5,2)` = 209196 |
+| DDB | 장부가 × 율 과 장부가 − 잔존가 가운데 작은 것 — 잔존가가 크면 음수 (`DDB(100,200,5,1)` = −100). 기간 < 1 은 #NUM!, 소수 기간은 정수 기간 장부가를 직선으로 이은 값의 차 (`DDB(2400,300,10,2.5)` = 345.6) |
+| DOLLARDE·DOLLARFR | 분모 자릿수의 10 거듭제곱은 적어도 10 (`DOLLARDE(1.1,1)` = 2) |
 
 ### 단위 환산
 

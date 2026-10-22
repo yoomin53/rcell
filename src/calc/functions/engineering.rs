@@ -102,14 +102,27 @@ pub const FNS: &[FnSpec] = &[
     })),
     f("IMSIN", 1, 1, V, |c, a| im1(c, a, |z| Ok(csin(z)))),
     f("IMCOS", 1, 1, V, |c, a| im1(c, a, |z| Ok(ccos(z)))),
-    f("IMTAN", 1, 1, V, |c, a| im1(c, a, |z| cdiv(csin(z), ccos(z)))),
-    f("IMCOT", 1, 1, V, |c, a| im1(c, a, |z| cdiv(ccos(z), csin(z)))),
+    // IMTAN·IMCOT·IMCSC·IMCSCH 는 두 배각 꼴: 분모 cos 2x + cosh 2y 등 (끝자리가 한셀과 같다, 대조 실험 engineering)
+    f("IMTAN", 1, 1, V, |c, a| im1(c, a, |z| {
+        let d = (2.0 * z.0).mcos() + (2.0 * z.1).mcosh();
+        Ok(((2.0 * z.0).msin() / d, (2.0 * z.1).msinh() / d))
+    })),
+    f("IMCOT", 1, 1, V, |c, a| im1(c, a, |z| {
+        let d = (2.0 * z.1).mcosh() - (2.0 * z.0).mcos();
+        Ok(((2.0 * z.0).msin() / d, -(2.0 * z.1).msinh() / d))
+    })),
     f("IMSEC", 1, 1, V, |c, a| im1(c, a, |z| cdiv((1.0, 0.0), ccos(z)))),
-    f("IMCSC", 1, 1, V, |c, a| im1(c, a, |z| cdiv((1.0, 0.0), csin(z)))),
+    f("IMCSC", 1, 1, V, |c, a| im1(c, a, |z| {
+        let d = (2.0 * z.1).mcosh() - (2.0 * z.0).mcos();
+        Ok((2.0 * z.0.msin() * z.1.mcosh() / d, -2.0 * z.0.mcos() * z.1.msinh() / d))
+    })),
     f("IMSINH", 1, 1, V, |c, a| im1(c, a, |z| Ok(csinh(z)))),
     f("IMCOSH", 1, 1, V, |c, a| im1(c, a, |z| Ok(ccosh(z)))),
     f("IMSECH", 1, 1, V, |c, a| im1(c, a, |z| cdiv((1.0, 0.0), ccosh(z)))),
-    f("IMCSCH", 1, 1, V, |c, a| im1(c, a, |z| cdiv((1.0, 0.0), csinh(z)))),
+    f("IMCSCH", 1, 1, V, |c, a| im1(c, a, |z| {
+        let d = (2.0 * z.0).mcosh() - (2.0 * z.1).mcos();
+        Ok((2.0 * z.0.msinh() * z.1.mcos() / d, -2.0 * z.0.mcosh() * z.1.msin() / d))
+    })),
     f("IMPOWER", 2, 2, V, |c, a| {
         let (z, s) = try_v!(complex_arg(c, &a[0]));
         let p = try_v!(num_arg(c, a, 1));
@@ -124,7 +137,10 @@ pub const FNS: &[FnSpec] = &[
         let rp = r.mpow(p);
         Value::from(fmt_complex(rp * (p * t).mcos(), rp * (p * t).msin(), s))
     }),
-    f("IMDIV", 2, 2, V, |c, a| im2(c, a, cdiv)),
+    // 0 으로 나누면 #DIV/0! (IMDIV("1","0"), 대조 실험 engineering)
+    f("IMDIV", 2, 2, V, |c, a| {
+        im2(c, a, |x, y| if y == (0.0, 0.0) { Err(ErrorKind::Div0) } else { cdiv(x, y) })
+    }),
     f("IMSUB", 2, 2, V, |c, a| im2(c, a, |x, y| Ok((x.0 - y.0, x.1 - y.1)))),
     f("IMSUM", 1, MANY, R, |c, a| imfold(c, a, (0.0, 0.0), |x, y| (x.0 + y.0, x.1 + y.1))),
     f("IMPRODUCT", 1, MANY, R, |c, a| imfold(c, a, (1.0, 0.0), cmul)),
@@ -143,9 +159,10 @@ fn base_text(ctx: &mut Ctx, v: &Value) -> Result<String, ErrorKind> {
             }
             Ok(format!("{}", *n as u64))
         }
-        Value::Bool(_) => Err(ErrorKind::Value),
+        // 논리 값·앞뒤 공백은 #NUM! (BIN2DEC(TRUE)·BIN2DEC(" 101"), 대조 실험 engineering)
+        Value::Bool(_) => Err(ErrorKind::Num),
         Value::Empty => Ok("0".into()),
-        other => Ok(ctx.text(other)?.trim().to_string()),
+        other => Ok(ctx.text(other)?.to_string()),
     }
 }
 
@@ -219,6 +236,10 @@ fn from_base(ctx: &mut Ctx, a: &[Value], radix: u32, to: Option<u32>) -> Value {
 }
 
 fn dec2(ctx: &mut Ctx, a: &[Value], radix: u32) -> Value {
+    // 빈 칸은 #N/A (DEC2BIN(빈 칸), 대조 실험 engineering)
+    if matches!(a[0], Value::Empty) {
+        return Value::Error(ErrorKind::NA);
+    }
     let x = try_v!(num_arg(ctx, a, 0)).trunc();
     let places = match opt(a, 1) {
         Some(p) => Some(try_v!(ctx.num(p))),
@@ -285,8 +306,9 @@ type C = (f64, f64);
 /// "a+bi" 글 → 복소수와 접미사
 pub fn parse_complex(s: &str) -> Option<(C, char)> {
     let s = s.trim();
+    // 빈 글은 #NUM! (IMREAL("")…, 대조 실험 engineering)
     if s.is_empty() {
-        return Some(((0.0, 0.0), 'i'));
+        return None;
     }
     let suffix = if s.ends_with('i') {
         'i'
@@ -389,8 +411,9 @@ fn im1n(ctx: &mut Ctx, a: &[Value], f: impl Fn(C) -> Result<f64, ErrorKind>) -> 
 fn im2(ctx: &mut Ctx, a: &[Value], f: impl Fn(C, C) -> Result<C, ErrorKind>) -> Value {
     let (x, s1) = try_v!(complex_arg(ctx, &a[0]));
     let (y, s2) = try_v!(complex_arg(ctx, &a[1]));
+    // i 와 j 를 섞으면 #NUM! (IMDIV("1+i","1-j"), 대조 실험 engineering)
     if s1 != s2 && !(x.1 == 0.0 || y.1 == 0.0) {
-        return Value::Error(ErrorKind::Value);
+        return Value::Error(ErrorKind::Num);
     }
     let s = if x.1 != 0.0 { s1 } else { s2 };
     match f(x, y) {
@@ -414,7 +437,7 @@ fn imfold(ctx: &mut Ctx, a: &[Value], init: C, f: fn(C, C) -> C) -> Value {
                 if let Some(p) = seen_suffix
                     && p != s
                 {
-                    return Value::Error(ErrorKind::Value);
+                    return Value::Error(ErrorKind::Num);
                 }
                 seen_suffix = Some(s);
                 suf = s;

@@ -192,7 +192,8 @@ pub const FNS: &[FnSpec] = &[
         if (x <= 0.0 && x == x.floor()) || x >= 171.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num(round9(sp::gamma(x)))
+        // 양수는 6항 란초시 근사의 exp (GAMMA(30.5) = 4.822696933622876E+31, 대조 실험 stat)
+        num(round9(if x > 0.0 { hc::gammln(x).mexp() } else { sp::gamma(x) }))
     }),
     f("GAMMALN", 1, 1, V, gammaln),
     f("GAMMALN.PRECISE", 1, 1, V, gammaln),
@@ -1584,13 +1585,17 @@ fn binom_range(ctx: &mut Ctx, a: &[Value]) -> Value {
     if n < 0.0 || !(0.0..=1.0).contains(&p) || s1 < 0.0 || s1 > n || s2 < s1 || s2 > n {
         return Value::Error(ErrorKind::Num);
     }
-    let mut s = 0.0;
-    let mut k = s1;
-    while k <= s2 {
-        s += sp::binom_pmf(k, n, p);
-        k += 1.0;
-    }
-    num(round9(s))
+    // 누적 확률의 차, 누적은 불완전 베타 근사 (BINOM.DIST.RANGE(60,0.75,48) = 0.083974969, 대조 실험 dist)
+    let cdf = |k: f64| {
+        if k < 0.0 {
+            0.0
+        } else if k >= n {
+            1.0
+        } else {
+            hc::betai(n - k, k + 1.0, 1.0 - p)
+        }
+    };
+    num(round9(cdf(s2) - cdf(s1 - 1.0)))
 }
 
 fn negbinom(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
@@ -1749,8 +1754,10 @@ fn ftest(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Div0);
     }
     let fv = vx / vy;
-    let c = sp::f_cdf(fv, x.len() as f64 - 1.0, y.len() as f64 - 1.0);
-    num(2.0 * c.min(1.0 - c))
+    // 오른쪽 꼬리 q (FDIST) 와 1 − q 가운데 작은 것의 두 배 — 왼쪽 꼬리가 아주 작으면 1 − q 에서 자릿수를
+    // 잃는다 (F.TEST = 1.6671777736121385E-8, 대조 실험 dist)
+    let q = 1.0 - sp::f_cdf(fv, x.len() as f64 - 1.0, y.len() as f64 - 1.0);
+    num(2.0 * q.min(1.0 - q))
 }
 
 fn t_inv_2t(ctx: &mut Ctx, a: &[Value]) -> Value {
