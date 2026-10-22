@@ -1241,10 +1241,18 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
     // None = 이 통합 문서, Some(관계 ID) = 외부 통합 문서
     let mut supbooks: Vec<Option<String>> = Vec::new();
     let mut xti: Vec<(u32, i32, i32)> = Vec::new();
+    // 피벗 캐시: (번호 idSx, 정의 파트의 관계 ID)
+    let mut pivot_caches: Vec<(u32, String)> = Vec::new();
 
     for rec in biff12::records(&data) {
         let mut r = Rd::new(rec.data);
         match rec.rtype {
+            386 => {
+                // BrtBeginPivotCacheID: idSx u32, 관계 ID XLWideString
+                if let (Some(id), Some(rel)) = (r.u32(), r.wstr()) {
+                    pivot_caches.push((id, rel));
+                }
+            }
             128 => {
                 r.take(16);
                 let app = r.wstr();
@@ -1533,6 +1541,15 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
         &mut wb.raw_parts,
     )?;
     wb.hancom.vbs_project = crate::parser::vbs_project_of(&wb.part_links, &wb.raw_parts);
+    // 피벗 캐시는 레코드를 XML 파트로 바꿔 둔다 (모델의 피벗은 XML 파트다)
+    let pivot_caches = super::pivot::read_binary_caches(
+        pkg,
+        &rels,
+        &pivot_caches,
+        &mut wb.raw_parts,
+        &mut wb.part_links,
+    )?;
+    let mut next_pivot = 0;
 
     // 다른 시트 범위의 이름은 시트 이름을 붙여 읽는다
     let name_scopes: Vec<Option<u32>> = names.iter().map(|n| n.1).collect();
@@ -1576,6 +1593,14 @@ pub fn read_workbook(pkg: &mut Package, wb_part: &str) -> Result<Workbook> {
                 crate::parser::SHEET_PART_LINKS,
                 true,
                 &mut wb.raw_parts,
+            )?;
+            super::pivot::read_binary_tables(
+                pkg,
+                &srels,
+                &pivot_caches,
+                &mut next_pivot,
+                &mut wb.raw_parts,
+                &mut sheet.part_links,
             )?;
         }
         wb.sheets.push(sheet);

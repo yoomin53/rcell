@@ -1265,6 +1265,8 @@ struct SheetCtx<'a, 'b> {
     exact: bool,
     /// 지금까지 쓴 표 파트 수 (파트 이름 `tableN.bin` 은 문서 전체에서 1부터)
     next_table: usize,
+    /// 워크시트마다 피벗 표 파트 이름 ([`super::pivot::binary_parts`])
+    pivot_tables: &'a [Vec<String>],
 }
 
 /// 데이터 막대의 x14 확장 GUID. 한셀은 새로 만든다 (임의 값) — rcell 은 문서 안 순서로 정한다
@@ -1597,8 +1599,17 @@ impl SheetCtx<'_, '_> {
             tables.push((name, self.table_part(t, sheet)));
         }
         o.e(662);
-        // 시트 관계 순서: 하이퍼링크, 그리기, VML, 표, 피벗 표, 메모 (표·피벗·메모 실험의 COM 문서). 원본 그대로의 프린터
-        // 설정은 rIdP<n> (한셀은 버리는 파트라 자리를 관측할 수 없다 — XML 쓰기와 같은 이름)
+        // 시트 관계 순서: 하이퍼링크, 그리기, VML, 표, 피벗 표, 메모 (표·피벗·메모 실험의 COM 문서). 피벗 표는 시트에
+        // 레코드가 없고 관계로만 가리킨다. 원본 그대로의 프린터 설정은 rIdP<n> (한셀은 버리는 파트라 자리를 관측할 수
+        // 없다 — XML 쓰기와 같은 이름)
+        for name in self.pivot_tables.get(index).into_iter().flatten() {
+            rels.push((
+                format!("rId{}", rels.len() + 1),
+                format!("{REL_BASE}/pivotTable"),
+                name.clone(),
+                false,
+            ));
+        }
         for (k, l) in sheet
             .part_links
             .iter()
@@ -2940,6 +2951,13 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
     let mut sheets_out = Vec::new();
     let mut comments_n = 0;
     let mut model_charts: Vec<(String, String)> = Vec::new();
+    // 피벗 캐시·표: 모델의 XML 원본 파트를 레코드 파트로
+    let pivots = super::pivot::binary_parts(wb, &worksheets, &mut warnings, opts.exact);
+    let pivot_tables: Vec<Vec<String>> = pivots
+        .tables
+        .iter()
+        .map(|l| l.iter().map(|t| t.0.clone()).collect())
+        .collect();
     {
         let mut ctx = SheetCtx {
             book: &mut book,
@@ -2951,6 +2969,7 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
             charts: &mut model_charts,
             exact: opts.exact,
             next_table: 0,
+            pivot_tables: &pivot_tables,
         };
         for (i, sh) in worksheets.iter().enumerate() {
             if !sh.comments.is_empty() {
@@ -2964,6 +2983,12 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
                 drawing_names[i].clone(),
                 comments_n,
             ));
+        }
+    }
+    // 피벗 캐시의 원본 시트는 모든 시트의 수식 다음에 XTI 를 받는다 (쓰이지 않아도 — 피벗 실험 px1)
+    for c in &pivots.caches {
+        if let Some(s) = &c.source_sheet {
+            let _ = book.xti(None, s, None);
         }
     }
     let sst_bin = sst.bin(&mut fonts);
@@ -3017,6 +3042,18 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
             false,
         ));
         link_ids.push(id);
+    }
+    // 피벗 캐시 정의: 시트 다음 (피벗 실험 pf3: 시트 둘 뒤 rId6·rId7)
+    let mut cache_ids = Vec::new();
+    for c in &pivots.caches {
+        let id = format!("rId{}", wbrels.len() + 1);
+        wbrels.push((
+            id.clone(),
+            format!("{REL_BASE}/pivotCacheDefinition"),
+            c.def_name.clone(),
+            false,
+        ));
+        cache_ids.push(id);
     }
     // 원본 그대로 옮기는 통합 문서 수준 파트 (매크로 프로젝트·사용자 지정 XML). 한셀의 매크로 프로젝트 관계는 시트
     // 다음 (패키지 파트 실험의 vbs.bin.cell: rId4 = vbsProject, 콘텐츠 타입 application/vnd.hancom-office.vbsProject)
@@ -3186,6 +3223,15 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
             0xF1, 0xD2, 0x4D, 0x62, 0x50, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x2A, 0x00,
         ]),
     );
+    // 피벗 캐시 목록: 캐시 번호(idSx)와 정의 파트의 관계 ID
+    if !pivots.caches.is_empty() {
+        o.e(384);
+        for (c, id) in pivots.caches.iter().zip(&cache_ids) {
+            o.p(386, P::new().u32(c.id).wstr(id));
+            o.e(387);
+        }
+        o.e(385);
+    }
     o.e(132);
     let workbook_bin = o.0;
 
@@ -3337,6 +3383,51 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
                 ));
             }
         }
+    }
+    // 피벗 파트: 캐시 정의 (→ 레코드 rId1), 레코드, 피벗 표 (→ 캐시 정의 rId1) — 한셀 바이너리와 같은 관계
+    for c in pivots.caches {
+        if let Some((rname, data)) = c.records {
+            parts.push((
+                crate::package::rels_part_for(&c.def_name),
+                rels_xml(
+                    &[(
+                        "rId1".into(),
+                        format!("{REL_BASE}/pivotCacheRecords"),
+                        rname.clone(),
+                        false,
+                    )],
+                    "xl/pivotCache",
+                )
+                .into_bytes(),
+            ));
+            overrides.push((
+                rname.clone(),
+                "application/vnd.ms-excel.pivotCacheRecords".into(),
+            ));
+            parts.push((rname, data));
+        }
+        overrides.push((
+            c.def_name.clone(),
+            "application/vnd.ms-excel.pivotCacheDefinition".into(),
+        ));
+        parts.push((c.def_name, c.def));
+    }
+    for (name, data, cache) in pivots.tables.into_iter().flatten() {
+        parts.push((
+            crate::package::rels_part_for(&name),
+            rels_xml(
+                &[(
+                    "rId1".into(),
+                    format!("{REL_BASE}/pivotCacheDefinition"),
+                    cache,
+                    false,
+                )],
+                "xl/pivotTables",
+            )
+            .into_bytes(),
+        ));
+        overrides.push((name.clone(), "application/vnd.ms-excel.pivotTable".into()));
+        parts.push((name, data));
     }
     // 원본 파트가 없는 모델 차트 (레거시에서 읽은 차트)
     for (name, xml) in model_charts {

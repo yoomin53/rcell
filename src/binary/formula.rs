@@ -40,6 +40,10 @@ pub trait Resolver {
     fn table(&mut self, _name: &str) -> Option<ListRef> {
         None
     }
+    /// 피벗 계산 필드 수식의 캐시 필드 이름 → 이름 목록(BrtBeginPName) 번호 (0부터, PtgSxName). 피벗 수식이 아니면 None
+    fn pivot_field(&mut self, _name: &str) -> Option<u32> {
+        None
+    }
 }
 
 /// 구조적 참조(PtgList)가 가리키는 표
@@ -1265,6 +1269,14 @@ impl Gen<'_> {
     }
 
     fn name(&mut self, sheet: Option<&SheetRef>, name: &str, want: ArgClass) -> Result<(), String> {
+        // 피벗 계산 필드 수식의 필드 이름: PtgSxName (0x18 0x1D, 이름 목록 번호 u32 — 피벗 실험 v_calc)
+        if sheet.is_none()
+            && let Some(i) = self.r.pivot_field(name)
+        {
+            self.out.extend_from_slice(&[0x18, 0x1D]);
+            self.u32(i);
+            return Ok(());
+        }
         // 이름만 쓴 표 (`COUNTA(Table1)`)는 열 없는 구조적 참조다 — 한셀은 XML 에 `Table1[]` 로 쓴다 (표 대조 실험)
         if sheet.is_none() && self.r.table(name).is_some() {
             return self.list(name, "");

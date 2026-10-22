@@ -21,7 +21,7 @@ ZIP 패키지 구조는 XML `.cell` 과 같고, 파트 내용이 BIFF12 레코�
 | `xl/theme/theme1.xml` | 테마 (XML 그대로) |
 | `xl/vbsProject.bin` | 한컴 매크로 프로젝트 — XML 과 같은 복합 문서 파트 (`application/vnd.hancom-office.vbsProject`, [cell-2024.md](cell-2024.md) 7.10절) |
 | `xl/tables/tableN.bin` | 표 — 레코드 파트 (2절 표) |
-| `xl/pivotTables/pivotTableN.bin`, `xl/pivotCache/pivotCacheDefinitionN.bin`·`pivotCacheRecordsN.bin` | 피벗 — 레코드 파트. rcell 은 아직 읽지 않는다 |
+| `xl/pivotTables/pivotTableN.bin`, `xl/pivotCache/pivotCacheDefinitionN.bin`·`pivotCacheRecordsN.bin` | 피벗 — 레코드 파트 (`application/vnd.ms-excel.pivotTable`·`pivotCacheDefinition`·`pivotCacheRecords`, 5절) |
 
 ## 2. 한셀 고유 사항 (관측)
 
@@ -161,7 +161,7 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 | 검증 | 방법 | 결과 |
 |---|---|---|
 | 왕복 | XML·한셀 바이너리·레거시 원본 → rcell 바이너리 → rcell 읽기, `rcell diff` | 342/342 차이 0 |
-| 레코드 대조 | rcell 이 `X.cell` 에서 쓴 바이너리 대 한셀의 `X.bin.cell` (`rcell bindiff`) | 한셀 레코드 47,382 중 바이트까지 같음 46,898 (98.98%, `exact`) · 46,874 (98.93%, 기본) |
+| 레코드 대조 | rcell 이 `X.cell` 에서 쓴 바이너리 대 한셀의 `X.bin.cell` (`rcell bindiff`) | 한셀 레코드 47,382 중 바이트까지 같음 46,905 (98.99%, `exact`) · 46,881 (98.94%, 기본) |
 | 한셀 읽기 | rcell 바이너리를 한셀이 .xlsb 로 열어 XML 저장 (`tools/probe/binw-oracle.ps1`) 대 `X.bin.as.cell`, `rcell diff --ignore-hancom` | `exact` 114/114 차이 0. 기본은 한셀의 바이너리 저장이 잃는 값(4.8절)이 있는 조작 문서 5개만 다르다 |
 
 ## 4. 쓰기 — 한셀이 쓰는 꼴 (`src/binary/writer.rs`)
@@ -193,7 +193,7 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 끝에 `\`) `BrtACEnd`, `BrtBeginBookViews` `BrtBookView`(창 위치·크기·탭 비율·첫 탭·활성 탭, 플래그 0x38) `BrtEndBookViews`,
 `BrtBeginBundleShs` `BrtBundleSh`×n (`hsState`, 시트 번호 1…, 관계 ID, 이름) `BrtEndBundleShs`, `BrtBeginExternals`
 [연결들 + `BrtExternSheet`] `BrtEndExternals`, `BrtName`×n, `BrtCalcProp`(늘 `00000000 01000000 64000000` + 0.001 +
-`00000000 2A00`), `BrtEndBook`.
+`00000000 2A00`), [피벗 캐시 목록 (5.1절)], `BrtEndBook`.
 
 - **연결(SupBook) 순서**: 외부 연결은 `[n]` 번호 순서, 이 통합 문서(`BrtSupSelf`)는 쓰일 때만 첫 외부 연결 바로 뒤 —
   관측한 다섯 꼴 `[외부1, 자신]`, `[외부1, 자신, 외부2]`, `[외부1, 외부2]`, `[자신]`, 없음이 모두 이 규칙이다.
@@ -201,7 +201,7 @@ rcell diff X.bin.cell X.cell --ignore-hancom
   (`Sheet1!$A$1:$A$5`). 차트만 있는 문서도 `BrtSupSelf` + `BrtExternSheet` 가 있는 까닭이다 (차트 문서 68개).
   **표가 있는 시트**는 쓰이지 않아도 그 시트의 수식보다 먼저 XTI 를 받는다 (XTI 순서 실험: 시트 셋에 수식·표·이름을
   나눠 넣은 COM 문서 셋 — `S1` 에 표와 `=S3!A1+1`, `S2` 에 표 → `[S1, S3, S2]`; 이름 `'S1'!$A$1` 이 있으면 이름이 먼저).
-  구조적 참조(PtgList)의 `ixti` 가 이 XTI 다.
+  구조적 참조(PtgList)의 `ixti` 가 이 XTI 다. **피벗 캐시의 원본 시트**는 모든 시트의 수식 다음에 XTI 를 받는다 (5.1절).
 - **이름**: 모델 순서 그대로, `_xlnm.` 은 떼고 `fBuiltin`(0x20). 수식에 쓰였지만 정의되지 않은 이름은 수식 없는
   이름(cce 0)으로 덧붙인다 (`=XYZ` → `BrtName XYZ`). 주석은 0xFFFFFFFF.
 - 구조 잠금이 걸린 통합 문서는 ECMA-376 표준 암호화로 감싼다 (4.10절).
@@ -356,3 +356,111 @@ OLE2 복합 문서 판 3 (0x3E, 512바이트 섹터) 안에 스트림 `Encryptio
 rcell 바이너리도 차이 0. 한셀의 `.xlsb` 읽기는 요약 행을 버린다 — 자기 바이너리도 `totalsRowCount="1"` 이 사라지고
 `totalsRowShown="0"` 이 된다 (tbl·tbl2) — 그래서 요약 행은 레코드 대조로 확인했다. 조작한 XML 의 계산 열 수식(351)은 한셀이
 읽지 않고 버린다 (XML 읽기와 같다).
+
+## 5. 피벗 (`src/binary/pivot.rs`)
+
+rcell 의 피벗 모델은 XML 파트다 (원본 그대로 옮기는 파트 + 관계 `PartLink`, 캐시 번호 `cache_id`). 바이너리 쓰기는 XML
+파트를 레코드 파트로, 바이너리 읽기는 레코드 파트를 한셀의 `.xlsb` 읽기가 쓰는 꼴의 XML 파트로 바꾼다. 근거는 피벗
+실험이다: COM 으로 만든 피벗 문서 11개(pa–pi: 행·열·페이지·데이터 필드, 데이터 함수 11가지, 날짜·빈 칸·참거짓 값, 다른
+시트의 피벗, 캐시 둘·피벗 셋)와 그 XML 저장본의 속성을 하나씩 바꾼 조작 문서 33개(v_*)를 한셀이 XML·바이너리·레거시로
+저장한 것을 레코드마다 맞댔다. 레코드·필드 이름은 [MS-XLSB] 2.4 를 따른다.
+
+### 5.1 패키지·통합 문서
+
+| 항목 | 한셀 |
+|---|---|
+| 파트 | `xl/pivotCache/pivotCacheDefinitionN.bin` (관계 rId1 → `pivotCacheRecordsN.bin`), `xl/pivotTables/pivotTableN.bin` (관계 rId1 → `../pivotCache/pivotCacheDefinitionN.bin`). N 은 문서 안에서 1부터 — 캐시는 통합 문서 관계 순서, 피벗 표는 시트 순서 |
+| 관계 | 통합 문서: 시트·외부 연결 다음에 캐시 정의 (pf3: 시트 둘 뒤 rId6·rId7). 시트: 표 다음, 메모 앞에 피벗 표 — 시트 레코드에는 피벗이 없다 |
+| `workbook.bin` | `BrtCalcProp` 뒤 `BrtBeginPivotCacheIDs`(384) [`BrtBeginPivotCacheID`(386: `idSx u32` = `cacheId`, 관계 ID) `BrtEndPivotCacheID`(387)]×n `BrtEndPivotCacheIDs`(385) |
+| XTI | 캐시의 원본 시트는 쓰이지 않아도 XTI 를 받는다 — **모든 시트의 수식 다음** (XTI 실험 px1: 시트 다섯, 첫째 시트가 원본인 피벗이 둘째 시트에, 첫째·둘째·셋째 시트의 수식이 셋째·넷째·다섯째 시트를 가리킴 → `[셋째, 넷째, 다섯째, 첫째]`). 이름 정의 등이 먼저 쓰면 그 번호 그대로 (px2) |
+
+### 5.2 피벗 표 (`pivotTableN.bin`)
+
+```
+BrtBeginSXView 280
+  BrtBeginSXLocation 314  BrtEndSXLocation 313
+  BrtBeginSXVDs 287 (필드 수)
+    (BrtBeginSXVD 285 [BrtBeginSXVIs 283 (BrtBeginSXVI 282 BrtEndSXVI 281)×n BrtEndSXVIs 284] BrtEndSXVD 286)×n
+  BrtEndSXVDs 288
+  [BrtBeginISXVDRws 309 (수 u32, 필드 i32 ×n — −2 는 값) BrtEndISXVDRws 310]
+  [BrtBeginSXLIRws 299 (BrtBeginSXLI 297 [BrtBeginISXVIs 388 BrtEndISXVIs 389] BrtEndSXLI 298)×n BrtEndSXLIRws 300]
+  [BrtBeginISXVDCols 311 … 312]  [BrtBeginSXLICols 301 … 302]
+  [BrtBeginSXPIs 291 (BrtBeginSXPI 289 BrtEndSXPI 290)×n BrtEndSXPIs 292]
+  [BrtBeginSXDIs 295 (BrtBeginSXDI 293 BrtEndSXDI 294)×n BrtEndSXDIs 296]
+  [BrtTableStyleClient 513]
+BrtEndSXView 315
+```
+
+| 레코드 | 칸 |
+|---|---|
+| `BrtBeginSXView` | 판 u8 (늘 3 — XML 의 판과 상관없이, v_ver), 플래그 u16, `indent`+1 u8 (0x80 `showHeaders="0"`), 플래그 u32 ×2, 값 축 u8 (1 행 = `dataOnRows`, 2 열), `pageWrap` u8, 3, 3, `dataPosition` u32 (없으면 0x0000FFFF), `autoFormatId` u16, 0 u16, `chartFormat` u32, `cacheId` u32, 이름, `dataCaption`, 있는 글만 차례로: 총합계·오류·빈 칸·페이지 스타일·표 스타일(`pivotTableStyleInfo` 이름)·빈 자리 스타일·태그·열 머리글·행 머리글 |
+| 플래그 u16 | 0x0001 `showItems`, 0x0002 `editData`, 0x0004 `disableFieldList`, 0x0010 `showCalcMbrs="0"`, 0x0020 `visualTotals="0"`, 0x0040 `showMultipleLabel`, 0x0100 `showDataDropDown="0"`, 0x1000 `showDrill="0"`, 0x2000 `printDrill`, 0x4000 `showMemberPropertyTips`, 0x8000 `showDataTips="0"` |
+| 첫 플래그 u32 | 0x01 `showDropZones="0"`, 0x02 `asteriskTotals="0"`, 0x04 `showEmptyRow`, 0x08 `showEmptyCol`, 0x10 `enableWizard`, 0x20 `enableDrill`, 0x40 `enableFieldProperties`, 0x80 `preserveFormatting`, 0x100 `useAutoFormatting`, 0x200 `showError`, 0x400 `showMissing`, 0x800 `pageOverThenDown`, 0x1000 `subtotalHiddenItems`, 0x2000 `rowGrandTotals`, 0x4000 `colGrandTotals`, 0x8000 `fieldPrintTitles`, 0x20000 `itemPrintTitles`, 0x40000 `mergeItem`, 0x80000 늘, 0x100000 총합계 글, 0x200000 페이지 스타일, 0x400000 표 스타일, 0x800000 빈 자리 스타일, 0x1000000–0x10000000 `applyNumber`·`Font`·`Alignment`·`Border`·`PatternFormats`, 0x20000000 `applyWidthHeightFormats`, 0x40000000 태그 |
+| 둘째 플래그 u32 | 0x01 `compact`, 0x02 `outline`, 0x04 `outlineData`, 0x08 `compactData`, 0x10 `gridDropZones="0"`, 0x20 `published`, 0x40 오류 글 없음, 0x80 빈 칸 글 없음, 0x100 `immersive="0"`, 0x200 `multipleFieldFilters="0"`, 0x400 행 머리글 글, 0x800 열 머리글 글, 0x1000 `fieldListSortAscending`, 0x4000 `customListSort="0"` |
+| `BrtBeginSXLocation` | RfX, 머리글 행·데이터 행·데이터 열 u32 (**절대 좌표** — XML 은 범위 왼쪽 위에서의 거리), 페이지 필드 행 수·열 수 u32 |
+| `BrtBeginSXVD` | 축 u8 (0x01 행, 0x02 열, 0x04 페이지, 0x08 데이터 필드), 플래그 24비트 (0x01 `defaultSubtotal`, 0x02–0x800 `sum`·`countA`·`avg`·`max`·`min`·`product`·`count`·`stdDev`·`stdDevP`·`var`·`varPSubtotal`, 0x10000 `allDrilled`, 0x20000 `showDropDowns="0"`, 0x40000 `hiddenLevel`, 0x80000 `uniqueMemberProperty` 있음, 0x100000 `compact`, 0x200000 이름 있음, 0x400000 `subtotalCaption` 있음, 0x800000 `dataSourceSort`), `numFmtId` u32, 플래그 u32 (0x01–0x10 `dragToRow`·`Col`·`Page`·`Off`·`Data`, 0x20 `showAll`, 0x40 `outline`, 0x80 `insertBlankRow`, 0x100 `subtotalTop`, 0x200 `serverField`, 0x800 `insertPageBreak`, 0x1000 자동 정렬, 0x2000 오름 — 수동(`sortType` 없음)도 켠다, 내림차순은 0x1000 만 (v_sorta·v_sortd), 0x4000 `autoShow`, 0x8000 `topAutoShow`, 0x10000 `hideNewItems`, 0x20000 `measureFilter`, 0x40000 늘, 0x80000 `multipleItemSelectionAllowed`, 0x100000 `nonAutoSortDefault`), `itemPageCount` i32 (10), `rankBy` i32 (−1), 이름, `subtotalCaption` |
+| `BrtBeginSXVI` | 종류 u8 (0 data, 1 default, 2 sum, 3 countA, 4 avg, 5 max, 6 min, 7 product, 8 count, 9 stdDev, 10 stdDevP, 11 var, 12 varP, 13 grand, 14 blank), 플래그 u16 (0x01 `h`, 0x02 `sd="0"`, 0x04 `f`, 0x08 `m`, 0x10 이름 있음, 0x20 `d`, 0x40 `c`), 캐시 항목 i32 (data 가 아니면 −1), 이름 |
+| `BrtBeginSXLI` | 앞 줄과 같은 항목 수 u16 (`r`), 종류 u8 (`t`), 0 u8, 항목 수 u32, 데이터 필드 u32 (`i`). 항목은 `BrtBeginISXVIs`(388) u32 ×n |
+| `BrtBeginSXPI` | 필드 u32, 항목 u32 (고르지 않으면 0x001000FE), 계층 i32 (−1), 플래그 u8 (0x01 이름, 0x02 캡션), 글 |
+| `BrtBeginSXDI` | 필드 u32, 함수 u32 (0 sum, 1 count, 2 average, 3 max, 4 min, 5 product, 6 countNums, 7 stdDev, 8 stdDevp, 9 var, 10 varp), 값 표시 u32 (`showDataAs`: 0 normal … 8 index), 기준 필드 i32, 기준 항목 u32, `numFmtId` u32, 이름 있음 u8 (한셀 0x07), 이름 |
+| `BrtTableStyleClient` | 0x02 끝 열, 0x04 행 줄무늬, 0x08 열 줄무늬, 0x10 행 머리글, 0x20 열 머리글. 한셀은 나머지 비트(0x40 …)에 초기화하지 않은 값을 남긴다 — rcell 은 0 |
+
+### 5.3 캐시 (`pivotCacheDefinitionN.bin`, `pivotCacheRecordsN.bin`)
+
+```
+BrtBeginPivotCacheDef 179
+  BrtBeginPCDSource 185 (종류 u32 — 0 worksheet, 1 external, 2 consolidation, 3 scenario; 연결 u32)
+    BrtBeginPCDSRange 187  BrtEndPCDSRange 188
+  BrtEndPCDSource 186
+  BrtBeginPCDFields 181 (필드 수)
+    BrtBeginPCDField 183
+      [BrtBeginPNames 253 (BrtBeginPName 255 BrtEndPName 256)×n BrtEndPNames 254]                       계산 필드
+      [BrtBeginPCDFAtbl 189 (항목 20–25 | BrtBeginPCDIRun 191 … BrtEndPCDIRun 192)… BrtEndPCDFAtbl 190]
+      [BrtBeginPCDFGroup 219 [BrtBeginPCDFGRange 223 224] [BrtBeginPCDFGItems 221 … 222] BrtEndPCDFGroup 220]
+    BrtEndPCDField 184
+  BrtEndPCDFields 182
+BrtEndPivotCacheDef 180
+```
+
+| 레코드 | 칸 |
+|---|---|
+| `BrtBeginPivotCacheDef` | 판 u8 ×3 (늘 3), 플래그 u8 (0x01 `saveData`, 0x02 `invalid`, 0x04 `refreshOnLoad`, 0x08 `optimizeMemory`, 0x10 `enableRefresh`, 0x20 `backgroundQuery`, 0x40 `upgradeOnRefresh`, 0x80 `tupleCache`), `missingItemsLimit` i32 (−1), `refreshedDate` f64, 플래그 u8 (0x02 레코드 관계 ID 있음; 한셀은 `refreshedBy`(0x01)를 쓰지 않는다), 레코드 수 u32, 관계 ID (`rId1`) |
+| `BrtBeginPCDSRange` | 이름 원본 u8, 내장 이름 u8, 플래그 u8 (0x01 관계 ID, 0x02 시트), [시트], [관계 ID], 이름 또는 RfX |
+| `BrtBeginPCDField` | 플래그 u16 (0x04 원본 필드 `databaseField`, 0x08 캡션, 0x100 수식), `numFmtId` u32, `sqlType` u16, 계층 u32, 수준 u32, 덧붙은 u32 수 + u32 ×n, 이름, [캡션], [수식: cce u32, 토큰열, cb u32, 덧붙은 데이터]. 계산 필드 수식의 필드 이름은 `PtgSxName`(0x18 0x1D + 이름 목록 번호 u32), 목록은 `BrtBeginPName`(`ifdb` u32 = 캐시 필드 번호, 함수 u8 0xFF 없음, 플래그 u8) — v_calc: `금액*2` → `18 1D 00000000 1E 0200 05`, 목록 [3] |
+| `BrtBeginPCDFAtbl` | 플래그 u16 (0x01 `containsSemiMixedTypes`, 0x02 `containsNonDate`, 0x04 `containsDate`, 0x08 `containsString`, 0x10 `containsBlank`, 0x20 `containsMixedTypes`, 0x40 `containsNumber`, 0x80 `containsInteger`, 0x100 최소·최대 있음, 0x200 `longText`), 항목 수 u32, [최소 f64, 최대 f64 — 날짜는 일련번호]. 한셀은 날짜만 있는 필드에도 0x02 를 켜고 (XML 은 `containsNonDate="0"`, pg), 묶음으로 쓴 필드의 최소·최대에 둘 다 **첫 값**을 쓴다 (한셀의 읽기는 항목에서 다시 셈한다) |
+| 항목 | `BrtPCDIMissing`(20), `BrtPCDINumber`(21: f64), `BrtPCDIBoolean`(22: u8), `BrtPCDIError`(23: u8), `BrtPCDIString`(24), `BrtPCDIDatetime`(25: 해 u16, 달 u16, 날·시·분·초 u8). 한셀은 수만 있는 공유 항목을 `BrtBeginPCDIRun`(191: 종류 u16 — 0x01 수, 0x02 글, 0x10 오류, 0x20 날짜 — 개수 u32, 값들) 하나로, 날짜만이면 날짜 묶음으로, 묶음 항목(`groupItems`)의 글은 글 묶음으로, 나머지는 항목마다 레코드로 쓴다 |
+| 묶음 | `BrtBeginPCDFGroup`(219: 부모 i32, 기준 i32), `BrtBeginPCDFGRange`(223: 단위 u8 — 0 range, 1 seconds … 7 years, 플래그 u8 — 0x01 `autoStart`, 0x02 `autoEnd`, 0x04 날짜, 시작·끝·간격 f64), `BrtBeginPCDFGItems`(221: 수 u32) + 항목 |
+| 레코드 파트 | `BrtBeginPivotCacheRecords`(193: 수 u32), 행마다 `BrtPCRRecord`(33) — 원본 필드마다 공유 항목이 있으면 번호 u32, 없으면 수 f64·날짜·글 (계산 필드는 없다) |
+
+### 5.4 한셀의 바이너리 저장이 잃는 것과 rcell
+
+조작한 XML 33개 → 한셀 → 바이너리에서 잃는 것: 총합계·빈 자리 스타일·태그·행/열 머리글 글, `apply*Formats` 다섯
+(`applyWidthHeightFormats` 말고), `autoFormatId`, 필드의 `subtotalCaption`·`autoShow`·`itemPageCount`·`rankBy`·끌기 금지
+(`dragTo*="0"` 을 늘 1 로)·`showDropDowns="0"`·`hideNewItems`·`measureFilter`·`multipleItemSelectionAllowed`·
+`nonAutoSortDefault`·`insertPageBreak`, 데이터 필드의 `showDataAs`·`baseField`·`baseItem`·`numFmtId` (모두 0), 캐시 필드의
+`caption`, `refreshedBy`, 피벗 서식(`formats`)·조건부 서식·차트 서식·x14 확장. 대부분 한셀의 XML 저장도 잃는다
+([cell-2024.md](cell-2024.md) 7.12절). rcell 은 기본으로 이것들을 쓰고 `exact` 면 한셀처럼 잃는다 — `refreshedBy` 와 서식은
+쓰지 않는다. 한셀은 읽을 때 `outline="0"` 필드를 `compact="0"` 으로, `dataOnRows` 를 값 필드(−2)의 자리로 고친다 (조작한
+XML 에서만 어긋난다 — v_blank·v_dor). 한셀은 항목이 없는 피벗 필드(계산 필드)의 `defaultSubtotal="0"` 을 XML 에 쓰지
+않는다 — 그래서 한셀 XML 저장본에서 쓴 rcell 바이너리는 그 비트만 한셀 바이너리와 다르다 (v_calc).
+
+### 5.5 읽기
+
+레코드 → XML 은 한셀이 같은 바이너리를 `.xlsb` 로 열어 XML 로 저장한 것과 같은 꼴이다 (속성 순서까지): `recordCount` 를
+쓰고, 최소·최대는 항목에서 셈하고, x14 확장(`hideValuesRow="1" altText=""`)을 늘 붙이고, 이름 원본은 `sheet=""`, 판은
+표 `updatedVersion`·`createdVersion` 4, 캐시 `createdVersion` 3. 한셀과 다른 점: 한셀은 `sortType` 을 XML 에 쓰지 않고
+(rcell 은 쓴다), 계산 필드의 피벗 필드에 `dragToRow`·`Col`·`Page="0"` 을 넣고 `defaultSubtotal="0"` 을 빼며 (rcell 은
+레코드 그대로), 묶음 필드가 있는 캐시의 마지막 레코드 값을 4294967295 로 쓴다 (v_group — rcell 은 레코드의 6).
+
+### 5.6 검증
+
+- 레코드 대조 (`rcell bindiff`): 피벗 문서 44개(pa–pi, v_*)에서 rcell 이 한셀 XML 저장본으로 쓴 바이너리의 피벗 파트가 한셀
+  바이너리와 바이트까지 같다 — `BrtTableStyleClient` 의 한셀 쓰레기 비트, 한셀이 XML 에서 잃은 값(`sortType` 등)과 v_calc 의
+  위 비트 말고. 조작한 원본 XML 에서 `exact` 로 쓰면 한셀의 읽기 정규화 둘(v_blank·v_dor)과 공유 항목 없는 필드의 항목
+  (v_group, 한셀이 버린다)만 다르다. 한셀 바이너리 → rcell → 바이너리는 44개 모두 쓰레기 비트 말고 같다.
+- XML 대조: rcell 이 한셀 바이너리에서 쓴 피벗 XML 파트가 한셀의 `.xlsb` 읽기 결과와 같다 — 5.5절의 차이(v_calc·v_group·
+  v_sorta·v_sortd)만.
+- 한셀 대조 (`rcell diff`, 피벗 문서 46개 — px1·px2 포함): rcell 바이너리를 한셀이 읽은 것 대 한셀 자기 바이너리를 읽은 것,
+  바이너리 원본 → rcell 바이너리, 바이너리 원본 → rcell XML 대 같은 문서의 XML 저장본 — 피벗 표 차이는 모두 0. 남은 차이는
+  한셀이 바이너리 저장에서 테두리의 색인 65(시스템 전경)를 RGB `020080` 으로 바꾸는 것뿐이다 (피벗 서식의 테두리; rcell 은
+  색인 65 를 쓴다). 바이너리 원본 → rcell 바이너리와 XML → rcell XML 은 차이 0.

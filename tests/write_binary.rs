@@ -149,6 +149,140 @@ fn macro_project_roundtrips() {
     assert_eq!(c.hancom.vbs_project.as_deref(), Some(stream.as_slice()));
 }
 
+/// 피벗: 모델의 XML 파트 → 바이너리 레코드 파트 → 다시 읽은 XML 파트 (손으로 쓴 작은 피벗: 행 필드, 값 필드 둘, 계산 필드)
+#[test]
+fn pivots_roundtrip() {
+    use rcell::model::{PartLink, RawPart};
+    const DECL: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#;
+    const NS: &str = r#"xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+    const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let rels = |ty: &str, target: &str| {
+        format!(
+            r#"{DECL}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{REL}/{ty}" Target="{target}"/></Relationships>"#
+        )
+    };
+    let cache = format!(
+        r#"{DECL}<pivotCacheDefinition {NS} r:id="rId1" refreshedDate="45000.5" createdVersion="3" recordCount="3"><cacheSource type="worksheet"><worksheetSource ref="A1:B4" sheet="데이터"/></cacheSource><cacheFields count="3"><cacheField name="품목" numFmtId="0"><sharedItems count="2"><s v="사과"/><s v="배"/></sharedItems></cacheField><cacheField name="금액" numFmtId="0"><sharedItems containsSemiMixedTypes="0" containsString="0" containsNumber="1" containsInteger="1" minValue="100" maxValue="300" count="3"><n v="100"/><n v="200"/><n v="300"/></sharedItems></cacheField><cacheField name="두배" numFmtId="0" formula="금액*2" databaseField="0"/></cacheFields></pivotCacheDefinition>"#
+    );
+    let records = format!(
+        r#"{DECL}<pivotCacheRecords {NS} count="3"><r><x v="0"/><x v="0"/></r><r><x v="1"/><x v="1"/></r><r><x v="0"/><x v="2"/></r></pivotCacheRecords>"#
+    );
+    let table = format!(
+        r#"{DECL}<pivotTableDefinition {NS} name="피벗1" cacheId="7" dataOnRows="0" applyWidthHeightFormats="1" dataCaption="값" grandTotalCaption="총계" updatedVersion="4" createdVersion="4" indent="0" outline="1" outlineData="1"><location ref="D1:F4" firstHeaderRow="1" firstDataRow="2" firstDataCol="1"/><pivotFields count="3"><pivotField axis="axisRow" showAll="0" sortType="descending"><items count="3"><item x="0"/><item x="1"/><item t="default"/></items></pivotField><pivotField dataField="1" showAll="0"/><pivotField dataField="1" showAll="0" defaultSubtotal="0"/></pivotFields><rowFields count="1"><field x="0"/></rowFields><rowItems count="3"><i><x/></i><i><x v="1"/></i><i t="grand"><x/></i></rowItems><colFields count="1"><field x="-2"/></colFields><colItems count="2"><i><x/></i><i i="1"><x v="1"/></i></colItems><dataFields count="2"><dataField name="합계 : 금액" fld="1" subtotal="sum" showDataAs="normal" baseField="0" baseItem="0"/><dataField name="최대 : 두배" fld="2" subtotal="max" showDataAs="normal" baseField="0" baseItem="0"/></dataFields><pivotTableStyleInfo name="PivotStyleLight16" showRowHeaders="1" showColHeaders="1" showRowStripes="0" showColStripes="0" showLastColumn="1"/></pivotTableDefinition>"#
+    );
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    let raw = |name: &str, ct: Option<&str>, data: String| RawPart {
+        name: name.into(),
+        content_type: ct.map(str::to_string),
+        data: data.into_bytes(),
+    };
+    a.raw_parts.extend([
+        raw(
+            "xl/pivotCache/pivotCacheDefinition1.xml",
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"),
+            cache,
+        ),
+        raw(
+            "xl/pivotCache/_rels/pivotCacheDefinition1.xml.rels",
+            None,
+            rels("pivotCacheRecords", "pivotCacheRecords1.xml"),
+        ),
+        raw(
+            "xl/pivotCache/pivotCacheRecords1.xml",
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheRecords+xml"),
+            records,
+        ),
+        raw(
+            "xl/pivotTables/pivotTable1.xml",
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml"),
+            table,
+        ),
+        raw(
+            "xl/pivotTables/_rels/pivotTable1.xml.rels",
+            None,
+            rels("pivotCacheDefinition", "../pivotCache/pivotCacheDefinition1.xml"),
+        ),
+    ]);
+    a.part_links.push(PartLink {
+        rel_type: format!("{REL}/pivotCacheDefinition"),
+        part: "xl/pivotCache/pivotCacheDefinition1.xml".into(),
+        cache_id: Some(7),
+    });
+    a.sheets[0].part_links.push(PartLink {
+        rel_type: format!("{REL}/pivotTable"),
+        part: "xl/pivotTables/pivotTable1.xml".into(),
+        cache_id: None,
+    });
+    let out = write_report(&a, &Options::default()).unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let part = |name: &str| rcell::container::read_entry(&out.bytes, name).unwrap();
+    // 계산 필드 수식: PtgSxName(0) * 2, 이름 목록 [금액 = 1]
+    let def = part("xl/pivotCache/pivotCacheDefinition1.bin");
+    let recs = rcell::binary::biff12::records(&def);
+    let field = recs.iter().filter(|r| r.rtype == 183).nth(2).unwrap();
+    assert!(
+        field.data.ends_with(&[
+            10, 0, 0, 0, 0x18, 0x1D, 0, 0, 0, 0, 0x1E, 2, 0, 0x05, 0, 0, 0, 0
+        ]),
+        "{:02x?}",
+        field.data
+    );
+    let pname = recs.iter().find(|r| r.rtype == 255).unwrap();
+    assert_eq!(pname.data, [1, 0, 0, 0, 0xFF, 0]);
+    // 통합 문서: 캐시 번호 7 과 관계
+    let wb = part("xl/workbook.bin");
+    let ids = rcell::binary::biff12::records(&wb);
+    let id = ids.iter().find(|r| r.rtype == 386).unwrap();
+    assert_eq!(&id.data[..4], &[7, 0, 0, 0]);
+    // 다시 읽기: 피벗 표 비교가 같고, 수식·정렬·총합계 글·레코드가 남는다
+    let b = rcell::from_bytes(out.bytes).unwrap();
+    let diffs: Vec<String> = compare(&a, &b, CmpOptions::default())
+        .into_iter()
+        .filter(|d| d.contains("피벗"))
+        .collect();
+    assert!(diffs.is_empty(), "{diffs:#?}");
+    let text = |w: &rcell::Workbook, name: &str| {
+        String::from_utf8(
+            w.raw_parts
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+                .data
+                .clone(),
+        )
+        .unwrap()
+    };
+    let cache_b = text(&b, "xl/pivotCache/pivotCacheDefinition1.xml");
+    assert!(
+        cache_b.contains(r#"formula="금액*2" databaseField="0""#),
+        "{cache_b}"
+    );
+    assert!(cache_b.contains(r#"recordCount="3""#), "{cache_b}");
+    let table_b = text(&b, "xl/pivotTables/pivotTable1.xml");
+    assert!(table_b.contains(r#"sortType="descending""#), "{table_b}");
+    assert!(table_b.contains(r#"grandTotalCaption="총계""#), "{table_b}");
+    let rec_b = text(&b, "xl/pivotCache/pivotCacheRecords1.xml");
+    assert_eq!(rec_b.matches("<x:r>").count(), 3, "{rec_b}");
+    assert_eq!(
+        b.part_links
+            .iter()
+            .find(|l| l.rel_type.ends_with("/pivotCacheDefinition"))
+            .and_then(|l| l.cache_id),
+        Some(7)
+    );
+    // exact: 한셀처럼 총합계 글을 잃는다
+    let ex = write_report(
+        &a,
+        &Options {
+            exact: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let c = rcell::from_bytes(ex.bytes).unwrap();
+    assert!(!text(&c, "xl/pivotTables/pivotTable1.xml").contains("grandTotalCaption"));
+}
+
 #[test]
 fn binary_is_detected_by_name() {
     use rcell::SaveFormat;
