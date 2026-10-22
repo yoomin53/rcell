@@ -18,9 +18,12 @@ pub fn parse_rich_text(e: &Element) -> RichText {
     let mut rt = RichText::default();
     for c in e.elements() {
         if c.is_sml("t") {
-            rt.text.push_str(&c.text());
+            rt.text.push_str(&crate::text::xstring_decode(&c.text()));
         } else if c.is_sml("r") {
-            let text: String = c.sml_children("t").map(|t| t.text()).collect();
+            let text: String = c
+                .sml_children("t")
+                .map(|t| crate::text::xstring_decode(&t.text()).into_owned())
+                .collect();
             rt.text.push_str(&text);
             rt.runs.push(TextRun {
                 text,

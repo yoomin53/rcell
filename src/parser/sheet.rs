@@ -660,7 +660,7 @@ fn parse_cell(c: &Element, r: CellRef, shared: &[RichText]) -> Cell {
             .and_then(|i| shared.get(i))
             .map(|s| CellValue::Text(s.text.clone()))
             .unwrap_or(CellValue::Error(format!("#SST?{}", v.trim()))),
-        ("str", Some(v)) => CellValue::Text(v),
+        ("str", Some(v)) => CellValue::Text(crate::text::xstring_decode(&v).into_owned()),
         ("b", Some(v)) => CellValue::Bool(v.trim() == "1" || v.trim() == "true"),
         ("e", Some(v)) => CellValue::Error(v),
         ("d", Some(v)) => CellValue::Date(v),
