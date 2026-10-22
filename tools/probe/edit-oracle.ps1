@@ -36,6 +36,8 @@ function Get-Bgr([string]$hex) {
 
 function Get-Sheet($wb, $name) {
     if ($null -eq $name) { return $wb.Worksheets.Item(1) }
+    # 숫자는 0부터 시작하는 시트 번호
+    if ($name -is [int] -or $name -is [long]) { return $wb.Worksheets.Item([int]$name + 1) }
     return $wb.Worksheets.Item([string]$name)
 }
 
@@ -118,7 +120,7 @@ function Invoke-Edit($wb, $e) {
         "colWidth" { $ws.Range((Get-ColRange $e.col 1)).EntireColumn.ColumnWidth = [double]$e.width }
         "rowHeight" { $ws.Range("A$($e.row)").EntireRow.RowHeight = [double]$e.height }
         "addSheet" {
-            $after = if ($e.after) { $wb.Worksheets.Item([string]$e.after) } else { $wb.Worksheets.Item($wb.Worksheets.Count) }
+            $after = if ($null -ne $e.after) { Get-Sheet $wb $e.after } else { $wb.Worksheets.Item($wb.Worksheets.Count) }
             $n = $wb.Worksheets.Add([Type]::Missing, $after)
             if ($e.name) { $n.Name = [string]$e.name }
         }

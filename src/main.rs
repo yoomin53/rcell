@@ -102,6 +102,19 @@ enum Cmd {
         #[arg(long)]
         exact: bool,
     },
+    /// 편집 대본(JSON — docs/editing.md)을 실행해 저장한다. 편집 뒤 수식을 다시 계산한다
+    Edit {
+        input: PathBuf,
+        /// 편집 대본 ({"edits":[{"op":"set","cell":"B2","input":"=A1*2"}, …]})
+        script: PathBuf,
+        output: PathBuf,
+        /// 저장 형식 (cell, xlsx, bin) — 생략하면 출력 이름으로 정한다
+        #[arg(long)]
+        format: Option<String>,
+        /// 다시 계산하지 않는다
+        #[arg(long)]
+        no_recalc: bool,
+    },
     /// 바이너리 .cell 두 개를 레코드 단위로 비교 (A: rcell 이 쓴 것, B: 한셀이 쓴 것) — 리버스 엔지니어링용
     Bindiff {
         a: PathBuf,
@@ -238,6 +251,13 @@ fn main() -> ExitCode {
             abs_path,
             exact,
         } => convert(&input, &output, format.as_deref(), abs_path, exact),
+        Cmd::Edit {
+            input,
+            script,
+            output,
+            format,
+            no_recalc,
+        } => edit(&input, &script, &output, format.as_deref(), no_recalc),
         Cmd::Bindiff { a, b, samples } => bindiff(&a, &b, samples),
         Cmd::Diff {
             a,
@@ -729,6 +749,62 @@ fn convert(
         return Ok(());
     }
     rcell::save_as(&wb, output, format)
+}
+
+fn save_format(output: &Path, format: Option<&str>) -> rcell::Result<rcell::SaveFormat> {
+    Ok(match format.map(str::to_ascii_lowercase).as_deref() {
+        None => rcell::SaveFormat::from_path(output),
+        Some("cell" | "xml") => rcell::SaveFormat::Cell,
+        Some("xlsx") => rcell::SaveFormat::Xlsx,
+        Some("bin" | "binary" | "xlsb") => rcell::SaveFormat::Binary,
+        Some(other) => {
+            return Err(rcell::Error::InvalidValue {
+                context: "--format (cell, xlsx, bin)".into(),
+                value: other.into(),
+            });
+        }
+    })
+}
+
+fn edit(
+    input: &Path,
+    script: &Path,
+    output: &Path,
+    format: Option<&str>,
+    no_recalc: bool,
+) -> rcell::Result<()> {
+    let format = save_format(output, format)?;
+    let mut wb = open_doc(input)?;
+    let text = std::fs::read_to_string(script)?;
+    let script: rcell::edit::Script =
+        serde_json::from_str(&text).map_err(|e| rcell::Error::InvalidValue {
+            context: format!("편집 대본 {}", script.display()),
+            value: e.to_string(),
+        })?;
+    let mut failed = 0;
+    for (i, e) in script.edits.iter().enumerate() {
+        if let Err(err) = rcell::edit::apply(&mut wb, e) {
+            failed += 1;
+            eprintln!("편집 #{i} 실패: {err}");
+        }
+    }
+    if !no_recalc {
+        let opts = rcell::calc::CalcOptions {
+            file_name: output
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string),
+            ..Default::default()
+        };
+        rcell::calc::recalculate_with(&mut wb, &opts);
+    }
+    rcell::save_as(&wb, output, format)?;
+    eprintln!(
+        "편집 {}개 (실패 {failed}) → {}",
+        script.edits.len(),
+        output.display()
+    );
+    Ok(())
 }
 
 fn bindiff(a: &Path, b: &Path, samples: usize) -> rcell::Result<()> {

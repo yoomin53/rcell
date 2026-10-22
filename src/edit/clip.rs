@@ -12,7 +12,10 @@
 
 use super::refs::{self, Area, Move};
 use super::structure::{map_all_charts, unshare, update_dimension};
-use crate::model::{Cell, CellRange, CellRef, CellValue, Formula, FormulaKind, Sheet, Workbook};
+use crate::model::{
+    Cell, CellRange, CellRef, CellValue, ConditionalFormat, DataValidation, DefinedName, Formula,
+    FormulaKind, Sheet, Workbook,
+};
 
 /// 복사한 칸 하나
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +42,10 @@ pub struct Clip {
     pub cells: Vec<ClipCell>,
     /// 범위 안의 병합 (원본 범위 기준 (첫 행, 첫 열, 끝 행, 끝 열))
     pub merges: Vec<(u32, u32, u32, u32)>,
+    /// 범위에 걸친 조건부 서식: 원본 범위 기준 조각들과, 첫 조각의 왼쪽 위 칸(원본 좌표)에 맞춘 수식
+    pub cfs: Vec<(Vec<(u32, u32, u32, u32)>, ConditionalFormat)>,
+    /// 범위에 걸친 데이터 유효성 (조건부 서식과 같은 꼴)
+    pub dvs: Vec<(Vec<(u32, u32, u32, u32)>, DataValidation)>,
 }
 
 fn err(m: &str) -> crate::Error {
@@ -125,6 +132,48 @@ pub fn copy(wb: &Workbook, si: usize, range: CellRange) -> crate::Result<Clip> {
         }
         clip.cells.sort_by_key(|c| (c.dr, c.dc));
     }
+    // 조건부 서식·유효성 조각: 수식은 첫 조각의 왼쪽 위 칸(원본 좌표)에 맞춰 둔다
+    let area = (r0, c0, r1, c1);
+    let pieces = |sqref: &str| -> Option<((i64, i64), Vec<(u32, u32, u32, u32)>)> {
+        let areas = refs::parse_sqref(sqref);
+        let tl = areas.first().map(|a| {
+            let b = a.bounds();
+            (b.0, b.1)
+        })?;
+        let cut: Vec<(u32, u32, u32, u32)> = areas
+            .iter()
+            .filter_map(|a| intersect(a.bounds(), area))
+            .map(|x| (x.0 - r0, x.1 - c0, x.2 - r0, x.3 - c0))
+            .collect();
+        let first = cut.first()?;
+        let d = (
+            (first.0 + r0) as i64 - tl.0 as i64,
+            (first.1 + c0) as i64 - tl.1 as i64,
+        );
+        Some((d, cut))
+    };
+    for cf in &sheet.conditional_formats {
+        let Some(((dr, dc), cut)) = pieces(&cf.sqref) else {
+            continue;
+        };
+        let mut m = cf.clone();
+        for r in &mut m.rules {
+            for f in &mut r.formulas {
+                *f = crate::formula_text::shift_references(f, dr, dc);
+            }
+        }
+        clip.cfs.push((cut, m));
+    }
+    for dv in &sheet.data_validations {
+        let Some(((dr, dc), cut)) = pieces(&dv.sqref) else {
+            continue;
+        };
+        let mut m = dv.clone();
+        for f in [&mut m.formula1, &mut m.formula2].into_iter().flatten() {
+            *f = crate::formula_text::shift_references(f, dr, dc);
+        }
+        clip.dvs.push((cut, m));
+    }
     for m in &sheet.merges {
         if m.start.row >= r0 && m.start.col >= c0 && m.end.row <= r1 && m.end.col <= c1 {
             clip.merges.push((
@@ -181,6 +230,87 @@ pub fn paste(
     at: CellRef,
     clip: &Clip,
     fill: Option<CellRange>,
+) -> crate::Result<CellRange> {
+    paste_with(wb, si, at, clip, fill, true)
+}
+
+/// 수식이 쓰는 통합 문서 이름을 붙인 시트의 시트 범위 이름으로 복사한다 — 한셀은 이름을 쓰는 수식을 복사해
+/// 붙이면 그 이름을 붙인 시트 범위로 하나 더 만든다 (편집 대조 실험: `SUM(MyRange)` 를 같은 시트에 복사)
+fn localize_names(wb: &mut Workbook, si: usize, formulas: &[String]) {
+    use crate::calc::ast::RefOrName;
+    let mut used: Vec<String> = Vec::new();
+    for t in formulas {
+        let Ok(e) = crate::calc::parse(t) else {
+            continue;
+        };
+        e.visit_refs(&mut |r| {
+            if let RefOrName::Name(n) = r
+                && n.book.is_none()
+                && n.sheet.is_none()
+                && !used.iter().any(|u| refs::same_sheet(u, &n.name))
+            {
+                used.push(n.name.clone());
+            }
+        });
+    }
+    for n in used {
+        let Some(global) = wb
+            .defined_names
+            .iter()
+            .find(|d| d.local_sheet_id.is_none() && refs::same_sheet(&d.name, &n))
+            .cloned()
+        else {
+            continue;
+        };
+        let exists = wb
+            .defined_names
+            .iter()
+            .any(|d| d.local_sheet_id == Some(si as u32) && refs::same_sheet(&d.name, &n));
+        if !exists {
+            wb.defined_names.push(DefinedName {
+                local_sheet_id: Some(si as u32),
+                ..global
+            });
+        }
+    }
+}
+
+/// 조건부 서식·유효성 범위에서 덮어쓰는 자리를 뺀다 (모두 빠지면 없앤다)
+fn cut_out(sheet: &mut Sheet, area: (u32, u32, u32, u32)) {
+    let rest = |sqref: &str| -> Option<String> {
+        let areas = refs::parse_sqref(sqref);
+        if !areas.iter().any(|a| overlaps(a.bounds(), area)) {
+            return None;
+        }
+        let rest: Vec<Area> = areas
+            .iter()
+            .flat_map(|a| subtract(a.bounds(), area))
+            .map(rect_area)
+            .collect();
+        Some(refs::sqref_text(&rest))
+    };
+    for cf in &mut sheet.conditional_formats {
+        if let Some(r) = rest(&cf.sqref) {
+            cf.sqref = r;
+        }
+    }
+    sheet.conditional_formats.retain(|cf| !cf.sqref.is_empty());
+    for dv in &mut sheet.data_validations {
+        if let Some(r) = rest(&dv.sqref) {
+            dv.sqref = r;
+        }
+    }
+    sheet.data_validations.retain(|dv| !dv.sqref.is_empty());
+}
+
+/// [`paste`] — `localize` 면 수식이 쓰는 이름을 시트 범위로 복사한다 (채우기는 하지 않는다)
+pub fn paste_with(
+    wb: &mut Workbook,
+    si: usize,
+    at: CellRef,
+    clip: &Clip,
+    fill: Option<CellRange>,
+    localize: bool,
 ) -> crate::Result<CellRange> {
     let (mut reps_r, mut reps_c) = (1, 1);
     if let Some(f) = fill {
@@ -259,9 +389,61 @@ pub fn paste(
             }
         }
     }
+    // 조건부 서식·유효성: 덮어쓴 자리의 것은 떼고, 복사한 조각을 옮겨 붙인다
+    let mut cfs = Vec::new();
+    let mut dvs = Vec::new();
+    for i in 0..reps_r {
+        for j in 0..reps_c {
+            let drow = (at.row + i * clip.rows) as i64 - clip.origin.row as i64;
+            let dcol = (at.col + j * clip.cols) as i64 - clip.origin.col as i64;
+            let place = |cut: &[(u32, u32, u32, u32)]| -> String {
+                let list: Vec<Area> = cut
+                    .iter()
+                    .filter_map(|&(a, b, c, d)| {
+                        Area::rect(
+                            a + clip.origin.row,
+                            b + clip.origin.col,
+                            c + clip.origin.row,
+                            d + clip.origin.col,
+                        )
+                        .offset(drow, dcol)
+                    })
+                    .collect();
+                refs::sqref_text(&list)
+            };
+            for (cut, cf) in &clip.cfs {
+                let mut m = cf.clone();
+                for r in &mut m.rules {
+                    for f in &mut r.formulas {
+                        *f = crate::formula_text::shift_references(f, drow, dcol);
+                    }
+                }
+                m.sqref = place(cut);
+                cfs.push(m);
+            }
+            for (cut, dv) in &clip.dvs {
+                let mut m = dv.clone();
+                for f in [&mut m.formula1, &mut m.formula2].into_iter().flatten() {
+                    *f = crate::formula_text::shift_references(f, drow, dcol);
+                }
+                m.sqref = place(cut);
+                dvs.push(m);
+            }
+        }
+    }
+    if localize {
+        let texts: Vec<String> = new
+            .iter()
+            .filter_map(|c| c.formula.as_ref().map(|f| f.text.clone()))
+            .collect();
+        localize_names(wb, si, &texts);
+    }
     let sheet = &mut wb.sheets[si];
     sheet.merges.retain(|m| !overlaps(rect(m), area));
     sheet.merges.extend(merges);
+    cut_out(sheet, area);
+    sheet.conditional_formats.extend(cfs);
+    sheet.data_validations.extend(dvs);
     replace_cells(sheet, area, new);
     unshare(sheet);
     update_dimension(sheet);
@@ -309,7 +491,7 @@ pub fn fill(wb: &mut Workbook, si: usize, range: CellRange, down: bool) -> crate
             end: range.end,
         }
     };
-    paste(wb, si, target.start, &clip, Some(target)).map(|_| ())
+    paste_with(wb, si, target.start, &clip, Some(target), false).map(|_| ())
 }
 
 /// 직사각형에서 구멍을 뺀 조각들 (위, 왼쪽, 오른쪽, 아래 순)
@@ -525,8 +707,17 @@ pub fn move_cells(
                     cut.push(x);
                 }
             }
-            if !cut.is_empty() {
+            let tl = areas.first().map(|a| {
+                let b = a.bounds();
+                (b.0, b.1)
+            });
+            if let (Some(first), Some(tl)) = (cut.first(), tl) {
                 let mut m = dv.clone();
+                let (dr, dc) = (first.0 as i64 - tl.0 as i64, first.1 as i64 - tl.1 as i64);
+                for f in [&mut m.formula1, &mut m.formula2].into_iter().flatten() {
+                    let anchored = crate::formula_text::shift_references(f, dr, dc);
+                    *f = refs::move_formula(&anchored, &here, &mv);
+                }
                 let list: Vec<Area> = cut
                     .iter()
                     .filter_map(|&x| rect_area(x).offset(mv.drow, mv.dcol))
@@ -535,6 +726,9 @@ pub fn move_cells(
                 moved_dv.push(m);
             }
             if !rest.is_empty() {
+                for f in [&mut dv.formula1, &mut dv.formula2].into_iter().flatten() {
+                    *f = refs::move_formula(f, &here, &mv);
+                }
                 dv.sqref =
                     refs::sqref_text(&rest.iter().map(|&x| rect_area(x)).collect::<Vec<_>>());
                 keep_dv.push(dv);
@@ -584,30 +778,7 @@ pub fn move_cells(
     });
     dst.hyperlinks
         .retain(|h| !CellRange::parse(&h.range).is_some_and(|r| overlaps(rect(&r), d)));
-    for cf in &mut dst.conditional_formats {
-        let areas = refs::parse_sqref(&cf.sqref);
-        if areas.iter().any(|a| overlaps(a.bounds(), d)) {
-            let rest: Vec<Area> = areas
-                .iter()
-                .flat_map(|a| subtract(a.bounds(), d))
-                .map(rect_area)
-                .collect();
-            cf.sqref = refs::sqref_text(&rest);
-        }
-    }
-    dst.conditional_formats.retain(|cf| !cf.sqref.is_empty());
-    for dv in &mut dst.data_validations {
-        let areas = refs::parse_sqref(&dv.sqref);
-        if areas.iter().any(|a| overlaps(a.bounds(), d)) {
-            let rest: Vec<Area> = areas
-                .iter()
-                .flat_map(|a| subtract(a.bounds(), d))
-                .map(rect_area)
-                .collect();
-            dv.sqref = refs::sqref_text(&rest);
-        }
-    }
-    dst.data_validations.retain(|dv| !dv.sqref.is_empty());
+    cut_out(dst, d);
     dst.conditional_formats.extend(moved_cf);
     dst.data_validations.extend(moved_dv);
     for m in merges {

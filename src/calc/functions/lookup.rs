@@ -532,9 +532,9 @@ fn choose(ctx: &mut Ctx, args: &[Expr]) -> Value {
 }
 
 fn offset(ctx: &mut Ctx, a: &[Value]) -> Value {
+    // 참조가 아니면 (오류 값 포함) #VALUE! — 한셀: 행 삭제로 OFFSET(#REF!,4,0) 이 된 수식은 #VALUE! (편집 대조 실험)
     let area = match &a[0] {
         Value::Ref(r) if r.len() == 1 => r[0],
-        Value::Error(e) => return Value::Error(*e),
         _ => return Value::Error(ErrorKind::Value),
     };
     let dr = try_v!(num_arg(ctx, a, 1)).trunc();
