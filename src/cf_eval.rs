@@ -25,11 +25,54 @@ pub struct CfStyle {
     pub fill: Option<Color>,
     /// 색 눈금으로 정한 배경 (#RRGGBB)
     pub scale: Option<String>,
-    /// 데이터 막대: (0–1 길이, 색)
-    pub bar: Option<(f64, Color)>,
-    /// 아이콘: (집합 이름, 단계, 단계 수), 값 숨김 여부
+    /// 데이터 막대
+    pub bar: Option<BarDraw>,
+    /// 아이콘: (집합 이름, 집합 안 번호 — 0 이 가장 낮은 단계, 집합의 아이콘 수). 사용자 지정 아이콘이면 그 집합·번호
     pub icon: Option<(String, usize, usize)>,
     pub hide_value: bool,
+}
+
+/// 데이터 막대 한 칸. 한셀 화면은 막대를 직각삼각형으로 그린다 — 시작(축) 쪽이 막대 높이 그대로이고 끝에서 0
+/// (x14 데이터 막대 실험: 그라데이션·단색, 테두리, 음수, 축 위치, 방향, 확장 없는 막대 모두 같은 모양)
+#[derive(Debug, Clone, PartialEq)]
+pub struct BarDraw {
+    /// 축 자리 (막대 영역의 0–1)와 축 색 (#RRGGBB). 음수가 섞였거나 가운데 축일 때만 — 이때 막대는 축에서 시작
+    pub axis: Option<(f64, String)>,
+    /// 막대 길이: 시작에서 그쪽 끝까지의 비율 (0–1). 축이 없으면 영역 왼쪽에서
+    pub len: f64,
+    /// 축에서 왼쪽으로 (음수)
+    pub leftward: bool,
+    /// 채우기·테두리 색 (#RRGGBB)
+    pub fill: String,
+    pub border: Option<String>,
+    /// 그라데이션 (시작 색 → 끝에서 흰색, 막대 길이에 맞춰)
+    pub gradient: bool,
+    /// 오른쪽에서 왼쪽 (direction="rightToLeft") — 칸 안에서 좌우를 뒤집는다
+    pub rtl: bool,
+}
+
+/// 아이콘 집합의 아이콘 수 (이름 앞 숫자)
+pub fn icon_count(set: &str) -> usize {
+    set.chars()
+        .next()
+        .and_then(|c| c.to_digit(10))
+        .map_or(3, |d| d as usize)
+}
+
+/// 데이터 막대의 기준 값: x14 의 autoMin·autoMax 는 0 을 넣는다 (0 또는 음수 최솟값, 0 또는 양수 최댓값)
+fn bar_bound(c: &Cfvo, nums: &[f64]) -> Option<f64> {
+    if nums.is_empty() {
+        return None;
+    }
+    let (lo, hi) = nums
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+    match c.kind.as_str() {
+        "autoMin" => Some(lo.min(0.0)),
+        "autoMax" => Some(hi.max(0.0)),
+        "formula" => c.val.as_deref().and_then(|v| v.trim().parse().ok()),
+        _ => cfvo_value(c, nums),
+    }
 }
 
 fn cells_in(sqref: &str) -> Vec<CellRange> {
@@ -322,8 +365,19 @@ pub fn evaluate(
             }
             "dataBar" => {
                 let Some(db) = &rule.data_bar else { continue };
-                let lo = db.cfvos.first().and_then(|c| cfvo_value(c, &nums));
-                let hi = db.cfvos.get(1).and_then(|c| cfvo_value(c, &nums));
+                // 확장이 없으면 한셀이 저장할 때 만드는 확장 (기준 값은 본 규칙 것, 축 자동)
+                let implied = db.ext.is_none();
+                let ext = db
+                    .ext
+                    .clone()
+                    .unwrap_or_else(|| crate::model::DataBarExt::implied(db));
+                let cfvos = if ext.cfvos.len() >= 2 {
+                    &ext.cfvos
+                } else {
+                    &db.cfvos
+                };
+                let lo = cfvos.first().and_then(|c| bar_bound(c, &nums));
+                let hi = cfvos.get(1).and_then(|c| bar_bound(c, &nums));
                 let (Some(lo), Some(hi)) = (lo, hi) else {
                     continue;
                 };
@@ -331,20 +385,79 @@ pub fn evaluate(
                     db.min_length.unwrap_or(10) as f64 / 100.0,
                     db.max_length.unwrap_or(90) as f64 / 100.0,
                 );
-                let color = db.color.clone().unwrap_or(Color {
-                    rgb: Some("FF638EC6".into()),
-                    ..Default::default()
+                let len = |t: f64| min_len + (max_len - min_len) * t.clamp(0.0, 1.0);
+                let res = |c: &Option<Color>| {
+                    c.as_ref()
+                        .and_then(|c| crate::theme::resolve(c, theme))
+                        .map(|s| s.to_ascii_uppercase())
+                };
+                let fill = res(&db.color).unwrap_or_else(|| "#638EC6".into());
+                // 음수 색이 없으면: 확장 없는 막대는 검정 (한셀 화면), 확장이 있으면 x14 기본 빨강
+                let neg_default = if implied { "#000000" } else { "#FF0000" };
+                let neg_fill = if ext.negative_same_as_positive {
+                    fill.clone()
+                } else {
+                    res(&ext.negative_fill_color).unwrap_or_else(|| neg_default.into())
+                };
+                let border = ext
+                    .border
+                    .then(|| res(&ext.border_color).unwrap_or_else(|| fill.clone()));
+                let neg_border = border.as_ref().map(|b| {
+                    if ext.negative_border_same_as_positive {
+                        b.clone()
+                    } else {
+                        res(&ext.negative_border_color).unwrap_or_else(|| neg_default.into())
+                    }
                 });
+                let axis_color = res(&ext.axis_color).unwrap_or_else(|| "#000000".into());
+                let middle = ext.axis_position.as_deref() == Some("middle");
+                // 축 자리: 자동은 음수·양수가 섞일 때 0 의 자리, 모두 음수면 오른쪽 끝, 가운데는 0.5
+                let axis = match ext.axis_position.as_deref() {
+                    Some("none") => None,
+                    Some("middle") => Some(0.5),
+                    _ if lo < 0.0 && hi > 0.0 => Some(-lo / (hi - lo)),
+                    _ if hi <= 0.0 && lo < 0.0 => Some(1.0),
+                    _ => None,
+                };
                 for &r in &cells {
                     let Some(v) = num(&value(r)) else { continue };
-                    let t = if hi > lo {
-                        ((v - lo) / (hi - lo)).clamp(0.0, 1.0)
-                    } else {
-                        1.0
+                    let neg = v < 0.0;
+                    let (len, leftward) = match axis {
+                        Some(_) if middle => {
+                            let s = lo.abs().max(hi.abs());
+                            let t = if s > 0.0 { v.abs() / s } else { 0.0 };
+                            (if v == 0.0 { 0.0 } else { len(t) }, neg)
+                        }
+                        Some(_) => {
+                            let t = if neg {
+                                v / lo
+                            } else if hi > 0.0 {
+                                v / hi
+                            } else {
+                                0.0
+                            };
+                            (if v == 0.0 { 0.0 } else { len(t) }, neg)
+                        }
+                        None => {
+                            let t = if hi > lo { (v - lo) / (hi - lo) } else { 1.0 };
+                            (len(t), false)
+                        }
                     };
                     let e = out.entry((r.row, r.col)).or_default();
                     if e.bar.is_none() {
-                        e.bar = Some((min_len + (max_len - min_len) * t, color.clone()));
+                        e.bar = Some(BarDraw {
+                            axis: axis.map(|a| (a, axis_color.clone())),
+                            len,
+                            leftward,
+                            fill: if neg { neg_fill.clone() } else { fill.clone() },
+                            border: if neg {
+                                neg_border.clone()
+                            } else {
+                                border.clone()
+                            },
+                            gradient: ext.gradient,
+                            rtl: ext.direction.as_deref() == Some("rightToLeft"),
+                        });
                         e.hide_value |= !db.show_value;
                     }
                 }
@@ -356,22 +469,27 @@ pub fn evaluate(
                     .iter()
                     .filter_map(|c| Some((cfvo_value(c, &nums)?, c.gte)))
                     .collect();
-                let n = is.cfvos.len().max(3);
+                let n = icon_count(&is.set);
                 for &r in &cells {
                     let Some(v) = num(&value(r)) else { continue };
-                    // 마지막으로 넘어선 기준의 단계 (첫 기준은 바닥)
+                    // 마지막으로 넘어선 기준의 단계 (첫 기준은 바닥). 한셀 화면은 거꾸로(reverse)를 따르지 않는다
+                    // (아이콘 실험: 본 구역·x14 구역 모두 순서 그대로)
                     let mut level = 0;
                     for (i, &(t, gte)) in th.iter().enumerate().skip(1) {
                         if if gte { v >= t } else { v > t } {
                             level = i;
                         }
                     }
-                    if is.reverse {
-                        level = n - 1 - level;
-                    }
+                    let level = level.min(n - 1);
+                    // 사용자 지정 아이콘: 단계마다 (집합, 번호), NoIcons 는 아이콘 없음
+                    let icon = match is.custom_icons.get(level) {
+                        Some((set, _)) if set == "NoIcons" => None,
+                        Some((set, id)) => Some((set.clone(), *id as usize, icon_count(set))),
+                        None => Some((is.set.clone(), level, n)),
+                    };
                     let e = out.entry((r.row, r.col)).or_default();
                     if e.icon.is_none() {
-                        e.icon = Some((is.set.clone(), level, n));
+                        e.icon = icon;
                         e.hide_value |= !is.show_value;
                     }
                 }
@@ -546,5 +664,130 @@ mod tests {
         assert_eq!(r[&(0, 0)].scale.as_deref(), Some("#FFFFFF"));
         assert_eq!(r[&(1, 0)].scale.as_deref(), Some("#7F7F7F"));
         assert_eq!(r[&(2, 0)].scale.as_deref(), Some("#000000"));
+    }
+
+    fn cfvo(kind: &str) -> Cfvo {
+        Cfvo {
+            kind: kind.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn data_bar_axis_and_negative_colors() {
+        // x14 막대 (x14 데이터 막대 실험의 B 열): −40·0·100 → 축은 40/140 자리, 음수는 축에서 왼쪽으로 빨강
+        let bar = crate::model::DataBar {
+            cfvos: vec![cfvo("min"), cfvo("max")],
+            color: Some(Color {
+                rgb: Some("FF638EC6".into()),
+                ..Default::default()
+            }),
+            show_value: true,
+            min_length: Some(0),
+            max_length: Some(100),
+            ext: Some(crate::model::DataBarExt {
+                cfvos: vec![cfvo("autoMin"), cfvo("autoMax")],
+                negative_fill_color: Some(Color {
+                    rgb: Some("FFFF0000".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+        let rule = |b: crate::model::DataBar| CfRule {
+            kind: "dataBar".into(),
+            priority: 1,
+            data_bar: Some(b),
+            ..Default::default()
+        };
+        let r = evaluate(
+            &sheet_with(&[-40.0, 0.0, 100.0], vec![rule(bar.clone())]),
+            &Styles::default(),
+            &Default::default(),
+        );
+        let b0 = r[&(0, 0)].bar.as_ref().unwrap();
+        let (a, c) = b0.axis.clone().unwrap();
+        assert!((a - 40.0 / 140.0).abs() < 1e-9 && c == "#000000");
+        assert!(b0.leftward && b0.fill == "#FF0000" && (b0.len - 1.0).abs() < 1e-9);
+        assert_eq!(r[&(1, 0)].bar.as_ref().unwrap().len, 0.0);
+        let b2 = r[&(2, 0)].bar.as_ref().unwrap();
+        assert!(!b2.leftward && b2.fill == "#638EC6" && (b2.len - 1.0).abs() < 1e-9);
+        // 확장 없는 막대: 한셀이 만드는 확장(축 자동) — 음수는 검정, 길이 10–90%
+        let mut old = bar;
+        old.ext = None;
+        old.min_length = None;
+        old.max_length = None;
+        let r = evaluate(
+            &sheet_with(&[-40.0, 100.0], vec![rule(old)]),
+            &Styles::default(),
+            &Default::default(),
+        );
+        let b0 = r[&(0, 0)].bar.as_ref().unwrap();
+        assert!(b0.leftward && b0.fill == "#000000" && (b0.len - 0.9).abs() < 1e-9);
+        // 모두 양수면 축이 없고 autoMin 은 0
+        let r = evaluate(
+            &sheet_with(
+                &[10.0, 80.0],
+                vec![rule(crate::model::DataBar {
+                    cfvos: vec![cfvo("min"), cfvo("max")],
+                    show_value: true,
+                    min_length: Some(0),
+                    max_length: Some(100),
+                    ext: Some(crate::model::DataBarExt {
+                        cfvos: vec![cfvo("autoMin"), cfvo("autoMax")],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })],
+            ),
+            &Styles::default(),
+            &Default::default(),
+        );
+        let b0 = r[&(0, 0)].bar.as_ref().unwrap();
+        assert!(b0.axis.is_none() && (b0.len - 0.125).abs() < 1e-9);
+    }
+
+    #[test]
+    fn custom_icons_and_reverse() {
+        let pct = |v: &str| Cfvo {
+            kind: "percent".into(),
+            val: Some(v.into()),
+            gte: true,
+        };
+        let set = |reverse: bool, custom: Vec<(String, u32)>| CfRule {
+            kind: "iconSet".into(),
+            priority: 1,
+            icon_set: Some(crate::model::IconSet {
+                set: "3TrafficLights1".into(),
+                cfvos: vec![pct("0"), pct("33"), pct("67")],
+                show_value: true,
+                reverse,
+                percent: true,
+                custom_icons: custom,
+            }),
+            ..Default::default()
+        };
+        // 한셀은 거꾸로를 따르지 않는다
+        let r = evaluate(
+            &sheet_with(&[1.0, 3.0, 5.0], vec![set(true, vec![])]),
+            &Styles::default(),
+            &Default::default(),
+        );
+        assert_eq!(r[&(0, 0)].icon, Some(("3TrafficLights1".into(), 0, 3)));
+        assert_eq!(r[&(2, 0)].icon, Some(("3TrafficLights1".into(), 2, 3)));
+        // 사용자 지정: 단계마다 (집합, 번호), NoIcons 는 없음
+        let custom = vec![
+            ("3Flags".into(), 0),
+            ("NoIcons".into(), 0),
+            ("3Symbols".into(), 2),
+        ];
+        let r = evaluate(
+            &sheet_with(&[1.0, 3.0, 5.0], vec![set(false, custom)]),
+            &Styles::default(),
+            &Default::default(),
+        );
+        assert_eq!(r[&(0, 0)].icon, Some(("3Flags".into(), 0, 3)));
+        assert_eq!(r[&(1, 0)].icon, None);
+        assert_eq!(r[&(2, 0)].icon, Some(("3Symbols".into(), 2, 3)));
     }
 }

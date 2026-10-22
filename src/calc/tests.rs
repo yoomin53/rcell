@@ -1,0 +1,448 @@
+// Copyright 2026 yoomin53 (https://github.com/yoomin53)
+// SPDX-License-Identifier: Apache-2.0
+//
+// rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
+
+//! 계산 엔진 단위 테스트 (직접 만든 통합 문서).
+
+use super::*;
+use crate::model::{Cell, CellRef, CellValue, DefinedName, Formula, Sheet, Workbook};
+
+/// ("A1", "=수식" 또는 값) 목록으로 시트를 만든다
+fn sheet(name: &str, cells: &[(&str, &str)]) -> Sheet {
+    let mut out: Vec<Cell> = cells
+        .iter()
+        .map(|(r, v)| {
+            let (value, formula) = if let Some(f) = v.strip_prefix('=') {
+                (
+                    CellValue::Empty,
+                    Some(Formula {
+                        text: f.to_string(),
+                        ..Default::default()
+                    }),
+                )
+            } else if let Ok(n) = v.parse::<f64>() {
+                (CellValue::Number(n), None)
+            } else if *v == "TRUE" || *v == "FALSE" {
+                (CellValue::Bool(*v == "TRUE"), None)
+            } else {
+                (CellValue::Text(v.to_string()), None)
+            };
+            Cell {
+                r: CellRef::parse(r).unwrap(),
+                style: 0,
+                value,
+                formula,
+            }
+        })
+        .collect();
+    out.sort_by_key(|c| (c.r.row, c.r.col));
+    Sheet {
+        name: name.into(),
+        cells: out,
+        ..Default::default()
+    }
+}
+
+fn wb(sheets: Vec<Sheet>) -> Workbook {
+    Workbook {
+        sheets,
+        ..Default::default()
+    }
+}
+
+fn calc(w: &Workbook, at: &str) -> CellValue {
+    let opts = CalcOptions {
+        now: Some(46314.5),
+        ..Default::default()
+    };
+    let (res, _) = evaluate(w, &opts);
+    let r = CellRef::parse(at).unwrap();
+    res.into_iter()
+        .find(|x| x.sheet == 0 && x.cell == r)
+        .map(|x| x.value)
+        .unwrap()
+}
+
+fn one(formula: &str) -> CellValue {
+    let w = wb(vec![sheet(
+        "S",
+        &[
+            ("A1", "10"),
+            ("A2", "20"),
+            ("A3", "30"),
+            ("A4", "40"),
+            ("A5", "50"),
+            ("B1", "항목1"),
+            ("B2", "항목2"),
+            ("C1", "TRUE"),
+            ("Z99", &format!("={formula}")),
+        ],
+    )]);
+    calc(&w, "Z99")
+}
+
+fn n(v: f64) -> CellValue {
+    CellValue::Number(v)
+}
+
+fn t(s: &str) -> CellValue {
+    CellValue::Text(s.into())
+}
+
+fn e(s: &str) -> CellValue {
+    CellValue::Error(s.into())
+}
+
+#[test]
+fn arithmetic_and_precedence() {
+    assert_eq!(one("1+2*3"), n(7.0));
+    assert_eq!(one("-2^2"), n(4.0));
+    assert_eq!(one("2^3^2"), n(64.0));
+    assert_eq!(one("A1%"), n(0.1));
+    assert_eq!(one("1/0"), e("#DIV/0!"));
+    assert_eq!(one("\"a\"+1"), e("#VALUE!"));
+    assert_eq!(one("\"3\"*2"), n(6.0));
+    assert_eq!(one("1&2"), t("12"));
+    assert_eq!(one("B1&B2"), t("항목1항목2"));
+    assert_eq!(one("A1<>A2"), CellValue::Bool(true));
+    assert_eq!(one("\"abc\"=\"ABC\""), CellValue::Bool(true));
+    assert_eq!(one("1<\"a\""), CellValue::Bool(true));
+}
+
+#[test]
+fn aggregates() {
+    assert_eq!(one("SUM(A1:A5)"), n(150.0));
+    assert_eq!(one("SUM(A:A)"), n(150.0));
+    assert_eq!(one("AVERAGE(A1:A5)"), n(30.0));
+    assert_eq!(one("MAX(A1:A5)-MIN(A1:A5)"), n(40.0));
+    assert_eq!(one("COUNT(A1:B5)"), n(5.0));
+    assert_eq!(one("COUNTA(A1:B5)"), n(7.0));
+    assert_eq!(one("SUMIF(A1:A5,\">20\")"), n(120.0));
+    assert_eq!(one("COUNTIF(A1:A5,\">=30\")"), n(3.0));
+    assert_eq!(one("SUMPRODUCT(A1:A2,A3:A4)"), n(1100.0));
+    assert_eq!(one("SUMPRODUCT((A1:A5>20)*1)"), n(3.0));
+    assert_eq!(one("SUM(1,\"2\",TRUE)"), n(4.0));
+}
+
+#[test]
+fn logic_and_lookup() {
+    assert_eq!(one("IF(A1>5,\"크다\",\"작다\")"), t("크다"));
+    assert_eq!(one("IF(FALSE,1)"), CellValue::Bool(false));
+    assert_eq!(one("AND(A1>0,A2>0)"), CellValue::Bool(true));
+    assert_eq!(one("IFERROR(1/0,0)"), n(0.0));
+    assert_eq!(one("VLOOKUP(20,A1:B5,2,FALSE)"), t("항목2"));
+    assert_eq!(one("INDEX(A1:A5,3)"), n(30.0));
+    assert_eq!(one("MATCH(40,A1:A5,0)"), n(4.0));
+    assert_eq!(one("MATCH(35,A1:A5)"), n(3.0));
+    assert_eq!(one("SUM(OFFSET(A1,1,0,2,1))"), n(50.0));
+    assert_eq!(one("SUM(INDIRECT(\"A1:A3\"))"), n(60.0));
+    assert_eq!(one("CHOOSE(2,A1,A2,A3)"), n(20.0));
+    assert_eq!(one("ROWS(A1:B5)*COLUMNS(A1:B5)"), n(10.0));
+}
+
+#[test]
+fn text_functions() {
+    assert_eq!(one("LEFT(B1,1)"), t("항"));
+    assert_eq!(one("LEN(B1)"), n(3.0));
+    assert_eq!(one("CONCATENATE(B1,\"-\",B2)"), t("항목1-항목2"));
+    assert_eq!(one("TEXT(A1,\"0.00\")"), t("10.00"));
+    assert_eq!(one("PROPER(\"hello WORLD\")"), t("Hello World"));
+    assert_eq!(one("TRIM(\"  a   b \")"), t("a b"));
+    assert_eq!(one("SUBSTITUTE(\"aaa\",\"a\",\"b\",2)"), t("aba"));
+    assert_eq!(one("FIND(\"b\",\"abc\")"), n(2.0));
+    assert_eq!(one("SEARCH(\"B?\",\"abc\")"), n(2.0));
+    assert_eq!(one("FIXED(1234.567,1)"), t("1,234.6"));
+    assert_eq!(one("1/3&\"\""), t("0.333333333333333"));
+}
+
+#[test]
+fn math_functions() {
+    assert_eq!(one("ROUND(2.675,2)"), n(2.68));
+    assert_eq!(one("ROUND(-2.5,0)"), n(-3.0));
+    assert_eq!(one("ROUNDUP(0.1+0.2,1)"), n(0.3));
+    assert_eq!(one("MOD(-3,2)"), n(1.0));
+    assert_eq!(one("INT(-7.8)"), n(-8.0));
+    assert_eq!(one("CEILING(2.5,1)"), n(3.0));
+    assert_eq!(one("FLOOR(-2.5,1)"), n(-3.0));
+    assert_eq!(one("ROMAN(499,0)"), t("CDXCIX"));
+    assert_eq!(one("ROMAN(499,1)"), t("LDVLIV"));
+    assert_eq!(one("ROMAN(499,4)"), t("ID"));
+    assert_eq!(one("FACT(5)"), n(120.0));
+    assert_eq!(one("COMBIN(5,2)"), n(10.0));
+    assert_eq!(one("GCD(12,18)"), n(6.0));
+}
+
+#[test]
+fn dates() {
+    assert_eq!(one("DATE(2026,10,19)"), n(46314.0));
+    assert_eq!(one("YEAR(46314)"), n(2026.0));
+    assert_eq!(one("DATE(1900,2,29)"), n(60.0));
+    assert_eq!(one("WEEKDAY(46314)"), n(2.0));
+    assert_eq!(one("EOMONTH(46314,1)"), n(46356.0));
+    assert_eq!(
+        one("DATEDIF(DATE(2020,1,15),DATE(2026,10,19),\"Y\")"),
+        n(6.0)
+    );
+    assert_eq!(one("TODAY()"), n(46314.0));
+    assert_eq!(one("YEAR(NOW())"), n(2026.0));
+}
+
+#[test]
+fn names_sheets_and_chains() {
+    let mut w = wb(vec![
+        sheet(
+            "첫 시트",
+            &[("A1", "7"), ("A2", "=A1*2"), ("A3", "=A2+'둘'!A1")],
+        ),
+        sheet("둘", &[("A1", "=SUM('첫 시트'!A1:A2)")]),
+    ]);
+    w.defined_names.push(DefinedName {
+        name: "가격".into(),
+        formula: "'첫 시트'!$A$1".into(),
+        ..Default::default()
+    });
+    w.sheets[0].cells.push(Cell {
+        r: CellRef::parse("B1").unwrap(),
+        style: 0,
+        value: CellValue::Empty,
+        formula: Some(Formula {
+            text: "가격*3".into(),
+            ..Default::default()
+        }),
+    });
+    w.sheets[0].cells.sort_by_key(|c| (c.r.row, c.r.col));
+    assert_eq!(calc(&w, "A3"), n(35.0));
+    assert_eq!(calc(&w, "B1"), n(21.0));
+    let report = recalculate(&mut w);
+    assert_eq!(report.formula_cells, 4);
+    assert_eq!(report.cycles, 0);
+}
+
+#[test]
+fn long_chain_does_not_overflow() {
+    let mut cells: Vec<(String, String)> = vec![("A1".into(), "1".into())];
+    for i in 2..=5000 {
+        cells.push((format!("A{i}"), format!("=A{}+1", i - 1)));
+    }
+    let refs: Vec<(&str, &str)> = cells
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let w = wb(vec![sheet("S", &refs)]);
+    assert_eq!(calc(&w, "A5000"), n(5000.0));
+    // 역순 의존 (위 셀이 아래 셀을 참조)
+    let mut cells: Vec<(String, String)> = vec![("A5000".into(), "1".into())];
+    for i in 1..5000 {
+        cells.push((format!("A{i}"), format!("=A{}+1", i + 1)));
+    }
+    let refs: Vec<(&str, &str)> = cells
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let w = wb(vec![sheet("S", &refs)]);
+    assert_eq!(calc(&w, "A1"), n(5000.0));
+}
+
+#[test]
+fn cycles_are_reported() {
+    let w = wb(vec![sheet(
+        "S",
+        &[("A1", "=B1+1"), ("B1", "=A1+1"), ("C1", "=5")],
+    )]);
+    let (_, report) = evaluate(&w, &CalcOptions::default());
+    assert_eq!(report.cycles, 2);
+    assert_eq!(calc(&w, "C1"), n(5.0));
+}
+
+#[test]
+fn array_formula_and_lifting() {
+    assert_eq!(one("SUM(1/{1,2,4})"), n(1.75));
+    assert_eq!(one("SUM(LEN({\"a\",\"bb\"}))"), n(3.0));
+    assert_eq!(one("INDEX({1,2;3,4},2,1)"), n(3.0));
+    assert_eq!(one("MMULT({1,2},{3;4})"), n(11.0));
+    assert_eq!(one("SUMPRODUCT(LEN(B1:B2))"), n(6.0));
+}
+
+#[test]
+fn same_value_rules() {
+    assert!(same_value(&n(0.1 + 0.2), &n(0.3), None, false));
+    assert!(!same_value(&n(1.0), &n(1.001), None, false));
+    assert!(same_value(&n(1.0004), &n(1.0), Some("0.00"), false));
+    assert!(same_value(&e("#DIV/0!"), &e("#DIV/0!"), None, false));
+    assert!(!same_value(&t("1"), &n(1.0), None, false));
+}
+
+/// 표(A1:C5, 머리글 1행·요약 1행: 이름 수량 단가)와 구조적 참조
+#[test]
+fn structured_references() {
+    use crate::model::{Table, TableColumn};
+    let mut s = sheet(
+        "S",
+        &[
+            ("A1", "이름"),
+            ("B1", "수량"),
+            ("C1", "단가"),
+            ("A2", "가"),
+            ("B2", "2"),
+            ("C2", "10"),
+            ("A3", "나"),
+            ("B3", "3"),
+            ("C3", "20"),
+            ("A4", "다"),
+            ("B4", "5"),
+            ("C4", "30"),
+            ("A5", "합계"),
+            ("B5", "=SUBTOTAL(109,Table1[수량])"),
+            (
+                "D2",
+                "=Table1[[#This Row],[수량]]*Table1[[#This Row],[단가]]",
+            ),
+            ("D3", "=[@수량]*[@단가]"),
+            ("E1", "=SUM(Table1[[수량]:[단가]])"),
+            ("E2", "=ROWS(Table1[#All])"),
+            ("E3", "=ROWS(Table1)"),
+            ("E4", "=Table1[[#Headers],[단가]]"),
+            ("E5", "=Table1[[#Totals],[수량]]"),
+            ("E6", "=COUNTA(Table1[[#Headers],[#Data],[이름]])"),
+            ("E7", "=SUM(table1[수량])"),
+            ("E8", "=Table1[없는열]"),
+            ("E9", "=Table1[[#This Row],[수량]]"),
+        ],
+    );
+    s.tables.push(Table {
+        name: "Table1".into(),
+        display_name: "Table1".into(),
+        range: "A1:C5".into(),
+        header_rows: 1,
+        totals_rows: 1,
+        columns: ["이름", "수량", "단가"]
+            .iter()
+            .map(|n| TableColumn {
+                name: n.to_string(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    });
+    let w = wb(vec![s]);
+    assert_eq!(calc(&w, "B5"), n(10.0));
+    assert_eq!(calc(&w, "D2"), n(20.0));
+    assert_eq!(
+        calc(&w, "D3"),
+        e("#REF!"),
+        "D 열은 표 밖이라 [@…] 의 표가 없다"
+    );
+    assert_eq!(calc(&w, "E1"), n(70.0));
+    assert_eq!(calc(&w, "E2"), n(5.0));
+    assert_eq!(calc(&w, "E3"), n(3.0));
+    assert_eq!(calc(&w, "E4"), t("단가"));
+    assert_eq!(calc(&w, "E5"), n(10.0));
+    assert_eq!(calc(&w, "E6"), n(4.0));
+    assert_eq!(calc(&w, "E7"), n(10.0));
+    assert_eq!(calc(&w, "E8"), e("#REF!"));
+    assert_eq!(
+        calc(&w, "E9"),
+        e("#VALUE!"),
+        "9행은 표의 데이터 행이 아니다"
+    );
+}
+
+/// 모델의 배열 수식 (FormulaKind::Array + 범위): 범위 칸마다 결과
+#[test]
+fn array_formula_from_model() {
+    use crate::model::FormulaKind;
+    let mut s = sheet("S", &[("A1", "1"), ("A2", "2"), ("A3", "3")]);
+    s.cells.push(Cell {
+        r: CellRef::parse("C1").unwrap(),
+        style: 0,
+        value: CellValue::Number(0.0),
+        formula: Some(Formula {
+            text: "A1:A3*10".into(),
+            kind: FormulaKind::Array,
+            range: Some("C1:C3".into()),
+            ..Default::default()
+        }),
+    });
+    s.cells.push(Cell {
+        r: CellRef::parse("D1").unwrap(),
+        style: 0,
+        value: CellValue::Number(0.0),
+        formula: Some(Formula {
+            text: "SUM(A1:A3*A1:A3)".into(),
+            kind: FormulaKind::Array,
+            range: Some("D1".into()),
+            ..Default::default()
+        }),
+    });
+    s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    let w = wb(vec![s]);
+    assert_eq!(calc(&w, "C1"), n(10.0));
+    assert_eq!(calc(&w, "C2"), n(20.0));
+    assert_eq!(calc(&w, "C3"), n(30.0));
+    assert_eq!(calc(&w, "D1"), n(14.0));
+}
+
+/// 데이터 표 (What-If): 1변수 열 입력과 2변수
+#[test]
+fn data_tables() {
+    use crate::model::{DataTableInput, FormulaKind};
+    let mut s = sheet(
+        "S",
+        &[
+            ("A1", "0.05"),
+            ("B1", "=A1*100"),
+            ("C1", "3"),
+            ("E1", "=B1"),
+            ("D2", "0.1"),
+            ("D3", "0.2"),
+            ("G1", "=A1*C1"),
+            ("H1", "1"),
+            ("I1", "2"),
+            ("G2", "10"),
+            ("G3", "20"),
+            ("K1", "=B1+1"),
+        ],
+    );
+    let dt = |at: &str, rg: &str, inp: DataTableInput| Cell {
+        r: CellRef::parse(at).unwrap(),
+        style: 0,
+        value: CellValue::Number(0.0),
+        formula: Some(Formula {
+            text: String::new(),
+            kind: FormulaKind::DataTable,
+            range: Some(rg.into()),
+            data_table: Some(inp),
+            ..Default::default()
+        }),
+    };
+    s.cells.push(dt(
+        "E2",
+        "E2:E3",
+        DataTableInput {
+            r1: Some("A1".into()),
+            ..Default::default()
+        },
+    ));
+    s.cells.push(dt(
+        "H2",
+        "H2:I3",
+        DataTableInput {
+            two_d: true,
+            r1: Some("A1".into()),
+            r2: Some("C1".into()),
+            ..Default::default()
+        },
+    ));
+    s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    let w = wb(vec![s]);
+    assert_eq!(calc(&w, "E2"), n(10.0));
+    assert_eq!(calc(&w, "E3"), n(20.0));
+    assert_eq!(calc(&w, "H2"), n(10.0));
+    assert_eq!(calc(&w, "I2"), n(20.0));
+    assert_eq!(calc(&w, "H3"), n(20.0));
+    assert_eq!(calc(&w, "I3"), n(40.0));
+    // 입력 셀과 그에 기대는 수식은 원래 값으로 돌아온다
+    assert_eq!(calc(&w, "B1"), n(5.0));
+    assert_eq!(calc(&w, "K1"), n(6.0));
+}

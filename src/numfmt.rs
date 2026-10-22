@@ -23,6 +23,32 @@
 //! 자세한 관측은 docs/format/cell-2024.md 7.11절.
 
 use crate::model::CellValue;
+use std::cell::Cell;
+
+thread_local! {
+    /// TEXT 함수용: `?` 자리 공백을 이 표시 글자로 넣는다 (TEXT 가 글 앞으로 옮긴다)
+    static PAD_MARK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// TEXT 함수가 `?` 자리의 공백을 알아볼 수 있게 넣는 표시 글자 (사용자 정의 영역)
+pub const PAD_CHAR: char = '\u{E0FF}';
+
+fn pad_str() -> &'static str {
+    if PAD_MARK.with(|p| p.get()) {
+        "\u{E0FF}"
+    } else {
+        " "
+    }
+}
+
+/// [`format`] 과 같되 `?` 자리 공백을 [`PAD_CHAR`] 로, 정수 값의 분수 자리도 그 글자로 채운다
+/// (한셀의 TEXT 는 이 공백을 글 앞으로 옮긴다: TEXT(5,"# ?/?") = "   5 ", 대조 실험 misc4)
+pub fn format_padded(value: &CellValue, code: &str, date1904: bool) -> Formatted {
+    PAD_MARK.with(|p| p.set(true));
+    let out = format(value, code, date1904);
+    PAD_MARK.with(|p| p.set(false));
+    out
+}
 
 /// 표시 결과.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -707,7 +733,7 @@ fn fill_int(toks: &[&Tok], digits: &str, thousands: bool) -> String {
         };
         let width = zeros + qs;
         while s.chars().count() < width {
-            s.insert(0, ' ');
+            s.insert_str(0, pad_str());
         }
         return s;
     }
@@ -722,7 +748,7 @@ fn fill_int(toks: &[&Tok], digits: &str, thousands: bool) -> String {
                     Some(d) => d.to_string(),
                     None => match c {
                         '0' => "0".into(),
-                        '?' => " ".into(),
+                        '?' => pad_str().into(),
                         _ => String::new(),
                     },
                 };
@@ -760,7 +786,7 @@ fn fill_frac(toks: &[&Tok], frac: &str) -> String {
         }
         match ph.get(k) {
             Some('#') => shown[k] = String::new(),
-            Some('?') => shown[k] = " ".into(),
+            Some('?') => shown[k] = pad_str().into(),
             _ => break,
         }
     }
@@ -1072,6 +1098,13 @@ fn format_fraction(sec: &Section, v: f64, si: usize, signed: bool) -> String {
             push_simple(&mut out, t, v);
         }
         if n == 0 {
+            // TEXT: 분수 자리(분자 자리 + / + 분모 자리)만큼 공백 표시
+            if PAD_MARK.with(|p| p.get()) {
+                let num_len = si - ns;
+                for _ in 0..num_len + 1 + den_len {
+                    out.push(PAD_CHAR);
+                }
+            }
             return out;
         }
     }
