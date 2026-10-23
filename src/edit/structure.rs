@@ -14,8 +14,7 @@
 
 use super::refs::{self, Area, Shift};
 use crate::model::{
-    Cell, CellRef, CellValue, ColInfo, Comment, FormulaKind, Marker, RowInfo, Shape, Sheet,
-    Workbook,
+    Cell, CellRef, CellValue, ColInfo, FormulaKind, Marker, RowInfo, Shape, Sheet, Workbook,
 };
 
 /// 수식의 공유 표시를 지운다 (셀마다 원문이 있으므로 일반 수식으로 쓰면 된다)
