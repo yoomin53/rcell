@@ -431,13 +431,13 @@ fn build(cases: &[Case], date1904: bool) -> Workbook {
     }
 }
 
-/// 사용: `<출력 폴더> [--only 분류] [--chunk N]` — `--chunk` 는 한 문서에 경우 N개씩 나눠 쓴다
+/// 사용: `<출력 폴더> [--only 분류] [--chunk N] [--list 파일]` — `--chunk` 는 한 문서에 경우 N개씩 나눠 쓴다
 /// (한셀을 죽이는 경우를 좁힐 때).
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(out) = args.first().map(PathBuf::from) else {
         eprintln!(
-            "사용: cargo run --release --example calc_oracle_gen -- <출력 폴더> [--only 분류] [--chunk N]"
+            "사용: cargo run --release --example calc_oracle_gen -- <출력 폴더> [--only 분류] [--chunk N] [--list 파일]"
         );
         std::process::exit(2);
     };
@@ -452,8 +452,27 @@ fn main() {
         .and_then(|n| n.parse().ok())
         .unwrap_or(usize::MAX);
     std::fs::create_dir_all(&out).expect("출력 폴더");
+    // --list <파일>: 목록 대신 파일의 수식(한 줄에 하나, `=` 없이)으로 문서 하나 (이름은 파일 이름)
+    let catalog = match opt("--list") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            let text = std::fs::read_to_string(&path).expect("수식 목록 파일");
+            let cases: Vec<Case> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(|l| Case {
+                    f: l.trim_start_matches('=').to_string(),
+                    array: None,
+                })
+                .collect();
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            vec![(&*Box::leak(name.into_boxed_str()), cases, false)]
+        }
+        None => cases::catalog(),
+    };
     let mut total = 0;
-    for (name, cases, date1904) in cases::catalog() {
+    for (name, cases, date1904) in catalog {
         if only.as_deref().is_some_and(|o| o != name) {
             continue;
         }

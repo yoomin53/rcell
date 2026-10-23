@@ -143,6 +143,8 @@ pub struct Engine {
     pub(crate) sheet_names: Vec<String>,
     /// 한셀이 모르는 Excel 함수도 계산한다 ([`crate::calc::CalcOptions::excel_functions`])
     pub(crate) excel_functions: bool,
+    /// 한셀의 잘못된 계산도 흉내 낸다 ([`crate::calc::CalcOptions::hcell_bugs`])
+    pub(crate) hcell_bugs: bool,
     /// 문서 파일 이름 (CELL("address") 가 다른 시트를 가리킬 때 `[이름]` 으로 쓴다)
     pub(crate) file_name: Option<String>,
 }
@@ -393,6 +395,7 @@ impl Engine {
             xf_codes,
             sheet_names: wb.sheets.iter().map(|s| s.name.clone()).collect(),
             excel_functions: false,
+            hcell_bugs: false,
             file_name: None,
         }
     }

@@ -466,6 +466,30 @@ pub fn gamma_p_inv(p: f64, a: f64) -> f64 {
     )
 }
 
+/// Q(a, x) = q 인 x (위쪽 꼬리로 풀어 p 가 1 에 가까울 때 자릿수를 잃지 않는다)
+pub fn gamma_q_inv(q: f64, a: f64) -> f64 {
+    if q >= 1.0 {
+        return 0.0;
+    }
+    if q <= 0.0 {
+        return f64::INFINITY;
+    }
+    let mut hi = a.max(1.0);
+    while gamma_q(a, hi) > q {
+        hi *= 2.0;
+        if hi > 1e300 {
+            return f64::INFINITY;
+        }
+    }
+    let x = solve_increasing(|x| -gamma_q(a, x), -q, 0.0, hi);
+    newton_refine(
+        x,
+        -q,
+        |x| -gamma_q(a, x),
+        |x| (-x + (a - 1.0) * x.mln() - ln_gamma(a)).mexp(),
+    )
+}
+
 /// I_x(a, b) = p 인 x
 pub fn beta_i_inv(p: f64, a: f64, b: f64) -> f64 {
     if p <= 0.0 {

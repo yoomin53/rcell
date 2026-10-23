@@ -314,7 +314,8 @@ pub const FNS: &[FnSpec] = &[
         if !(0.0..1.0).contains(&p) || !(1.0..=1e10).contains(&df) {
             return Value::Error(ErrorKind::Num);
         }
-        num(2.0 * sp::gamma_p_inv(p, df / 2.0))
+        // 한셀 근사 반복 (hcnum::chisq_inv), 소수 9자리 반올림 (대조 실험 x1)
+        num(round9(hc::chisq_inv(p, df)))
     }),
     f("CHISQ.INV.RT", 2, 2, V, chi_inv_rt),
     f("CHIINV", 2, 2, V, chi_inv_rt),
@@ -344,10 +345,12 @@ pub const FNS: &[FnSpec] = &[
         let p = try_v!(num_arg(c, a, 0));
         let d1 = try_v!(num_arg(c, a, 1)).trunc();
         let d2 = try_v!(num_arg(c, a, 2)).trunc();
-        if !(0.0..=1.0).contains(&p) || d1 < 1.0 || d2 < 1.0 || p == 1.0 {
+        // 확률 0·1 은 #NUM! (F.INV(0,1,1), 대조 실험 dist)
+        if p <= 0.0 || p >= 1.0 || d1 < 1.0 || d2 < 1.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num(sp::f_inv(p, d1, d2))
+        // 한셀 근사 반복 (hcnum::f_inv), 소수 9자리 반올림 (대조 실험 x1)
+        num(round9(hc::f_inv(p, d1, d2)))
     }),
     f("F.INV.RT", 3, 3, V, f_inv_rt),
     f("FINV", 3, 3, V, f_inv_rt),
@@ -400,7 +403,8 @@ pub const FNS: &[FnSpec] = &[
         if p <= 0.0 || p >= 1.0 || df < 1.0 {
             return Value::Error(ErrorKind::Num);
         }
-        num(sp::t_inv(p, df))
+        // 한셀 근사 반복 (hcnum::t_inv), 소수 9자리 반올림 (대조 실험 x1·x3)
+        num(round9(hc::t_inv(p, df)))
     }),
     f("T.INV.2T", 2, 2, V, t_inv_2t),
     f("TINV", 2, 2, V, t_inv_2t),
@@ -1530,7 +1534,9 @@ fn confidence(ctx: &mut Ctx, a: &[Value], t: bool) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     if t {
-        return num(sp::t_inv(1.0 - alpha / 2.0, n - 1.0) * sd / n.sqrt());
+        // t 는 T.INV 와 같은 반복의 값을 소수 7자리에서 버린 것 (대조 실험 x1: CONFIDENCE.T(…,2E6,4) = t·1E6)
+        let t = (hc::t_inv(1.0 - alpha / 2.0, n - 1.0) * 1e7).trunc() / 1e7;
+        return num(round9(t * sd / n.sqrt()));
     }
     // CONFIDENCE·CONFIDENCE.NORM 은 한셀 근사 정규 누적을 이분법으로 푼다 (결과가 k/2ⁿ, 대조 실험 norm4)
     num(hc::norm_inv_bisect(1.0 - alpha / 2.0) * sd / n.sqrt())
@@ -1620,7 +1626,13 @@ fn gamma_inv(ctx: &mut Ctx, a: &[Value]) -> Value {
     if !(0.0..1.0).contains(&p) || al <= 0.0 || be <= 0.0 {
         return Value::Error(ErrorKind::Num);
     }
-    num(be * sp::gamma_p_inv(p, al))
+    // p 가 ½ 보다 크면 위쪽 꼬리 1 − p 로 푼다 (GAMMAINV(0.999999,1,1) = 13.815510557935518 = −ln(1 − p), 대조 실험 dist)
+    num(be
+        * if p > 0.5 {
+            sp::gamma_q_inv(1.0 - p, al)
+        } else {
+            sp::gamma_p_inv(p, al)
+        })
 }
 
 fn beta_dist(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
