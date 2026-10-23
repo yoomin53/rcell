@@ -115,8 +115,8 @@ pub(crate) fn patch_anchor_xml(raw: &str, from: &Marker, to: Option<&Marker>) ->
     out
 }
 
-/// 열 너비·행 높이가 바뀐 칸 안의 도형 표지 오프셋을 같은 비율로 늘이거나 줄인다 — 한셀은 칸 크기(px)에서 1px 을
-/// 뺀 길이의 비율로 옮기고 px 로 반올림한다 (열 너비·행 높이 대조 실험: 28px 열을 131px 로 넓히면 25px 표지가
+/// 열 너비·행 높이가 바뀐 칸 안의 도형 표지 오프셋을 같은 비율로 늘이거나 줄인다 — 한셀은 오프셋을 px 로 올리고
+/// 칸 크기(px)에서 1px 을 뺀 길이의 비율로 옮겨 px 로 반올림한다 (열 너비·행 높이 대조 실험: 28px 열을 131px 로 넓히면 25px 표지가
 /// 25 × 130/27 → 120px, 40px 행을 60px 로 높이면 25px 표지가 38px). `first` 부터 `old`·`new` (px) 개수만큼의
 /// 행(`rows`) 또는 열
 pub(crate) fn scale_offsets(sheet: &mut Sheet, rows: bool, first: u32, old: &[f64], new: &[f64]) {
@@ -133,7 +133,9 @@ pub(crate) fn scale_offsets(sheet: &mut Sheet, rows: bool, first: u32, old: &[f6
         }
         const EMU: i64 = crate::units::EMU_PER_PX;
         let off = if rows { &mut m.row_off } else { &mut m.col_off };
-        let v = (*off as f64 / EMU as f64 * (n - 1.0).max(0.0) / (o - 1.0)).round() as i64 * EMU;
+        // 1px 보다 작은 EMU 는 한셀처럼 올려 px 로 (12345 EMU → 2px) 한 뒤 비율로 옮긴다
+        let px = ((*off).max(0) as u64).div_ceil(EMU as u64) as f64;
+        let v = (px * (n - 1.0).max(0.0) / (o - 1.0)).round() as i64 * EMU;
         let changed = v != *off;
         *off = v;
         changed
