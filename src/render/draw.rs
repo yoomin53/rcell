@@ -840,11 +840,20 @@ fn shape_body(
     format!("{css}\">{inner}")
 }
 
-/// 테마 글꼴 참조(+mn-lt, +mn-ea, +mj-lt, +mj-ea …)를 글꼴 이름으로
+/// 테마 글꼴 참조(+mn-lt, +mn-ea, +mj-lt, +mj-ea …)를 글꼴 이름으로. 동아시아(`-ea`)는 테마의 `a:ea` 글꼴, 그 이름이
+/// 비어 있으면 한셀 기본 글꼴 함초롬돋움 (서식 파일 소개 글상자: 10pt 한 줄이 맑은 고딕 403px 이 아니라 함초롬돋움의
+/// 387~391px — 글꼴 폭 실험)
 fn theme_font<'a>(name: &'a str, theme: &'a Theme) -> Option<&'a str> {
+    let ea = |f: &'a Option<String>| {
+        f.as_deref()
+            .filter(|n| !n.is_empty())
+            .or(Some("함초롬돋움"))
+    };
     match name {
-        "+mn-lt" | "+mn-ea" | "+mn-cs" => theme.minor_font.as_deref().or(Some("맑은 고딕")),
-        "+mj-lt" | "+mj-ea" | "+mj-cs" => theme.major_font.as_deref().or(Some("맑은 고딕")),
+        "+mn-ea" => ea(&theme.minor_ea),
+        "+mj-ea" => ea(&theme.major_ea),
+        "+mn-lt" | "+mn-cs" => theme.minor_font.as_deref().or(Some("맑은 고딕")),
+        "+mj-lt" | "+mj-cs" => theme.major_font.as_deref().or(Some("맑은 고딕")),
         "" => None,
         n => Some(n),
     }
@@ -946,6 +955,7 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
     let lvl1 = lst
         .and_then(|l| l.child_ns(shape::A, "lvl1pPr"))
         .and_then(|p| p.child_ns(shape::A, "defRPr"));
+    let mut first_para = true;
     for p in tx.elements().filter(|e| e.is(shape::A, "p")) {
         let ppr = p.child_ns(shape::A, "pPr");
         let align = match ppr.and_then(|x| x.attr("algn")) {
@@ -969,22 +979,29 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
                 size = Some(size.map_or(z / 100.0, |s| s.max(z / 100.0)));
             }
         }
-        let size = size
-            .or_else(|| lvl1.and_then(|d| d.attr_f64("sz")).map(|v| v / 100.0))
-            .unwrap_or(11.0)
-            * scale;
-        // 줄 간격: spcPct 100% = 글꼴 크기의 1.2 배, spcPts 는 그대로
+        let size = size.or_else(|| lvl1.and_then(|d| d.attr_f64("sz")).map(|v| v / 100.0));
+        // 글도 크기도 없는 빈 문단은 한셀 화면에 자리가 없다 (서식 파일 소개 글상자: `<a:endParaRPr>` 만 있는 문단 앞뒤
+        // 줄이 16px 간격 그대로 — 크기가 있는 빈 문단은 한 줄)
+        let has_text = p
+            .elements()
+            .any(|e| e.is(shape::A, "r") || e.is(shape::A, "fld") || e.is(shape::A, "br"));
+        if size.is_none() && !has_text {
+            continue;
+        }
+        let size = size.unwrap_or(11.0) * scale;
+        // 줄 간격: spcPct 100% = 글꼴 크기의 1.2 배, spcPts 는 그대로. px 로 정해 둔다 (대신 쓰는 글꼴의 위아래 폭이
+        // 줄을 늘리지 않게 — 한셀은 10pt 한 줄이 16px)
         let lnspc = ppr.and_then(|x| x.child_ns(shape::A, "lnSpc"));
-        let line = match lnspc.and_then(|l| l.child_ns(shape::A, "spcPct")) {
-            Some(pct) => format!(
-                "{:.3}",
-                1.2 * pct.attr_f64("val").unwrap_or(100_000.0) / 100_000.0
-            ),
+        let line_px = match lnspc.and_then(|l| l.child_ns(shape::A, "spcPct")) {
+            Some(pct) => {
+                1.2 * pct.attr_f64("val").unwrap_or(100_000.0) / 100_000.0 * size * 4.0 / 3.0
+            }
             None => match lnspc.and_then(|l| l.child_ns(shape::A, "spcPts")) {
-                Some(pts) => format!("{:.2}pt", pts.attr_f64("val").unwrap_or(0.0) / 100.0),
-                None => "1.2".into(),
+                Some(pts) => pts.attr_f64("val").unwrap_or(0.0) / 100.0 * 4.0 / 3.0,
+                None => 1.2 * size * 4.0 / 3.0,
             },
         };
+        let line = format!("{line_px:.2}px");
         let space = |n: &str| -> f64 {
             let Some(sp) = ppr.and_then(|x| x.child_ns(shape::A, n)) else {
                 return 0.0;
@@ -1003,12 +1020,33 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
         let first = ppr
             .and_then(|x| x.attr_f64("indent"))
             .map_or(0.0, |v| v / EMU);
+        // 문단의 글꼴은 첫 조각의 글꼴 (줄 상자의 기준이 조각과 같은 글꼴이어야 줄 높이가 늘지 않는다)
+        let face = p
+            .elements()
+            .find(|e| e.is(shape::A, "r"))
+            .and_then(|r| r.child_ns(shape::A, "rPr"))
+            .or(lvl1)
+            .and_then(|r| {
+                r.child_ns(shape::A, "ea")
+                    .or_else(|| r.child_ns(shape::A, "latin"))
+            })
+            .and_then(|f| f.attr("typeface"))
+            .and_then(|f| theme_font(f, theme))
+            .map(|f| format!("font-family:{};", font_family(f)))
+            .unwrap_or_default();
         let _ = write!(
             s,
-            "<p style=\"text-align:{align};font-size:{size:.2}pt;line-height:{line};margin:{:.1}px 0 {:.1}px {indent:.1}px;text-indent:{first:.1}px\">",
-            space("spcBef"),
+            "<p style=\"text-align:{align};font-size:{size:.2}pt;{face}line-height:{line};margin:{:.1}px 0 {:.1}px {indent:.1}px;text-indent:{first:.1}px\">",
+            // 첫 줄의 글자는 한셀이 0.12 em 위에 그린다 (글꼴 폭 실험의 5 글꼴 × 5 크기, 서식 파일 소개 글상자)
+            space("spcBef")
+                - if first_para {
+                    0.12 * size * 4.0 / 3.0
+                } else {
+                    0.0
+                },
             space("spcAft")
         );
+        first_para = false;
         // 글머리 기호
         if let Some(bu) = ppr.and_then(|x| x.child_ns(shape::A, "buChar")) {
             let _ = write!(s, "{} ", esc(bu.attr("char").unwrap_or("•")));
