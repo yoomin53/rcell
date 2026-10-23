@@ -401,11 +401,10 @@ impl Ctx<'_> {
     }
 
     fn stroke(&self, l: &ChartLine) -> Option<Option<Stroke>> {
+        // 미리 정한 색(a:prstClr)의 선도 그린다 — 레거시 차트의 범례 테두리 prstClr black 은 레거시 화면(VtChart)에는
+        // 없지만, 한셀이 그 차트를 XML 로 저장한 문서의 화면에는 있다 (*.legacy.as.cell 갈무리)
         let color = match l.fill.as_ref()? {
             ChartFill::None => return Some(None),
-            // 한셀 차트 화면은 미리 정한 색(a:prstClr)의 선을 그리지 않는다 (레거시 차트의 범례 테두리 prstClr black 이
-            // 한셀 화면에 없다 — craft-charts 레거시 15개)
-            ChartFill::Solid(c) if c.value.starts_with("prst:") => return Some(None),
             f => self.fill(f)?.map(|c| c.0)?,
         };
         let width = l.width.map_or(1.0, |w| (w as f64 / 9525.0).max(0.75));
