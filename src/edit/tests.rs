@@ -732,28 +732,27 @@ fn inserted_rows_and_columns_take_the_previous_format() {
             (6, Some(30.0), Some(1))
         ]
     );
-    assert_eq!(
-        s.cell(CellRef::parse("A5").unwrap()).map(|c| c.style),
-        Some(1)
-    );
-    assert_eq!(
-        s.cell(CellRef::parse("D6").unwrap()).map(|c| c.style),
-        Some(1)
-    );
-    // C 열 삽입: B 열에 열 서식이 있으므로 행 서식 있는 4행의 칸만 복사, 열 정보는 넓어진다
+    // 4행 칸의 서식은 행 서식과 같으므로 새 행에는 셀 없이 행 서식으로 보인다
+    assert_eq!(style_at(s, CellRef::parse("A5").unwrap()), 1);
+    assert_eq!(style_at(s, CellRef::parse("D6").unwrap()), 1);
+    assert!(s.cell(CellRef::parse("D6").unwrap()).is_none());
+    // C 열 삽입: 새 열은 B 열의 열 정보를 너비를 명시해 따로 받고, 칸마다 B 열 칸의 서식을 받는다 (B2 의 서식 3,
+    // 4행은 행 서식과 같으므로 셀 없이 행 서식으로 보인다)
     let mut wb = base.clone();
     insert_cols(&mut wb, 0, 2, 1).unwrap();
     let s = &wb.sheets[0];
     assert_eq!(
-        s.cols.iter().map(|c| (c.min, c.max)).collect::<Vec<_>>(),
-        [(2, 3)]
+        s.cols
+            .iter()
+            .map(|c| (c.min, c.max, c.style, c.custom_width))
+            .collect::<Vec<_>>(),
+        [(2, 2, Some(2), true), (3, 3, Some(2), true)]
     );
-    assert_eq!(
-        s.cell(CellRef::parse("C4").unwrap()).map(|c| c.style),
-        Some(1)
-    );
-    assert!(s.cell(CellRef::parse("C2").unwrap()).is_none());
-    // E 열 삽입: D 열에는 열 서식이 없으므로 모든 칸의 서식을 복사, 새 열 정보는 기본 너비
+    assert_eq!(style_at(s, CellRef::parse("C4").unwrap()), 1);
+    assert!(s.cell(CellRef::parse("C4").unwrap()).is_none());
+    assert_eq!(style_at(s, CellRef::parse("C2").unwrap()), 3);
+    assert_eq!(style_at(s, CellRef::parse("C5").unwrap()), 2);
+    // E 열 삽입: D 열에는 열 정보가 없으므로 새 열 정보는 기본 너비
     let mut wb = base;
     insert_cols(&mut wb, 0, 4, 1).unwrap();
     let s = &wb.sheets[0];
@@ -761,10 +760,7 @@ fn inserted_rows_and_columns_take_the_previous_format() {
         s.cell(CellRef::parse("E1").unwrap()).map(|c| c.style),
         Some(4)
     );
-    assert_eq!(
-        s.cell(CellRef::parse("E4").unwrap()).map(|c| c.style),
-        Some(1)
-    );
+    assert_eq!(style_at(s, CellRef::parse("E4").unwrap()), 1);
     assert_eq!(
         s.cols
             .iter()
@@ -772,6 +768,139 @@ fn inserted_rows_and_columns_take_the_previous_format() {
             .collect::<Vec<_>>(),
         [(2, Some(20.77734375), true), (5, Some(9.00390625), true)]
     );
+}
+
+/// 열 삽입·삭제 대조 실험의 문서: B 열 서식 1, D:F 서식 2, H:K 서식 3, 3행 행 서식 4, 7행 행 서식 3, A20 에 값
+fn row_style_book() -> Workbook {
+    let mut wb = Workbook {
+        sheets: vec![Sheet {
+            name: "Sheet1".into(),
+            default_col_width: Some(9.00390625),
+            ..Default::default()
+        }],
+        styles: styles(),
+        ..Default::default()
+    };
+    for i in 1..=4 {
+        wb.styles.cell_xfs.push(Xf {
+            num_fmt_id: i,
+            ..Default::default()
+        });
+    }
+    let s = &mut wb.sheets[0];
+    for (min, max, style) in [(2, 2, 1), (4, 6, 2), (8, 11, 3)] {
+        s.cols.push(ColInfo {
+            min,
+            max,
+            width: Some(9.00390625),
+            style: Some(style),
+            ..Default::default()
+        });
+    }
+    for (index, style) in [(3, 4), (7, 3)] {
+        s.rows.push(RowInfo {
+            index,
+            style: Some(style),
+            ..Default::default()
+        });
+    }
+    put(s, "A20", CellValue::Number(1.0), None);
+    wb
+}
+
+/// 행의 셀 기록 `열=서식` (없는 칸은 빼고)
+fn row_cells(wb: &Workbook, row: u32) -> String {
+    wb.sheets[0]
+        .cells
+        .iter()
+        .filter(|c| c.r.row == row - 1)
+        .map(|c| {
+            format!(
+                "{}={}",
+                CellRef {
+                    row: 0,
+                    col: c.r.col
+                }
+                .to_string()
+                .trim_end_matches('1'),
+                c.style
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// 열 삽입·삭제 대조 실험: 행 서식이 있는 행에는 열 정보가 옮겨지는 칸에 열 서식 셀이 생긴다
+#[test]
+fn column_shift_writes_cells_in_row_styled_rows() {
+    let run = |f: &dyn Fn(&mut Workbook)| {
+        let mut wb = row_style_book();
+        f(&mut wb);
+        (row_cells(&wb, 3), row_cells(&wb, 7))
+    };
+    let r = run(&|wb| insert_cols(wb, 0, 2, 1).unwrap());
+    assert_eq!(r.0, "D=0 E=2 F=2 G=2 H=0 I=3 J=3 K=3 L=3");
+    assert_eq!(r.1, "D=0 E=2 F=2 G=2 H=0");
+    // 4칸 삽입: 옛 C 열(D:F 의 3칸 앞 중 C)은 만들지 않는다 — 열 정보 칸마다 n 칸 앞 열
+    let r = run(&|wb| insert_cols(wb, 0, 2, 4).unwrap());
+    assert_eq!(
+        r.0,
+        "A=0 B=1 C=1 D=1 E=1 F=1 H=2 I=2 J=2 K=0 L=3 M=3 N=3 O=3"
+    );
+    let r = run(&|wb| insert_cols(wb, 0, 4, 3).unwrap());
+    assert_eq!(r.0, "B=1 C=0 H=2 I=2 J=0 K=3 L=3 M=3 N=3");
+    let r = run(&|wb| delete_cols(wb, 0, 1, 3).unwrap());
+    assert_eq!(r.0, "B=2 C=2 E=3 F=3 G=3 H=3 I=0 J=0 K=0");
+    let r = run(&|wb| delete_cols(wb, 0, 2, 2).unwrap());
+    assert_eq!(r.0, "C=2 D=2 E=0 F=3 G=3 H=3 I=3 J=0 K=0");
+    // 마지막 셀이 있는 행보다 아래 행, 셀이 없는 문서는 그대로
+    let r = run(&|wb| {
+        wb.sheets[0].rows.push(RowInfo {
+            index: 25,
+            style: Some(4),
+            ..Default::default()
+        });
+        insert_cols(wb, 0, 2, 1).unwrap();
+    });
+    assert_eq!(r.1, "D=0 E=2 F=2 G=2 H=0");
+    let mut wb = row_style_book();
+    wb.sheets[0].rows.push(RowInfo {
+        index: 25,
+        style: Some(4),
+        ..Default::default()
+    });
+    insert_cols(&mut wb, 0, 2, 1).unwrap();
+    assert_eq!(row_cells(&wb, 25), "");
+    let r = run(&|wb| {
+        wb.sheets[0].cells.clear();
+        insert_cols(wb, 0, 2, 1).unwrap();
+    });
+    assert_eq!(r.0, "");
+}
+
+// 서식 물려받기 대조 실험: 맞은편 칸에 같은 선이 없는 변은 물려받지 않는다
+#[test]
+fn inherited_borders_need_the_same_line_beyond() {
+    let mut wb = hcell_book();
+    put_edge(&mut wb, "B2", "B", Some("000000"));
+    put_edge(&mut wb, "B3", "B", Some("000000"));
+    put_edge(&mut wb, "C2", "B", Some("000000"));
+    put_edge(&mut wb, "C3", "B", Some("FF0000"));
+    put_edge(&mut wb, "D2", "L", Some("000000"));
+    put(&mut wb.sheets[0], "D3", CellValue::Number(1.0), None);
+    insert_rows(&mut wb, 0, 2, 1).unwrap();
+    assert_eq!(edges(&wb, "B3"), "- - - 000000");
+    assert_eq!(edges(&wb, "C3"), "- - - -");
+    assert_eq!(edges(&wb, "D3"), "- - - -");
+    assert_eq!(edges(&wb, "C4"), "- - - ff0000");
+    // 열도 같다 (왼쪽 칸의 선은 오른쪽 칸에 같은 선이 있을 때만)
+    let mut wb = hcell_book();
+    put_edge(&mut wb, "B5", "R", Some("000000"));
+    put_edge(&mut wb, "C5", "R", Some("000000"));
+    put_edge(&mut wb, "B6", "T", Some("000000"));
+    insert_cols(&mut wb, 0, 2, 1).unwrap();
+    assert_eq!(edges(&wb, "C5"), "- 000000 - -");
+    assert_eq!(edges(&wb, "C6"), "- - - -");
 }
 
 #[test]
@@ -1049,6 +1178,44 @@ fn merge_like_hcell() {
     assert_eq!(edges(&wb, "C24"), "- - auto -");
     assert_eq!(edges(&wb, "D25"), "- - - auto");
     assert!(wb.sheets[0].cell(c24).is_some_and(|c| c.value.is_empty()));
+}
+
+// 병합 대조 실험: 열을 지워 병합이 한 칸이 되거나 왼쪽 위 칸이 지워질 때
+#[test]
+fn merges_shrunk_by_deleted_columns_like_hcell() {
+    let book = || {
+        let mut wb = hcell_book();
+        put_edge(&mut wb, "A2", "R", Some("000000"));
+        put_edge(&mut wb, "B1", "B", Some("000000"));
+        put_edge(&mut wb, "C1", "B", Some("000000"));
+        put_edge(&mut wb, "B3", "T", Some("000000"));
+        put_edge(&mut wb, "C3", "T", Some("000000"));
+        put_edge(&mut wb, "D2", "L", Some("000000"));
+        put(&mut wb.sheets[0], "B2", CellValue::Text("m".into()), None);
+        merge(&mut wb, 0, parse_range("B2:C2").unwrap(), false).unwrap();
+        put_edge(&mut wb, "E5", "L", Some("000000"));
+        put(&mut wb.sheets[0], "B5", CellValue::Text("n".into()), None);
+        merge(&mut wb, 0, parse_range("B5:D5").unwrap(), false).unwrap();
+        wb
+    };
+    // 왼쪽 위 칸이 남아 한 칸이 되면 왼쪽·위·아래 변에 보이던 선을 적는다 (오른쪽은 그대로)
+    let mut wb = book();
+    delete_cols(&mut wb, 0, 2, 1).unwrap();
+    assert_eq!(edges(&wb, "B2"), "000000 - 000000 000000");
+    assert_eq!(edges(&wb, "A2"), "- 000000 - -");
+    // 왼쪽 위 칸을 지우면 값이 남는 칸으로 가고, 지운 쪽 변은 남는 칸 자리의 선(병합 안쪽이라 없음) — 앞 이웃의
+    // 맞닿은 선도 지운다
+    let mut wb = book();
+    delete_cols(&mut wb, 0, 1, 1).unwrap();
+    let b2 = wb.sheets[0].cell(CellRef::parse("B2").unwrap()).unwrap();
+    assert_eq!(b2.value, CellValue::Text("m".into()));
+    assert_eq!(edges(&wb, "B2"), "- - 000000 000000");
+    assert_eq!(edges(&wb, "A2"), "- - - -");
+    // 여러 칸이 남으면 값은 새 첫 칸으로, 오른쪽 둘레에 보이던 선을 적는다
+    let b5 = wb.sheets[0].cell(CellRef::parse("B5").unwrap()).unwrap();
+    assert_eq!(b5.value, CellValue::Text("n".into()));
+    assert_eq!(edges(&wb, "C5"), "- 000000 - -");
+    assert_eq!(merges(&wb), ["B5:C5"]);
 }
 
 // 열 너비·행 높이 대조 실험: 바뀐 칸 안의 표지 오프셋은 (칸 px − 1) 의 비율로 옮기고 px 로 반올림한다

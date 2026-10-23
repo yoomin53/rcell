@@ -110,6 +110,11 @@ pub fn intern_xf(styles: &mut Styles, xf: Xf) -> u32 {
     find_or_push(&mut styles.cell_xfs, xf)
 }
 
+/// 테두리 하나를 더한다 (같은 것이 있으면 그 번호)
+pub fn intern_border(styles: &mut Styles, b: Border) -> u32 {
+    find_or_push(&mut styles.borders, b)
+}
+
 /// 바꾼 서식 번호를 기억해 같은 서식을 여러 칸에 줄 때 한 번만 계산한다
 #[derive(Default)]
 pub struct Restyler {

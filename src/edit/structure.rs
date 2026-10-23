@@ -541,6 +541,428 @@ fn would_push_out(sheet: &Sheet, op: Shift) -> bool {
     }
 }
 
+/// 열 정보의 열 서식 (0부터 센 열, 열 정보가 없으면 0)
+fn col_style(sheet: &Sheet, c: u32) -> u32 {
+    sheet
+        .cols
+        .iter()
+        .find(|ci| ci.min <= c + 1 && c < ci.max)
+        .and_then(|ci| ci.style)
+        .unwrap_or(0)
+}
+
+/// 열을 넣거나 지울 때 행 서식이 있는 행에 만드는 셀 (옮기기 전 좌표). 한셀은 마지막 셀이 있는 행(지울 열의 셀은
+/// 빼고)까지, 행 서식이 있는 행마다 열 정보가 옮겨지는 칸에 그 칸의 열 서식(열 정보가 없으면 0)으로 셀을 만든다
+/// — 삽입은 삽입 위치부터 열 정보가 있는 열과 그 n 칸 앞 열, 삭제는 지운 범위 뒤의 열 정보가 있는 열과 그 n 칸 뒤
+/// 열 (열 삽입·삭제 대조 실험: E:J 열 서식, C 열 삽입 → 옛 D:J, G 열에 3칸 삽입 → 옛 D:J, C:D 삭제 → 옛 E:L).
+/// 행 서식과 같은 서식, 이미 있는 셀은 그대로 둔다. 그래서 그 칸들은 행 서식 대신 열 서식으로 보인다
+fn row_style_cells(sheet: &Sheet, op: Shift) -> Vec<Cell> {
+    let (at, n, ins) = match op {
+        Shift::InsCols { at, n } => (at, n, true),
+        Shift::DelCols { at, n } => (at, n, false),
+        _ => return Vec::new(),
+    };
+    let max = refs::MAX_COLS - 1;
+    let last = sheet
+        .cells
+        .iter()
+        .filter(|c| ins || c.r.col < at || c.r.col >= at + n)
+        .map(|c| c.r.row)
+        .max();
+    let Some(last) = last else {
+        return Vec::new();
+    };
+    let styled: Vec<(u32, u32)> = sheet
+        .rows
+        .iter()
+        .filter_map(|r| Some((r.index - 1, r.style?)))
+        .filter(|&(i, _)| i <= last)
+        .collect();
+    if styled.is_empty() {
+        return Vec::new();
+    }
+    let mut spans: Vec<(u32, u32)> = Vec::new();
+    for ci in &sheet.cols {
+        let (a, b) = (ci.min.max(1) - 1, (ci.max.max(1) - 1).min(max));
+        if ins {
+            if b < at {
+                continue;
+            }
+            let a = a.max(at);
+            spans.push((a, b));
+            if b >= n {
+                spans.push((a.max(n) - n, b - n));
+            }
+        } else {
+            let a = a.max(at + n);
+            if a > b {
+                continue;
+            }
+            spans.push((a, b));
+            if a + n <= max {
+                spans.push((a + n, (b + n).min(max)));
+            }
+        }
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::new();
+    for (a, b) in spans {
+        match merged.last_mut() {
+            Some(l) if a <= l.1 + 1 => l.1 = l.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    let cols: Vec<(u32, u32)> = merged
+        .iter()
+        .flat_map(|&(a, b)| a..=b)
+        .map(|c| (c, col_style(sheet, c)))
+        .collect();
+    let mut out = Vec::new();
+    for (row, s) in styled {
+        for &(col, cs) in &cols {
+            if cs != s && sheet.cell(CellRef { row, col }).is_none() {
+                out.push(Cell {
+                    r: CellRef { row, col },
+                    style: cs,
+                    value: CellValue::Empty,
+                    formula: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// 삽입한 행·열이 물려받는 서식: 앞 칸의 서식에서 맞은편 칸(삽입 위치에 있던 칸)과 같은 선이 아닌 변은 지운다
+/// (지운 변은 기본 테두리의 그 변). 한셀 대조 실험: 아래 선이 있는 B2 아래에 행을 넣으면 옛 B3 에도 같은 아래 선이
+/// 있을 때만 새 B3 이 아래 선을 받는다. 열도 같다
+fn inherited_style(
+    styles: &mut crate::model::Styles,
+    cache: &mut std::collections::HashMap<(u32, u32), u32>,
+    src: u32,
+    far: u32,
+) -> u32 {
+    if let Some(&s) = cache.get(&(src, far)) {
+        return s;
+    }
+    let border = |st: &crate::model::Styles, i: u32| {
+        st.xf(i)
+            .and_then(|x| st.borders.get(x.border_id as usize))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut b = border(styles, src);
+    let fb = border(styles, far);
+    let base = styles.borders.first().cloned().unwrap_or_default();
+    let keep = |own: &Option<crate::model::BorderEdge>, far: &Option<crate::model::BorderEdge>| {
+        !super::is_line(own.as_ref())
+            || matches!((own, far), (Some(x), Some(y)) if super::is_line(Some(y)) && super::same_line(x, y))
+    };
+    let mut changed = false;
+    for (own, far, def) in [
+        (&mut b.left, &fb.left, &base.left),
+        (&mut b.right, &fb.right, &base.right),
+        (&mut b.top, &fb.top, &base.top),
+        (&mut b.bottom, &fb.bottom, &base.bottom),
+    ] {
+        if !keep(own, far) {
+            *own = def.clone();
+            changed = true;
+        }
+    }
+    if !keep(&b.diagonal, &fb.diagonal)
+        || (super::is_line(b.diagonal.as_ref())
+            && (b.diagonal_up != fb.diagonal_up || b.diagonal_down != fb.diagonal_down))
+    {
+        b.diagonal = base.diagonal.clone();
+        b.diagonal_up = false;
+        b.diagonal_down = false;
+        changed = true;
+    }
+    let out = match styles.xf(src).cloned() {
+        Some(mut xf) if changed => {
+            xf.border_id = super::style::intern_border(styles, b);
+            super::style::intern_xf(styles, xf)
+        }
+        _ => src,
+    };
+    cache.insert((src, far), out);
+    out
+}
+
+/// 삽입한 행·열에 만들 셀 (옮긴 뒤 좌표, 서식): 앞 행(열)의 셀마다 물려받는 서식을 정하고, 새 칸이 셀 없이도
+/// 그 서식으로 보이면(행 서식 → 열 서식) 만들지 않는다. `sheet` 는 옮기기 전
+fn inherited_cells(
+    styles: &mut crate::model::Styles,
+    sheet: &Sheet,
+    op: Shift,
+) -> Vec<(u32, u32, u32)> {
+    let (at, n, on_rows) = match op {
+        Shift::InsRows { at, n } if at > 0 => (at, n, true),
+        Shift::InsCols { at, n } if at > 0 => (at, n, false),
+        _ => return Vec::new(),
+    };
+    let row_style: std::collections::HashMap<u32, u32> = sheet
+        .rows
+        .iter()
+        .filter_map(|r| Some((r.index - 1, r.style?)))
+        .collect();
+    let src = at - 1;
+    let mut cache = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for c in &sheet.cells {
+        let (line, other) = if on_rows {
+            (c.r.row, c.r.col)
+        } else {
+            (c.r.col, c.r.row)
+        };
+        if line != src {
+            continue;
+        }
+        let far = if on_rows {
+            CellRef {
+                row: at,
+                col: other,
+            }
+        } else {
+            CellRef {
+                row: other,
+                col: at,
+            }
+        };
+        let st = inherited_style(styles, &mut cache, c.style, super::style_at(sheet, far));
+        // 새 행은 앞 행의 행 정보를, 새 열은 앞 열의 열 정보를 받는다
+        let row = if on_rows { src } else { other };
+        let default = row_style
+            .get(&row)
+            .copied()
+            .unwrap_or_else(|| col_style(sheet, if on_rows { other } else { src }));
+        if st == default {
+            continue;
+        }
+        let end = (at + n).min(if on_rows {
+            refs::MAX_ROWS
+        } else {
+            refs::MAX_COLS
+        });
+        for k in at..end {
+            out.push(if on_rows {
+                (k, other, st)
+            } else {
+                (other, k, st)
+            });
+        }
+    }
+    out
+}
+
+/// 서식의 변 몇 개를 바꾼 서식 (선이 없으면 기본 테두리의 그 변)
+fn with_sides(
+    styles: &mut crate::model::Styles,
+    style: u32,
+    sides: &[(super::Side, Option<crate::model::BorderEdge>)],
+) -> u32 {
+    let Some(mut xf) = styles.xf(style).cloned() else {
+        return style;
+    };
+    let mut b = styles
+        .borders
+        .get(xf.border_id as usize)
+        .cloned()
+        .unwrap_or_default();
+    let base = styles.borders.first().cloned().unwrap_or_default();
+    let before = format!("{b:?}");
+    for (side, line) in sides {
+        let (slot, def) = match side {
+            super::Side::Left => (&mut b.left, &base.left),
+            super::Side::Right => (&mut b.right, &base.right),
+            super::Side::Top => (&mut b.top, &base.top),
+            super::Side::Bottom => (&mut b.bottom, &base.bottom),
+        };
+        *slot = line.clone().or_else(|| def.clone());
+    }
+    if format!("{b:?}") == before {
+        return style;
+    }
+    xf.border_id = super::style::intern_border(styles, b);
+    super::style::intern_xf(styles, xf)
+}
+
+/// 선의 굵기 순위 (가는 선 2, 보통 3, 굵은 선·이중선 4)
+fn line_weight(e: &crate::model::BorderEdge) -> u8 {
+    match e.style.as_deref() {
+        Some("hair") => 1,
+        Some("medium" | "mediumDashed" | "mediumDashDot" | "mediumDashDotDot" | "slantDashDot") => {
+            3
+        }
+        Some("thick" | "double") => 4,
+        _ => 2,
+    }
+}
+
+/// 칸 서식의 한 변의 선 (선이 없으면 None)
+fn edge_of(
+    sheet: &Sheet,
+    styles: &crate::model::Styles,
+    at: CellRef,
+    side: super::Side,
+) -> Option<crate::model::BorderEdge> {
+    styles
+        .xf(super::style_at(sheet, at))
+        .and_then(|x| styles.borders.get(x.border_id as usize))
+        .and_then(|b| side.of(b))
+        .filter(|e| super::is_line(Some(e)))
+        .cloned()
+}
+
+/// 이웃 칸의 맞닿은 선
+fn facing(
+    sheet: &Sheet,
+    styles: &crate::model::Styles,
+    at: CellRef,
+    side: super::Side,
+) -> Option<crate::model::BorderEdge> {
+    side.step(at)
+        .and_then(|q| edge_of(sheet, styles, q, side.opposite()))
+}
+
+/// 후보 선 가운데 가장 굵은 것 (같은 굵기면 앞의 것)
+fn pick_line(
+    cands: impl IntoIterator<Item = Option<crate::model::BorderEdge>>,
+) -> Option<crate::model::BorderEdge> {
+    let mut best: Option<crate::model::BorderEdge> = None;
+    for c in cands.into_iter().flatten() {
+        if best
+            .as_ref()
+            .is_none_or(|b| line_weight(&c) > line_weight(b))
+        {
+            best = Some(c);
+        }
+    }
+    best
+}
+
+/// 행·열을 지워 병합이 줄 때 한셀이 고치는 칸 (옮기기 전 좌표): 칸마다 새 서식, 그리고 왼쪽 위 칸의 값을 옮길 자리.
+/// 병합 대조 실험 (B2:C2 병합에서 열 하나를 지우는 경우 등). 변에 적는 선은 후보 가운데 가장 굵은 선(같으면 앞의
+/// 후보)이고, 지운 쪽 변은 열을 지우면 왼쪽, 행을 지우면 위다:
+/// - 한 칸만 남으면 그 칸은 왼쪽 위 칸의 서식을 받고, 열을 지우면 왼쪽·위·아래 변, 행을 지우면 위·왼쪽·오른쪽 변을
+///   다시 적는다. 후보는 왼쪽 위 칸이 남으면 (그 칸의 선, 이웃의 맞닿은 선), 지웠으면 (이웃의 맞닿은 선, 남는 칸의
+///   선)이고, 지웠을 때는 지운 자리 앞 이웃의 맞닿은 선이 새 선과 다르면 지운다
+/// - 여러 칸이 남고 왼쪽 위 칸을 지웠으면 값은 남는 첫 칸으로 가고, 병합의 칸 서식은 병합의 처음부터 남는 칸 수만큼
+///   그 자리에 남는다 (B2:D2 에서 B 열을 지우면 새 B2:C2 는 옛 B2·C2 의 서식). 둘레의 변(지운 쪽 변 포함)에는 (이웃의
+///   맞닿은 선, 남는 칸의 선)을 적는다
+/// - 왼쪽 위 칸이 남고 여러 칸이 남으면 그대로 둔다
+type MergeFix = (Vec<(CellRef, u32)>, Vec<(CellRef, CellRef)>);
+fn merge_fixes(styles: &mut crate::model::Styles, sheet: &Sheet, op: Shift) -> MergeFix {
+    use super::Side;
+    let (at, n, rows) = match op {
+        Shift::DelRows { at, n } => (at, n, true),
+        Shift::DelCols { at, n } => (at, n, false),
+        _ => return (Vec::new(), Vec::new()),
+    };
+    let gone = |v: u32| v >= at && v < at + n;
+    let pos = |line: u32, other: u32| {
+        if rows {
+            CellRef {
+                row: line,
+                col: other,
+            }
+        } else {
+            CellRef {
+                row: other,
+                col: line,
+            }
+        }
+    };
+    // 지운 쪽 변, 맞은편 변, 다른 축의 두 변
+    let (low, high, side_a, side_b) = if rows {
+        (Side::Top, Side::Bottom, Side::Left, Side::Right)
+    } else {
+        (Side::Left, Side::Right, Side::Top, Side::Bottom)
+    };
+    let mut sets = Vec::new();
+    let mut moves = Vec::new();
+    for m in &sheet.merges {
+        let (lo, hi, olo, ohi) = if rows {
+            (m.start.row, m.end.row, m.start.col, m.end.col)
+        } else {
+            (m.start.col, m.end.col, m.start.row, m.end.row)
+        };
+        let keep: Vec<u32> = (lo..=hi).filter(|&v| !gone(v)).collect();
+        if keep.len() as u32 == hi - lo + 1 || keep.is_empty() {
+            continue;
+        }
+        let anchor_gone = gone(lo);
+        let first = keep[0];
+        if keep.len() == 1 && olo == ohi {
+            let s = pos(first, olo);
+            let base = super::style_at(sheet, m.start);
+            let mut lines = Vec::new();
+            for sd in [low, side_a, side_b] {
+                let line = if anchor_gone {
+                    pick_line([facing(sheet, styles, s, sd), edge_of(sheet, styles, s, sd)])
+                } else {
+                    pick_line([
+                        edge_of(sheet, styles, m.start, sd),
+                        facing(sheet, styles, s, sd),
+                    ])
+                };
+                lines.push((sd, line));
+            }
+            let st = with_sides(styles, base, &lines);
+            sets.push((s, st));
+            if anchor_gone {
+                moves.push((m.start, s));
+                if at > 0 {
+                    let nb = pos(at - 1, olo);
+                    let face = low.opposite();
+                    let their = edge_of(sheet, styles, nb, face);
+                    let same = match (&lines[0].1, &their) {
+                        (Some(a), Some(b)) => super::same_line(a, b),
+                        _ => false,
+                    };
+                    if their.is_some() && !same {
+                        let nst = super::style_at(sheet, nb);
+                        sets.push((nb, with_sides(styles, nst, &[(face, None)])));
+                    }
+                }
+            }
+        } else if anchor_gone {
+            moves.push((m.start, pos(first, olo)));
+            for (k, &v) in keep.iter().enumerate() {
+                for o in olo..=ohi {
+                    let p = pos(v, o);
+                    let src = pos(lo + k as u32, o);
+                    let mut lines = Vec::new();
+                    if v == first {
+                        lines.push((
+                            low,
+                            pick_line([
+                                facing(sheet, styles, p, low),
+                                edge_of(sheet, styles, p, low),
+                            ]),
+                        ));
+                    }
+                    for (sd, on) in [(side_a, o == olo), (side_b, o == ohi), (high, v == hi)] {
+                        if on {
+                            let line = pick_line([
+                                facing(sheet, styles, p, sd),
+                                edge_of(sheet, styles, p, sd),
+                            ]);
+                            lines.push((sd, line));
+                        }
+                    }
+                    let st = with_sides(styles, super::style_at(sheet, src), &lines);
+                    if st != super::style_at(sheet, p) {
+                        sets.push((p, st));
+                    }
+                }
+            }
+        }
+    }
+    (sets, moves)
+}
+
 /// 행·열 삽입·삭제
 pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
     let err = |m: &str| crate::Error::Edit(m.to_string());
@@ -622,10 +1044,31 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
     map_all_charts(wb, &|x| refs::shift_formula(x, "", &target, op));
 
     let default_width = default_col_width(wb, si);
-    let (raw_parts, sheet) = (&mut wb.raw_parts, &mut wb.sheets[si]);
+    let (raw_parts, styles, sheet) = (&mut wb.raw_parts, &mut wb.styles, &mut wb.sheets[si]);
     let rows = op.on_rows();
 
-    // 2. 셀
+    // 2. 셀. 열을 옮기면 행 서식이 있는 행에 열 서식 셀을 먼저 만들고, 삽입한 행·열이 물려받을 서식을 정한다
+    let made = row_style_cells(sheet, op);
+    if !made.is_empty() {
+        sheet.cells.extend(made);
+        sheet.cells.sort_by_key(|c| (c.r.row, c.r.col));
+    }
+    let (sets, moves) = merge_fixes(styles, sheet, op);
+    for (from, to) in moves {
+        let Some(a) = sheet.cell(from).cloned() else {
+            continue;
+        };
+        if a.value.is_empty() && a.formula.is_none() {
+            continue;
+        }
+        let c = super::cell_mut(sheet, to);
+        c.value = a.value;
+        c.formula = a.formula;
+    }
+    for (r, st) in sets {
+        super::cell_mut(sheet, r).style = st;
+    }
+    let inherit = inherited_cells(styles, sheet, op);
     let mut cells: Vec<Cell> = Vec::with_capacity(sheet.cells.len());
     for mut c in std::mem::take(&mut sheet.cells) {
         let (Some(row), Some(col)) = (op.point(true, c.r.row), op.point(false, c.r.col)) else {
@@ -662,56 +1105,14 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
         }
         cells.push(c);
     }
-    // 삽입한 행·열: 앞 행(열)의 서식을 물려받는다
-    match op {
-        Shift::InsRows { at, n } if at > 0 => {
-            let src = at - 1;
-            let styled: Vec<(u32, u32)> = cells
-                .iter()
-                .filter(|c| c.r.row == src && c.style != 0)
-                .map(|c| (c.r.col, c.style))
-                .collect();
-            for r in at..(at + n).min(refs::MAX_ROWS) {
-                for &(col, style) in &styled {
-                    cells.push(Cell {
-                        r: CellRef { row: r, col },
-                        style,
-                        value: CellValue::Empty,
-                        formula: None,
-                    });
-                }
-            }
-        }
-        Shift::InsCols { at, n } if at > 0 => {
-            let src = at - 1;
-            let col_styled = sheet
-                .cols
-                .iter()
-                .any(|c| (c.min..=c.max).contains(&at) && c.style.is_some_and(|s| s != 0));
-            let row_styled: std::collections::HashSet<u32> = sheet
-                .rows
-                .iter()
-                .filter(|r| r.style.is_some())
-                .map(|r| r.index - 1)
-                .collect();
-            let styled: Vec<(u32, u32)> = cells
-                .iter()
-                .filter(|c| c.r.col == src && c.style != 0)
-                .filter(|c| !col_styled || row_styled.contains(&c.r.row))
-                .map(|c| (c.r.row, c.style))
-                .collect();
-            for col in at..(at + n).min(refs::MAX_COLS) {
-                for &(row, style) in &styled {
-                    cells.push(Cell {
-                        r: CellRef { row, col },
-                        style,
-                        value: CellValue::Empty,
-                        formula: None,
-                    });
-                }
-            }
-        }
-        _ => {}
+    // 삽입한 행·열: 앞 행(열)의 서식을 물려받는다 (옮기기 전의 칸으로 정해 둔 것)
+    for (r, c, style) in inherit {
+        cells.push(Cell {
+            r: CellRef { row: r, col: c },
+            style,
+            value: CellValue::Empty,
+            formula: None,
+        });
     }
     cells.sort_by_key(|c| (c.r.row, c.r.col));
     cells.dedup_by_key(|c| (c.r.row, c.r.col));
@@ -747,19 +1148,41 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
         out.dedup_by_key(|r| r.index);
         sheet.rows = out;
     } else {
-        let mut out: Vec<ColInfo> = Vec::with_capacity(sheet.cols.len() + 1);
-        let mut covered = false;
+        // 삽입한 열은 왼쪽 열의 열 정보를 너비를 명시해(customWidth) 받는다 — 왼쪽 열을 덮는 정보를 넓히지 않고
+        // 따로 둔다 (숨김·접힘은 받지 않는다). 왼쪽 열 정보가 없거나 맨 앞에 넣으면 기본 너비를 명시한 열 정보
+        let mut out: Vec<ColInfo> = Vec::with_capacity(sheet.cols.len() + 2);
+        let mut new_cols: Option<ColInfo> = None;
         for c in std::mem::take(&mut sheet.cols) {
             let (a, b) = (c.min - 1, c.max - 1);
-            // 왼쪽 열을 덮는 정보는 삽입한 열까지 넓어진다
-            if let Shift::InsCols { at, .. } = op
-                && at > 0
-                && (a..=b).contains(&(at - 1))
-            {
-                covered = true;
+            if let Shift::InsCols { at, n } = op {
+                if at > 0 && (a..=b).contains(&(at - 1)) {
+                    new_cols = Some(ColInfo {
+                        min: at + 1,
+                        max: (at + n).min(refs::MAX_COLS),
+                        hidden: false,
+                        collapsed: false,
+                        custom_width: true,
+                        ..c.clone()
+                    });
+                }
+                // 삽입 위치를 품은 정보는 둘로 나뉜다
+                if a < at && at <= b {
+                    out.push(ColInfo {
+                        min: a + 1,
+                        max: at,
+                        ..c.clone()
+                    });
+                    if at + n < refs::MAX_COLS {
+                        out.push(ColInfo {
+                            min: at + n + 1,
+                            max: (b + n + 1).min(refs::MAX_COLS),
+                            ..c
+                        });
+                    }
+                    continue;
+                }
             }
-            let adjacent = matches!(op, Shift::InsCols { .. });
-            if let Some((x, y)) = op.span(false, a, b, adjacent) {
+            if let Some((x, y)) = op.span(false, a, b, false) {
                 out.push(ColInfo {
                     min: x + 1,
                     max: y + 1,
@@ -767,11 +1190,8 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
                 });
             }
         }
-        if let Shift::InsCols { at, n } = op
-            && at > 0
-            && !covered
-        {
-            out.push(ColInfo {
+        if let Shift::InsCols { at, n } = op {
+            out.push(new_cols.unwrap_or(ColInfo {
                 min: at + 1,
                 max: (at + n).min(refs::MAX_COLS),
                 width: Some(default_width),
@@ -780,7 +1200,7 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
                 custom_width: true,
                 outline_level: 0,
                 collapsed: false,
-            });
+            }));
         }
         out.sort_by_key(|c| c.min);
         sheet.cols = out;
