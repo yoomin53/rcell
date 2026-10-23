@@ -758,7 +758,8 @@ fn legend_items(ch: &Chart, groups: &[Group], cx: &Ctx, pie_like: bool) -> Vec<L
             let color = series_color(s, k, cx);
             let name = s.name.clone().unwrap_or_else(|| format!("계열{}", k + 1));
             let item = match g.kind {
-                "line" | "scatter" | "radar" => {
+                // 3차원 꺾은선의 범례 표지는 네모 (c2_e4_line3d 의 한셀 화면)
+                "line" | "scatter" | "radar" if !g.three_d => {
                     let st = series_stroke(s, &color, cx);
                     let marker = marker_of(s, g, k).map(|(m, _)| m);
                     LegendItem {
@@ -1550,6 +1551,39 @@ fn draw_axis_chart(
     } else {
         0.0
     };
+    // 원근 3차원 (rAngAx 0): 상자를 돌려 그린다
+    if !legacy
+        && first.three_d
+        && !horizontal
+        && !xy
+        && matches!(first.kind, "bar" | "line" | "area")
+        && ch
+            .view3d
+            .as_ref()
+            .is_some_and(|v| v.r_ang_ax == Some(false))
+        && ch
+            .plot_layout
+            .as_ref()
+            .and_then(|l| l.manual.as_ref())
+            .is_none()
+    {
+        let p = Persp {
+            val_ax,
+            cat_ax,
+            cats: &cats,
+            n_cat,
+            val_fmt: val_fmt.as_deref(),
+            cat_fmt: cat_fmt.as_deref(),
+            val_font: &val_font,
+            cat_font: &cat_font,
+            range: (vlo, vhi, percent),
+            left: inner.x + val_label_w,
+            right: inner.x + inner.w,
+            h,
+        };
+        draw_perspective(out, ch, groups, cx, &p);
+        return;
+    }
     let sec_label_w = if sec_ax.is_some() && labels_on(sec_ax) {
         val_label_w
     } else {
@@ -1679,10 +1713,13 @@ fn draw_axis_chart(
             .and_then(|l| l.manual.as_ref())
             .is_none()
     {
+        // 직각 축(rAngAx)의 깊이 자리는 회전에 따라 (rotX·rotY 0 이면 막대는 평면이지만 왼쪽·오른쪽·아래 자리는
+        // 남는다 — c2_e4_bar3d_b: 왼쪽 +8, 오른쪽 −12, 아래 −3 px)
+        let (fx, fy) = oblique(ch);
         let (l, r, t, b) = (
             plot.w * 0.022,
-            plot.w * 0.092,
-            plot.h * 0.056,
+            plot.w * (0.031 + 0.061 * fx),
+            plot.h * 0.056 * fy,
             plot.h * 0.008,
         );
         plot.x += l;
@@ -1829,7 +1866,17 @@ fn draw_axis_chart(
         };
         match g.kind {
             "bar" => draw_bars(
-                out, g, cx, sc, &plot, horizontal, n_cat, band, &cat_mid, &vpos,
+                out,
+                g,
+                cx,
+                sc,
+                &plot,
+                horizontal,
+                n_cat,
+                band,
+                &cat_mid,
+                &vpos,
+                oblique(ch),
             ),
             "line" | "stock" => draw_lines(out, g, cx, sc, n_cat, &cat_mid, &vpos, false),
             "area" => draw_areas(out, g, cx, sc, n_cat, &cat_mid, &vpos, &plot),
@@ -2144,6 +2191,7 @@ fn draw_bars(
     band: f64,
     cat_mid: &dyn Fn(usize) -> f64,
     vpos: &dyn Fn(&Scale, f64) -> f64,
+    depth: (f64, f64),
 ) {
     let stacked = matches!(g.grouping, "stacked" | "percentStacked");
     let percent = g.grouping == "percentStacked";
@@ -2220,9 +2268,11 @@ fn draw_bars(
             };
             if g.three_d {
                 // 한셀 화면 (chart_col3d, 막대 폭 30px): 앞면은 축 자리에서 오른쪽 6px·위 3~4px, 깊이는 오른쪽 8px·위 7px
-                let (sx, sy) = (bw * 0.2, bw * 0.12);
+                let (sx, sy) = (bw * 0.2 * depth.0, bw * 0.12 * depth.1);
                 out.rect(rx + sx, ry - sy, rw, rh, &st);
-                bar_depth(out, rx + sx, ry - sy, rw, rh, bw, &st, &color);
+                if depth.0 > 0.0 || depth.1 > 0.0 {
+                    bar_depth(out, rx + sx, ry - sy, rw, rh, bw, depth, &st, &color);
+                }
             } else {
                 out.rect(rx, ry, rw, rh, &st);
             }
@@ -2232,8 +2282,18 @@ fn draw_bars(
 
 /// 3차원 막대의 윗면·옆면. 한셀 화면에서 윗면은 앞면 색 × 0.72, 옆면은 × 0.485 (chart_col3d: #6182D6 → #465E9A·#2F3F68)
 #[allow(clippy::too_many_arguments)]
-fn bar_depth(out: &mut Svg, x: f64, y: f64, w: f64, h: f64, bw: f64, st: &Style, color: &str) {
-    let (dx, dy) = (bw * 0.267, bw * 0.233);
+fn bar_depth(
+    out: &mut Svg,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    bw: f64,
+    depth: (f64, f64),
+    st: &Style,
+    color: &str,
+) {
+    let (dx, dy) = (bw * 0.267 * depth.0, bw * 0.233 * depth.1);
     let front = st.fill.as_ref().map_or(color, |f| f.0.as_str());
     let top = format!(
         "M{x:.1},{y:.1}L{:.1},{:.1}L{:.1},{:.1}L{:.1},{y:.1}Z",
@@ -2255,6 +2315,299 @@ fn bar_depth(out: &mut Svg, x: f64, y: f64, w: f64, h: f64, bw: f64, st: &Style,
     );
     out.path(&top, &Style::fill(&scale_rgb(front, 0.72)));
     out.path(&side, &Style::fill(&scale_rgb(front, 0.485)));
+}
+
+// ---------------------------------------------------------------------------
+// 원근 3차원 (rAngAx 0)
+// ---------------------------------------------------------------------------
+
+/// 원근 3차원 차트에 넘기는 축 차트의 값들
+struct Persp<'a> {
+    val_ax: Option<&'a ChartAxis>,
+    cat_ax: Option<&'a ChartAxis>,
+    cats: &'a [String],
+    n_cat: usize,
+    val_fmt: Option<&'a str>,
+    cat_fmt: Option<&'a str>,
+    val_font: &'a Font,
+    cat_font: &'a Font,
+    /// 값 범위 (최소, 최대, 100% 누적)
+    range: (f64, f64, bool),
+    /// 상자가 들어갈 가로 자리 (값 레이블 오른쪽 ~ 범례 앞)
+    left: f64,
+    right: f64,
+    h: f64,
+}
+
+/// 한셀 화면의 원근 3차원 상자 (c2_e4_line3d 15/20/30 과 c2_e4_bar3d_a 30/45/50/200 의 모서리 13개를 한 모형으로
+/// 맞춘 값 — 평균 오차 2.5px): 가로 1 × 높이 0.675 × 깊이 0.163 상자를 세로축으로 rotY, 가로축으로 rotX 돌리고 가로의
+/// 2.46 배 거리에서 원근으로 본다. 원근값·깊이 비율은 두 표본에서 상자를 바꾸지 않는다
+const BOX3D: (f64, f64, f64) = (0.675, 0.163, 2.458);
+
+struct View3 {
+    sa: f64,
+    ca: f64,
+    sb: f64,
+    cb: f64,
+    k: f64,
+    ox: f64,
+    oy: f64,
+}
+
+impl View3 {
+    /// 상자 좌표 (x 0..1 항목, y 0..높이 값, z 0..깊이 앞 → 뒤) → 크기를 맞추기 전 화면 좌표 (y 위로)
+    fn raw(&self, x: f64, y: f64, z: f64) -> (f64, f64) {
+        let (hh, dd, l) = BOX3D;
+        let (x, y, z) = (x - 0.5, y - hh / 2.0, z - dd / 2.0);
+        let xx = x * self.cb + z * self.sb;
+        let zz = -x * self.sb + z * self.cb;
+        let yy = y * self.ca + zz * self.sa;
+        let z2 = -y * self.sa + zz * self.ca;
+        let s = l / (l + z2);
+        (xx * s, yy * s)
+    }
+    fn p(&self, x: f64, y: f64, z: f64) -> (f64, f64) {
+        let (a, b) = self.raw(x, y, z);
+        (self.ox + self.k * a, self.oy - self.k * b)
+    }
+    fn path(&self, pts: &[(f64, f64, f64)]) -> String {
+        let mut d = String::new();
+        for (i, &(x, y, z)) in pts.iter().enumerate() {
+            let (a, b) = self.p(x, y, z);
+            let _ = write!(d, "{}{a:.1},{b:.1}", if i == 0 { "M" } else { "L" });
+        }
+        d.push('Z');
+        d
+    }
+}
+
+/// 원근 3차원 막대·꺾은선·영역 (한셀 화면, docs/format/screen.md 6절): 상자를 위 18px·아래 36px 자리에 높이로
+/// 맞춰 가운데 두고, 옆벽(x 0)·뒷벽(z 깊이)에 눈금선, 바닥 왼쪽·뒤 모서리, 앞 왼쪽 세로 모서리에 값 축, 바닥 앞
+/// 모서리에 항목 축을 그린다. 막대는 앞면(계열 색)·윗면(× 0.97)·옆면(× 0.65), 깊이는 상자 깊이 / (1 + 깊이 간격)
+fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &Persp) {
+    let v3 = ch.view3d.as_ref();
+    let rx = f64::from(v3.and_then(|v| v.rot_x).unwrap_or(15)).to_radians();
+    let ry = f64::from(v3.and_then(|v| v.rot_y).unwrap_or(20)).to_radians();
+    let (hh, dd, _) = BOX3D;
+    let mut v = View3 {
+        sa: rx.sin(),
+        ca: rx.cos(),
+        sb: ry.sin(),
+        cb: ry.cos(),
+        k: 1.0,
+        ox: 0.0,
+        oy: 0.0,
+    };
+    // 상자 모서리 8개의 테두리 → 자리에 맞춘다 (높이가 먼저 찬다)
+    let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for &x in &[0.0, 1.0] {
+        for &y in &[0.0, hh] {
+            for &z in &[0.0, dd] {
+                let (a, b) = v.raw(x, y, z);
+                x0 = x0.min(a);
+                x1 = x1.max(a);
+                y0 = y0.min(b);
+                y1 = y1.max(b);
+            }
+        }
+    }
+    let (top, bottom) = (18.0, p.h - 36.0);
+    v.k = ((bottom - top) / (y1 - y0))
+        .min((p.right - p.left).max(10.0) / (x1 - x0))
+        .max(1.0);
+    v.oy = top + v.k * y1;
+    v.ox = (p.left + p.right) / 2.0 - v.k * (x0 + x1) / 2.0;
+
+    // 값 눈금: 앞 왼쪽 세로 모서리 길이로
+    let (_, a0) = v.p(0.0, 0.0, 0.0);
+    let (_, a1) = v.p(0.0, hh, 0.0);
+    let (vlo, vhi, percent) = p.range;
+    let sc = make_scale(
+        vlo,
+        vhi,
+        p.val_ax,
+        (a0 - a1).abs(),
+        true,
+        TickRule::Xml { room: false },
+    );
+    let yv = |val: f64| sc.t(val).clamp(0.0, 1.0) * hh;
+    let gray = |sp: Option<&ChartShapeProps>| cx.line_of(sp, Some((AXIS_GRAY, 1.0)));
+    let line3 = |out: &mut Svg, a: (f64, f64, f64), b: (f64, f64, f64), st: &Stroke| {
+        let (x0, y0) = v.p(a.0, a.1, a.2);
+        let (x1, y1) = v.p(b.0, b.1, b.2);
+        out.line(x0, y0, x1, y1, st);
+    };
+    // 벽의 눈금선
+    if let Some(gl) = p.val_ax.and_then(|a| a.major_gridlines.as_ref())
+        && let Some(st) = gray(gl.sp_pr.as_ref())
+    {
+        for t in sc.ticks() {
+            let y = yv(t);
+            line3(out, (0.0, y, 0.0), (0.0, y, dd), &st);
+            line3(out, (0.0, y, dd), (1.0, y, dd), &st);
+        }
+    }
+    let axis_st = Stroke::new(AXIS_GRAY, 1.0);
+    // 바닥 왼쪽·뒤 모서리
+    line3(out, (0.0, 0.0, 0.0), (0.0, 0.0, dd), &axis_st);
+    line3(out, (0.0, 0.0, dd), (1.0, 0.0, dd), &axis_st);
+
+    // 계열
+    let n = p.n_cat.max(1);
+    let base = yv(0.0f64.clamp(sc.min, sc.max));
+    for g in groups {
+        let ns = g.series.len().max(1);
+        let gap_depth = g.props.gap_depth.unwrap_or(150) as f64 / 100.0;
+        let dz = dd / (1.0 + gap_depth);
+        let (z0, z1) = ((dd - dz) / 2.0, (dd + dz) / 2.0);
+        match g.kind {
+            "bar" => {
+                let gap = g.props.gap_width.unwrap_or(150) as f64 / 100.0;
+                let slot = (1.0 / n as f64) / (ns as f64 + gap);
+                for k in 0..n {
+                    for (i, s) in g.series.iter().enumerate() {
+                        let Some(val) = s.values.get(k).copied().flatten() else {
+                            continue;
+                        };
+                        let color = series_color(s, g.offset + i, cx);
+                        let st = point_style(s, i, k, cx, &color);
+                        let front = st.fill.as_ref().map_or(color.as_str(), |f| f.0.as_str());
+                        let bx0 = k as f64 / n as f64 + slot * (gap / 2.0 + i as f64);
+                        let bx1 = bx0 + slot;
+                        let (ya, yb) = (base, yv(val));
+                        let sx = if v.sb >= 0.0 { bx1 } else { bx0 };
+                        out.path(
+                            &v.path(&[(sx, ya, z0), (sx, yb, z0), (sx, yb, z1), (sx, ya, z1)]),
+                            &Style::fill(&scale_rgb(front, 0.65)),
+                        );
+                        out.path(
+                            &v.path(&[(bx0, yb, z0), (bx1, yb, z0), (bx1, yb, z1), (bx0, yb, z1)]),
+                            &Style::fill(&scale_rgb(front, 0.97)),
+                        );
+                        out.path(
+                            &v.path(&[(bx0, ya, z0), (bx1, ya, z0), (bx1, yb, z0), (bx0, yb, z0)]),
+                            &st,
+                        );
+                    }
+                }
+            }
+            "area" => {
+                for (i, s) in g.series.iter().enumerate() {
+                    let color = series_color(s, g.offset + i, cx);
+                    let st = cx.shape(s.sp_pr.as_ref(), Some(&color), None);
+                    let front = st.fill.as_ref().map_or(color.clone(), |f| f.0.clone());
+                    let xs = |k: usize| k as f64 / (n.max(2) - 1) as f64;
+                    let ys: Vec<f64> = (0..n)
+                        .map(|k| yv(s.values.get(k).copied().flatten().unwrap_or(0.0)))
+                        .collect();
+                    for k in 0..n.saturating_sub(1) {
+                        out.path(
+                            &v.path(&[
+                                (xs(k), ys[k], z0),
+                                (xs(k + 1), ys[k + 1], z0),
+                                (xs(k + 1), ys[k + 1], z1),
+                                (xs(k), ys[k], z1),
+                            ]),
+                            &Style::fill(&scale_rgb(&front, 0.97)),
+                        );
+                    }
+                    let last = n - 1;
+                    out.path(
+                        &v.path(&[
+                            (xs(last), base, z0),
+                            (xs(last), ys[last], z0),
+                            (xs(last), ys[last], z1),
+                            (xs(last), base, z1),
+                        ]),
+                        &Style::fill(&scale_rgb(&front, 0.65)),
+                    );
+                    let mut pts: Vec<(f64, f64, f64)> =
+                        (0..n).map(|k| (xs(k), ys[k], z0)).collect();
+                    pts.push((xs(last), base, z0));
+                    pts.push((0.0, base, z0));
+                    out.path(&v.path(&pts), &st);
+                }
+            }
+            _ => {
+                for (i, s) in g.series.iter().enumerate() {
+                    let color = series_color(s, g.offset + i, cx);
+                    let mut st =
+                        series_stroke(s, &color, cx).unwrap_or_else(|| Stroke::new(&color, 2.0));
+                    st.width = st.width.min(2.0);
+                    let mut d = String::new();
+                    for k in 0..n {
+                        let Some(val) = s.values.get(k).copied().flatten() else {
+                            continue;
+                        };
+                        let (a, b) = v.p((k as f64 + 0.5) / n as f64, yv(val), dd / 2.0);
+                        let _ = write!(d, "{}{a:.1},{b:.1}", if d.is_empty() { "M" } else { "L" });
+                    }
+                    out.path(
+                        &d,
+                        &Style {
+                            fill: None,
+                            stroke: Some(st),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    // 값 축: 앞 왼쪽 세로 모서리, 눈금은 앞쪽으로, 레이블은 그 왼쪽
+    if axis_visible(p.val_ax) {
+        let st = gray(p.val_ax.and_then(|a| a.sp_pr.as_ref())).unwrap_or(axis_st.clone());
+        line3(out, (0.0, 0.0, 0.0), (0.0, hh, 0.0), &st);
+        for t in sc.ticks() {
+            let y = yv(t);
+            line3(out, (0.0, y, 0.0), (0.0, y, -dd * 0.18), &st);
+            if labels_on(p.val_ax) {
+                let (a, b) = v.p(0.0, y, 0.0);
+                let label = tick_label(t, p.val_ax, p.val_fmt, percent);
+                out.text(
+                    a - 9.0,
+                    b + p.val_font.px() * 0.35,
+                    &label,
+                    p.val_font,
+                    "end",
+                );
+            }
+        }
+    }
+    // 항목 축: 바닥 앞 모서리, 눈금은 띠 경계에서 앞쪽으로, 레이블은 띠 가운데의 왼쪽 아래
+    if axis_visible(p.cat_ax) {
+        let st = gray(p.cat_ax.and_then(|a| a.sp_pr.as_ref())).unwrap_or(axis_st.clone());
+        line3(out, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), &st);
+        for k in 0..=n {
+            let x = k as f64 / n as f64;
+            line3(out, (x, 0.0, 0.0), (x, 0.0, -dd * 0.18), &st);
+        }
+        if labels_on(p.cat_ax) {
+            for (k, c) in p.cats.iter().enumerate().take(n) {
+                let (a, b) = v.p((k as f64 + 0.5) / n as f64, 0.0, 0.0);
+                let t = cat_text(c, p.cat_fmt);
+                out.text(
+                    a - 9.0,
+                    b + 21.0 + p.cat_font.px() * 0.35,
+                    &t,
+                    p.cat_font,
+                    "middle",
+                );
+            }
+        }
+    }
+}
+
+/// 직각 축 3차원(rAngAx)의 깊이 비율 (가로, 세로): chart_col3d 의 rotY 20·rotX 15 를 1 로, sin 에 비례 (rotX·rotY 0
+/// 이면 깊이가 보이지 않는다 — c2_e4_bar3d_b 의 한셀 화면은 평면 막대)
+fn oblique(ch: &Chart) -> (f64, f64) {
+    let v = ch.view3d.as_ref();
+    let rx = f64::from(v.and_then(|v| v.rot_x).unwrap_or(15)).to_radians();
+    let ry = f64::from(v.and_then(|v| v.rot_y).unwrap_or(20)).to_radians();
+    (
+        ry.sin() / 20f64.to_radians().sin(),
+        rx.sin() / 15f64.to_radians().sin(),
+    )
 }
 
 /// `#RRGGBB` 의 각 성분에 `k` 를 곱한다 (형식이 다르면 그대로)
@@ -2726,6 +3079,10 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
             h: inner.h + 6.0,
         },
     };
+    if g.three_d && !doughnut && legacy.is_none() {
+        draw_pie3d(out, ch, g, cx, plot);
+        return;
+    }
     let (cx0, cy0) = (plot.x + plot.w / 2.0, plot.y + plot.h / 2.0);
     let r_out = (plot.w.min(plot.h) / 2.0).max(4.0);
     // 레거시 화면: 원 위 가운데에 계열 이름 (chart_pie: 글자 아랫변이 원 위 14px)
@@ -2847,6 +3204,91 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
             }
             a0 = a1;
         }
+    }
+}
+
+/// 3차원 원형 (한셀 화면, c2_e4_pie3d — rotX 30): 윗면은 가로 반지름 rx, 세로 0.519·rx 의 타원 (rotX 에 따라
+/// sin·1.04), 옆면 두께 0.233·rx. rx 는 2차원 원 자리 높이의 0.65 배와 너비의 0.456 배 중 작은 것, 가운데는 5px 왼쪽·
+/// 3px 위. 옆면은 앞쪽 반만 보이고 위(× 0.58)에서 아래(× 0.95)로 밝아진다. 조각 경계선은 없다
+fn draw_pie3d(out: &mut Svg, ch: &Chart, g: &Group, cx: &Ctx, plot: Rect) {
+    let Some(s) = g.series.first() else { return };
+    let rot_x = f64::from(
+        ch.view3d
+            .as_ref()
+            .and_then(|v| v.rot_x)
+            .unwrap_or(30)
+            .clamp(10, 80),
+    )
+    .to_radians();
+    let rx = (plot.h * 0.65).min(plot.w * 0.456).max(4.0);
+    let ry = rx * rot_x.sin() * 1.038;
+    let th = rx * 0.233;
+    let (cx0, cy0) = (
+        plot.x + plot.w / 2.0 - 5.0,
+        plot.y + plot.h / 2.0 - 3.0 - th / 2.0,
+    );
+    let vals: Vec<f64> = s.values.iter().map(|v| v.unwrap_or(0.0).abs()).collect();
+    let total: f64 = vals.iter().sum();
+    if total <= 0.0 {
+        return;
+    }
+    // 각도 θ (위에서 시계 방향, 라디안) → 윗면 타원 위 점
+    let pt = |t: f64, dy: f64| (cx0 + rx * t.sin(), cy0 - ry * t.cos() + dy);
+    let first_ang = (g.props.first_slice_ang.unwrap_or(0) as f64).to_radians();
+    let mut slices = Vec::new();
+    let mut a0 = first_ang;
+    for (k, v) in vals.iter().enumerate() {
+        let a1 = a0 + v / total * std::f64::consts::TAU;
+        let base_c = pie_color(ch, cx, k);
+        let st0 = point_style(s, 0, k, cx, &base_c);
+        let color = st0.fill.map_or(base_c, |f| f.0);
+        slices.push((a0, a1, color));
+        a0 = a1;
+    }
+    // 옆면: 앞쪽 반 (θ 가 90°..270°)
+    let half = std::f64::consts::PI;
+    for (k, (a0, a1, color)) in slices.iter().enumerate() {
+        let lo = a0.max(half / 2.0);
+        let hi = a1.min(half * 1.5);
+        // 한 바퀴 넘는 조각은 다음 바퀴의 앞쪽도
+        for (lo, hi) in [(lo, hi), (a0.max(half * 2.5), a1.min(half * 3.5))] {
+            if hi <= lo {
+                continue;
+            }
+            let id = format!("rcp{k}x{:.0}y{:.0}", cx0 * 8.0, cy0 * 8.0);
+            let _ = write!(
+                out.defs,
+                "<linearGradient id=\"{id}\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"{}\"/><stop offset=\"1\" stop-color=\"{}\"/></linearGradient>",
+                scale_rgb(color, 0.58),
+                scale_rgb(color, 0.95)
+            );
+            let steps = ((hi - lo) / 0.05).ceil().max(1.0) as usize;
+            let mut d = String::new();
+            for i in 0..=steps {
+                let t = lo + (hi - lo) * i as f64 / steps as f64;
+                let (x, y) = pt(t, 0.0);
+                let _ = write!(d, "{}{x:.1},{y:.1}", if i == 0 { "M" } else { "L" });
+            }
+            for i in (0..=steps).rev() {
+                let t = lo + (hi - lo) * i as f64 / steps as f64;
+                let (x, y) = pt(t, th);
+                let _ = write!(d, "L{x:.1},{y:.1}");
+            }
+            d.push('Z');
+            let _ = write!(out.s, "<path d=\"{d}\" fill=\"url(#{id})\"/>");
+        }
+    }
+    // 윗면
+    for (a0, a1, color) in &slices {
+        let steps = ((a1 - a0) / 0.05).ceil().max(1.0) as usize;
+        let mut d = format!("M{cx0:.1},{cy0:.1}");
+        for i in 0..=steps {
+            let t = a0 + (a1 - a0) * i as f64 / steps as f64;
+            let (x, y) = pt(t, 0.0);
+            let _ = write!(d, "L{x:.1},{y:.1}");
+        }
+        d.push('Z');
+        out.path(&d, &Style::fill(color));
     }
 }
 
