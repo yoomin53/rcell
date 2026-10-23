@@ -1937,6 +1937,7 @@ pub(crate) fn chart_record(
             .unwrap_or_default(),
         has_names: c.series.iter().any(|s| s.name.is_some()),
         bubble,
+        marker_fill: wb.styles.from_legacy,
         names,
         values,
     };
