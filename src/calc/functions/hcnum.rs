@@ -418,6 +418,157 @@ pub fn bessel_k(n: i32, x: f64) -> f64 {
     bk
 }
 
+/// 오데-에번스(AS 70) 정규 분위수 근사 (오차 1.5E-8). 한셀의 NORM.S.INV 는 정확하지만 T.INV·CHISQ.INV·
+/// F.INV 의 시작 값은 이 근사로 구한다 (가운데에서 +1.45E-8, 대조 실험 x1·x3 의 반복 없는 구간)
+pub fn norm_inv_oe(p: f64) -> f64 {
+    let ps = if p > 0.5 { 1.0 - p } else { p };
+    if ps == 0.5 {
+        return 0.0;
+    }
+    let y = (1.0 / (ps * ps)).mln().sqrt();
+    let num = (((y * -0.453_642_210_148e-4 - 0.204_231_210_245e-1) * y - 0.342_242_088_547) * y
+        - 1.0)
+        * y
+        - 0.322_232_431_088;
+    let den = (((y * 0.385_607_006_34e-2 + 0.103_537_752_850) * y + 0.531_103_462_366) * y
+        + 0.588_581_570_495)
+        * y
+        + 0.993_484_626_060e-1;
+    let x = y + num / den;
+    if p < 0.5 { -x } else { x }
+}
+
+/// 한셀 역함수의 반복 (T.INV·CHISQ.INV·F.INV): 누적 확률을 소수 9자리로 반올림한 값이 p 와 1E-6 안이면
+/// 그 x 를 내고, 아니면 핼리 한 걸음 x ← x − s/(1 − s·c), s = (F − p)/f, c = f′/(2f).
+/// `dens(x)` 는 (밀도 f, c). 허용 오차가 확률의 절댓값이라 꼬리에서는 참값과 꽤 다를 수 있다
+/// (T.INV(0.0001,2) = −70.6948, 참값 −70.7001).
+fn hc_solve(
+    p: f64,
+    mut x: f64,
+    cdf: impl Fn(f64) -> f64,
+    dens: impl Fn(f64) -> (f64, f64),
+    positive: bool,
+) -> f64 {
+    for _ in 0..100 {
+        if !x.is_finite() {
+            return x;
+        }
+        let r = super::stat::round9(cdf(x)) - p;
+        if r.abs() < 1e-6 {
+            return x;
+        }
+        let (f, c) = dens(x);
+        if !(f > 0.0 && f.is_finite()) {
+            return x;
+        }
+        let s = r / f;
+        x -= s / (1.0 - s * c);
+        if positive && x <= 0.0 {
+            x = 1e-10;
+        }
+    }
+    x
+}
+
+/// T.INV (소수 9자리 반올림 전). 자유도 1 은 tan(π′(p − ½)), π′ = 3.141592654. 그 밖에는 코니시-피셔 전개를
+/// z⁵·z⁷ 항 없이 쓴 시작 값 z + (z³+z)/(4ν) + (16z³+3z)/(96ν²) + (17z³−15z)/(384ν³) (z 는 오데-에번스)에서
+/// [`hc_solve`] (대조 실험 x1·x3·x4·x5: 반복 없는 구간이 이 시작 값과 소수 9자리까지 같다)
+pub fn t_inv(p: f64, df: f64) -> f64 {
+    if p == 0.5 {
+        return 0.0;
+    }
+    if df == 1.0 {
+        return (3.141_592_654 * (p - 0.5)).mtan();
+    }
+    let z = norm_inv_oe(p);
+    let z2 = z * z;
+    let g1 = (z2 * z + z) / 4.0;
+    let g2 = (16.0 * z2 + 3.0) * z / 96.0;
+    let g3 = (17.0 * z2 - 15.0) * z / 384.0;
+    let x0 = z + g1 / df + g2 / (df * df) + g3 / (df * df * df);
+    hc_solve(
+        p,
+        x0,
+        |x| t_cdf(x, df),
+        |x| {
+            (
+                super::special::t_pdf(x, df),
+                -0.5 * (df + 1.0) * x / (df + x * x),
+            )
+        },
+        false,
+    )
+}
+
+/// 이보다 큰 자유도의 CHISQ.INV 는 윌슨-힐퍼티 근사 그대로 (반복 없음, 대조 실험 x1: 자유도 100·200)
+const CHISQ_WH_MIN: f64 = 100.0;
+
+/// CHISQ.INV (소수 9자리 반올림 전). 자유도 1 은 (오데-에번스 z((1+p)/2))², 2 는 −2 ln(1 − p),
+/// 큰 자유도는 윌슨-힐퍼티 ν(1 − 2/(9ν) + z√(2/(9ν)))³, 그 사이는 이 근사에서 [`hc_solve`] (대조 실험 x1)
+pub fn chisq_inv(p: f64, df: f64) -> f64 {
+    if p == 0.0 {
+        return 0.0;
+    }
+    if df == 1.0 {
+        let z = norm_inv_oe((1.0 + p) / 2.0);
+        return z * z;
+    }
+    if df == 2.0 {
+        return -2.0 * (1.0 - p).mln();
+    }
+    let z = norm_inv_oe(p);
+    let c = 2.0 / (9.0 * df);
+    let x0 = df * (1.0 - c + z * c.sqrt()).powi(3);
+    if df >= CHISQ_WH_MIN {
+        return x0;
+    }
+    let a = df / 2.0;
+    let lg = gammln(a);
+    hc_solve(
+        p,
+        x0,
+        |x| gammp(a, x / 2.0),
+        |x| {
+            (
+                ((a - 1.0) * x.mln() - x / 2.0 - a * 2f64.mln() - lg).mexp(),
+                0.5 * ((a - 1.0) / x - 0.5),
+            )
+        },
+        true,
+    )
+}
+
+/// F.INV (소수 9자리 반올림 전): A&S 26.6.16 근사 e^{2w} 에서 [`hc_solve`]. 두 자유도가 같으면 한셀과
+/// 끝자리까지 같다 (대조 실험 x1). 다르면 한셀의 시작 값이 이 근사와 조금 달라 반복이 한 번 덜 된 곳에서
+/// 끝자리가 다를 수 있다 (아직 모른다)
+pub fn f_inv(p: f64, d1: f64, d2: f64) -> f64 {
+    let z = norm_inv_oe(p);
+    let lam = (z * z - 3.0) / 6.0;
+    let h = 2.0 / (1.0 / (d1 - 1.0) + 1.0 / (d2 - 1.0));
+    let w = z * (h + lam).sqrt() / h
+        - (1.0 / (d1 - 1.0) - 1.0 / (d2 - 1.0)) * (lam + 5.0 / 6.0 - 2.0 / (3.0 * h));
+    let mut x0 = (2.0 * w).mexp();
+    if !(x0 > 0.0 && x0.is_finite()) {
+        x0 = 1.0;
+    }
+    let lb = gammln(d1 / 2.0) + gammln(d2 / 2.0) - gammln((d1 + d2) / 2.0);
+    hc_solve(
+        p,
+        x0,
+        |x| f_cdf(x, d1, d2),
+        |x| {
+            (
+                ((d1 / 2.0) * (d1 / d2).mln() + (d1 / 2.0 - 1.0) * x.mln()
+                    - ((d1 + d2) / 2.0) * (1.0 + d1 * x / d2).mln()
+                    - lb)
+                    .mexp(),
+                0.5 * ((d1 / 2.0 - 1.0) / x - ((d1 + d2) / 2.0) * (d1 / d2) / (1.0 + d1 * x / d2)),
+            )
+        },
+        true,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
