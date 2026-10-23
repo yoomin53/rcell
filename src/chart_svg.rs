@@ -833,10 +833,12 @@ fn legacy_layout(
         if !items.is_empty() {
             let line = items.iter().any(|i| i.stroke.is_some() && i.fill.is_none());
             let kw = if line { 28.0 } else { 16.0 };
+            // 글 폭은 잉크 폭 (어림 폭 − 2.5: 9pt "10" 이 9.5px — chart_base 의 글 끝이 틀 − 20)
             let tw = items
                 .iter()
                 .map(|i| font.width(&i.name))
-                .fold(0.0, f64::max);
+                .fold(0.0, f64::max)
+                - 2.5;
             let n = items.len() as f64;
             // 세로 범례의 첫 표지 윗변 (틀 가운데에 맞추되 줄이 많으면 조금 위로)
             let first_top = |a: f64, b: f64| {
@@ -895,8 +897,9 @@ fn legacy_layout(
         }
     }
     if pie_like {
-        // 원: 왼쪽 + 15, 위 + 41 (계열 이름이 원 위에), 아래 − 15
-        let y0 = plot_top - 22.0 + 41.0;
+        // 원: 왼쪽 + 15, 위 + 41 (계열 이름이 원 위에), 아래 − 15. 도넛형은 이름이 없고 위 + 15 (c2_e6_doughnut)
+        let doughnut = groups.first().is_some_and(|g| g.kind == "doughnut");
+        let y0 = plot_top - 22.0 + if doughnut { 15.0 } else { 41.0 };
         return Rect {
             x: fl + 15.0,
             y: y0,
@@ -1530,6 +1533,8 @@ fn draw_axis_chart(
     } else {
         TickRule::Horizontal { room }
     };
+    let legacy_wide_cats =
+        legacy && !horizontal && cats.iter().any(|c| c.chars().any(crate::render::is_wide));
     let probe = make_scale(vlo, vhi, val_ax, inner.h.max(inner.w) * 0.8, !xy, vrule);
     let val_labels: Vec<String> = probe
         .ticks()
@@ -1590,11 +1595,23 @@ fn draw_axis_chart(
                 val_label_w
             };
             let shrink = if first.kind == "area" { 4.0 } else { 0.0 };
-            Rect {
-                x: inner.x + left,
-                y: inner.y,
-                w: inner.w - left - shrink,
-                h: inner.h - shrink,
+            // 한글 항목 이름은 레이블 자리가 16px 더 높다 (c2_e10_str_cat: 축이 16px 위, 글자 윗변이 축 + 16)
+            let tall = if legacy_wide_cats { 16.0 } else { 0.0 };
+            if horizontal {
+                // 가로 막대: 그림 영역 위가 틀 + 16, 아래 4px 더, 오른쪽은 마지막 값 레이블의 반만큼 더 (chart_barh)
+                Rect {
+                    x: inner.x + left,
+                    y: inner.y - 6.0,
+                    w: inner.w - left - 15.0,
+                    h: inner.h + 2.0,
+                }
+            } else {
+                Rect {
+                    x: inner.x + left,
+                    y: inner.y,
+                    w: inner.w - left - shrink,
+                    h: inner.h - shrink - tall,
+                }
             }
         }
         None => {
@@ -1847,7 +1864,7 @@ fn draw_axis_chart(
     let val_dy = |f: &Font| f.px() * if legacy { 0.3 } else { 0.35 };
     let cat_dy = |f: &Font| {
         if legacy {
-            f.px() * 1.39
+            f.px() * 1.39 + if legacy_wide_cats { 8.0 } else { 0.0 }
         } else {
             22.5 * f.size / BASE_PT + f.px() * 0.35
         }
@@ -2713,6 +2730,7 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
     let r_out = (plot.w.min(plot.h) / 2.0).max(4.0);
     // 레거시 화면: 원 위 가운데에 계열 이름 (chart_pie: 글자 아랫변이 원 위 14px)
     if legacy.is_some()
+        && !doughnut
         && let Some(name) = g.series.first().and_then(|s| s.name.as_deref())
     {
         let font = cx.font(ch.legend_props.tx_pr.as_ref(), None, base.size, false);
