@@ -1013,6 +1013,34 @@ fn yield_fn(ctx: &mut Ctx, a: &[Value]) -> Value {
     let d1904 = ctx.date1904();
     // 가격 함수(일반식)의 해 — 한셀은 남은 지급이 하나여도 같은 식을 푼다
     let f = |y: f64| bond_price(s, m, rate, y, red, fr, b, d1904) - pr;
+    // 남은 지급이 5–40 번이면 한셀은 [0, fr] 에서 거짓 위치법(할선이 구간 안의 한 끝을 늘 바꾸는)을 쓰고
+    // |가격 − pr| < 1E-7 인 첫 값을 낸다 — 볼록한 가격 곡선이라 위에서 다가가 참 근보다 1E-10 쯤 크다
+    // (YIELD(39494,42842,0.0575,95.04287,100,2,0) = 0.06473806170959318, 대조 실험 x7·x12: n = 5–40 의
+    // 60여 경우 끝자리까지 같음). 4 번 이하·41 번 이상은 다른 반복이라 (아직 모름) 정확한 해를 낸다
+    let (_, _, n) = coupon_dates(s, m, fr, d1904);
+    if (5.0..=40.0).contains(&n) {
+        let (mut a0, mut b0) = (0.0, fr);
+        let (mut fa, mut fb) = (f(a0), f(b0));
+        if fa * fb < 0.0 {
+            for _ in 0..10_000 {
+                let c = b0 - fb * (b0 - a0) / (fb - fa);
+                let fc = f(c);
+                if fc.abs() < 1e-7 {
+                    return num(c);
+                }
+                if !fc.is_finite() {
+                    break;
+                }
+                if fc * fa < 0.0 {
+                    b0 = c;
+                    fb = fc;
+                } else {
+                    a0 = c;
+                    fa = fc;
+                }
+            }
+        }
+    }
     let (mut lo, mut hi) = (-0.99 * fr, 10.0);
     if f(lo) * f(hi) > 0.0 {
         return Value::Error(ErrorKind::Num);
