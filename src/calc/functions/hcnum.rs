@@ -188,14 +188,15 @@ pub fn erfcc(x: f64) -> f64 {
 /// 때문에 작은 x 에서 정확한 무게보다 1E-12 쯤 다르다 (대조 실험 norm4·norm5 의 작은 x)
 const NC8: [f64; 4] = [0.043_460_648, 0.207_002_315, 0.076_562_5, 0.172_974_537];
 
-/// [0, x] 를 p 칸으로 나눈 8점 뉴턴-코츠 적분
-fn nc8(f: &impl Fn(f64) -> f64, x: f64, p: usize) -> f64 {
-    let hh = x / p as f64;
+/// [a, b] 를 p 칸으로 나눈 8점 뉴턴-코츠 적분. 칸의 첫 점은 a + k·hh, 칸 안의 점은 거기서 h 씩
+/// (a 가 음수면 점을 음수 쪽 끝에서부터 잰다 — 끝자리가 달라진다)
+fn nc8(f: &impl Fn(f64) -> f64, a: f64, b: f64, p: usize) -> f64 {
+    let hh = (b - a) / p as f64;
     let h = hh / 7.0;
     let mut s = 0.0;
     for k in 0..p {
-        let a = k as f64 * hh;
-        let v = |i: f64| f(a + i * h);
+        let x0 = a + k as f64 * hh;
+        let v = |i: f64| f(x0 + i * h);
         s += (NC8[0] * (v(0.0) + v(7.0))
             + NC8[1] * (v(1.0) + v(6.0))
             + NC8[2] * (v(2.0) + v(5.0))
@@ -208,11 +209,16 @@ fn nc8(f: &impl Fn(f64) -> f64, x: f64, p: usize) -> f64 {
 /// 칸 수를 1부터 하나씩 늘려 앞 칸 수의 값과 차이가 3E-7 보다 작아지면 멈춘다
 /// (정규 누적의 칸 수가 바뀌는 x: 1.407, 3.035, 4.519, 6.029 …, 대조 실험 norm5)
 pub fn integrate(f: impl Fn(f64) -> f64, x: f64) -> f64 {
+    integrate_ab(f, 0.0, x)
+}
+
+/// [a, b] 적분 (칸 늘리기는 [`integrate`] 와 같다)
+pub fn integrate_ab(f: impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
     // 아주 큰 x 는 칸 수가 한없이 늘어난다 — 한셀의 끝은 아직 모른다, 여기서는 2만 칸에서 멈춘다
     const LIMIT: usize = 20_000;
-    let mut prev = nc8(&f, x, 1);
+    let mut prev = nc8(&f, a, b, 1);
     for p in 2..=LIMIT {
-        let q = nc8(&f, x, p);
+        let q = nc8(&f, a, b, p);
         if (q - prev).abs() < EPS {
             return q;
         }
@@ -238,8 +244,13 @@ pub fn norm_cdf(z: f64) -> f64 {
     if z.abs() > 1e4 {
         return if z > 0.0 { 1.0 } else { 0.0 };
     }
-    let y = integrate(|t| (-t * t / 2.0).mexp(), z.abs()) / 2.506_628_275;
-    if z > 0.0 { 0.5 + y } else { 0.5 - y }
+    // 음수 z 는 [z, 0] 을 z 쪽에서부터 잰 점으로 적분한다 (왼쪽 꼬리의 끝자리, 대조 실험 norm4)
+    let f = |t: f64| (-t * t / 2.0).mexp();
+    if z > 0.0 {
+        0.5 + integrate(f, z) / 2.506_628_275
+    } else {
+        0.5 - integrate_ab(f, z, 0.0) / 2.506_628_275
+    }
 }
 
 /// 정수·반정수 a 의 Γ(a): (a−1)! 또는 √π·½·(3/2)·…·(a−1) (한셀의 t 상수와 끝자리까지 같다)
