@@ -236,6 +236,10 @@ pub struct Sheet {
     pub show_grid_lines: bool,
     pub default_col_width: Option<f64>,
     pub default_row_height: Option<f64>,
+    /// 기본 행 높이를 직접 정했다 (`sheetFormatPr/@customHeight`, 바이너리 BrtWsFmtInfo·레거시 DEFAULTROWHEIGHT 의
+    /// 플래그 비트 0). 켜져 있으면 높이를 직접 정하지 않은 행도 다시 맞추지 않고 기본 높이를 쓴다 (한셀 화면)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub default_row_custom: bool,
     pub cols: Vec<ColInfo>,
     /// 높이·숨김 등 속성이 있는 행만
     pub rows: Vec<RowInfo>,
@@ -923,6 +927,31 @@ pub struct Chart {
     /// `c:extLst` 의 한컴 확장 `ho:hncChartStyle`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hnc_chart_style: Option<HncChartStyle>,
+    /// 레거시(VtChart) 레코드에서 읽은 차트의 화면 정보 (렌더러용 — 쓰기·비교에는 쓰지 않는다)
+    #[serde(skip)]
+    pub legacy: Option<LegacyChartView>,
+}
+
+/// 레거시 차트의 화면 정보. 한셀은 레거시 문서에서 읽은 차트를 XML 차트와 다른 규칙(VtChart 화면)으로 그린다 —
+/// 눈금이 촘촘하고, 범례 표지가 크고 틀이 없고, 원형은 계열 목록의 색을 쓴다 (docs/format/screen.md 6절).
+/// 모델(XML)에 옮기지 않는 저장값을 함께 둔다. 문서 내용이 아니므로 비교(`==`)에서는 늘 같다
+#[derive(Debug, Clone, Default)]
+pub struct LegacyChartView {
+    /// `VtChart.chartType`
+    pub chart_type: u16,
+    /// 계열 목록(VtSeries)마다 채우기 색 `RRGGBB` (원형·도넛은 조각마다)
+    pub fills: Vec<String>,
+    /// 계열 목록마다 표식이 자동인가 (`VtSeries.u16_d` 1 — 모델에는 `none` 으로 옮기지만 한셀 화면은 자동 표식을 그린다)
+    pub auto_markers: Vec<bool>,
+    /// 3차원 회전·높이 (도, `VtChartPlot.rotation`·`elevation`)
+    pub rotation: f64,
+    pub elevation: f64,
+}
+
+impl PartialEq for LegacyChartView {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]

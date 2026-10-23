@@ -499,22 +499,81 @@ fn irr(ctx: &mut Ctx, a: &[Value]) -> Value {
         })
         .collect();
     let g = try_v!(num_or(ctx, a, 1, 0.1));
-    if !(v.iter().any(|&x| x > 0.0) && v.iter().any(|&x| x < 0.0)) {
-        return Value::Error(ErrorKind::Num);
-    }
+    num_r(irr_bisect(&v, g))
+}
+
+/// 한셀의 IRR (대조 실험 x7–x10, 127 경우 중 115 끝자리까지 같음 — 나머지는 겹근·0 근의 잡음):
+/// 앞의 0 을 뺀 현금 흐름의 NPV = Σ v_i / d (d ← d·(1+r)). 추정값 g 에서 NPV 가 양수면 위로
+/// r ← (1+r)·2 − 1 을 17번까지 (IRR({-1,120001}) 은 찾고 {-1,250001} 은 #NUM!), 아니면 아래로
+/// r ← (r − 1)/2 를 −1 에 닿기 전까지 부호가 바뀌는 점을 찾아 구간을 잡고 이분법. 중점의 |NPV| ≤ 1E-16
+/// 이거나 중점이 끝점과 같아지면(이웃한 두 수의 짝수 쪽) 그 중점. 그래서 결과가 추정값과 무관하고,
+/// 첫 현금 흐름이 양수면 어느 쪽으로도 부호가 바뀌지 않아 #NUM! (IRR({1,2.5,0,-4}) — 한셀 고유).
+/// 근이 둘이면 추정값 쪽에서 찾는다 (IRR({-100,230,-132},0.25) = #NUM!, 0.15 → 0.2)
+fn irr_bisect(v: &[f64], g: f64) -> Result<f64, ErrorKind> {
+    let Some(first) = v.iter().position(|&x| x != 0.0) else {
+        return Err(ErrorKind::Num);
+    };
+    let v = &v[first..];
     let npv = |r: f64| -> f64 {
-        v.iter()
-            .enumerate()
-            .map(|(i, x)| x / (1.0 + r).mpowi(i as i32))
-            .sum()
+        let mut s = 0.0;
+        let mut d = 1.0;
+        for &x in v {
+            s += x / d;
+            d *= 1.0 + r;
+        }
+        s
     };
-    let dnpv = |r: f64| -> f64 {
-        v.iter()
-            .enumerate()
-            .map(|(i, x)| -(i as f64) * x / (1.0 + r).mpowi(i as i32 + 1))
-            .sum()
-    };
-    num_r(newton(g, npv, dnpv))
+    let (mut lo, mut hi);
+    if npv(g) > 0.0 {
+        let mut x = g;
+        let mut found = false;
+        for _ in 0..17 {
+            x = (1.0 + x) * 2.0 - 1.0;
+            if npv(x) < 0.0 {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(ErrorKind::Num);
+        }
+        (lo, hi) = (g, x);
+    } else {
+        let mut x = g;
+        let mut found = false;
+        for _ in 0..100 {
+            x = (x - 1.0) / 2.0;
+            if x <= -1.0 {
+                break;
+            }
+            if npv(x) > 0.0 {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(ErrorKind::Num);
+        }
+        (lo, hi) = (x, g);
+    }
+    for _ in 0..3000 {
+        let mid = (lo + hi) / 2.0;
+        if mid == lo || mid == hi {
+            return Ok(mid);
+        }
+        let y = npv(mid);
+        if y.abs() <= 1e-16 {
+            return Ok(mid);
+        }
+        if y > 0.0 {
+            lo = mid;
+        } else if y < 0.0 {
+            hi = mid;
+        } else {
+            return Err(ErrorKind::Num);
+        }
+    }
+    Err(ErrorKind::Num)
 }
 
 fn newton(mut r: f64, f: impl Fn(f64) -> f64, df: impl Fn(f64) -> f64) -> Result<f64, ErrorKind> {
@@ -543,7 +602,8 @@ fn newton(mut r: f64, f: impl Fn(f64) -> f64, df: impl Fn(f64) -> f64) -> Result
 fn xirr(ctx: &mut Ctx, a: &[Value]) -> Value {
     let (v, d) = try_v!(cash_and_dates(ctx, &a[0], &a[1]));
     let g = try_v!(num_or(ctx, a, 2, 0.1));
-    if !(v.iter().any(|&x| x > 0.0) && v.iter().any(|&x| x < 0.0)) {
+    // 추정값 0 은 #NUM! (XIRR({-100,110},{40000,40365},0), 대조 실험 x8·x9 — 다섯 경우 모두)
+    if g == 0.0 || !(v.iter().any(|&x| x > 0.0) && v.iter().any(|&x| x < 0.0)) {
         return Value::Error(ErrorKind::Num);
     }
     let f = |r: f64| xnpv(r, &v, &d);
@@ -882,12 +942,22 @@ fn coup(ctx: &mut Ctx, a: &[Value], what: u8) -> Value {
     }
 }
 
-/// PRICE·YIELD 의 이자 기간 일수: 30/360·실제/360 기준은 360/fr, 나머지는 실제 일수 (기준 3 도,
-/// PRICE(…,1,3) = 94.6725635950793, 대조 실험 financial)
+/// PRICE·YIELD 의 이자 기간 일수: 30/360 기준(0·4)은 360/fr, 나머지는 실제 일수 (기준 3 도,
+/// PRICE(…,1,3) = 94.6725635950793, 대조 실험 financial). 실제/360(2)도 실제 일수라 기준 1·3 과 값이
+/// 같다 (PRICE(39493,43054,0.0575,0.065,100,2,2) = 94.63544920787723, 대조 실험 x8·x9)
 fn bond_period_days(pcd: f64, ncd: f64, fr: f64, b: u8) -> f64 {
     match b {
-        0 | 2 | 4 => 360.0 / fr,
+        0 | 4 => 360.0 / fr,
         _ => ncd - pcd,
+    }
+}
+
+/// ODDF*·ODDL* 의 준이표 기간 정상 일수: 기준 1 은 그 기간의 실제 일수, 3 은 365/fr, 나머지는 360/fr
+fn odd_period_days(p: f64, q: f64, fr: f64, b: u8) -> f64 {
+    match b {
+        1 => q - p,
+        3 => 365.0 / fr,
+        _ => 360.0 / fr,
     }
 }
 
@@ -943,6 +1013,34 @@ fn yield_fn(ctx: &mut Ctx, a: &[Value]) -> Value {
     let d1904 = ctx.date1904();
     // 가격 함수(일반식)의 해 — 한셀은 남은 지급이 하나여도 같은 식을 푼다
     let f = |y: f64| bond_price(s, m, rate, y, red, fr, b, d1904) - pr;
+    // 남은 지급이 5–40 번이면 한셀은 [0, fr] 에서 거짓 위치법(할선이 구간 안의 한 끝을 늘 바꾸는)을 쓰고
+    // |가격 − pr| < 1E-7 인 첫 값을 낸다 — 볼록한 가격 곡선이라 위에서 다가가 참 근보다 1E-10 쯤 크다
+    // (YIELD(39494,42842,0.0575,95.04287,100,2,0) = 0.06473806170959318, 대조 실험 x7·x12: n = 5–40 의
+    // 60여 경우 끝자리까지 같음). 4 번 이하·41 번 이상은 다른 반복이라 (아직 모름) 정확한 해를 낸다
+    let (_, _, n) = coupon_dates(s, m, fr, d1904);
+    if (5.0..=40.0).contains(&n) {
+        let (mut a0, mut b0) = (0.0, fr);
+        let (mut fa, mut fb) = (f(a0), f(b0));
+        if fa * fb < 0.0 {
+            for _ in 0..10_000 {
+                let c = b0 - fb * (b0 - a0) / (fb - fa);
+                let fc = f(c);
+                if fc.abs() < 1e-7 {
+                    return num(c);
+                }
+                if !fc.is_finite() {
+                    break;
+                }
+                if fc * fa < 0.0 {
+                    b0 = c;
+                    fb = fc;
+                } else {
+                    a0 = c;
+                    fa = fc;
+                }
+            }
+        }
+    }
     let (mut lo, mut hi) = (-0.99 * fr, 10.0);
     if f(lo) * f(hi) > 0.0 {
         return Value::Error(ErrorKind::Num);
@@ -1203,24 +1301,46 @@ fn odd_first(ctx: &mut Ctx, a: &[Value], yield_: bool) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let d1904 = ctx.date1904();
+    // 첫 기간을 첫 이자일에서 거꾸로 센 준이표 기간으로 나눠 기간마다 일수/정상 일수를 더한다
+    // (기간을 다 채우면 1 — 기준 3 의 분기 이자에서 드러난다). 발행→첫 이자일 dfc, 발행→결제 a,
+    // 결제→첫 이자일 dsc (대조 실험 x11)
+    let step = (12.0 / fr) as i64;
+    let (mut dfc, mut a_, mut dsc) = (0.0, 0.0, 0.0);
+    let mut q = fc;
+    let mut j = 1;
+    while q > iss && j < 100_000 {
+        let p = coupon_date(fc, j * step, d1904);
+        let nl = odd_period_days(p, q, fr, b);
+        let frac = |lo: f64, hi: f64| {
+            let (x, y) = (lo.max(p), hi.min(q));
+            if x == p && y == q {
+                1.0
+            } else if x < y {
+                day_count(x, y, b, d1904) / nl
+            } else {
+                0.0
+            }
+        };
+        dfc += frac(iss, fc);
+        a_ += frac(iss, s);
+        dsc += frac(s, fc);
+        q = p;
+        j += 1;
+    }
+    let (_, _, n) = coupon_dates(fc, m, fr, d1904);
+    // 경과 이자도 첫 이자일까지 할인한다 (Excel 과 다른 한셀 식: ODDFPRICE(39763,44256,39736,39873,
+    // 0.0785,0.0625,100,2,1) = 113.60856511556307, Excel 은 113.597717474079)
     let price = |yld: f64| -> f64 {
-        // 첫 이자일부터 만기까지의 정상 이자 + 첫 기간의 홀수 이자
-        let (_, _, n) = coupon_dates(fc, m, fr, d1904);
-        let pcd0 = coupon_date(fc, (12.0 / fr) as i64, d1904);
-        let e = coup_days(pcd0, fc, fr, b, d1904);
-        let dfc = day_count(iss, fc, b, d1904);
-        let dsc = day_count(s, fc, b, d1904);
-        let a_ = day_count(iss, s, b, d1904);
         let v = 1.0 + yld / fr;
         let c = 100.0 * rate / fr;
-        let mut p = red / v.mpow(n + dsc / e);
-        p += c * dfc / e / v.mpow(dsc / e);
+        let mut p = red / v.mpow(n + dsc);
+        p += c * dfc / v.mpow(dsc);
         let mut k = 1.0;
         while k <= n {
-            p += c / v.mpow(k + dsc / e);
+            p += c / v.mpow(k + dsc);
             k += 1.0;
         }
-        p - c * a_ / e
+        p - c * a_ / v.mpow(dsc)
     };
     if !yield_ {
         if x < 0.0 {
@@ -1245,11 +1365,30 @@ fn odd_last(ctx: &mut Ctx, a: &[Value], yield_: bool) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let d1904 = ctx.date1904();
-    let ncd = coupon_date(lc, -((12.0 / fr) as i64), d1904);
-    let nl = coup_days(lc, ncd, fr, b, d1904);
-    let dci = day_count(lc, m, b, d1904) / nl;
-    let a_ = day_count(lc, s, b, d1904) / nl;
-    let dsc = day_count(s, m, b, d1904) / nl;
+    // 마지막 기간을 만기에서 거꾸로 센 준이표 기간으로 나눠 기간마다 일수/정상 일수를 더한다
+    // (기준 1 은 기간마다 실제 일수, ODDLPRICE(39494,39762,39345,0,0.0405,100,2,1) = 97.12545994508676,
+    // 대조 실험 x11). 첫 기간과 달리 다 채운 기간도 일수/정상 일수 그대로
+    let step = (12.0 / fr) as i64;
+    let (mut dci, mut a_, mut dsc) = (0.0, 0.0, 0.0);
+    let mut q = m;
+    let mut k = 1;
+    while q > lc && k < 100_000 {
+        let p = coupon_date(m, k * step, d1904);
+        let nl = odd_period_days(p, q, fr, b);
+        let part = |lo: f64, hi: f64| {
+            let (x, y) = (lo.max(p), hi.min(q));
+            if x < y {
+                day_count(x, y, b, d1904) / nl
+            } else {
+                0.0
+            }
+        };
+        dci += part(lc, m);
+        a_ += part(lc, s);
+        dsc += part(s, m);
+        q = p;
+        k += 1;
+    }
     let c = 100.0 * rate / fr;
     if !yield_ {
         if x < 0.0 {

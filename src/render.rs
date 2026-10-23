@@ -27,6 +27,7 @@ mod numfit;
 mod paint;
 mod shape;
 mod sparkline;
+mod table;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -341,6 +342,8 @@ pub fn sheet_table_grid(
     let headers = opts.headers && view.show_row_col_headers;
     // 조건부 서식 결과 (칸 → 덧입힐 서식)
     let cfx = crate::cf_eval::evaluate(sheet, st, &theme);
+    // 표 스타일 (칸 → 덧입힐 서식, 칸 자체의 서식과 조건부 서식이 이긴다)
+    let tlooks = table::sheet_looks(sheet, st, &theme);
     // 메모: 셀 오른쪽 위 빨간 삼각형. 숨긴 메모는 마우스를 올리면 작성자·내용, 보이는 메모는 상자 (note.rs)
     let notes: HashMap<(u32, u32), (String, bool)> = sheet
         .comments
@@ -386,6 +389,12 @@ pub fn sheet_table_grid(
         .map(|c| (c.r.row, c.r.col))
         .collect();
     want.extend(cfx.keys().copied());
+    want.extend(
+        tlooks
+            .keys()
+            .copied()
+            .filter(|&(r, c)| r < lay_r && c < lay_c),
+    );
     want.sort_unstable();
     want.dedup();
     let make_view = |r: u32, c: u32| -> Option<CellView> {
@@ -397,7 +406,8 @@ pub fn sheet_table_grid(
             .map(|x| x.style)
             .unwrap_or_else(|| sheet.effective_style(r, c));
         let cf = cfx.get(&(r, c));
-        if cell.is_none() && style == 0 && cf.is_none() {
+        let tl = tlooks.get(&(r, c));
+        if cell.is_none() && style == 0 && cf.is_none() && tl.is_none() {
             return None;
         }
         let formula = cell
@@ -413,7 +423,7 @@ pub fn sheet_table_grid(
         let xf = st.xf(style);
         let align = xf.and_then(|x| x.alignment.as_ref());
         let font = xf.and_then(|x| st.fonts.get(x.font_id as usize));
-        let m = layout::font_metrics(font);
+        let m = layout::font_metrics(wb, font);
         let h = h_align(align, &value);
         let (w_px, _) = lay.cell_size(r, c);
         let origin = (lay.col_x(c), lay.row_y(r));
@@ -470,7 +480,26 @@ pub fn sheet_table_grid(
                 css: format!("background:{c};"),
                 color: Some(c),
             })
-            .or(fill);
+            .or(fill)
+            .or_else(|| {
+                tl.and_then(|t| t.fill.clone()).map(|c| paint::FillPaint {
+                    css: format!("background:{c};"),
+                    color: Some(c),
+                })
+            });
+        // 표 스타일 테두리는 칸 자체의 테두리가 없는 변에만
+        let mut borders = borders_of(xf, wb, &theme);
+        if let Some(t) = tl {
+            let fill_in = |slot: &mut Option<paint::Edge>, v: &Option<paint::Edge>| {
+                if slot.is_none() {
+                    slot.clone_from(v);
+                }
+            };
+            fill_in(&mut borders.left, &t.borders.left);
+            fill_in(&mut borders.right, &t.borders.right);
+            fill_in(&mut borders.top, &t.borders.top);
+            fill_in(&mut borders.bottom, &t.borders.bottom);
+        }
         Some(CellView {
             value,
             text,
@@ -486,7 +515,7 @@ pub fn sheet_table_grid(
             rotation: align.and_then(|a| a.text_rotation).unwrap_or(0),
             indent,
             fill,
-            borders: borders_of(xf, wb, &theme),
+            borders,
         })
     };
     for (r, c) in want {
@@ -729,8 +758,28 @@ pub fn sheet_table_grid(
                     css.push_str(&f.css);
                 }
                 let cf = cfx.get(&(r, c));
+                // 표 스타일의 글꼴 색·굵게 (조건부 서식이 이긴다)
+                let merged = tlooks
+                    .get(&(r, c))
+                    .filter(|t| t.font_color.is_some() || t.bold)
+                    .map(|t| {
+                        let mut m = cf.cloned().unwrap_or_default();
+                        if m.font_color.is_none() {
+                            m.font_color = t.font_color.as_ref().map(|c| crate::model::Color {
+                                rgb: Some(format!("FF{}", c.trim_start_matches('#'))),
+                                ..Default::default()
+                            });
+                        }
+                        if t.bold && m.bold.is_none() {
+                            m.bold = Some(true);
+                        }
+                        m
+                    });
                 let span = ov.span.get(&(r, c)).copied().unwrap_or((0, 0));
-                inner = cell::cell_content(v, cf, &theme, w, h, span);
+                inner = cell::cell_content(v, merged.as_ref().or(cf), &theme, w, h, span);
+            }
+            if tlooks.get(&(r, c)).is_some_and(|t| t.button) {
+                inner.push_str(&table::button_svg(w, h));
             }
             // 테두리: 병합 영역은 가장자리 칸들의 테두리 (위·왼쪽은 왼쪽 위 칸, 오른쪽은 오른쪽 위 칸,
             // 아래는 왼쪽 아래 칸). 넘친 글자가 지나가는 세로 경계는 지운다 (한셀 화면: 위·아래 선은 남는다)

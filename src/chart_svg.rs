@@ -26,8 +26,10 @@ use crate::writer::esc;
 
 type ColorFn<'a> = &'a dyn Fn(&DrawColor) -> Option<String>;
 
-/// 축 선·눈금의 기본 색 (한셀 화면)
+/// 축 선·눈금·눈금선의 기본 색 (한셀 화면)
 const AXIS_GRAY: &str = "#868686";
+/// 레거시(VtChart) 차트의 축 선·눈금선 색 (`VtAxis.axisPen`·`majorGridPen`, 한셀 화면)
+const LEGACY_GRAY: &str = "#808080";
 /// 기본 글자 크기 (pt)
 const BASE_PT: f64 = 9.0;
 /// 꺾은선 기본 굵기 (px, 2.25pt)
@@ -51,9 +53,29 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
     let cx = Ctx { theme, color };
     let mut out = Svg::new(w, h);
     // 차트 영역
-    let area = cx.shape(ch.sp_pr.as_ref(), Some("#FFFFFF"), Some((AXIS_GRAY, 1.0)));
-    out.rect(0.5, 0.5, w - 1.0, h - 1.0, &area);
+    let mut area = cx.shape(ch.sp_pr.as_ref(), Some("#FFFFFF"), Some((AXIS_GRAY, 1.0)));
     let base_font = cx.font(ch.tx_pr.as_ref(), None, BASE_PT, false);
+    if ch.legacy.is_some() {
+        // 레거시(VtChart) 화면: 틀은 XML 차트보다 왼쪽 1px 안, 아래 1px 위, 굵기는 늘 1px
+        if let Some(s) = area.stroke.as_mut() {
+            s.width = 1.0;
+        }
+        out.rect(1.5, 0.5, w - 2.0, h - 2.0, &area);
+        let groups = groups_of(ch);
+        let pie_like = groups
+            .first()
+            .is_some_and(|g| matches!(g.kind, "pie" | "doughnut"));
+        let inner = legacy_layout(&mut out, ch, &groups, &cx, &base_font, pie_like, w, h);
+        if pie_like {
+            draw_pies(&mut out, ch, &groups, &cx, &base_font, inner);
+        } else if groups.first().is_some_and(|g| g.kind == "radar") {
+            draw_radar(&mut out, ch, &groups, &cx, &base_font, inner);
+        } else if !groups.is_empty() {
+            draw_axis_chart(&mut out, ch, &groups, &cx, &base_font, inner, w, h);
+        }
+        return out.finish();
+    }
+    out.rect(0.5, 0.5, w - 1.0, h - 1.0, &area);
     // 안쪽 영역 (그림 영역 + 축 레이블)
     let mut inner = Rect {
         x: PAD.0,
@@ -62,8 +84,11 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
         h: h - PAD.2 - PAD.3,
     };
 
-    // 제목: 위 가운데 (한셀 화면: 14pt 굵게, 글자 윗변이 틀에서 14px, 그 아래 그림 영역)
-    if let Some((text, font)) = title_of(ch, &cx, &base_font) {
+    // 제목: 위 가운데 (한셀 화면: 14pt, 굵게 — b="0" 이어도 굵다, 글자 윗변이 틀에서 14px, 그림 영역은 제목 줄 아래
+    // 20px 뒤 — c2_e2_title_*: 맨 위 눈금선이 틀 + 60.5, 18pt 는 + 66.5). 범례는 제목 아래 자리의 가운데
+    let mut legend_top = 0.0;
+    if let Some((text, mut font)) = title_of(ch, &cx, &base_font) {
+        font.bold = true;
         let lines: Vec<&str> = text.split('\n').collect();
         let lh = font.px() * 1.25;
         let manual = ch
@@ -73,8 +98,9 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
             .and_then(manual_xy);
         let (tx, ty) = match manual {
             Some((x, y)) => (x * w, y * h),
-            None => (w / 2.0, 10.0),
+            None => (w / 2.0, 13.0),
         };
+        legend_top = ty + lh * (lines.len() as f64 - 1.0) + font.px() * 1.1 + 5.0;
         for (i, l) in lines.iter().enumerate() {
             out.text(
                 tx,
@@ -85,9 +111,11 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
             );
         }
         if ch.title_full.as_ref().and_then(|t| t.overlay) != Some(true) {
-            let bottom = ty + lh * lines.len() as f64 + 8.0;
+            let bottom = ty + lh * lines.len() as f64 + 20.0;
             inner.h -= bottom - inner.y;
             inner.y = bottom;
+        } else {
+            legend_top = 0.0;
         }
     }
 
@@ -101,7 +129,9 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
         let font = cx.font(ch.legend_props.tx_pr.as_ref(), None, base_font.size, false);
         let items = legend_items(ch, &groups, &cx, pie_like);
         if !items.is_empty() {
-            inner = draw_legend(&mut out, ch, pos, &items, &font, inner, w, h, &cx);
+            inner = draw_legend(
+                &mut out, ch, pos, &items, &font, inner, w, h, legend_top, &cx,
+            );
         }
     }
 
@@ -186,10 +216,18 @@ impl Svg {
             esc(t)
         );
     }
-    /// 그림 영역 안으로 자르기 시작 (끝은 `end_clip`)
+    /// 그림 영역 안으로 자르기 시작 (끝은 `end_clip`). 한 문서에 차트가 여럿이면 id 가 겹친다 — 사각형 전체를
+    /// id 에 넣어 같은 id 는 같은 사각형이 되게 한다 (첫 정의가 이긴다)
     fn begin_clip(&mut self, r: &Rect) {
         self.clip += 1;
-        let id = format!("rcc{}x{:.0}{:.0}", self.clip, r.x * 3.0, r.y * 7.0);
+        let id = format!(
+            "rcc{}x{:.0}y{:.0}w{:.0}h{:.0}",
+            self.clip,
+            r.x * 8.0,
+            r.y * 8.0,
+            r.w * 8.0,
+            r.h * 8.0
+        );
         let _ = write!(
             self.defs,
             "<clipPath id=\"{id}\"><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\"/></clipPath>",
@@ -316,6 +354,9 @@ impl Font {
                     0.5
                 } else if c == ' ' {
                     0.3
+                } else if c == '/' {
+                    // 레거시 값 레이블 "/표준" 이 10pt 돋움에서 31px (한셀 화면)
+                    0.38
                 } else if c.is_ascii_uppercase() {
                     0.64
                 } else {
@@ -360,11 +401,10 @@ impl Ctx<'_> {
     }
 
     fn stroke(&self, l: &ChartLine) -> Option<Option<Stroke>> {
+        // 미리 정한 색(a:prstClr)의 선도 그린다 — 레거시 차트의 범례 테두리 prstClr black 은 레거시 화면(VtChart)에는
+        // 없지만, 한셀이 그 차트를 XML 로 저장한 문서의 화면에는 있다 (*.legacy.as.cell 갈무리)
         let color = match l.fill.as_ref()? {
             ChartFill::None => return Some(None),
-            // 한셀 차트 화면은 미리 정한 색(a:prstClr)의 선을 그리지 않는다 (레거시 차트의 범례 테두리 prstClr black 이
-            // 한셀 화면에 없다 — craft-charts 레거시 15개)
-            ChartFill::Solid(c) if c.value.starts_with("prst:") => return Some(None),
             f => self.fill(f)?.map(|c| c.0)?,
         };
         let width = l.width.map_or(1.0, |w| (w as f64 / 9525.0).max(0.75));
@@ -578,10 +618,16 @@ struct Group<'a> {
     series: &'a [ChartSeries],
     /// 이 묶음보다 앞선 묶음들의 계열 수 (색 순서)
     offset: usize,
+    /// 레거시 차트: 계열마다 자동 표식인가 (`LegacyChartView::auto_markers`, XML 차트는 비어 있다)
+    legacy_auto: &'a [bool],
 }
 
 fn groups_of(ch: &Chart) -> Vec<Group<'_>> {
     let mut out = Vec::new();
+    let legacy_auto: &[bool] = ch
+        .legacy
+        .as_ref()
+        .map_or(&[], |l| l.auto_markers.as_slice());
     if !ch.kind.is_empty() {
         out.push(Group {
             kind: ch.kind.as_str(),
@@ -592,6 +638,7 @@ fn groups_of(ch: &Chart) -> Vec<Group<'_>> {
             props: &ch.group,
             series: &ch.series,
             offset: 0,
+            legacy_auto,
         });
     }
     let mut off = ch.series.len();
@@ -605,10 +652,21 @@ fn groups_of(ch: &Chart) -> Vec<Group<'_>> {
             props: &g.props,
             series: &g.series,
             offset: off,
+            legacy_auto,
         });
         off += g.series.len();
     }
     out
+}
+
+/// 원형 조각(요소마다 색) k 의 기본 색: 테마 순서. 레거시 차트는 계열 목록(VtSeries)의 채우기 — 한셀 화면의
+/// 레거시 원형은 73B1D1·CD6565·EBC452 … (chart_pie)
+fn pie_color(ch: &Chart, cx: &Ctx, k: usize) -> String {
+    ch.legacy
+        .as_ref()
+        .and_then(|l| l.fills.get(k))
+        .filter(|c| c.len() == 6)
+        .map_or_else(|| cx.palette(k), |c| format!("#{c}"))
 }
 
 /// 계열 하나의 기본 색 (지정 → 테마 순서)
@@ -684,7 +742,7 @@ fn legend_items(ch: &Chart, groups: &[Group], cx: &Ctx, pie_like: bool) -> Vec<L
         if let Some(s) = groups.first().and_then(|g| g.series.first()) {
             let n = s.values.len().max(s.categories.len());
             for k in 0..n {
-                let base = cx.palette(k);
+                let base = pie_color(ch, cx, k);
                 let st = point_style(s, 0, k, cx, &base);
                 let name = s
                     .categories
@@ -707,7 +765,8 @@ fn legend_items(ch: &Chart, groups: &[Group], cx: &Ctx, pie_like: bool) -> Vec<L
             let color = series_color(s, k, cx);
             let name = s.name.clone().unwrap_or_else(|| format!("계열{}", k + 1));
             let item = match g.kind {
-                "line" | "scatter" | "radar" => {
+                // 3차원 꺾은선의 범례 표지는 네모 (c2_e4_line3d 의 한셀 화면)
+                "line" | "scatter" | "radar" if !g.three_d => {
                     let st = series_stroke(s, &color, cx);
                     let marker = marker_of(s, g, k).map(|(m, _)| m);
                     LegendItem {
@@ -741,6 +800,129 @@ fn legend_items(ch: &Chart, groups: &[Group], cx: &Ctx, pie_like: bool) -> Vec<L
     items
 }
 
+/// 레거시(VtChart) 화면의 배치 (한셀 화면, 레거시 차트 갈무리 — docs/format/screen.md 6.2절). 제목·범례를 그리고
+/// 남은 자리를 돌려준다: 축 차트는 x = 값 레이블 왼쪽, y = 그림 영역 위, 오른쪽·아래 = 그림 영역 끝, 원형은 원이 들어갈
+/// 자리. 틀 픽셀은 왼쪽 1, 위 0, 오른쪽 w−1, 아래 h−2 (SVG 좌표).
+///
+/// - 그림 영역: 레이블 왼쪽이 틀 + 14, 위 + 22, 아래 − 36 (항목 레이블 글자 윗변은 축 + 9), 범례가 없으면 오른쪽 − 15
+/// - 범례: 틀 없음, 표지 16×15 (선은 28px 선 + 표식), 표지 → 글 8, 줄 23px. 오른쪽은 글 끝이 틀 − 20, 그림 영역은
+///   표지 18px 앞까지. 왼쪽은 표지가 틀 + 16, 위는 표지 윗변이 + 16 (그림 영역 + 35), 아래는 − 32 (그림 영역 − 35)
+/// - 제목: 기준선이 틀 위 + 42, 제목 자리 56px
+#[allow(clippy::too_many_arguments)]
+fn legacy_layout(
+    out: &mut Svg,
+    ch: &Chart,
+    groups: &[Group],
+    cx: &Ctx,
+    base: &Font,
+    pie_like: bool,
+    w: f64,
+    h: f64,
+) -> Rect {
+    let (fl, ft, fr, fb) = (1.0, 0.0, w - 1.0, h - 2.0);
+    let mut top = ft;
+    if let Some((text, font)) = title_of(ch, cx, base) {
+        for (i, l) in text.split('\n').enumerate() {
+            out.text(
+                (fl + fr) / 2.0,
+                ft + 42.0 + font.px() * 1.2 * i as f64,
+                l,
+                &font,
+                "middle",
+            );
+        }
+        top = ft + 56.0;
+    }
+    let (mut left, mut right, mut plot_top, mut plot_bottom) =
+        (fl + 14.0, fr - 15.0, top + 22.0, fb - 36.0);
+    if let Some(pos) = ch.legend.as_deref() {
+        let font = cx.font(ch.legend_props.tx_pr.as_ref(), None, base.size, false);
+        let items = legend_items(ch, groups, cx, pie_like);
+        if !items.is_empty() {
+            let line = items.iter().any(|i| i.stroke.is_some() && i.fill.is_none());
+            let kw = if line { 28.0 } else { 16.0 };
+            // 글 폭은 잉크 폭 (어림 폭 − 2.5: 9pt "10" 이 9.5px — chart_base 의 글 끝이 틀 − 20)
+            let tw = items
+                .iter()
+                .map(|i| font.width(&i.name))
+                .fold(0.0, f64::max)
+                - 2.5;
+            let n = items.len() as f64;
+            // 세로 범례의 첫 표지 윗변 (틀 가운데에 맞추되 줄이 많으면 조금 위로)
+            let first_top = |a: f64, b: f64| {
+                let cy = (a + b) / 2.0;
+                if n <= 1.0 {
+                    (cy - 7.5).floor()
+                } else {
+                    (cy - (23.0 * n - 8.0) / 2.0 - 1.5).floor()
+                }
+            };
+            let mut keys: Vec<(f64, f64)> = Vec::new();
+            match pos {
+                "l" => {
+                    let y0 = first_top(top, fb);
+                    keys.extend((0..items.len()).map(|k| (fl + 16.0, y0 + 23.0 * k as f64)));
+                    left = fl + 16.0 + kw + 8.0 + tw + 19.0;
+                }
+                "t" | "b" => {
+                    let total: f64 = items
+                        .iter()
+                        .map(|i| kw + 8.0 + font.width(&i.name))
+                        .sum::<f64>()
+                        + 16.0 * (n - 1.0);
+                    let mut x = ((fl + fr) / 2.0 - total / 2.0).round();
+                    let y = if pos == "t" { top + 16.0 } else { fb - 32.0 };
+                    for it in &items {
+                        keys.push((x, y));
+                        x += kw + 8.0 + font.width(&it.name) + 16.0;
+                    }
+                    if pos == "t" {
+                        plot_top += 35.0;
+                    } else {
+                        plot_bottom -= 35.0;
+                    }
+                    right = fr - 15.0;
+                }
+                _ => {
+                    let kx = (fr - 20.0 - tw - 8.0 - kw).round();
+                    let y0 = first_top(top, fb);
+                    keys.extend((0..items.len()).map(|k| (kx, y0 + 23.0 * k as f64)));
+                    right = kx - 18.0;
+                }
+            }
+            for (it, (kx, ky)) in items.iter().zip(keys) {
+                if let Some(f) = &it.fill {
+                    out.rect(kx, ky, kw, 15.0, &Style::fill(f));
+                } else if let Some(st) = &it.stroke {
+                    let y = ky + 8.0;
+                    out.line(kx, y + 0.5, kx + kw, y + 0.5, st);
+                    if let Some(m) = &it.marker {
+                        draw_marker(out, m, kx + kw / 2.0, y + 0.5, 7.0, &Style::fill(&st.color));
+                    }
+                }
+                out.text(kx + kw + 8.0, ky + 9.5, &it.name, &font, "start");
+            }
+        }
+    }
+    if pie_like {
+        // 원: 왼쪽 + 15, 위 + 41 (계열 이름이 원 위에), 아래 − 15. 도넛형은 이름이 없고 위 + 15 (c2_e6_doughnut)
+        let doughnut = groups.first().is_some_and(|g| g.kind == "doughnut");
+        let y0 = plot_top - 22.0 + if doughnut { 15.0 } else { 41.0 };
+        return Rect {
+            x: fl + 15.0,
+            y: y0,
+            w: (right - (fl + 15.0)).max(10.0),
+            h: (plot_bottom + 36.0 - 15.0 - y0).max(10.0),
+        };
+    }
+    Rect {
+        x: left,
+        y: plot_top,
+        w: (right - left).max(10.0),
+        h: (plot_bottom - plot_top).max(10.0),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_legend(
     out: &mut Svg,
@@ -751,6 +933,7 @@ fn draw_legend(
     inner: Rect,
     w: f64,
     h: f64,
+    top: f64,
     cx: &Ctx,
 ) -> Rect {
     let fpx = font.px();
@@ -783,7 +966,7 @@ fn draw_legend(
             "l" => {
                 rest.x = inner.x + bw + plot_gap;
                 rest.w -= bw + plot_gap;
-                (inner.x, (h - bh) / 2.0)
+                (inner.x, (top + h - bh) / 2.0)
             }
             "t" => {
                 rest.y += bh + 12.0;
@@ -804,7 +987,7 @@ fn draw_legend(
                 // 오른쪽: 글 끝이 틀에서 11px, 세로 가운데는 틀 가운데, 그림 영역은 표지 15px 앞까지
                 let x = w - right - bw;
                 rest.w = x - plot_gap - inner.x;
-                (x, (h - bh) / 2.0)
+                (x, (top + h - bh) / 2.0)
             }
         },
     };
@@ -864,6 +1047,10 @@ fn marker_of(s: &ChartSeries, g: &Group, k: usize) -> Option<(String, f64)> {
     let m: Option<&ChartMarker> = s.marker.as_ref();
     let sym = m.and_then(|m| m.symbol.as_deref());
     let size = m.and_then(|m| m.size).unwrap_or(7) as f64 * 1.1;
+    // 레거시 2차원 꺾은선의 자동 표식: 모델에는 none 이지만 한셀 화면은 자동 표식을 그린다 (c2_e3_line_pct 등)
+    if g.legacy_auto.get(k) == Some(&true) && g.kind == "line" && !g.three_d {
+        return Some((AUTO[k % AUTO.len()].to_string(), size));
+    }
     match (g.kind, sym) {
         (_, Some("none")) => None,
         ("scatter", None) => match g.props.scatter_style.as_deref() {
@@ -1008,14 +1195,38 @@ fn nice_unit(range: f64, n: f64) -> f64 {
     }
 }
 
-/// 자동 범위: 0 을 포함하고, 끝에 `room` 비율 여유(2차원 5%, 3차원 0 — chart_col3d 의 20~60 이 0~60)를 두어 주 단위로 맞춘다. 축 지정값이 이긴다
+/// 값 축 자동 눈금의 규칙 (한셀 화면, 높이 실험 — docs/format/screen.md 6절)
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TickRule {
+    /// XML 차트의 세로 값 축: 간격 수 ≤ clamp(⌊축 길이 / 25px⌋, 3, 10) 인 가장 작은 단위 (1·2·5 × 10ⁿ).
+    /// 끝값은 데이터 끝 + 단위/4 를 덮는 배수 (`room` 이 거짓이면 데이터 끝을 덮는 배수 — 3차원·100%)
+    Xml { room: bool },
+    /// 가로 값 축 (가로 막대·분산형의 x): 눈금 사이 40px 남짓, 끝에 5% 여유 (`room` 이 거짓이면 없이)
+    Horizontal { room: bool },
+    /// 레거시(VtChart) 차트: 간격 수 ≤ clamp(⌊축 길이 / 15.5px⌋, 2, 10) 인 가장 작은 단위. 끝값은 데이터 끝과
+    /// 5.5px 넘게 떨어진 배수 (`room` 이 거짓이면 데이터 끝을 덮는 배수)
+    Legacy { room: bool },
+}
+
+impl TickRule {
+    /// 단위를 고를 때 허용하는 간격 수
+    fn max_intervals(self, len_px: f64) -> f64 {
+        match self {
+            TickRule::Xml { .. } => (len_px / 25.0).floor().clamp(3.0, 10.0),
+            TickRule::Legacy { .. } => (len_px / 15.5).floor().clamp(2.0, 10.0),
+            TickRule::Horizontal { .. } => (len_px / 40.0).clamp(2.0, 10.0),
+        }
+    }
+}
+
+/// 자동 범위: 0 을 포함하고 (폭이 끝값의 1/6 넘으면), 규칙([`TickRule`])대로 주 단위와 끝값을 고른다. 축 지정값이 이긴다
 fn make_scale(
     lo: f64,
     hi: f64,
     axis: Option<&ChartAxis>,
     len_px: f64,
     zero_based: bool,
-    room: f64,
+    rule: TickRule,
 ) -> Scale {
     let sc = axis.map(|a| &a.scaling);
     let reverse = sc.and_then(|s| s.orientation.as_deref()) == Some("maxMin");
@@ -1050,25 +1261,68 @@ fn make_scale(
     let fixed_max = sc.and_then(|s| s.max);
     let lo = fixed_min.unwrap_or(lo);
     let hi = fixed_max.unwrap_or(hi);
-    // 눈금 사이가 40px 남짓
-    let target = (len_px / 40.0).clamp(2.0, 10.0);
-    // 주 단위는 여유를 빼고 고른다 (0~130 → 20 단위 0~140)
     let span = hi - lo;
-    let major = axis
-        .and_then(|a| a.major_unit)
-        .filter(|u| *u > 0.0)
-        .unwrap_or_else(|| nice_unit(span, target));
-    let min = fixed_min.unwrap_or_else(|| {
-        if lo >= 0.0 && zero_based {
-            0.0
-        } else {
-            ((lo - (hi - lo) * room) / major).floor() * major
-        }
-    });
-    let max = fixed_max.unwrap_or_else(|| {
-        let m = ((hi + (hi - lo) * room) / major).ceil() * major;
-        if hi <= 0.0 && zero_based { 0.0 } else { m }
-    });
+    // 단위 u 의 끝값 (최소, 최대)
+    let ends = |u: f64| -> (f64, f64) {
+        // 데이터 끝을 덮는 배수 (부동소수 오차는 빼고)
+        let up = |v: f64, pad: f64| ((v + pad) / u - 1e-9).ceil() * u;
+        let down = |v: f64, pad: f64| ((v - pad) / u + 1e-9).floor() * u;
+        let min = fixed_min.unwrap_or_else(|| {
+            if lo >= 0.0 && zero_based {
+                0.0
+            } else {
+                match rule {
+                    TickRule::Xml { room: true } => down(lo, u / 4.0),
+                    TickRule::Horizontal { room: true } => down(lo, span * 0.05),
+                    _ => down(lo, 0.0),
+                }
+            }
+        });
+        let max = fixed_max.unwrap_or_else(|| {
+            if hi <= 0.0 && zero_based {
+                return 0.0;
+            }
+            match rule {
+                TickRule::Xml { room: true } => up(hi, u / 4.0),
+                TickRule::Horizontal { room: true } => up(hi, span * 0.05),
+                TickRule::Legacy { room: true } => {
+                    // 데이터 끝이 축 끝에서 5.5px 넘게 아래
+                    let mut m = up(hi, 0.0);
+                    while (m - hi) / (m - min).max(f64::MIN_POSITIVE) * len_px < 5.5 {
+                        m += u;
+                    }
+                    m
+                }
+                _ => up(hi, 0.0),
+            }
+        });
+        (min, max)
+    };
+    let major = match axis.and_then(|a| a.major_unit).filter(|u| *u > 0.0) {
+        Some(u) => u,
+        None => match rule {
+            // 주 단위는 여유를 빼고 고른다 (0~130 → 20 단위 0~140)
+            TickRule::Horizontal { .. } => nice_unit(span, rule.max_intervals(len_px)),
+            _ => {
+                let n = rule.max_intervals(len_px);
+                let mut base = 10f64.powf((span / n).log10().floor() - 1.0);
+                let mut found = None;
+                'search: for _ in 0..40 {
+                    for step in [1.0, 2.0, 5.0] {
+                        let u = base * step;
+                        let (mn, mx) = ends(u);
+                        if ((mx - mn) / u - 1e-6).ceil() <= n {
+                            found = Some(u);
+                            break 'search;
+                        }
+                    }
+                    base *= 10.0;
+                }
+                found.unwrap_or_else(|| nice_unit(span, n))
+            }
+        },
+    };
+    let (min, max) = ends(major);
     Scale {
         min,
         max: if max > min { max } else { min + major },
@@ -1080,7 +1334,12 @@ fn make_scale(
 
 /// 눈금 레이블 글: 축 표시 형식 (원본 연결이면 계열 캐시의 형식) → 일반
 fn tick_label(v: f64, axis: Option<&ChartAxis>, linked: Option<&str>, percent: bool) -> String {
-    if percent && axis.and_then(|a| a.num_fmt.as_ref()).is_none() {
+    // 100% 누적: 원본에 연결된 형식(셀의 G/표준)이면 0% (c2_e3_*_pct 의 한셀 화면)
+    if percent
+        && axis
+            .and_then(|a| a.num_fmt.as_ref())
+            .is_none_or(|f| f.source_linked == Some(true))
+    {
         return format!("{:.0}%", v * 100.0);
     }
     // 원본 연결 형식의 G/표준 은 일반 서식으로, 축에 정한 G/표준 은 표시 형식 그대로 (연호 G + 글자 — 한셀 화면의
@@ -1268,8 +1527,24 @@ fn draw_axis_chart(
 
     // 그림 영역: 직접 배치 또는 축 레이블 자리를 빼고
     let (vlo, vhi, percent) = value_range(&primary);
-    let room = if first.three_d { 0.0 } else { 0.05 };
-    let probe = make_scale(vlo, vhi, val_ax, inner.h.max(inner.w) * 0.8, !xy, room);
+    // 끝 여유: 3차원은 없고 (chart_col3d 의 20~60 이 0~60), 100% 누적은 100% 에서 끝난다
+    let room = !first.three_d && !percent;
+    let legacy = ch.legacy.is_some();
+    let vrule = if legacy {
+        TickRule::Legacy { room }
+    } else if horizontal {
+        TickRule::Horizontal { room }
+    } else {
+        TickRule::Xml { room }
+    };
+    let xrule = if legacy {
+        TickRule::Legacy { room }
+    } else {
+        TickRule::Horizontal { room }
+    };
+    let legacy_wide_cats =
+        legacy && !horizontal && cats.iter().any(|c| c.chars().any(crate::render::is_wide));
+    let probe = make_scale(vlo, vhi, val_ax, inner.h.max(inner.w) * 0.8, !xy, vrule);
     let val_labels: Vec<String> = probe
         .ticks()
         .iter()
@@ -1284,6 +1559,39 @@ fn draw_axis_chart(
     } else {
         0.0
     };
+    // 원근 3차원 (rAngAx 0): 상자를 돌려 그린다
+    if !legacy
+        && first.three_d
+        && !horizontal
+        && !xy
+        && matches!(first.kind, "bar" | "line" | "area")
+        && ch
+            .view3d
+            .as_ref()
+            .is_some_and(|v| v.r_ang_ax == Some(false))
+        && ch
+            .plot_layout
+            .as_ref()
+            .and_then(|l| l.manual.as_ref())
+            .is_none()
+    {
+        let p = Persp {
+            val_ax,
+            cat_ax,
+            cats: &cats,
+            n_cat,
+            val_fmt: val_fmt.as_deref(),
+            cat_fmt: cat_fmt.as_deref(),
+            val_font: &val_font,
+            cat_font: &cat_font,
+            range: (vlo, vhi, percent),
+            left: inner.x + val_label_w,
+            right: inner.x + inner.w,
+            h,
+        };
+        draw_perspective(out, ch, groups, cx, &p);
+        return;
+    }
     let sec_label_w = if sec_ax.is_some() && labels_on(sec_ax) {
         val_label_w
     } else {
@@ -1321,6 +1629,33 @@ fn draw_axis_chart(
             w: r.w - val_label_w - sec_label_w,
             h: r.h - cat_label_h,
         },
+        None if legacy => {
+            // 레거시: 안쪽 자리(legacy_layout)에서 왼쪽 레이블 + 14px 만 뺀다. 영역형은 축이 4px 위·왼쪽 (chart_area)
+            let left = if horizontal {
+                cats.iter().map(|c| cat_font.width(c)).fold(0.0, f64::max) + VAL_GAP
+            } else {
+                val_label_w
+            };
+            let shrink = if first.kind == "area" { 4.0 } else { 0.0 };
+            // 한글 항목 이름은 레이블 자리가 16px 더 높다 (c2_e10_str_cat: 축이 16px 위, 글자 윗변이 축 + 16)
+            let tall = if legacy_wide_cats { 16.0 } else { 0.0 };
+            if horizontal {
+                // 가로 막대: 그림 영역 위가 틀 + 16, 아래 4px 더, 오른쪽은 마지막 값 레이블의 반만큼 더 (chart_barh)
+                Rect {
+                    x: inner.x + left,
+                    y: inner.y - 6.0,
+                    w: inner.w - left - 15.0,
+                    h: inner.h + 2.0,
+                }
+            } else {
+                Rect {
+                    x: inner.x + left,
+                    y: inner.y,
+                    w: inner.w - left - shrink,
+                    h: inner.h - shrink - tall,
+                }
+            }
+        }
         None => {
             // 한셀 화면: 왼쪽은 레이블 + 14px, 위는 눈금 레이블 반 줄, 아래는 항목 레이블 한 줄 + 14px
             let tl = val_title.as_ref().map_or(0.0, |(_, f)| f.px() * 1.4);
@@ -1349,6 +1684,7 @@ fn draw_axis_chart(
     };
     // 가로 막대·분산형: 값 레이블이 눈금 가운데에 오므로 마지막 레이블의 반을 오른쪽에 남긴다
     if (horizontal || xy)
+        && !legacy
         && ch
             .plot_layout
             .as_ref()
@@ -1367,7 +1703,7 @@ fn draw_axis_chart(
                     }
                 }
             }
-            let xs = make_scale(lo.min(hi), hi.max(lo), cat_ax, plot.w, true, room);
+            let xs = make_scale(lo.min(hi), hi.max(lo), cat_ax, plot.w, true, xrule);
             xs.ticks().last().map_or(0.0, |v| {
                 cat_font.width(&tick_label(*v, cat_ax, cat_fmt.as_deref(), false))
             })
@@ -1378,16 +1714,20 @@ fn draw_axis_chart(
     // 3차원: 깊이 자리만큼 앞면 그림 영역이 작다 (chart_col3d: 2차원 415×267 보다 왼쪽 +9, 오른쪽 −38, 위 +15, 아래 −2 px)
     if first.three_d
         && !xy
+        && !legacy
         && ch
             .plot_layout
             .as_ref()
             .and_then(|l| l.manual.as_ref())
             .is_none()
     {
+        // 직각 축(rAngAx)의 깊이 자리는 회전에 따라 (rotX·rotY 0 이면 막대는 평면이지만 왼쪽·오른쪽·아래 자리는
+        // 남는다 — c2_e4_bar3d_b: 왼쪽 +8, 오른쪽 −12, 아래 −3 px)
+        let (fx, fy) = oblique(ch);
         let (l, r, t, b) = (
             plot.w * 0.022,
-            plot.w * 0.092,
-            plot.h * 0.056,
+            plot.w * (0.031 + 0.061 * fx),
+            plot.h * 0.056 * fy,
             plot.h * 0.008,
         );
         plot.x += l;
@@ -1400,10 +1740,16 @@ fn draw_axis_chart(
 
     // 값 축 범위 (그림 영역 크기로 다시)
     let vlen = if horizontal { plot.w } else { plot.h };
-    let scale = make_scale(vlo, vhi, val_ax, vlen, !xy, room);
+    let scale = make_scale(vlo, vhi, val_ax, vlen, !xy, vrule);
     let sec_scale = sec_ax.map(|a| {
-        let (lo, hi, _) = value_range(&secondary);
-        make_scale(lo, hi, Some(a), vlen, true, room)
+        let (lo, hi, sp) = value_range(&secondary);
+        let room = !first.three_d && !sp;
+        let rule = match vrule {
+            TickRule::Legacy { .. } => TickRule::Legacy { room },
+            TickRule::Horizontal { .. } => TickRule::Horizontal { room },
+            TickRule::Xml { .. } => TickRule::Xml { room },
+        };
+        make_scale(lo, hi, Some(a), vlen, true, rule)
     });
     // x 값 축 (분산형·거품형)
     let xscale = if xy {
@@ -1420,7 +1766,7 @@ fn draw_axis_chart(
             lo = 0.0;
             hi = 1.0;
         }
-        Some(make_scale(lo, hi, cat_ax, plot.w, true, room))
+        Some(make_scale(lo, hi, cat_ax, plot.w, true, xrule))
     } else {
         None
     };
@@ -1439,8 +1785,12 @@ fn draw_axis_chart(
         }
     };
     // 항목 띠 (between: 띠 가운데, midCat: 눈금 위)
-    let between =
-        val_ax.and_then(|a| a.cross_between.as_deref()) != Some("midCat") || first.kind == "bar";
+    // 레거시 영역형은 첫 항목이 값 축 위에서 끝 항목이 오른쪽 끝 (chart_area)
+    let between = if legacy {
+        first.kind != "area"
+    } else {
+        val_ax.and_then(|a| a.cross_between.as_deref()) != Some("midCat") || first.kind == "bar"
+    };
     let cat_reverse = cat_ax.and_then(|a| a.scaling.orientation.as_deref()) == Some("maxMin");
     let band_len = if horizontal { plot.h } else { plot.w };
     let band = if between {
@@ -1463,7 +1813,7 @@ fn draw_axis_chart(
         }
     };
 
-    // 눈금선
+    // 눈금선: 지정이 없으면 축 선과 같은 회색 (레거시는 808080, 화소에 맞춘다 — XML 차트는 계산한 자리에 흐리게)
     let grid = |a: Option<&ChartAxis>, major: bool| -> Option<Stroke> {
         let a = a?;
         let l = if major {
@@ -1471,7 +1821,10 @@ fn draw_axis_chart(
         } else {
             a.minor_gridlines.as_ref()
         }?;
-        cx.line_of(l.sp_pr.as_ref(), Some(("#D9D9D9", 1.0)))
+        cx.line_of(
+            l.sp_pr.as_ref(),
+            Some((if legacy { LEGACY_GRAY } else { AXIS_GRAY }, 1.0)),
+        )
     };
     if let Some(gs) = grid(val_ax, false) {
         let minor = val_ax
@@ -1481,7 +1834,7 @@ fn draw_axis_chart(
             let mut v = scale.min;
             while v <= scale.max && (v - scale.min) / minor < 500.0 {
                 let p = vpos(&scale, v);
-                grid_line(out, horizontal, p, &plot, &gs);
+                grid_line(out, horizontal, p, &plot, &gs, legacy);
                 v += minor;
             }
         }
@@ -1489,14 +1842,14 @@ fn draw_axis_chart(
     if let Some(gs) = grid(val_ax, true) {
         for v in scale.ticks() {
             let p = vpos(&scale, v);
-            grid_line(out, horizontal, p, &plot, &gs);
+            grid_line(out, horizontal, p, &plot, &gs, legacy);
         }
     }
     if let Some(gs) = grid(cat_ax, true) {
         if let Some(xs) = &xscale {
             for v in xs.ticks() {
                 let p = plot.x + xs.t(v) * plot.w;
-                grid_line(out, true, p, &plot, &gs);
+                grid_line(out, true, p, &plot, &gs, legacy);
             }
         } else {
             for k in 0..=n_cat {
@@ -1506,7 +1859,7 @@ fn draw_axis_chart(
                 } else {
                     plot.x + off
                 };
-                grid_line(out, !horizontal, p, &plot, &gs);
+                grid_line(out, !horizontal, p, &plot, &gs, legacy);
             }
         }
     }
@@ -1521,7 +1874,17 @@ fn draw_axis_chart(
         };
         match g.kind {
             "bar" => draw_bars(
-                out, g, cx, sc, &plot, horizontal, n_cat, band, &cat_mid, &vpos,
+                out,
+                g,
+                cx,
+                sc,
+                &plot,
+                horizontal,
+                n_cat,
+                band,
+                &cat_mid,
+                &vpos,
+                oblique(ch),
             ),
             "line" | "stock" => draw_lines(out, g, cx, sc, n_cat, &cat_mid, &vpos, false),
             "area" => draw_areas(out, g, cx, sc, n_cat, &cat_mid, &vpos, &plot),
@@ -1538,13 +1901,28 @@ fn draw_axis_chart(
 
     // 축 선과 눈금, 레이블
     let ax_line = |a: Option<&ChartAxis>| {
-        cx.line_of(a.and_then(|a| a.sp_pr.as_ref()), Some((AXIS_GRAY, 1.0)))
+        cx.line_of(
+            a.and_then(|a| a.sp_pr.as_ref()),
+            Some((if legacy { LEGACY_GRAY } else { AXIS_GRAY }, 1.0)),
+        )
     };
+    // 눈금 길이: 레거시는 바깥 4px (한셀은 레거시의 눈금 모양을 읽지 않는다 — 늘 바깥)
     let tick_len = |a: Option<&ChartAxis>| match a.and_then(|a| a.major_tick_mark.as_deref()) {
+        _ if legacy => (0.0, 4.0),
         Some("none") => (0.0, 0.0),
         Some("in") => (-5.0, 0.0),
         Some("cross") => (-5.0, 5.0),
         _ => (0.0, 5.0),
+    };
+    // 레이블 기준선: 값 레이블은 눈금 + 글꼴 0.35 (레거시 0.3), 항목 레이블은 축 아래 22.5px (레거시는 글자 윗변이
+    // 축 + 9 — 기준선 1.39 글꼴)
+    let val_dy = |f: &Font| f.px() * if legacy { 0.3 } else { 0.35 };
+    let cat_dy = |f: &Font| {
+        if legacy {
+            f.px() * 1.39 + if legacy_wide_cats { 8.0 } else { 0.0 }
+        } else {
+            22.5 * f.size / BASE_PT + f.px() * 0.35
+        }
     };
     // 값 축이 항목 축과 만나는 자리 (항목 축 선의 위치)
     let cross_v = match cat_ax.and_then(|a| a.crosses.as_deref()) {
@@ -1581,13 +1959,7 @@ fn draw_axis_chart(
                 }
                 if labels_on(val_ax) {
                     let t = tick_label(v, val_ax, val_fmt.as_deref(), percent);
-                    out.text(
-                        p,
-                        y + 22.5 * val_font.size / BASE_PT + val_font.px() * 0.35,
-                        &t,
-                        &val_font,
-                        "middle",
-                    );
+                    out.text(p, y + cat_dy(&val_font), &t, &val_font, "middle");
                 }
             }
         } else {
@@ -1610,15 +1982,9 @@ fn draw_axis_chart(
                 if labels_on(val_ax) {
                     let t = tick_label(v, val_ax, val_fmt.as_deref(), percent);
                     if right {
-                        out.text(
-                            x + VAL_GAP,
-                            p + val_font.px() * 0.35,
-                            &t,
-                            &val_font,
-                            "start",
-                        );
+                        out.text(x + VAL_GAP, p + val_dy(&val_font), &t, &val_font, "start");
                     } else {
-                        out.text(x - VAL_GAP, p + val_font.px() * 0.35, &t, &val_font, "end");
+                        out.text(x - VAL_GAP, p + val_dy(&val_font), &t, &val_font, "end");
                     }
                 }
             }
@@ -1668,7 +2034,7 @@ fn draw_axis_chart(
                     let t = tick_label(v, cat_ax, cat_fmt.as_deref(), false);
                     out.text(
                         p,
-                        plot.y + plot.h + 22.5 * cat_font.size / BASE_PT + cat_font.px() * 0.35,
+                        plot.y + plot.h + cat_dy(&cat_font),
                         &t,
                         &cat_font,
                         "middle",
@@ -1691,7 +2057,7 @@ fn draw_axis_chart(
                     let t = cat_text(c, cat_fmt.as_deref());
                     out.text(
                         plot.x - VAL_GAP,
-                        cat_mid(k) + cat_font.px() * 0.35,
+                        cat_mid(k) + val_dy(&cat_font),
                         &t,
                         &cat_font,
                         "end",
@@ -1722,7 +2088,7 @@ fn draw_axis_chart(
                         ((widest + 6.0) / band).ceil().max(1.0) as usize
                     });
                 // 항목 레이블 가운데가 축 아래 22.5px (한셀 화면, 9pt)
-                let ly = plot.y + plot.h + 22.5 * cat_font.size / BASE_PT + cat_font.px() * 0.35;
+                let ly = plot.y + plot.h + cat_dy(&cat_font);
                 for (k, c) in cats.iter().enumerate().take(n_cat) {
                     if k % skip != 0 {
                         continue;
@@ -1796,8 +2162,10 @@ fn draw_axis_chart(
     }
 }
 
-fn grid_line(out: &mut Svg, vertical: bool, p: f64, plot: &Rect, st: &Stroke) {
-    let p = p.round() + 0.5;
+/// 눈금선 하나. `snap` 이면 화소 가운데에 (레거시), 아니면 계산한 자리 그대로 (한셀 XML 차트는 흐리게 그린다 —
+/// 한 화소에 걸치면 진한 회색, 두 화소에 걸치면 연한 회색 둘)
+fn grid_line(out: &mut Svg, vertical: bool, p: f64, plot: &Rect, st: &Stroke, snap: bool) {
+    let p = if snap { p.round() + 0.5 } else { p + 0.5 };
     if vertical {
         out.line(p, plot.y, p, plot.y + plot.h, st);
     } else {
@@ -1831,6 +2199,7 @@ fn draw_bars(
     band: f64,
     cat_mid: &dyn Fn(usize) -> f64,
     vpos: &dyn Fn(&Scale, f64) -> f64,
+    depth: (f64, f64),
 ) {
     let stacked = matches!(g.grouping, "stacked" | "percentStacked");
     let percent = g.grouping == "percentStacked";
@@ -1907,9 +2276,11 @@ fn draw_bars(
             };
             if g.three_d {
                 // 한셀 화면 (chart_col3d, 막대 폭 30px): 앞면은 축 자리에서 오른쪽 6px·위 3~4px, 깊이는 오른쪽 8px·위 7px
-                let (sx, sy) = (bw * 0.2, bw * 0.12);
+                let (sx, sy) = (bw * 0.2 * depth.0, bw * 0.12 * depth.1);
                 out.rect(rx + sx, ry - sy, rw, rh, &st);
-                bar_depth(out, rx + sx, ry - sy, rw, rh, bw, &st, &color);
+                if depth.0 > 0.0 || depth.1 > 0.0 {
+                    bar_depth(out, rx + sx, ry - sy, rw, rh, bw, depth, &st, &color);
+                }
             } else {
                 out.rect(rx, ry, rw, rh, &st);
             }
@@ -1919,8 +2290,18 @@ fn draw_bars(
 
 /// 3차원 막대의 윗면·옆면. 한셀 화면에서 윗면은 앞면 색 × 0.72, 옆면은 × 0.485 (chart_col3d: #6182D6 → #465E9A·#2F3F68)
 #[allow(clippy::too_many_arguments)]
-fn bar_depth(out: &mut Svg, x: f64, y: f64, w: f64, h: f64, bw: f64, st: &Style, color: &str) {
-    let (dx, dy) = (bw * 0.267, bw * 0.233);
+fn bar_depth(
+    out: &mut Svg,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    bw: f64,
+    depth: (f64, f64),
+    st: &Style,
+    color: &str,
+) {
+    let (dx, dy) = (bw * 0.267 * depth.0, bw * 0.233 * depth.1);
     let front = st.fill.as_ref().map_or(color, |f| f.0.as_str());
     let top = format!(
         "M{x:.1},{y:.1}L{:.1},{:.1}L{:.1},{:.1}L{:.1},{y:.1}Z",
@@ -1942,6 +2323,299 @@ fn bar_depth(out: &mut Svg, x: f64, y: f64, w: f64, h: f64, bw: f64, st: &Style,
     );
     out.path(&top, &Style::fill(&scale_rgb(front, 0.72)));
     out.path(&side, &Style::fill(&scale_rgb(front, 0.485)));
+}
+
+// ---------------------------------------------------------------------------
+// 원근 3차원 (rAngAx 0)
+// ---------------------------------------------------------------------------
+
+/// 원근 3차원 차트에 넘기는 축 차트의 값들
+struct Persp<'a> {
+    val_ax: Option<&'a ChartAxis>,
+    cat_ax: Option<&'a ChartAxis>,
+    cats: &'a [String],
+    n_cat: usize,
+    val_fmt: Option<&'a str>,
+    cat_fmt: Option<&'a str>,
+    val_font: &'a Font,
+    cat_font: &'a Font,
+    /// 값 범위 (최소, 최대, 100% 누적)
+    range: (f64, f64, bool),
+    /// 상자가 들어갈 가로 자리 (값 레이블 오른쪽 ~ 범례 앞)
+    left: f64,
+    right: f64,
+    h: f64,
+}
+
+/// 한셀 화면의 원근 3차원 상자 (c2_e4_line3d 15/20/30 과 c2_e4_bar3d_a 30/45/50/200 의 모서리 13개를 한 모형으로
+/// 맞춘 값 — 평균 오차 2.5px): 가로 1 × 높이 0.675 × 깊이 0.163 상자를 세로축으로 rotY, 가로축으로 rotX 돌리고 가로의
+/// 2.46 배 거리에서 원근으로 본다. 원근값·깊이 비율은 두 표본에서 상자를 바꾸지 않는다
+const BOX3D: (f64, f64, f64) = (0.675, 0.163, 2.458);
+
+struct View3 {
+    sa: f64,
+    ca: f64,
+    sb: f64,
+    cb: f64,
+    k: f64,
+    ox: f64,
+    oy: f64,
+}
+
+impl View3 {
+    /// 상자 좌표 (x 0..1 항목, y 0..높이 값, z 0..깊이 앞 → 뒤) → 크기를 맞추기 전 화면 좌표 (y 위로)
+    fn raw(&self, x: f64, y: f64, z: f64) -> (f64, f64) {
+        let (hh, dd, l) = BOX3D;
+        let (x, y, z) = (x - 0.5, y - hh / 2.0, z - dd / 2.0);
+        let xx = x * self.cb + z * self.sb;
+        let zz = -x * self.sb + z * self.cb;
+        let yy = y * self.ca + zz * self.sa;
+        let z2 = -y * self.sa + zz * self.ca;
+        let s = l / (l + z2);
+        (xx * s, yy * s)
+    }
+    fn p(&self, x: f64, y: f64, z: f64) -> (f64, f64) {
+        let (a, b) = self.raw(x, y, z);
+        (self.ox + self.k * a, self.oy - self.k * b)
+    }
+    fn path(&self, pts: &[(f64, f64, f64)]) -> String {
+        let mut d = String::new();
+        for (i, &(x, y, z)) in pts.iter().enumerate() {
+            let (a, b) = self.p(x, y, z);
+            let _ = write!(d, "{}{a:.1},{b:.1}", if i == 0 { "M" } else { "L" });
+        }
+        d.push('Z');
+        d
+    }
+}
+
+/// 원근 3차원 막대·꺾은선·영역 (한셀 화면, docs/format/screen.md 6절): 상자를 위 18px·아래 36px 자리에 높이로
+/// 맞춰 가운데 두고, 옆벽(x 0)·뒷벽(z 깊이)에 눈금선, 바닥 왼쪽·뒤 모서리, 앞 왼쪽 세로 모서리에 값 축, 바닥 앞
+/// 모서리에 항목 축을 그린다. 막대는 앞면(계열 색)·윗면(× 0.97)·옆면(× 0.65), 깊이는 상자 깊이 / (1 + 깊이 간격)
+fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &Persp) {
+    let v3 = ch.view3d.as_ref();
+    let rx = f64::from(v3.and_then(|v| v.rot_x).unwrap_or(15)).to_radians();
+    let ry = f64::from(v3.and_then(|v| v.rot_y).unwrap_or(20)).to_radians();
+    let (hh, dd, _) = BOX3D;
+    let mut v = View3 {
+        sa: rx.sin(),
+        ca: rx.cos(),
+        sb: ry.sin(),
+        cb: ry.cos(),
+        k: 1.0,
+        ox: 0.0,
+        oy: 0.0,
+    };
+    // 상자 모서리 8개의 테두리 → 자리에 맞춘다 (높이가 먼저 찬다)
+    let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for &x in &[0.0, 1.0] {
+        for &y in &[0.0, hh] {
+            for &z in &[0.0, dd] {
+                let (a, b) = v.raw(x, y, z);
+                x0 = x0.min(a);
+                x1 = x1.max(a);
+                y0 = y0.min(b);
+                y1 = y1.max(b);
+            }
+        }
+    }
+    let (top, bottom) = (18.0, p.h - 36.0);
+    v.k = ((bottom - top) / (y1 - y0))
+        .min((p.right - p.left).max(10.0) / (x1 - x0))
+        .max(1.0);
+    v.oy = top + v.k * y1;
+    v.ox = (p.left + p.right) / 2.0 - v.k * (x0 + x1) / 2.0;
+
+    // 값 눈금: 앞 왼쪽 세로 모서리 길이로
+    let (_, a0) = v.p(0.0, 0.0, 0.0);
+    let (_, a1) = v.p(0.0, hh, 0.0);
+    let (vlo, vhi, percent) = p.range;
+    let sc = make_scale(
+        vlo,
+        vhi,
+        p.val_ax,
+        (a0 - a1).abs(),
+        true,
+        TickRule::Xml { room: false },
+    );
+    let yv = |val: f64| sc.t(val).clamp(0.0, 1.0) * hh;
+    let gray = |sp: Option<&ChartShapeProps>| cx.line_of(sp, Some((AXIS_GRAY, 1.0)));
+    let line3 = |out: &mut Svg, a: (f64, f64, f64), b: (f64, f64, f64), st: &Stroke| {
+        let (x0, y0) = v.p(a.0, a.1, a.2);
+        let (x1, y1) = v.p(b.0, b.1, b.2);
+        out.line(x0, y0, x1, y1, st);
+    };
+    // 벽의 눈금선
+    if let Some(gl) = p.val_ax.and_then(|a| a.major_gridlines.as_ref())
+        && let Some(st) = gray(gl.sp_pr.as_ref())
+    {
+        for t in sc.ticks() {
+            let y = yv(t);
+            line3(out, (0.0, y, 0.0), (0.0, y, dd), &st);
+            line3(out, (0.0, y, dd), (1.0, y, dd), &st);
+        }
+    }
+    let axis_st = Stroke::new(AXIS_GRAY, 1.0);
+    // 바닥 왼쪽·뒤 모서리
+    line3(out, (0.0, 0.0, 0.0), (0.0, 0.0, dd), &axis_st);
+    line3(out, (0.0, 0.0, dd), (1.0, 0.0, dd), &axis_st);
+
+    // 계열
+    let n = p.n_cat.max(1);
+    let base = yv(0.0f64.clamp(sc.min, sc.max));
+    for g in groups {
+        let ns = g.series.len().max(1);
+        let gap_depth = g.props.gap_depth.unwrap_or(150) as f64 / 100.0;
+        let dz = dd / (1.0 + gap_depth);
+        let (z0, z1) = ((dd - dz) / 2.0, (dd + dz) / 2.0);
+        match g.kind {
+            "bar" => {
+                let gap = g.props.gap_width.unwrap_or(150) as f64 / 100.0;
+                let slot = (1.0 / n as f64) / (ns as f64 + gap);
+                for k in 0..n {
+                    for (i, s) in g.series.iter().enumerate() {
+                        let Some(val) = s.values.get(k).copied().flatten() else {
+                            continue;
+                        };
+                        let color = series_color(s, g.offset + i, cx);
+                        let st = point_style(s, i, k, cx, &color);
+                        let front = st.fill.as_ref().map_or(color.as_str(), |f| f.0.as_str());
+                        let bx0 = k as f64 / n as f64 + slot * (gap / 2.0 + i as f64);
+                        let bx1 = bx0 + slot;
+                        let (ya, yb) = (base, yv(val));
+                        let sx = if v.sb >= 0.0 { bx1 } else { bx0 };
+                        out.path(
+                            &v.path(&[(sx, ya, z0), (sx, yb, z0), (sx, yb, z1), (sx, ya, z1)]),
+                            &Style::fill(&scale_rgb(front, 0.65)),
+                        );
+                        out.path(
+                            &v.path(&[(bx0, yb, z0), (bx1, yb, z0), (bx1, yb, z1), (bx0, yb, z1)]),
+                            &Style::fill(&scale_rgb(front, 0.97)),
+                        );
+                        out.path(
+                            &v.path(&[(bx0, ya, z0), (bx1, ya, z0), (bx1, yb, z0), (bx0, yb, z0)]),
+                            &st,
+                        );
+                    }
+                }
+            }
+            "area" => {
+                for (i, s) in g.series.iter().enumerate() {
+                    let color = series_color(s, g.offset + i, cx);
+                    let st = cx.shape(s.sp_pr.as_ref(), Some(&color), None);
+                    let front = st.fill.as_ref().map_or(color.clone(), |f| f.0.clone());
+                    let xs = |k: usize| k as f64 / (n.max(2) - 1) as f64;
+                    let ys: Vec<f64> = (0..n)
+                        .map(|k| yv(s.values.get(k).copied().flatten().unwrap_or(0.0)))
+                        .collect();
+                    for k in 0..n.saturating_sub(1) {
+                        out.path(
+                            &v.path(&[
+                                (xs(k), ys[k], z0),
+                                (xs(k + 1), ys[k + 1], z0),
+                                (xs(k + 1), ys[k + 1], z1),
+                                (xs(k), ys[k], z1),
+                            ]),
+                            &Style::fill(&scale_rgb(&front, 0.97)),
+                        );
+                    }
+                    let last = n - 1;
+                    out.path(
+                        &v.path(&[
+                            (xs(last), base, z0),
+                            (xs(last), ys[last], z0),
+                            (xs(last), ys[last], z1),
+                            (xs(last), base, z1),
+                        ]),
+                        &Style::fill(&scale_rgb(&front, 0.65)),
+                    );
+                    let mut pts: Vec<(f64, f64, f64)> =
+                        (0..n).map(|k| (xs(k), ys[k], z0)).collect();
+                    pts.push((xs(last), base, z0));
+                    pts.push((0.0, base, z0));
+                    out.path(&v.path(&pts), &st);
+                }
+            }
+            _ => {
+                for (i, s) in g.series.iter().enumerate() {
+                    let color = series_color(s, g.offset + i, cx);
+                    let mut st =
+                        series_stroke(s, &color, cx).unwrap_or_else(|| Stroke::new(&color, 2.0));
+                    st.width = st.width.min(2.0);
+                    let mut d = String::new();
+                    for k in 0..n {
+                        let Some(val) = s.values.get(k).copied().flatten() else {
+                            continue;
+                        };
+                        let (a, b) = v.p((k as f64 + 0.5) / n as f64, yv(val), dd / 2.0);
+                        let _ = write!(d, "{}{a:.1},{b:.1}", if d.is_empty() { "M" } else { "L" });
+                    }
+                    out.path(
+                        &d,
+                        &Style {
+                            fill: None,
+                            stroke: Some(st),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    // 값 축: 앞 왼쪽 세로 모서리, 눈금은 앞쪽으로, 레이블은 그 왼쪽
+    if axis_visible(p.val_ax) {
+        let st = gray(p.val_ax.and_then(|a| a.sp_pr.as_ref())).unwrap_or(axis_st.clone());
+        line3(out, (0.0, 0.0, 0.0), (0.0, hh, 0.0), &st);
+        for t in sc.ticks() {
+            let y = yv(t);
+            line3(out, (0.0, y, 0.0), (0.0, y, -dd * 0.18), &st);
+            if labels_on(p.val_ax) {
+                let (a, b) = v.p(0.0, y, 0.0);
+                let label = tick_label(t, p.val_ax, p.val_fmt, percent);
+                out.text(
+                    a - 9.0,
+                    b + p.val_font.px() * 0.35,
+                    &label,
+                    p.val_font,
+                    "end",
+                );
+            }
+        }
+    }
+    // 항목 축: 바닥 앞 모서리, 눈금은 띠 경계에서 앞쪽으로, 레이블은 띠 가운데의 왼쪽 아래
+    if axis_visible(p.cat_ax) {
+        let st = gray(p.cat_ax.and_then(|a| a.sp_pr.as_ref())).unwrap_or(axis_st.clone());
+        line3(out, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), &st);
+        for k in 0..=n {
+            let x = k as f64 / n as f64;
+            line3(out, (x, 0.0, 0.0), (x, 0.0, -dd * 0.18), &st);
+        }
+        if labels_on(p.cat_ax) {
+            for (k, c) in p.cats.iter().enumerate().take(n) {
+                let (a, b) = v.p((k as f64 + 0.5) / n as f64, 0.0, 0.0);
+                let t = cat_text(c, p.cat_fmt);
+                out.text(
+                    a - 9.0,
+                    b + 21.0 + p.cat_font.px() * 0.35,
+                    &t,
+                    p.cat_font,
+                    "middle",
+                );
+            }
+        }
+    }
+}
+
+/// 직각 축 3차원(rAngAx)의 깊이 비율 (가로, 세로): chart_col3d 의 rotY 20·rotX 15 를 1 로, sin 에 비례 (rotX·rotY 0
+/// 이면 깊이가 보이지 않는다 — c2_e4_bar3d_b 의 한셀 화면은 평면 막대)
+fn oblique(ch: &Chart) -> (f64, f64) {
+    let v = ch.view3d.as_ref();
+    let rx = f64::from(v.and_then(|v| v.rot_x).unwrap_or(15)).to_radians();
+    let ry = f64::from(v.and_then(|v| v.rot_y).unwrap_or(20)).to_radians();
+    (
+        ry.sin() / 20f64.to_radians().sin(),
+        rx.sin() / 15f64.to_radians().sin(),
+    )
 }
 
 /// `#RRGGBB` 의 각 성분에 `k` 를 곱한다 (형식이 다르면 그대로)
@@ -2397,22 +3071,36 @@ fn draw_axis_labels(
 fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font, inner: Rect) {
     let g = &groups[0];
     let doughnut = g.kind == "doughnut";
-    // 한셀 화면: 원은 틀 위·아래에서 13px 안쪽까지 (안쪽 영역보다 위·아래로 3px 크다)
+    let legacy = ch.legacy.as_ref();
+    // 한셀 화면: 원은 틀 위·아래에서 13px 안쪽까지 (안쪽 영역보다 위·아래로 3px 크다). 레거시는 legacy_layout 의 자리
     let plot = match manual_rect(
         ch.plot_layout.as_ref(),
         inner.x + inner.w + PAD.1,
         inner.y + inner.h + PAD.3,
     ) {
-        Some((r, _)) => r,
-        None => Rect {
+        Some((r, _)) if legacy.is_none() => r,
+        _ if legacy.is_some() => inner,
+        _ => Rect {
             x: inner.x,
             y: inner.y - 3.0,
             w: inner.w,
             h: inner.h + 6.0,
         },
     };
+    if g.three_d && !doughnut && legacy.is_none() {
+        draw_pie3d(out, ch, g, cx, plot);
+        return;
+    }
     let (cx0, cy0) = (plot.x + plot.w / 2.0, plot.y + plot.h / 2.0);
     let r_out = (plot.w.min(plot.h) / 2.0).max(4.0);
+    // 레거시 화면: 원 위 가운데에 계열 이름 (chart_pie: 글자 아랫변이 원 위 14px)
+    if legacy.is_some()
+        && !doughnut
+        && let Some(name) = g.series.first().and_then(|s| s.name.as_deref())
+    {
+        let font = cx.font(ch.legend_props.tx_pr.as_ref(), None, base.size, false);
+        out.text(cx0, cy0 - r_out - 14.0, name, &font, "middle");
+    }
     let first_ang = g.props.first_slice_ang.unwrap_or(0) as f64;
     let rings: Vec<&ChartSeries> = if doughnut {
         g.series.iter().collect()
@@ -2436,7 +3124,7 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
         let mut a0 = (first_ang - 90.0).to_radians();
         for (k, v) in vals.iter().enumerate() {
             let a1 = a0 + v / total * std::f64::consts::TAU;
-            let base_c = cx.palette(k);
+            let base_c = pie_color(ch, cx, k);
             let st0 = point_style(s, 0, k, cx, &base_c);
             // 조각 경계선은 지정이 있을 때만 (한셀 기본은 없다)
             let st = Style {
@@ -2527,6 +3215,91 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
     }
 }
 
+/// 3차원 원형 (한셀 화면, c2_e4_pie3d — rotX 30): 윗면은 가로 반지름 rx, 세로 0.519·rx 의 타원 (rotX 에 따라
+/// sin·1.04), 옆면 두께 0.233·rx. rx 는 2차원 원 자리 높이의 0.65 배와 너비의 0.456 배 중 작은 것, 가운데는 5px 왼쪽·
+/// 3px 위. 옆면은 앞쪽 반만 보이고 위(× 0.58)에서 아래(× 0.95)로 밝아진다. 조각 경계선은 없다
+fn draw_pie3d(out: &mut Svg, ch: &Chart, g: &Group, cx: &Ctx, plot: Rect) {
+    let Some(s) = g.series.first() else { return };
+    let rot_x = f64::from(
+        ch.view3d
+            .as_ref()
+            .and_then(|v| v.rot_x)
+            .unwrap_or(30)
+            .clamp(10, 80),
+    )
+    .to_radians();
+    let rx = (plot.h * 0.65).min(plot.w * 0.456).max(4.0);
+    let ry = rx * rot_x.sin() * 1.038;
+    let th = rx * 0.233;
+    let (cx0, cy0) = (
+        plot.x + plot.w / 2.0 - 5.0,
+        plot.y + plot.h / 2.0 - 3.0 - th / 2.0,
+    );
+    let vals: Vec<f64> = s.values.iter().map(|v| v.unwrap_or(0.0).abs()).collect();
+    let total: f64 = vals.iter().sum();
+    if total <= 0.0 {
+        return;
+    }
+    // 각도 θ (위에서 시계 방향, 라디안) → 윗면 타원 위 점
+    let pt = |t: f64, dy: f64| (cx0 + rx * t.sin(), cy0 - ry * t.cos() + dy);
+    let first_ang = (g.props.first_slice_ang.unwrap_or(0) as f64).to_radians();
+    let mut slices = Vec::new();
+    let mut a0 = first_ang;
+    for (k, v) in vals.iter().enumerate() {
+        let a1 = a0 + v / total * std::f64::consts::TAU;
+        let base_c = pie_color(ch, cx, k);
+        let st0 = point_style(s, 0, k, cx, &base_c);
+        let color = st0.fill.map_or(base_c, |f| f.0);
+        slices.push((a0, a1, color));
+        a0 = a1;
+    }
+    // 옆면: 앞쪽 반 (θ 가 90°..270°)
+    let half = std::f64::consts::PI;
+    for (k, (a0, a1, color)) in slices.iter().enumerate() {
+        let lo = a0.max(half / 2.0);
+        let hi = a1.min(half * 1.5);
+        // 한 바퀴 넘는 조각은 다음 바퀴의 앞쪽도
+        for (lo, hi) in [(lo, hi), (a0.max(half * 2.5), a1.min(half * 3.5))] {
+            if hi <= lo {
+                continue;
+            }
+            let id = format!("rcp{k}x{:.0}y{:.0}", cx0 * 8.0, cy0 * 8.0);
+            let _ = write!(
+                out.defs,
+                "<linearGradient id=\"{id}\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"{}\"/><stop offset=\"1\" stop-color=\"{}\"/></linearGradient>",
+                scale_rgb(color, 0.58),
+                scale_rgb(color, 0.95)
+            );
+            let steps = ((hi - lo) / 0.05).ceil().max(1.0) as usize;
+            let mut d = String::new();
+            for i in 0..=steps {
+                let t = lo + (hi - lo) * i as f64 / steps as f64;
+                let (x, y) = pt(t, 0.0);
+                let _ = write!(d, "{}{x:.1},{y:.1}", if i == 0 { "M" } else { "L" });
+            }
+            for i in (0..=steps).rev() {
+                let t = lo + (hi - lo) * i as f64 / steps as f64;
+                let (x, y) = pt(t, th);
+                let _ = write!(d, "L{x:.1},{y:.1}");
+            }
+            d.push('Z');
+            let _ = write!(out.s, "<path d=\"{d}\" fill=\"url(#{id})\"/>");
+        }
+    }
+    // 윗면
+    for (a0, a1, color) in &slices {
+        let steps = ((a1 - a0) / 0.05).ceil().max(1.0) as usize;
+        let mut d = format!("M{cx0:.1},{cy0:.1}");
+        for i in 0..=steps {
+            let t = a0 + (a1 - a0) * i as f64 / steps as f64;
+            let (x, y) = pt(t, 0.0);
+            let _ = write!(d, "L{x:.1},{y:.1}");
+        }
+        d.push('Z');
+        out.path(&d, &Style::fill(color));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 방사형
 // ---------------------------------------------------------------------------
@@ -2552,7 +3325,7 @@ fn draw_radar(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font
     let (cx0, cy0) = (inner.x + inner.w / 2.0, inner.y + inner.h / 2.0);
     let (lo, hi, _) = value_range(&[g]);
     let (_, val_ax) = group_axes(ch, g);
-    let sc = make_scale(lo, hi, val_ax, r, true, 0.05);
+    let sc = make_scale(lo, hi, val_ax, r, true, TickRule::Horizontal { room: true });
     let ang = |k: usize| -std::f64::consts::FRAC_PI_2 + k as f64 * std::f64::consts::TAU / n as f64;
     let pt = |k: usize, v: f64| {
         let rr = sc.t(v).clamp(0.0, 1.0) * r;
@@ -2648,9 +3421,40 @@ mod tests {
     #[test]
     fn auto_scale_has_headroom_like_hancell() {
         // 한셀 화면: 최댓값 60 → 70, 130 → 140 (그림 영역 높이 270px 남짓)
-        let s = make_scale(20.0, 60.0, None, 270.0, true, 0.05);
+        let xml = TickRule::Xml { room: true };
+        let s = make_scale(20.0, 60.0, None, 270.0, true, xml);
         assert_eq!((s.min, s.max, s.major), (0.0, 70.0, 10.0));
-        let s = make_scale(0.0, 130.0, None, 270.0, true, 0.05);
+        let s = make_scale(0.0, 130.0, None, 270.0, true, xml);
         assert_eq!((s.min, s.max, s.major), (0.0, 140.0, 20.0));
+    }
+
+    #[test]
+    fn tick_density_follows_axis_length() {
+        // 높이 실험 (값 축 길이 px → 끝값/단위): 간격 수 ≤ ⌊길이/25⌋ (3~10), 끝은 데이터 끝 + 단위/4
+        let xml = TickRule::Xml { room: true };
+        let at = |hi: f64, len: f64, rule: TickRule| {
+            let s = make_scale(hi / 9.0, hi, None, len, true, rule);
+            (s.max, s.major)
+        };
+        assert_eq!(at(9.0, 68.0, xml), (15.0, 5.0));
+        assert_eq!(at(90.0, 108.0, xml), (150.0, 50.0));
+        assert_eq!(at(90.0, 148.0, xml), (100.0, 20.0));
+        assert_eq!(at(90.0, 288.0, xml), (100.0, 10.0));
+        assert_eq!(at(300.0, 188.0, xml), (350.0, 50.0));
+        assert_eq!(at(7.5, 198.0, xml), (8.0, 2.0));
+        assert_eq!(at(7.5, 208.0, xml), (8.0, 1.0));
+        assert_eq!(at(9.5, 248.0, xml), (10.0, 2.0));
+        assert_eq!(at(9.5, 258.0, xml), (10.0, 1.0));
+        assert_eq!(at(3.5, 208.0, xml), (4.0, 0.5));
+        // 레거시: 간격 수 ≤ ⌊길이/15.5⌋, 끝은 데이터 끝과 5.5px 넘게
+        let leg = TickRule::Legacy { room: true };
+        assert_eq!(at(90.0, 191.0, leg), (100.0, 10.0));
+        assert_eq!(at(9.0, 111.0, leg), (10.0, 2.0));
+        assert_eq!(at(7.5, 81.0, leg), (10.0, 2.0));
+        assert_eq!(at(7.5, 101.0, leg), (8.0, 2.0));
+        assert_eq!(at(60.0, 271.0, leg), (70.0, 10.0));
+        // 100% 누적은 100% 에서 끝난다
+        let s = make_scale(0.0, 1.0, None, 268.0, true, TickRule::Xml { room: false });
+        assert_eq!((s.max, s.major), (1.0, 0.1));
     }
 }

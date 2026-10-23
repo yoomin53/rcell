@@ -2264,6 +2264,7 @@ pub fn add_sheet(wb: &mut Workbook, name: Option<&str>, at: usize) -> crate::Res
         show_grid_lines: true,
         default_col_width: model.and_then(|m| m.default_col_width),
         default_row_height: model.and_then(|m| m.default_row_height),
+        default_row_custom: model.is_some_and(|m| m.default_row_custom),
         page: hcell_page(),
         dimension: Some("A1".into()),
         ..Default::default()

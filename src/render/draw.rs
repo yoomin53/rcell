@@ -80,7 +80,14 @@ pub(super) fn shapes_html(
                 h.round() + 1.0,
             ),
             crate::model::ShapeKind::Picture => (x1 - 1.0, y1 - 1.0, w, h),
-            _ => (x1 - 0.5, y1 - 0.5, w, h),
+            // 도형: 상자는 경계 1px 앞 정수 픽셀 (선은 shape_body 가 반 픽셀 안쪽에 — 브라우저가 SVG 상자를 정수
+            // 픽셀에 맞추므로 상자를 반 픽셀에 두면 선이 두 픽셀에 번진다)
+            _ => (
+                x1.round() - 1.0,
+                y1.round() - 1.0,
+                (x2.round() - x1.round()).max(0.0),
+                (y2.round() - y1.round()).max(0.0),
+            ),
         };
         let obj = sh.raw.as_deref().and_then(shape::object_element);
         s.push_str(&object_html(wb, sh, obj.as_ref(), r, theme));
@@ -573,23 +580,59 @@ fn marker_def(defs: &mut String, id: &str, end: &(String, String, String), color
     );
 }
 
-/// 겹선 마스크: 선 굵기 W 를 바깥 → 안 띠로 나눈다. dbl 은 1:1:1, tri 는 1:1:2:1:1 (가운데가 굵다). thickThin·
-/// thinThick 은 안팎을 가르지 않고 dbl 로 그린다 (한셀은 굵은 쪽이 바깥·안 — 근사)
+/// 겹선 마스크: 선 굵기 W 를 바깥 → 안 띠로 나눈다. dbl 은 1:1:1, tri 는 1:1:2:1:1 (가운데가 굵다), thickThin 은
+/// 굵은 바깥 3 : 틈 1 : 가는 안 1, thinThick 은 그 반대 (도형 실험의 6pt 사각형: 바깥 4.9px·틈 1.5·안 1.6). 안팎이
+/// 있는 닫힌 경로만 안쪽 자르기로 가르고, 열린 경로는 dbl 로 그린다
 fn compound_mask(id: &str, line: &Line, paths: &[&str], w: f64, h: f64) -> String {
     let wpx = line.px;
-    // (너비 비율, 흰/검) — 뒤에 칠한 것이 앞을 덮는다
-    let bands: &[(f64, &str)] = match line.compound.as_deref() {
-        Some("tri") => &[(1.0, "#fff"), (2.0 / 3.0, "#000"), (1.0 / 3.0, "#fff")],
-        _ => &[(1.0, "#fff"), (1.0 / 3.0, "#000")],
+    let closed = !paths.is_empty() && paths.iter().all(|d| d.trim_end().ends_with(['Z', 'z']));
+    let kind = match line.compound.as_deref() {
+        Some(k @ ("thickThin" | "thinThick")) if closed => k,
+        Some("tri") => "tri",
+        _ => "dbl",
     };
-    let mut m = format!(
+    // (너비 비율, 흰/검, 안쪽만) — 뒤에 칠한 것이 앞을 덮는다
+    let bands: &[(f64, &str, bool)] = match kind {
+        "tri" => &[
+            (1.0, "#fff", false),
+            (2.0 / 3.0, "#000", false),
+            (1.0 / 3.0, "#fff", false),
+        ],
+        // 바깥 [−0.1W, 0.5W] 와 안 [−0.5W, −0.3W] (가운데에서 바깥쪽이 +)
+        "thickThin" => &[
+            (1.0, "#fff", false),
+            (0.6, "#000", true),
+            (0.2, "#fff", true),
+        ],
+        // 바깥 [0.3W, 0.5W] 와 안 [−0.5W, 0.1W]
+        "thinThick" => &[
+            (1.0, "#fff", false),
+            (0.6, "#000", false),
+            (0.2, "#fff", false),
+            (1.0, "#fff", true),
+        ],
+        _ => &[(1.0, "#fff", false), (1.0 / 3.0, "#000", false)],
+    };
+    let mut m = String::new();
+    if bands.iter().any(|b| b.2) {
+        let _ = write!(m, "<clipPath id=\"{id}i\">");
+        for d in paths {
+            let _ = write!(m, "<path d=\"{d}\"/>");
+        }
+        m.push_str("</clipPath>");
+    }
+    let _ = write!(
+        m,
         "<mask id=\"{id}\" maskUnits=\"userSpaceOnUse\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\">",
         -wpx * 2.0 - 2.0,
         -wpx * 2.0 - 2.0,
         w + wpx * 4.0 + 4.0,
         h + wpx * 4.0 + 4.0
     );
-    for (k, c) in bands {
+    for (k, c, inside) in bands {
+        if *inside {
+            let _ = write!(m, "<g clip-path=\"url(#{id}i)\">");
+        }
         for d in paths {
             let _ = write!(
                 m,
@@ -597,6 +640,9 @@ fn compound_mask(id: &str, line: &Line, paths: &[&str], w: f64, h: f64) -> Strin
                 wpx * k,
                 line.join
             );
+        }
+        if *inside {
+            m.push_str("</g>");
         }
     }
     m.push_str("</mask>");
@@ -615,8 +661,12 @@ fn shadow_filter(sh: &Shape, theme: &Theme, id: &str) -> Option<String> {
         .map_or(1.0, |(_, v)| *v as f64 / 100_000.0);
     let dist = sd.dist as f64 / EMU;
     let dir = (sd.dir as f64 / 60_000.0).to_radians();
-    let (dx, dy) = (dist * dir.cos(), dist * dir.sin());
+    let (mut dx, mut dy) = (dist * dir.cos(), dist * dir.sin());
     let blur = sd.blur as f64 / EMU / 2.0;
+    // 흐림 없는 그림자는 정수 픽셀만큼 옮긴다 (서식 파일 소개 시트: 거리 1.89px·45도 → 오른쪽·아래 1px)
+    if blur == 0.0 {
+        (dx, dy) = (dx.round(), dy.round());
+    }
     Some(format!(
         "<filter id=\"{id}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\" color-interpolation-filters=\"sRGB\"><feDropShadow dx=\"{dx:.2}\" dy=\"{dy:.2}\" stdDeviation=\"{blur:.2}\" flood-color=\"{color}\" flood-opacity=\"{alpha:.3}\"/></filter>"
     ))
@@ -707,9 +757,11 @@ fn shape_body(
             });
             let mut defs = String::new();
             let attrs = stroke_attrs(&line, &mut defs, &id);
-            // 연결선 모양: 직선 또는 꺾인·굽은 연결선 (뒤집기는 경로를 뒤집어 그린다)
-            let flip_h = sh.xfrm.as_ref().is_some_and(|x| x.flip_h);
-            let flip_v = sh.xfrm.as_ref().is_some_and(|x| x.flip_v);
+            // 연결선 모양: 직선 또는 꺾인·굽은 연결선 (뒤집기는 경로를 뒤집어 그린다). 크기가 0 인 a:xfrm(앵커가
+            // 크기를 정한다)의 뒤집기는 한셀이 쓰지 않는다 (도형 실험의 flipV 연결선: 왼쪽 위 → 오른쪽 아래 그대로)
+            let sized = sh.xfrm.as_ref().is_some_and(|x| x.cx != 0 || x.cy != 0);
+            let flip_h = sized && sh.xfrm.as_ref().is_some_and(|x| x.flip_h);
+            let flip_v = sized && sh.xfrm.as_ref().is_some_and(|x| x.flip_v);
             let prst = obj
                 .and_then(shape::geometry)
                 .and_then(|g| g.attr("prst"))
@@ -731,10 +783,10 @@ fn shape_body(
                     if flip_v { -1 } else { 1 }
                 ),
             };
-            // 가로·세로 선은 크기가 0 이다 — SVG 상자는 1px 로 두고 넘쳐 그린다
+            // 가로·세로 선은 크기가 0 이다 — SVG 상자는 1px 로 두고 넘쳐 그린다. 선은 반 픽셀 안쪽 (도형과 같이)
             let _ = write!(
                 inner,
-                "<svg class=\"rc-geom\" width=\"{:.1}\" height=\"{:.1}\"><defs>{defs}</defs><path d=\"{d}\" fill=\"none\"{attrs}{tf}/></svg>",
+                "<svg class=\"rc-geom\" width=\"{:.1}\" height=\"{:.1}\"><defs>{defs}</defs><g transform=\"translate(0.5 0.5)\"><path d=\"{d}\" fill=\"none\"{attrs}{tf}/></g></svg>",
                 w.max(1.0),
                 h.max(1.0)
             );
@@ -766,33 +818,33 @@ fn shape_body(
                 });
                 let mut body = String::new();
                 for p in &paths {
-                    let fill_attr = match (&fill, p.fill) {
-                        (Some((f, a)), pf) if pf != shape::PathFill::None => {
-                            let mut v = format!(" fill=\"{f}\"");
-                            if *a < 1.0 {
-                                let _ = write!(v, " fill-opacity=\"{a:.3}\"");
-                            }
-                            v
-                        }
-                        _ => " fill=\"none\"".to_string(),
-                    };
+                    let filled = fill.is_some() && p.fill != shape::PathFill::None;
                     let st = if p.stroke && cmask.is_none() {
                         stroke.as_str()
                     } else {
                         ""
                     };
-                    let _ = write!(
-                        body,
-                        "<path d=\"{}\" fill-rule=\"evenodd\"{fill_attr}{st}/>",
-                        p.d
-                    );
+                    // 상자는 칸 경계 1px 앞 정수 픽셀: 채우기는 상자 그대로, 선은 반 픽셀 안쪽에 가운데 (한셀은
+                    // 채우기가 경계 앞 픽셀부터 폭만큼, 1px 선은 그 픽셀 — 서식 파일 소개 시트의 채운 사각형, 앵커 실험)
+                    if let Some((f, a)) = fill.as_ref().filter(|_| filled) {
+                        let mut v = format!(" fill=\"{f}\"");
+                        if *a < 1.0 {
+                            let _ = write!(v, " fill-opacity=\"{a:.3}\"");
+                        }
+                        let _ = write!(body, "<path d=\"{}\" fill-rule=\"evenodd\"{v}/>", p.d);
+                    }
                     // 어둡게·밝게: 같은 경로에 반투명 검정·흰색을 덧칠한다
-                    if fill.is_some()
-                        && let Some((c, o)) = p.fill.overlay()
-                    {
+                    if filled && let Some((c, o)) = p.fill.overlay() {
                         let _ = write!(
                             body,
                             "<path d=\"{}\" fill-rule=\"evenodd\" fill=\"{c}\" fill-opacity=\"{o}\"/>",
+                            p.d
+                        );
+                    }
+                    if !st.is_empty() {
+                        let _ = write!(
+                            body,
+                            "<path d=\"{}\" fill=\"none\"{st} transform=\"translate(0.5 0.5)\"/>",
                             p.d
                         );
                     }
@@ -801,7 +853,7 @@ fn shape_body(
                     {
                         let _ = write!(
                             body,
-                            "<path d=\"{}\" fill=\"none\"{stroke} mask=\"url(#{m})\"/>",
+                            "<path d=\"{}\" fill=\"none\"{stroke} mask=\"url(#{m})\" transform=\"translate(0.5 0.5)\"/>",
                             p.d
                         );
                     }
@@ -840,11 +892,20 @@ fn shape_body(
     format!("{css}\">{inner}")
 }
 
-/// 테마 글꼴 참조(+mn-lt, +mn-ea, +mj-lt, +mj-ea …)를 글꼴 이름으로
+/// 테마 글꼴 참조(+mn-lt, +mn-ea, +mj-lt, +mj-ea …)를 글꼴 이름으로. 동아시아(`-ea`)는 테마의 `a:ea` 글꼴, 그 이름이
+/// 비어 있으면 한셀 기본 글꼴 함초롬돋움 (서식 파일 소개 글상자: 10pt 한 줄이 맑은 고딕 403px 이 아니라 함초롬돋움의
+/// 387~391px — 글꼴 폭 실험)
 fn theme_font<'a>(name: &'a str, theme: &'a Theme) -> Option<&'a str> {
+    let ea = |f: &'a Option<String>| {
+        f.as_deref()
+            .filter(|n| !n.is_empty())
+            .or(Some("함초롬돋움"))
+    };
     match name {
-        "+mn-lt" | "+mn-ea" | "+mn-cs" => theme.minor_font.as_deref().or(Some("맑은 고딕")),
-        "+mj-lt" | "+mj-ea" | "+mj-cs" => theme.major_font.as_deref().or(Some("맑은 고딕")),
+        "+mn-ea" => ea(&theme.minor_ea),
+        "+mj-ea" => ea(&theme.major_ea),
+        "+mn-lt" | "+mn-cs" => theme.minor_font.as_deref().or(Some("맑은 고딕")),
+        "+mj-lt" | "+mj-cs" => theme.major_font.as_deref().or(Some("맑은 고딕")),
         "" => None,
         n => Some(n),
     }
@@ -936,7 +997,7 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
         .and_then(|a| a.attr_f64("fontScale"))
         .map_or(1.0, |v| v / 100_000.0);
     let mut s = format!(
-        "<div class=\"rc-text\" style=\"justify-content:{justify};padding:{:.1}px {:.1}px {:.1}px {:.1}px;{wrap};{vert}\">",
+        "<div class=\"rc-text\" style=\"left:0.5px;top:0.5px;justify-content:{justify};padding:{:.1}px {:.1}px {:.1}px {:.1}px;{wrap};{vert}\">",
         ins("tIns", 45720.0),
         ins("rIns", 91440.0),
         ins("bIns", 45720.0),
@@ -946,6 +1007,7 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
     let lvl1 = lst
         .and_then(|l| l.child_ns(shape::A, "lvl1pPr"))
         .and_then(|p| p.child_ns(shape::A, "defRPr"));
+    let mut first_para = true;
     for p in tx.elements().filter(|e| e.is(shape::A, "p")) {
         let ppr = p.child_ns(shape::A, "pPr");
         let align = match ppr.and_then(|x| x.attr("algn")) {
@@ -969,22 +1031,29 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
                 size = Some(size.map_or(z / 100.0, |s| s.max(z / 100.0)));
             }
         }
-        let size = size
-            .or_else(|| lvl1.and_then(|d| d.attr_f64("sz")).map(|v| v / 100.0))
-            .unwrap_or(11.0)
-            * scale;
-        // 줄 간격: spcPct 100% = 글꼴 크기의 1.2 배, spcPts 는 그대로
+        let size = size.or_else(|| lvl1.and_then(|d| d.attr_f64("sz")).map(|v| v / 100.0));
+        // 글도 크기도 없는 빈 문단은 한셀 화면에 자리가 없다 (서식 파일 소개 글상자: `<a:endParaRPr>` 만 있는 문단 앞뒤
+        // 줄이 16px 간격 그대로 — 크기가 있는 빈 문단은 한 줄)
+        let has_text = p
+            .elements()
+            .any(|e| e.is(shape::A, "r") || e.is(shape::A, "fld") || e.is(shape::A, "br"));
+        if size.is_none() && !has_text {
+            continue;
+        }
+        let size = size.unwrap_or(11.0) * scale;
+        // 줄 간격: spcPct 100% = 글꼴 크기의 1.2 배, spcPts 는 그대로. px 로 정해 둔다 (대신 쓰는 글꼴의 위아래 폭이
+        // 줄을 늘리지 않게 — 한셀은 10pt 한 줄이 16px)
         let lnspc = ppr.and_then(|x| x.child_ns(shape::A, "lnSpc"));
-        let line = match lnspc.and_then(|l| l.child_ns(shape::A, "spcPct")) {
-            Some(pct) => format!(
-                "{:.3}",
-                1.2 * pct.attr_f64("val").unwrap_or(100_000.0) / 100_000.0
-            ),
+        let line_px = match lnspc.and_then(|l| l.child_ns(shape::A, "spcPct")) {
+            Some(pct) => {
+                1.2 * pct.attr_f64("val").unwrap_or(100_000.0) / 100_000.0 * size * 4.0 / 3.0
+            }
             None => match lnspc.and_then(|l| l.child_ns(shape::A, "spcPts")) {
-                Some(pts) => format!("{:.2}pt", pts.attr_f64("val").unwrap_or(0.0) / 100.0),
-                None => "1.2".into(),
+                Some(pts) => pts.attr_f64("val").unwrap_or(0.0) / 100.0 * 4.0 / 3.0,
+                None => 1.2 * size * 4.0 / 3.0,
             },
         };
+        let line = format!("{line_px:.2}px");
         let space = |n: &str| -> f64 {
             let Some(sp) = ppr.and_then(|x| x.child_ns(shape::A, n)) else {
                 return 0.0;
@@ -1003,12 +1072,35 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
         let first = ppr
             .and_then(|x| x.attr_f64("indent"))
             .map_or(0.0, |v| v / EMU);
+        // 문단의 글꼴은 첫 조각의 글꼴 (줄 상자의 기준이 조각과 같은 글꼴이어야 줄 높이가 늘지 않는다)
+        let face_name = p
+            .elements()
+            .find(|e| e.is(shape::A, "r"))
+            .and_then(|r| r.child_ns(shape::A, "rPr"))
+            .or(lvl1)
+            .and_then(|r| {
+                r.child_ns(shape::A, "ea")
+                    .or_else(|| r.child_ns(shape::A, "latin"))
+            })
+            .and_then(|f| f.attr("typeface"))
+            .and_then(|f| theme_font(f, theme));
+        let face = face_name
+            .map(|f| format!("font-family:{};", font_family(f)))
+            .unwrap_or_default();
+        // 함초롬 글꼴의 첫 줄은 한셀이 브라우저보다 0.12 em 위에 그린다 (서식 파일 소개 글상자 24개, 글꼴 폭 실험의
+        // 함초롬돋움·바탕 9~16pt 는 0.06 em 쪽 — 사이 값). 맑은 고딕·돋움·Arial 은 같은 자리 (보정 문서 9·11·16pt)
+        let lift = if first_para && face_name.is_some_and(|f| f.starts_with("함초롬")) {
+            0.12 * size * 4.0 / 3.0
+        } else {
+            0.0
+        };
         let _ = write!(
             s,
-            "<p style=\"text-align:{align};font-size:{size:.2}pt;line-height:{line};margin:{:.1}px 0 {:.1}px {indent:.1}px;text-indent:{first:.1}px\">",
-            space("spcBef"),
+            "<p style=\"text-align:{align};font-size:{size:.2}pt;{face}line-height:{line};margin:{:.1}px 0 {:.1}px {indent:.1}px;text-indent:{first:.1}px\">",
+            space("spcBef") - lift,
             space("spcAft")
         );
+        first_para = false;
         // 글머리 기호
         if let Some(bu) = ppr.and_then(|x| x.child_ns(shape::A, "buChar")) {
             let _ = write!(s, "{} ", esc(bu.attr("char").unwrap_or("•")));
@@ -1058,7 +1150,7 @@ fn text_html(t: &TextBody, theme: &Theme) -> String {
         _ => "",
     };
     let mut s = format!(
-        "<div class=\"rc-text\" style=\"justify-content:{justify};padding:{:.1}px {:.1}px {:.1}px {:.1}px;{}{vert}\">",
+        "<div class=\"rc-text\" style=\"left:0.5px;top:0.5px;justify-content:{justify};padding:{:.1}px {:.1}px {:.1}px {:.1}px;{}{vert}\">",
         pad(t.insets[1], 45720),
         pad(t.insets[2], 91440),
         pad(t.insets[3], 45720),

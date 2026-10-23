@@ -2441,6 +2441,8 @@ fn read_sheet(
                 if let (Some(dx_gcol), Some(_dx_col), Some(dy)) = (r.u32(), r.u16(), r.u16()) {
                     sheet.default_col_width = Some(dx_gcol as f64 / 256.0);
                     sheet.default_row_height = Some(dy as f64 / 20.0);
+                    // 플래그 비트 0: 기본 높이를 직접 정했다 (customHeight)
+                    sheet.default_row_custom = r.u16().is_some_and(|f| f & 1 != 0);
                 }
             }
             60 => {

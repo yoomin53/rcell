@@ -1484,7 +1484,7 @@ impl SheetCtx<'_, '_> {
                 .u32(width256(sheet.default_col_width.unwrap_or(9.00390625)))
                 .u16(8)
                 .u16(twips(sheet.default_row_height.unwrap_or(16.4)))
-                .u16(0)
+                .u16(u16::from(sheet.default_row_custom))
                 .u8(0)
                 .u8(0),
         );

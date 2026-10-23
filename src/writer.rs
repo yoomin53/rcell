@@ -1373,6 +1373,9 @@ fn sheet_xml(
         " defaultRowHeight=\"{}\"",
         num(sheet.default_row_height.unwrap_or(16.5))
     );
+    if sheet.default_row_custom {
+        fmt.push_str(" customHeight=\"1\"");
+    }
     // 개요 수준의 최댓값 (한셀·Excel 이 개요 단추 칸을 그리는 데 쓴다)
     let max_row_level = sheet
         .rows

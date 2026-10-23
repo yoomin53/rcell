@@ -19,6 +19,12 @@ pub struct Theme {
     pub colors: [String; 12],
     pub major_font: Option<String>,
     pub minor_font: Option<String>,
+    /// 동아시아 글꼴 (`a:majorFont/a:ea`·`a:minorFont/a:ea` 의 typeface — 보통 빈 이름). 도형 글의 `+mj-ea`·`+mn-ea` 가
+    /// 가리킨다 (렌더러용)
+    #[serde(skip)]
+    pub major_ea: Option<String>,
+    #[serde(skip)]
+    pub minor_ea: Option<String>,
     /// 원본 테마 파트 (저장할 때 그대로 쓴다). 색·글꼴 밖의 내용(효과, 채우기 목록 …)을 잃지 않도록.
     #[serde(skip)]
     pub source: Option<Vec<u8>>,
@@ -35,6 +41,8 @@ impl Default for Theme {
             colors: c.map(str::to_string),
             major_font: None,
             minor_font: None,
+            major_ea: None,
+            minor_ea: None,
             source: None,
         }
     }
@@ -95,8 +103,18 @@ pub fn parse_theme(root: &Element) -> Theme {
         }
     }
     let mut fonts = (None, None);
+    let mut ea = (None, None);
     root.walk(&mut |e| {
         if e.is(DRAWINGML, "majorFont") || e.is(DRAWINGML, "minorFont") {
+            let face = e
+                .child_ns(DRAWINGML, "ea")
+                .and_then(|l| l.attr("typeface"))
+                .map(str::to_string);
+            if e.name == "majorFont" {
+                ea.0 = face;
+            } else {
+                ea.1 = face;
+            }
             let pick = e
                 .elements()
                 .find(|c| c.name == "font" && c.attr("script") == Some("Hang"))
@@ -115,6 +133,8 @@ pub fn parse_theme(root: &Element) -> Theme {
     });
     theme.major_font = fonts.0;
     theme.minor_font = fonts.1;
+    theme.major_ea = ea.0;
+    theme.minor_ea = ea.1;
     theme
 }
 

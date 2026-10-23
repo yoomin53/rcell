@@ -969,37 +969,69 @@ fn mmult(ctx: &mut Ctx, a: &[Value]) -> Value {
     Value::from(Array::new(ar, bc, out))
 }
 
-/// LU 분해 (부분 피벗). (행렬식, 분해 성공)
-fn determinant(n: usize, mut m: Vec<f64>) -> f64 {
-    let mut det = 1.0;
-    for c in 0..n {
-        let mut p = c;
-        for r in c + 1..n {
-            if m[r * n + c].abs() > m[p * n + c].abs() {
-                p = r;
-            }
-        }
-        if m[p * n + c] == 0.0 {
-            return 0.0;
-        }
-        if p != c {
-            for k in 0..n {
-                m.swap(p * n + k, c * n + k);
-            }
-            det = -det;
-        }
-        let piv = m[c * n + c];
-        det *= piv;
-        for r in c + 1..n {
-            let f = m[r * n + c] / piv;
-            if f != 0.0 {
-                for k in c..n {
-                    m[r * n + k] -= f * m[c * n + k];
-                }
+/// 한셀의 피벗 고르기 (MDETERM·MINVERSE 공통): 아직 쓰지 않은 행·열의 칸 가운데 절댓값이 가장 큰 칸
+/// (같으면 행 우선으로 먼저 만난 칸 — 완전 피벗). 그 절댓값이 1E-16 보다 작으면 특이 행렬로 본다
+/// (마지막 피벗 5.55E-17 은 특이, 1.11E-16 은 정칙, 대조 실험 x9·x10)
+fn full_pivot(m: &[f64], n: usize, used_r: &[bool], used_c: &[bool]) -> Option<(usize, usize)> {
+    let mut big = 0.0;
+    let mut at = None;
+    for j in (0..n).filter(|&j| !used_r[j]) {
+        for k in (0..n).filter(|&k| !used_c[k]) {
+            let v = m[j * n + k].abs();
+            if v > big {
+                big = v;
+                at = Some((j, k));
             }
         }
     }
-    det
+    if big < 1e-16 { None } else { at }
+}
+
+/// 자리 바꿈 수의 홀짝
+fn odd_permutation(p: &[usize]) -> bool {
+    let mut c = 0;
+    for i in 0..p.len() {
+        for j in i + 1..p.len() {
+            if p[i] > p[j] {
+                c += 1;
+            }
+        }
+    }
+    c % 2 == 1
+}
+
+/// 행렬식: 완전 피벗 소거. 피벗 행을 피벗으로 나눈 뒤(곱하기 1/p 가 아니라 나누기) 남은 행에서
+/// 피벗 열 값 × 피벗 행을 뺀다 — 끝자리가 한셀과 같다 (MDETERM({1,2,3;4,5,6;7,8,9}) = −3.996802888650564E-15,
+/// {4,7;2,6} = 9.999999999999998, 대조 실험 x7). 피벗 곱에 행·열 자리 바꿈 부호
+fn determinant(n: usize, mut m: Vec<f64>) -> f64 {
+    let (mut ur, mut uc) = (vec![false; n], vec![false; n]);
+    let (mut rows, mut cols) = (Vec::with_capacity(n), Vec::with_capacity(n));
+    let mut det = 1.0;
+    for _ in 0..n {
+        let Some((pr, pc)) = full_pivot(&m, n, &ur, &uc) else {
+            return 0.0;
+        };
+        ur[pr] = true;
+        uc[pc] = true;
+        rows.push(pr);
+        cols.push(pc);
+        let p = m[pr * n + pc];
+        det *= p;
+        for l in (0..n).filter(|&l| !uc[l]) {
+            m[pr * n + l] /= p;
+        }
+        for ll in (0..n).filter(|&ll| !ur[ll]) {
+            let d = m[ll * n + pc];
+            for l in (0..n).filter(|&l| !uc[l]) {
+                m[ll * n + l] -= m[pr * n + l] * d;
+            }
+        }
+    }
+    if odd_permutation(&rows) != odd_permutation(&cols) {
+        -det
+    } else {
+        det
+    }
 }
 
 fn mdeterm(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -1010,46 +1042,47 @@ fn mdeterm(ctx: &mut Ctx, a: &[Value]) -> Value {
     num(determinant(r, m))
 }
 
+/// 역행렬: 행을 옮기지 않는 제자리 가우스-요르단 (완전 피벗). 피벗 (r, c) 에서 피벗 칸은 1/p, 피벗 행의
+/// 다른 칸은 ÷p, 다른 행의 피벗 열 칸은 −d/p, 나머지는 −(피벗 행 칸 × d). 끝나면
+/// 역[c_i][r_j] = 제자리[r_i][c_j] 로 자리를 맞춘다. 끝자리까지 한셀과 같다 (대조 실험 x7·x10).
+/// 피벗이 없으면 #NUM! — 한셀은 그때까지의 제자리 행렬을 그대로 내는데 (MINVERSE({1,2;2,4}) =
+/// {0,−0.5;0.5,0.25}) 이는 `CalcOptions::hcell_bugs` 일 때만 흉내 낸다
 fn minverse(ctx: &mut Ctx, a: &[Value]) -> Value {
     let (n, c, mut m) = try_v!(numeric_matrix(ctx, &a[0]));
     if n != c {
         return Value::Error(ErrorKind::Value);
     }
-    let mut inv = vec![0.0; n * n];
-    for i in 0..n {
-        inv[i * n + i] = 1.0;
-    }
-    for col in 0..n {
-        let mut p = col;
-        for r in col + 1..n {
-            if m[r * n + col].abs() > m[p * n + col].abs() {
-                p = r;
+    let (mut ur, mut uc) = (vec![false; n], vec![false; n]);
+    let mut piv = Vec::with_capacity(n);
+    for _ in 0..n {
+        let Some((pr, pc)) = full_pivot(&m, n, &ur, &uc) else {
+            if ctx.engine().hcell_bugs {
+                return Value::from(Array::new(n, n, m.into_iter().map(num).collect()));
             }
-        }
-        if m[p * n + col] == 0.0 {
             return Value::Error(ErrorKind::Num);
+        };
+        ur[pr] = true;
+        uc[pc] = true;
+        piv.push((pr, pc));
+        let p = m[pr * n + pc];
+        for l in 0..n {
+            m[pr * n + l] = if l == pc { 1.0 / p } else { m[pr * n + l] / p };
         }
-        if p != col {
-            for k in 0..n {
-                m.swap(p * n + k, col * n + k);
-                inv.swap(p * n + k, col * n + k);
-            }
-        }
-        let piv = m[col * n + col];
-        for k in 0..n {
-            m[col * n + k] /= piv;
-            inv[col * n + k] /= piv;
-        }
-        for r in 0..n {
-            if r != col {
-                let f = m[r * n + col];
-                if f != 0.0 {
-                    for k in 0..n {
-                        m[r * n + k] -= f * m[col * n + k];
-                        inv[r * n + k] -= f * inv[col * n + k];
-                    }
+        for ll in (0..n).filter(|&ll| ll != pr) {
+            let d = m[ll * n + pc];
+            for l in 0..n {
+                if l == pc {
+                    m[ll * n + l] = -d / p;
+                } else {
+                    m[ll * n + l] -= m[pr * n + l] * d;
                 }
             }
+        }
+    }
+    let mut inv = vec![0.0; n * n];
+    for &(ri, ci) in &piv {
+        for &(rj, cj) in &piv {
+            inv[ci * n + rj] = m[ri * n + cj];
         }
     }
     Value::from(Array::new(n, n, inv.into_iter().map(num).collect()))

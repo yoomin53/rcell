@@ -57,6 +57,9 @@ pub struct CalcOptions {
     pub utc_offset_minutes: i32,
     /// 한셀이 모르는 Excel 함수(AGGREGATE, XMATCH …)도 계산한다. 기본은 한셀처럼 #NAME?.
     pub excel_functions: bool,
+    /// 한셀의 잘못된 계산(버그)도 그대로 흉내 낸다. 기본은 끔 — 지금은 특이 행렬의 MINVERSE 가
+    /// #NUM! 대신 소거 도중의 행렬을 내는 것 하나 (docs/format/calc.md)
+    pub hcell_bugs: bool,
     /// 문서 파일 이름 (CELL("address") 가 다른 시트를 가리키면 한셀은 `[이름]시트!$A$1` 로 쓴다)
     pub file_name: Option<String>,
 }
@@ -67,6 +70,7 @@ impl Default for CalcOptions {
             now: None,
             utc_offset_minutes: 9 * 60,
             excel_functions: false,
+            hcell_bugs: false,
             file_name: None,
         }
     }
@@ -156,6 +160,7 @@ fn engine_for(wb: &Workbook, opts: &CalcOptions) -> Engine {
         .unwrap_or_else(|| now_serial(opts.utc_offset_minutes, wb.date1904));
     let mut eng = Engine::new(wb, now);
     eng.excel_functions = opts.excel_functions;
+    eng.hcell_bugs = opts.hcell_bugs;
     eng.file_name = opts.file_name.clone();
     eng
 }

@@ -1748,7 +1748,8 @@ fn read_sheet(
         match rec.rtype {
             0x000A => break,
             0x0225 => {
-                let _flags = r.u16();
+                // 플래그 비트 0 (fUnsynced): 기본 높이를 직접 정했다
+                sheet.default_row_custom = r.u16().is_some_and(|f| f & 1 != 0);
                 if let Some(h) = r.u16() {
                     sheet.default_row_height = Some(h as f64 / 20.0);
                 }

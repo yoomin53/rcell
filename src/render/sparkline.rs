@@ -304,7 +304,15 @@ pub fn svg(
         "column" | "stacked" => {
             let bw = (slot * 0.65).max(1.0);
             let win = g.kind == "stacked";
-            let (top, bot) = (2.0, (h - 2.0).max(3.0));
+            // 막대 자리: 음수가 섞이면 위 0.1·h, 높이 0.75·h (한셀 화면 — 높이 40px 칸의 −4~6 막대가 위 4px 부터
+            // 30px, 1단위 3px). 모두 양수인 막대와 승패는 위·아래 2px
+            let (top, bot) = if win || lo >= 0.0 {
+                (2.0, (h - 2.0).max(3.0))
+            } else {
+                // 칸 높이(격자선 포함, h + 1) 기준
+                let hh = h + 1.0;
+                (hh * 0.1, (hh * 0.85).max(hh * 0.1 + 1.0))
+            };
             let ph = bot - top;
             // 바닥: 음수가 섞이면 0, 모두 양수면(자동 최솟값) 최솟값 — 가장 낮은 막대도 9%
             let floor_min = !win && auto_min && lo > 0.0;
