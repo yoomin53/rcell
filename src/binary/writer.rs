@@ -1055,6 +1055,8 @@ struct Book<'a> {
     links: &'a [crate::model::ExternalLink],
     /// XTI: (연결, 첫 시트, 끝 시트). 연결 번호는 다 모은 뒤에 정한다 ([`Book::supbooks`])
     xtis: Vec<(SupBook, i32, i32)>,
+    /// 앞에 둔 XTI 가 수식에 쓰였는지 ([`write_report`])
+    hits: Vec<bool>,
     names: Vec<NameEntry>,
     /// 지금 수식을 쓰는 시트 (지역 이름 찾기)
     cur: Option<u32>,
@@ -1105,7 +1107,12 @@ impl Resolver for Book<'_> {
         };
         let key = (sb, f.min(l), f.max(l));
         Some(match self.xtis.iter().position(|x| *x == key) {
-            Some(i) => i as u16,
+            Some(i) => {
+                if let Some(h) = self.hits.get_mut(i) {
+                    *h = true;
+                }
+                i as u16
+            }
             None => {
                 self.xtis.push(key);
                 (self.xtis.len() - 1) as u16
@@ -2868,7 +2875,54 @@ fn external_default(target: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// 통합 문서를 바이너리 `.cell` 로 쓰고 경고를 함께 돌려준다.
+///
+/// 한셀이 먼저 두는 XTI ([`Workbook::preset_xti`]) 를 이름·수식의 XTI 보다 앞에 둔다. 수식이 쓰는 것만 남으므로 한 번
+/// 써서 쓰이지 않은 것이 있으면 빼고 다시 쓴다 (레거시 쓰기와 같은 규칙 — 한셀은 저장 형식과 상관없이 같은 XTI 표를 쓴다)
 pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
+    // 레거시 XTI 의 문서 시트 번호는 모든 시트 차례 — 여기 XTI 는 워크시트 차례
+    let sheet_pos = |i: u16| {
+        let s = wb.sheets.get(i as usize)?;
+        (s.kind == SheetKind::Worksheet).then(|| {
+            wb.sheets[..i as usize]
+                .iter()
+                .filter(|x| x.kind == SheetKind::Worksheet)
+                .count() as i32
+        })
+    };
+    let mut preset: Vec<(SupBook, i32, i32)> = Vec::new();
+    for (b, f, l) in wb.preset_xti() {
+        let key = match b {
+            None => (SupBook::This, sheet_pos(f), sheet_pos(l)),
+            Some(n) if (1..=wb.external_links.len()).contains(&n) => {
+                (SupBook::Ext(n - 1), Some(f as i32), Some(l as i32))
+            }
+            Some(_) => continue,
+        };
+        let (Some(f), Some(l)) = (key.1, key.2) else {
+            continue;
+        };
+        let key = (key.0, f.min(l), f.max(l));
+        if !preset.contains(&key) {
+            preset.push(key);
+        }
+    }
+    let (out, hits) = write_with_preset(wb, opts, preset.clone())?;
+    if hits.iter().all(|&h| h) {
+        return Ok(out);
+    }
+    let kept = preset
+        .into_iter()
+        .zip(hits)
+        .filter_map(|(k, h)| h.then_some(k))
+        .collect();
+    write_with_preset(wb, opts, kept).map(|(o, _)| o)
+}
+
+fn write_with_preset(
+    wb: &Workbook,
+    opts: &Options,
+    preset: Vec<(SupBook, i32, i32)>,
+) -> Result<(Output, Vec<bool>)> {
     let mut warnings = Vec::new();
     let worksheets: Vec<&Sheet> = wb
         .sheets
@@ -2880,7 +2934,8 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
     let mut book = Book {
         sheets: worksheets.iter().map(|s| s.name.as_str()).collect(),
         links: &wb.external_links,
-        xtis: Vec::new(),
+        hits: vec![false; preset.len()],
+        xtis: preset,
         names: wb
             .defined_names
             .iter()
@@ -3560,7 +3615,7 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
     if wb.protection.as_ref().is_some_and(|p| p.lock_structure) {
         bytes = super::encrypt::wrap(&bytes);
     }
-    Ok(Output { bytes, warnings })
+    Ok((Output { bytes, warnings }, book.hits))
 }
 
 /// docProps/app.xml — 한셀이 쓰는 꼴 (프로그램 이름, 시트 이름 목록, 편집 시간, 버전).

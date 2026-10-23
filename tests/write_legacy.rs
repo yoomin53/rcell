@@ -135,3 +135,71 @@ fn pivots_roundtrip() {
     assert!(table_b.contains(r#"sortType="descending""#), "{table_b}");
     assert!(table_b.contains(r#"name="최대 : 두배""#), "{table_b}");
 }
+
+/// 이름 XTI 차례 (docs/format/cell-legacy.md 10.5절): 값 캐시가 시트 하나인 외부 연결의 XTI 가 이름 차례보다 앞
+/// (Trade_Show_Budget 실험) — 레거시·바이너리 쓰기 모두. 다시 읽은 레거시는 읽은 XTI 차례를 지키고, 힌트가 없으면 이름 차례
+#[test]
+fn preset_xti_come_first() {
+    use rcell::model::{DefinedName, ExternalLink, ExternalSheetData};
+    let mut a = rcell::from_bytes(common::hancom_style_cell()).unwrap();
+    a.external_links = vec![
+        ExternalLink {
+            target: "/a.xls".into(),
+            sheet_names: vec!["S1".into(), "S2".into()],
+            ..Default::default()
+        },
+        ExternalLink {
+            target: "/b.xls".into(),
+            sheet_names: vec!["T1".into()],
+            sheet_data: vec![ExternalSheetData::default()],
+            ..Default::default()
+        },
+    ];
+    a.defined_names = vec![
+        DefinedName {
+            name: "First".into(),
+            formula: "'[1]S2'!$A$1".into(),
+            ..Default::default()
+        },
+        DefinedName {
+            name: "Second".into(),
+            formula: "'[2]T1'!$B$2".into(),
+            ..Default::default()
+        },
+    ];
+    let xti_of = |bytes: &[u8]| {
+        let stream = rcell::container::read_entry(bytes, "/Workbook").unwrap();
+        let recs = rcell::legacy::biff::records(&stream);
+        recs.iter()
+            .find(|r| r.rtype == 0x0017)
+            .unwrap()
+            .data
+            .to_vec()
+    };
+    // 외부 2 의 시트 0 (SUPBOOK 1) 이 먼저, 이름 First 의 외부 1 시트 1 (SUPBOOK 0) 이 다음
+    let order = [2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0];
+    let (bytes, _) = rcell::legacy::write_with_report(&a).unwrap();
+    assert_eq!(xti_of(&bytes), order);
+    // 다시 읽은 레거시: 수식은 그대로, 값 캐시가 없어도 읽은 XTI 차례를 지킨다
+    let mut b = rcell::from_bytes(bytes).unwrap();
+    assert_eq!(b.defined_names[0].formula, "'[1]S2'!$A$1");
+    assert_eq!(b.defined_names[1].formula, "'[2]T1'!$B$2");
+    assert!(b.external_links.iter().all(|l| l.sheet_data.is_empty()));
+    let (again, _) = rcell::legacy::write_with_report(&b).unwrap();
+    assert_eq!(xti_of(&again), order);
+    // 힌트를 지우면 이름 차례
+    b.legacy_xti.clear();
+    let (plain, _) = rcell::legacy::write_with_report(&b).unwrap();
+    assert_eq!(xti_of(&plain), [2, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0]);
+    // 바이너리 BrtExternSheet: (BrtSupBookSrc 번호 u32, 첫·끝 시트 i32)
+    let out = rcell::binary::writer::write_report(&a, &Default::default()).unwrap();
+    let wbin = rcell::container::read_entry(&out.bytes, "xl/workbook.bin").unwrap();
+    let recs = rcell::binary::biff12::records(&wbin);
+    let ext = recs.iter().find(|r| r.rtype == 362).unwrap();
+    let words: Vec<u32> = ext
+        .data
+        .chunks(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(words, [2, 1, 0, 0, 0, 1, 1]);
+}

@@ -630,9 +630,22 @@ BIFF8 Ptg 에 한셀 폭(행 u32, 열 u16 의 14비트, PtgStr 길이 u16)을 �
 휘발 함수는 맨 앞 tAttrVolatile. 0–65535 정수는 PtgInt. 공유 수식·이름 안의 상대 참조는 PtgRefN·PtgAreaN 에 행 오프셋
 20비트(음수는 2²⁰ 보수). 맨 위의 쉼표는 합집합(PtgMemFunc 로 감싼다). 정의되지 않은 이름은 수식 없는 NAME 을 만들고,
 `_xlfn.` 함수는 grbit 0x000B 의 NAME, 사용자 함수는 PtgName + FuncVar 255. SUPBOOK 은 외부 연결을 모델 차례로 먼저,
-EXTERNSHEET 의 XTI 는 쓰일 때 만든다 — 이름 수식은 통합 문서 범위 이름을 먼저, 그다음 시트 범위 이름 (Trade_Show_Budget:
-전역 이름의 `[2]Intro` 가 XTI 0). 어떤 XTI 도 가리키지 않는 외부 연결은 SUPBOOK 을 쓰지 않고 XTI 의 SUPBOOK 번호를 당긴다
-(서식 파일 Marketing_Budget: 수식·이름·차트 어디에도 `[2]` 가 없는 externalLink2 `Template` 을 한셀은 쓰지 않는다). 외부 연결의 가상 경로는 대상의 드라이브가 저장할 문서의 드라이브와 같으면 드라이브 대신
+EXTERNSHEET 의 XTI 는 쓰일 때 만든다 — 이름 수식은 모델 차례 (통합 문서·시트 범위를 가리지 않는다). 그보다 먼저 한셀이
+문서를 열 때 만드는 XTI 가 온다: 레거시에서 읽은 문서는 읽은 XTI 표의 차례, XML·바이너리에서 읽은 문서는 값 캐시
+(`sheetDataSet`)가 시트 하나만 담은 외부 연결의 그 시트 (연결 차례). 수식이 쓰는 것만 남는다 (`Workbook::preset_xti`, 쓰기는
+한 번 써서 쓰이는 XTI 를 보고 다시 쓴다). 이름 XTI 차례 실험 xti–xti12 (서식 파일 Trade_Show_Budget·Average_Selling_Price·
+Marketing_Budget 의 이름·외부 연결을 바꾼 사본 58개, 한셀 레거시·바이너리 저장): Trade_Show_Budget 의 연결 2 는 캐시가 시트 `[0]`
+하나라 그 XTI 가 이름 차례보다 앞이고 (연결의 시트가 하나든 셋이든), 캐시를 `[0,1]` 로 늘리거나 없애면 이름 차례;
+Average_Selling_Price 의 연결 2 (캐시 `[0,1,2]`, `[0,2]` 로 바꿔도 이름 차례) 에 캐시 `[0]` 을 주면 거꾸로 앞; 두 연결 모두 시트
+하나 캐시면 연결 차례; 캐시의 시트를 아무 수식도 가리키지 않으면 그 XTI 는 남지 않는다; 이름의 따옴표·전역/지역·SET_RANGE 의
+`#REF!`·경로 잃음·외부 시트 이름과 수는 차례를 바꾸지 않는다 — 58개 모두 rcell 레거시의 EXTERNSHEET·NAME, 바이너리의
+`BrtExternSheet`·`BrtName` 이 한셀과 바이트까지 같다 (말뭉치 117개 중 116개, 남은 하나는 아래). 레거시를 한셀이 레거시로 다시
+저장해도 읽은 XTI 차례를 지키고 쓰이지 않는 XTI 는 버린다 (xti10: Trade_Show_Budget·Average_Selling_Price 그대로,
+Marketing_Budget 의 쓰이지 않는 XTI 하나가 빠진다 — rcell 의 레거시 입력 쓰기와 같다). 어떤 XTI 도 가리키지 않는 외부 연결은
+SUPBOOK 을 쓰지 않고 XTI 의 SUPBOOK 번호를 당긴다 (xti11: 연결 2 를 아무 수식도 가리키지 않게 한 8개 — 시트 하나·둘·셋, 캐시
+없음·하나·셋 — 모두 한셀이 버린다). 말뭉치의 Marketing_Budget.legacy.cell 은 쓰이지 않는 externalLink2 `Template` 의 SUPBOOK
+(자신 SUPBOOK 뒤)과 끝의 XTI `(2, 0, 0)` 을 담지만, 지금 한셀이 같은 XML 사본(그대로, 같은 파트로 다시 묶은 것)을 저장하면 둘 다
+없다 (xti12) — 그 파일을 저장한 세션의 상태다. 외부 연결의 가상 경로는 대상의 드라이브가 저장할 문서의 드라이브와 같으면 드라이브 대신
 U+0002 (같은 드라이브의 루트 — 서식 파일 9개의 `\x01\x02Hancell…`; `legacy::WriteOptions::doc_drive`, CLI·`save_legacy` 는
 저장 경로에서 찾는다). 함수 토큰은 참조를 돌려주면 자리의 클래스, 값·배열을 돌려주면 값(배열 자리면 배열).
 
@@ -762,7 +775,7 @@ U+0002 (같은 드라이브의 루트 — 서식 파일 9개의 `\x01\x02Hancell
 | 한셀 XML 이 잃은 피벗 값 | `sortType` 은 한셀 XML 에 없어 XML 입력에서는 수동 정렬로 쓴다 (v_sorta·v_sortd — 레거시·바이너리 입력은 지킨다) |
 | 차트 VtString 의 pad 바이트 | 한셀이 초기화하지 않은 바이트를 쓴다 — rcell 은 0 (`rec-diff --ignore-volatile` 은 보지 않는다) |
 | 레거시 차트가 담지 못하는 차트 속성 | 제목 글꼴·채우기·축 눈금 범위 … 는 한셀처럼 버린다 ([`cell-legacy-chart.md`](cell-legacy-chart.md) 6절) |
-| 이름 수식의 XTI 차례 | 전역 이름 먼저 (Trade_Show_Budget) 가 서식 파일 Average_Selling_Price 와 어긋난다 — 한셀은 지역 이름의 `[1]` 을 XTI 0 으로 둔다. 두 문서의 다른 점은 전역 이름 `'[2]Intro'!…` 의 따옴표와 SET_RANGE 의 `#REF!` 뿐이라 규칙을 정하지 못했다 (거꾸로 차례는 서식 파일 18개를 깨뜨린다). 뜻은 같다 — 한셀 판정 차이 0 |
+| 쓰이지 않는 외부 연결의 SUPBOOK·XTI | 말뭉치 Marketing_Budget.legacy.cell 하나 — 정답 파일을 저장한 세션의 상태다. 지금 한셀이 같은 XML 을 레거시로 저장하면 SUPBOOK·EXTERNSHEET·NAME 이 rcell 과 같다 (10.5절, xti12). 이름 XTI 차례는 풀렸다 (10.5절) |
 | SST 문자열 차례 | 한셀의 해시 표 차례 — 파일에서 정할 수 없다 (`rec-diff --ignore-sst-order` 로 견준다) |
 | TXO 첫 u16 0x0200 | 한셀이 저장할 때마다 다르다 (10.8절, `rec-diff --ignore-volatile`) |
 | 레거시 입력의 글 상자 회전 잠금 | 레거시 읽기가 한셀처럼 글 상자를 늘 회전 잠금으로 읽어(6.2절) 파일의 0x0100 비트인지 모델에 남지 않는다 — 다시 쓰면 0x007F 에 켜진다 |

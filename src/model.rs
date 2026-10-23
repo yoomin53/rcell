@@ -50,6 +50,10 @@ pub struct Workbook {
     /// 외부 통합 문서 연결. 수식의 `[n]` 은 이 목록의 n번째(1부터)다.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub external_links: Vec<ExternalLink>,
+    /// 레거시에서 읽은 XTI 차례 (책: None 이 문서, Some(n) 외부 연결 n, 첫·끝 시트). 한셀은 레거시를 열면 이 표를 그대로
+    /// 들고 있다가 저장한다 — 쓰기는 쓰이는 XTI 를 이 차례로 먼저 둔다 ([`Workbook::preset_xti`])
+    #[serde(skip)]
+    pub legacy_xti: Vec<(Option<usize>, u16, u16)>,
     pub hancom: HancomWorkbookExt,
     /// 테마 (xl/theme/theme1.xml). 없으면 렌더링 때 Office 기본 테마를 쓴다.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,6 +84,28 @@ pub struct ExternalSheetData {
     /// 마지막으로 갱신할 때 오류가 났음
     pub refresh_error: bool,
     pub cells: Vec<(CellRef, CellValue)>,
+}
+
+impl Workbook {
+    /// 쓰기가 다른 XTI 보다 먼저 두는 XTI 의 후보 (책: None 이 문서, Some(n) 외부 연결 n, 첫·끝 시트) — 수식이 쓰는 것만
+    /// 남는다. 레거시에서 읽은 문서는 그 XTI 차례. 아니면 값 캐시(`sheetDataSet`)가 시트 하나만 담은 외부 연결의 그 시트를
+    /// 연결 차례로: 한셀은 문서를 열 때 값 캐시의 시트 범위로 XTI 를 먼저 만든다 — 범위가 여러 시트면 쓰이지 않아 사라진다
+    /// (이름 XTI 차례 실험 58개, docs/format/cell-legacy.md 10.5절: Trade_Show_Budget 의 외부 연결 2 는 값 캐시가 시트 하나라
+    /// 이름의 XTI 보다 먼저, 캐시를 둘로 늘리거나 없애면 이름 차례; Average_Selling_Price 에 시트 하나 캐시를 주면 거꾸로)
+    pub fn preset_xti(&self) -> Vec<(Option<usize>, u16, u16)> {
+        if !self.legacy_xti.is_empty() {
+            return self.legacy_xti.clone();
+        }
+        self.external_links
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                let first = l.sheet_data.iter().map(|d| d.sheet_id).min()?;
+                let last = l.sheet_data.iter().map(|d| d.sheet_id).max()?;
+                (first == last).then_some((Some(i + 1), first as u16, last as u16))
+            })
+            .collect()
+    }
 }
 
 impl ExternalLink {

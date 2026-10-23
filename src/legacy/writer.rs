@@ -2128,12 +2128,46 @@ pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
 /// 피벗 캐시 스트림 (스트림 번호, 내용)
 type CacheStreams = Vec<(u16, Vec<u8>)>;
 
-/// `/Workbook` 스트림과 피벗 캐시 스트림
+/// XTI 하나 (SUPBOOK 번호, 첫 시트, 끝 시트)
+type XtiKey = (u16, u16, u16);
+
+/// 한 번 쓴 결과의 XTI 표와 SUPBOOK 차례 (None 이 이 문서, Some(n) 외부 연결 n)
+type XtiTables = (Vec<XtiKey>, Vec<Option<usize>>);
+
+/// `/Workbook` 스트림과 피벗 캐시 스트림. 한셀이 먼저 두는 XTI ([`Workbook::preset_xti`]) 는 수식이 쓰는 것만 남으므로,
+/// 후보가 있으면 한 번 써서 쓰이는 XTI 와 SUPBOOK 차례를 본 뒤 그것만 앞에 두고 다시 쓴다
 fn workbook_stream_and_caches(
     wb: &Workbook,
     opts: &WriteOptions,
     report: &mut Report,
 ) -> Result<(Vec<u8>, CacheStreams)> {
+    let candidates = wb.preset_xti();
+    if candidates.is_empty() {
+        return workbook_stream_inner(wb, opts, report, &[]).map(|(s, c, _)| (s, c));
+    }
+    let (_, _, (used, books)) = workbook_stream_inner(wb, opts, &mut Report::default(), &[])?;
+    let preset: Vec<XtiKey> = candidates
+        .into_iter()
+        .filter_map(|(book, a, b)| {
+            let sb = books.iter().position(|x| *x == book)? as u16;
+            Some((sb, a, b))
+        })
+        .filter(|k| used.contains(k))
+        .fold(Vec::new(), |mut v, k| {
+            if !v.contains(&k) {
+                v.push(k);
+            }
+            v
+        });
+    workbook_stream_inner(wb, opts, report, &preset).map(|(s, c, _)| (s, c))
+}
+
+fn workbook_stream_inner(
+    wb: &Workbook,
+    opts: &WriteOptions,
+    report: &mut Report,
+    preset: &[XtiKey],
+) -> Result<(Vec<u8>, CacheStreams, XtiTables)> {
     if wb.sheets.is_empty() {
         return Err(Error::InvalidValue {
             context: "레거시 쓰기".into(),
@@ -2172,12 +2206,12 @@ fn workbook_stream_and_caches(
     for n in 1..=wb.external_links.len() {
         tables.supbook(Some(n));
     }
+    // 한셀이 먼저 두는 XTI (레거시에서 읽은 XTI 차례, 아니면 값 캐시가 시트 하나인 외부 연결 — 쓰이는 것만)
+    tables.xti.extend_from_slice(preset);
 
-    // 이름 수식 (참조 클래스, 3차원). 통합 문서 범위 이름을 먼저 부호화한다 — XTI 가 그 차례로 생긴다 (관측:
-    // Trade_Show_Budget 의 전역 이름 [2]Intro 가 지역 이름 [1]… 보다 앞 XTI)
-    let mut name_order: Vec<usize> = (0..tables.names.len()).collect();
-    name_order.sort_by_key(|&i| tables.names[i].local.is_some());
-    for i in name_order {
+    // 이름 수식 (참조 클래스, 3차원). 모델 차례로 부호화한다 — XTI 가 그 차례로 생긴다 (이름 XTI 차례 실험: 이름의 따옴표·
+    // 수식·전역/지역, 경로 잃음, 외부 시트 이름과 번호를 바꿔도 차례는 위의 앞선 XTI 다음 이름 차례다)
+    for i in 0..tables.names.len() {
         let f = tables.names[i].formula.clone();
         if f.is_empty() {
             continue;
@@ -2789,7 +2823,7 @@ fn workbook_stream_and_caches(
         .into_iter()
         .map(|c| (c.id, c.stream))
         .collect();
-    Ok((out.buf, caches))
+    Ok((out.buf, caches, (tables.xti, tables.supbooks)))
 }
 
 /// 조건부 서식 틀 규칙의 수식 — 한셀이 레거시 CF 에 쓰는 꼴 (관측: craft/cf_dv·cfdv_x, R = 첫 범위 절대 참조,
