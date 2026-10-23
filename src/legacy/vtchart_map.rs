@@ -1030,6 +1030,10 @@ pub(crate) fn map(rec: &VtRecord, book: &Book<'_>) -> Chart {
                         .map_or_else(String::new, |c| c.hex().to_ascii_uppercase())
                 })
                 .collect(),
+            auto_markers: pool
+                .iter()
+                .map(|e| e.and_then(|e| e.u16("u16_d")).unwrap_or(1) != 0)
+                .collect(),
             rotation: plot.and_then(|p| p.f32("rotation")).map_or(0.0, f64::from),
             elevation: plot.and_then(|p| p.f32("elevation")).map_or(0.0, f64::from),
         }),

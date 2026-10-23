@@ -915,6 +915,8 @@ pub struct LegacyChartView {
     pub chart_type: u16,
     /// 계열 목록(VtSeries)마다 채우기 색 `RRGGBB` (원형·도넛은 조각마다)
     pub fills: Vec<String>,
+    /// 계열 목록마다 표식이 자동인가 (`VtSeries.u16_d` 1 — 모델에는 `none` 으로 옮기지만 한셀 화면은 자동 표식을 그린다)
+    pub auto_markers: Vec<bool>,
     /// 3차원 회전·높이 (도, `VtChartPlot.rotation`·`elevation`)
     pub rotation: f64,
     pub elevation: f64,

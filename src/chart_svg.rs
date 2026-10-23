@@ -53,9 +53,29 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
     let cx = Ctx { theme, color };
     let mut out = Svg::new(w, h);
     // 차트 영역
-    let area = cx.shape(ch.sp_pr.as_ref(), Some("#FFFFFF"), Some((AXIS_GRAY, 1.0)));
-    out.rect(0.5, 0.5, w - 1.0, h - 1.0, &area);
+    let mut area = cx.shape(ch.sp_pr.as_ref(), Some("#FFFFFF"), Some((AXIS_GRAY, 1.0)));
     let base_font = cx.font(ch.tx_pr.as_ref(), None, BASE_PT, false);
+    if ch.legacy.is_some() {
+        // 레거시(VtChart) 화면: 틀은 XML 차트보다 왼쪽 1px 안, 아래 1px 위, 굵기는 늘 1px
+        if let Some(s) = area.stroke.as_mut() {
+            s.width = 1.0;
+        }
+        out.rect(1.5, 0.5, w - 2.0, h - 2.0, &area);
+        let groups = groups_of(ch);
+        let pie_like = groups
+            .first()
+            .is_some_and(|g| matches!(g.kind, "pie" | "doughnut"));
+        let inner = legacy_layout(&mut out, ch, &groups, &cx, &base_font, pie_like, w, h);
+        if pie_like {
+            draw_pies(&mut out, ch, &groups, &cx, &base_font, inner);
+        } else if groups.first().is_some_and(|g| g.kind == "radar") {
+            draw_radar(&mut out, ch, &groups, &cx, &base_font, inner);
+        } else if !groups.is_empty() {
+            draw_axis_chart(&mut out, ch, &groups, &cx, &base_font, inner, w, h);
+        }
+        return out.finish();
+    }
+    out.rect(0.5, 0.5, w - 1.0, h - 1.0, &area);
     // 안쪽 영역 (그림 영역 + 축 레이블)
     let mut inner = Rect {
         x: PAD.0,
@@ -326,6 +346,9 @@ impl Font {
                     0.5
                 } else if c == ' ' {
                     0.3
+                } else if c == '/' {
+                    // 레거시 값 레이블 "/표준" 이 10pt 돋움에서 31px (한셀 화면)
+                    0.38
                 } else if c.is_ascii_uppercase() {
                     0.64
                 } else {
@@ -588,10 +611,16 @@ struct Group<'a> {
     series: &'a [ChartSeries],
     /// 이 묶음보다 앞선 묶음들의 계열 수 (색 순서)
     offset: usize,
+    /// 레거시 차트: 계열마다 자동 표식인가 (`LegacyChartView::auto_markers`, XML 차트는 비어 있다)
+    legacy_auto: &'a [bool],
 }
 
 fn groups_of(ch: &Chart) -> Vec<Group<'_>> {
     let mut out = Vec::new();
+    let legacy_auto: &[bool] = ch
+        .legacy
+        .as_ref()
+        .map_or(&[], |l| l.auto_markers.as_slice());
     if !ch.kind.is_empty() {
         out.push(Group {
             kind: ch.kind.as_str(),
@@ -602,6 +631,7 @@ fn groups_of(ch: &Chart) -> Vec<Group<'_>> {
             props: &ch.group,
             series: &ch.series,
             offset: 0,
+            legacy_auto,
         });
     }
     let mut off = ch.series.len();
@@ -615,10 +645,21 @@ fn groups_of(ch: &Chart) -> Vec<Group<'_>> {
             props: &g.props,
             series: &g.series,
             offset: off,
+            legacy_auto,
         });
         off += g.series.len();
     }
     out
+}
+
+/// 원형 조각(요소마다 색) k 의 기본 색: 테마 순서. 레거시 차트는 계열 목록(VtSeries)의 채우기 — 한셀 화면의
+/// 레거시 원형은 73B1D1·CD6565·EBC452 … (chart_pie)
+fn pie_color(ch: &Chart, cx: &Ctx, k: usize) -> String {
+    ch.legacy
+        .as_ref()
+        .and_then(|l| l.fills.get(k))
+        .filter(|c| c.len() == 6)
+        .map_or_else(|| cx.palette(k), |c| format!("#{c}"))
 }
 
 /// 계열 하나의 기본 색 (지정 → 테마 순서)
@@ -694,7 +735,7 @@ fn legend_items(ch: &Chart, groups: &[Group], cx: &Ctx, pie_like: bool) -> Vec<L
         if let Some(s) = groups.first().and_then(|g| g.series.first()) {
             let n = s.values.len().max(s.categories.len());
             for k in 0..n {
-                let base = cx.palette(k);
+                let base = pie_color(ch, cx, k);
                 let st = point_style(s, 0, k, cx, &base);
                 let name = s
                     .categories
@@ -749,6 +790,126 @@ fn legend_items(ch: &Chart, groups: &[Group], cx: &Ctx, pie_like: bool) -> Vec<L
         items.reverse();
     }
     items
+}
+
+/// 레거시(VtChart) 화면의 배치 (한셀 화면, 레거시 차트 갈무리 — docs/format/screen.md 6.2절). 제목·범례를 그리고
+/// 남은 자리를 돌려준다: 축 차트는 x = 값 레이블 왼쪽, y = 그림 영역 위, 오른쪽·아래 = 그림 영역 끝, 원형은 원이 들어갈
+/// 자리. 틀 픽셀은 왼쪽 1, 위 0, 오른쪽 w−1, 아래 h−2 (SVG 좌표).
+///
+/// - 그림 영역: 레이블 왼쪽이 틀 + 14, 위 + 22, 아래 − 36 (항목 레이블 글자 윗변은 축 + 9), 범례가 없으면 오른쪽 − 15
+/// - 범례: 틀 없음, 표지 16×15 (선은 28px 선 + 표식), 표지 → 글 8, 줄 23px. 오른쪽은 글 끝이 틀 − 20, 그림 영역은
+///   표지 18px 앞까지. 왼쪽은 표지가 틀 + 16, 위는 표지 윗변이 + 16 (그림 영역 + 35), 아래는 − 32 (그림 영역 − 35)
+/// - 제목: 기준선이 틀 위 + 42, 제목 자리 56px
+#[allow(clippy::too_many_arguments)]
+fn legacy_layout(
+    out: &mut Svg,
+    ch: &Chart,
+    groups: &[Group],
+    cx: &Ctx,
+    base: &Font,
+    pie_like: bool,
+    w: f64,
+    h: f64,
+) -> Rect {
+    let (fl, ft, fr, fb) = (1.0, 0.0, w - 1.0, h - 2.0);
+    let mut top = ft;
+    if let Some((text, font)) = title_of(ch, cx, base) {
+        for (i, l) in text.split('\n').enumerate() {
+            out.text(
+                (fl + fr) / 2.0,
+                ft + 42.0 + font.px() * 1.2 * i as f64,
+                l,
+                &font,
+                "middle",
+            );
+        }
+        top = ft + 56.0;
+    }
+    let (mut left, mut right, mut plot_top, mut plot_bottom) =
+        (fl + 14.0, fr - 15.0, top + 22.0, fb - 36.0);
+    if let Some(pos) = ch.legend.as_deref() {
+        let font = cx.font(ch.legend_props.tx_pr.as_ref(), None, base.size, false);
+        let items = legend_items(ch, groups, cx, pie_like);
+        if !items.is_empty() {
+            let line = items.iter().any(|i| i.stroke.is_some() && i.fill.is_none());
+            let kw = if line { 28.0 } else { 16.0 };
+            let tw = items
+                .iter()
+                .map(|i| font.width(&i.name))
+                .fold(0.0, f64::max);
+            let n = items.len() as f64;
+            // 세로 범례의 첫 표지 윗변 (틀 가운데에 맞추되 줄이 많으면 조금 위로)
+            let first_top = |a: f64, b: f64| {
+                let cy = (a + b) / 2.0;
+                if n <= 1.0 {
+                    (cy - 7.5).floor()
+                } else {
+                    (cy - (23.0 * n - 8.0) / 2.0 - 1.5).floor()
+                }
+            };
+            let mut keys: Vec<(f64, f64)> = Vec::new();
+            match pos {
+                "l" => {
+                    let y0 = first_top(top, fb);
+                    keys.extend((0..items.len()).map(|k| (fl + 16.0, y0 + 23.0 * k as f64)));
+                    left = fl + 16.0 + kw + 8.0 + tw + 19.0;
+                }
+                "t" | "b" => {
+                    let total: f64 = items
+                        .iter()
+                        .map(|i| kw + 8.0 + font.width(&i.name))
+                        .sum::<f64>()
+                        + 16.0 * (n - 1.0);
+                    let mut x = ((fl + fr) / 2.0 - total / 2.0).round();
+                    let y = if pos == "t" { top + 16.0 } else { fb - 32.0 };
+                    for it in &items {
+                        keys.push((x, y));
+                        x += kw + 8.0 + font.width(&it.name) + 16.0;
+                    }
+                    if pos == "t" {
+                        plot_top += 35.0;
+                    } else {
+                        plot_bottom -= 35.0;
+                    }
+                    right = fr - 15.0;
+                }
+                _ => {
+                    let kx = (fr - 20.0 - tw - 8.0 - kw).round();
+                    let y0 = first_top(top, fb);
+                    keys.extend((0..items.len()).map(|k| (kx, y0 + 23.0 * k as f64)));
+                    right = kx - 18.0;
+                }
+            }
+            for (it, (kx, ky)) in items.iter().zip(keys) {
+                if let Some(f) = &it.fill {
+                    out.rect(kx, ky, kw, 15.0, &Style::fill(f));
+                } else if let Some(st) = &it.stroke {
+                    let y = ky + 8.0;
+                    out.line(kx, y + 0.5, kx + kw, y + 0.5, st);
+                    if let Some(m) = &it.marker {
+                        draw_marker(out, m, kx + kw / 2.0, y + 0.5, 7.0, &Style::fill(&st.color));
+                    }
+                }
+                out.text(kx + kw + 8.0, ky + 9.5, &it.name, &font, "start");
+            }
+        }
+    }
+    if pie_like {
+        // 원: 왼쪽 + 15, 위 + 41 (계열 이름이 원 위에), 아래 − 15
+        let y0 = plot_top - 22.0 + 41.0;
+        return Rect {
+            x: fl + 15.0,
+            y: y0,
+            w: (right - (fl + 15.0)).max(10.0),
+            h: (plot_bottom + 36.0 - 15.0 - y0).max(10.0),
+        };
+    }
+    Rect {
+        x: left,
+        y: plot_top,
+        w: (right - left).max(10.0),
+        h: (plot_bottom - plot_top).max(10.0),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -874,6 +1035,10 @@ fn marker_of(s: &ChartSeries, g: &Group, k: usize) -> Option<(String, f64)> {
     let m: Option<&ChartMarker> = s.marker.as_ref();
     let sym = m.and_then(|m| m.symbol.as_deref());
     let size = m.and_then(|m| m.size).unwrap_or(7) as f64 * 1.1;
+    // 레거시 2차원 꺾은선의 자동 표식: 모델에는 none 이지만 한셀 화면은 자동 표식을 그린다 (c2_e3_line_pct 등)
+    if g.legacy_auto.get(k) == Some(&true) && g.kind == "line" && !g.three_d {
+        return Some((AUTO[k % AUTO.len()].to_string(), size));
+    }
     match (g.kind, sym) {
         (_, Some("none")) => None,
         ("scatter", None) => match g.props.scatter_style.as_deref() {
@@ -1417,6 +1582,21 @@ fn draw_axis_chart(
             w: r.w - val_label_w - sec_label_w,
             h: r.h - cat_label_h,
         },
+        None if legacy => {
+            // 레거시: 안쪽 자리(legacy_layout)에서 왼쪽 레이블 + 14px 만 뺀다. 영역형은 축이 4px 위·왼쪽 (chart_area)
+            let left = if horizontal {
+                cats.iter().map(|c| cat_font.width(c)).fold(0.0, f64::max) + VAL_GAP
+            } else {
+                val_label_w
+            };
+            let shrink = if first.kind == "area" { 4.0 } else { 0.0 };
+            Rect {
+                x: inner.x + left,
+                y: inner.y,
+                w: inner.w - left - shrink,
+                h: inner.h - shrink,
+            }
+        }
         None => {
             // 한셀 화면: 왼쪽은 레이블 + 14px, 위는 눈금 레이블 반 줄, 아래는 항목 레이블 한 줄 + 14px
             let tl = val_title.as_ref().map_or(0.0, |(_, f)| f.px() * 1.4);
@@ -1445,6 +1625,7 @@ fn draw_axis_chart(
     };
     // 가로 막대·분산형: 값 레이블이 눈금 가운데에 오므로 마지막 레이블의 반을 오른쪽에 남긴다
     if (horizontal || xy)
+        && !legacy
         && ch
             .plot_layout
             .as_ref()
@@ -1474,6 +1655,7 @@ fn draw_axis_chart(
     // 3차원: 깊이 자리만큼 앞면 그림 영역이 작다 (chart_col3d: 2차원 415×267 보다 왼쪽 +9, 오른쪽 −38, 위 +15, 아래 −2 px)
     if first.three_d
         && !xy
+        && !legacy
         && ch
             .plot_layout
             .as_ref()
@@ -1541,8 +1723,12 @@ fn draw_axis_chart(
         }
     };
     // 항목 띠 (between: 띠 가운데, midCat: 눈금 위)
-    let between =
-        val_ax.and_then(|a| a.cross_between.as_deref()) != Some("midCat") || first.kind == "bar";
+    // 레거시 영역형은 첫 항목이 값 축 위에서 끝 항목이 오른쪽 끝 (chart_area)
+    let between = if legacy {
+        first.kind != "area"
+    } else {
+        val_ax.and_then(|a| a.cross_between.as_deref()) != Some("midCat") || first.kind == "bar"
+    };
     let cat_reverse = cat_ax.and_then(|a| a.scaling.orientation.as_deref()) == Some("maxMin");
     let band_len = if horizontal { plot.h } else { plot.w };
     let band = if between {
@@ -1643,13 +1829,28 @@ fn draw_axis_chart(
 
     // 축 선과 눈금, 레이블
     let ax_line = |a: Option<&ChartAxis>| {
-        cx.line_of(a.and_then(|a| a.sp_pr.as_ref()), Some((AXIS_GRAY, 1.0)))
+        cx.line_of(
+            a.and_then(|a| a.sp_pr.as_ref()),
+            Some((if legacy { LEGACY_GRAY } else { AXIS_GRAY }, 1.0)),
+        )
     };
+    // 눈금 길이: 레거시는 바깥 4px (한셀은 레거시의 눈금 모양을 읽지 않는다 — 늘 바깥)
     let tick_len = |a: Option<&ChartAxis>| match a.and_then(|a| a.major_tick_mark.as_deref()) {
+        _ if legacy => (0.0, 4.0),
         Some("none") => (0.0, 0.0),
         Some("in") => (-5.0, 0.0),
         Some("cross") => (-5.0, 5.0),
         _ => (0.0, 5.0),
+    };
+    // 레이블 기준선: 값 레이블은 눈금 + 글꼴 0.35 (레거시 0.3), 항목 레이블은 축 아래 22.5px (레거시는 글자 윗변이
+    // 축 + 9 — 기준선 1.39 글꼴)
+    let val_dy = |f: &Font| f.px() * if legacy { 0.3 } else { 0.35 };
+    let cat_dy = |f: &Font| {
+        if legacy {
+            f.px() * 1.39
+        } else {
+            22.5 * f.size / BASE_PT + f.px() * 0.35
+        }
     };
     // 값 축이 항목 축과 만나는 자리 (항목 축 선의 위치)
     let cross_v = match cat_ax.and_then(|a| a.crosses.as_deref()) {
@@ -1686,13 +1887,7 @@ fn draw_axis_chart(
                 }
                 if labels_on(val_ax) {
                     let t = tick_label(v, val_ax, val_fmt.as_deref(), percent);
-                    out.text(
-                        p,
-                        y + 22.5 * val_font.size / BASE_PT + val_font.px() * 0.35,
-                        &t,
-                        &val_font,
-                        "middle",
-                    );
+                    out.text(p, y + cat_dy(&val_font), &t, &val_font, "middle");
                 }
             }
         } else {
@@ -1715,15 +1910,9 @@ fn draw_axis_chart(
                 if labels_on(val_ax) {
                     let t = tick_label(v, val_ax, val_fmt.as_deref(), percent);
                     if right {
-                        out.text(
-                            x + VAL_GAP,
-                            p + val_font.px() * 0.35,
-                            &t,
-                            &val_font,
-                            "start",
-                        );
+                        out.text(x + VAL_GAP, p + val_dy(&val_font), &t, &val_font, "start");
                     } else {
-                        out.text(x - VAL_GAP, p + val_font.px() * 0.35, &t, &val_font, "end");
+                        out.text(x - VAL_GAP, p + val_dy(&val_font), &t, &val_font, "end");
                     }
                 }
             }
@@ -1773,7 +1962,7 @@ fn draw_axis_chart(
                     let t = tick_label(v, cat_ax, cat_fmt.as_deref(), false);
                     out.text(
                         p,
-                        plot.y + plot.h + 22.5 * cat_font.size / BASE_PT + cat_font.px() * 0.35,
+                        plot.y + plot.h + cat_dy(&cat_font),
                         &t,
                         &cat_font,
                         "middle",
@@ -1796,7 +1985,7 @@ fn draw_axis_chart(
                     let t = cat_text(c, cat_fmt.as_deref());
                     out.text(
                         plot.x - VAL_GAP,
-                        cat_mid(k) + cat_font.px() * 0.35,
+                        cat_mid(k) + val_dy(&cat_font),
                         &t,
                         &cat_font,
                         "end",
@@ -1827,7 +2016,7 @@ fn draw_axis_chart(
                         ((widest + 6.0) / band).ceil().max(1.0) as usize
                     });
                 // 항목 레이블 가운데가 축 아래 22.5px (한셀 화면, 9pt)
-                let ly = plot.y + plot.h + 22.5 * cat_font.size / BASE_PT + cat_font.px() * 0.35;
+                let ly = plot.y + plot.h + cat_dy(&cat_font);
                 for (k, c) in cats.iter().enumerate().take(n_cat) {
                     if k % skip != 0 {
                         continue;
@@ -2504,14 +2693,16 @@ fn draw_axis_labels(
 fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font, inner: Rect) {
     let g = &groups[0];
     let doughnut = g.kind == "doughnut";
-    // 한셀 화면: 원은 틀 위·아래에서 13px 안쪽까지 (안쪽 영역보다 위·아래로 3px 크다)
+    let legacy = ch.legacy.as_ref();
+    // 한셀 화면: 원은 틀 위·아래에서 13px 안쪽까지 (안쪽 영역보다 위·아래로 3px 크다). 레거시는 legacy_layout 의 자리
     let plot = match manual_rect(
         ch.plot_layout.as_ref(),
         inner.x + inner.w + PAD.1,
         inner.y + inner.h + PAD.3,
     ) {
-        Some((r, _)) => r,
-        None => Rect {
+        Some((r, _)) if legacy.is_none() => r,
+        _ if legacy.is_some() => inner,
+        _ => Rect {
             x: inner.x,
             y: inner.y - 3.0,
             w: inner.w,
@@ -2520,6 +2711,13 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
     };
     let (cx0, cy0) = (plot.x + plot.w / 2.0, plot.y + plot.h / 2.0);
     let r_out = (plot.w.min(plot.h) / 2.0).max(4.0);
+    // 레거시 화면: 원 위 가운데에 계열 이름 (chart_pie: 글자 아랫변이 원 위 14px)
+    if legacy.is_some()
+        && let Some(name) = g.series.first().and_then(|s| s.name.as_deref())
+    {
+        let font = cx.font(ch.legend_props.tx_pr.as_ref(), None, base.size, false);
+        out.text(cx0, cy0 - r_out - 14.0, name, &font, "middle");
+    }
     let first_ang = g.props.first_slice_ang.unwrap_or(0) as f64;
     let rings: Vec<&ChartSeries> = if doughnut {
         g.series.iter().collect()
@@ -2543,7 +2741,7 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
         let mut a0 = (first_ang - 90.0).to_radians();
         for (k, v) in vals.iter().enumerate() {
             let a1 = a0 + v / total * std::f64::consts::TAU;
-            let base_c = cx.palette(k);
+            let base_c = pie_color(ch, cx, k);
             let st0 = point_style(s, 0, k, cx, &base_c);
             // 조각 경계선은 지정이 있을 때만 (한셀 기본은 없다)
             let st = Style {
