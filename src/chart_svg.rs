@@ -84,8 +84,11 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
         h: h - PAD.2 - PAD.3,
     };
 
-    // 제목: 위 가운데 (한셀 화면: 14pt 굵게, 글자 윗변이 틀에서 14px, 그 아래 그림 영역)
-    if let Some((text, font)) = title_of(ch, &cx, &base_font) {
+    // 제목: 위 가운데 (한셀 화면: 14pt, 굵게 — b="0" 이어도 굵다, 글자 윗변이 틀에서 14px, 그림 영역은 제목 줄 아래
+    // 20px 뒤 — c2_e2_title_*: 맨 위 눈금선이 틀 + 60.5, 18pt 는 + 66.5). 범례는 제목 아래 자리의 가운데
+    let mut legend_top = 0.0;
+    if let Some((text, mut font)) = title_of(ch, &cx, &base_font) {
+        font.bold = true;
         let lines: Vec<&str> = text.split('\n').collect();
         let lh = font.px() * 1.25;
         let manual = ch
@@ -95,8 +98,9 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
             .and_then(manual_xy);
         let (tx, ty) = match manual {
             Some((x, y)) => (x * w, y * h),
-            None => (w / 2.0, 10.0),
+            None => (w / 2.0, 13.0),
         };
+        legend_top = ty + lh * (lines.len() as f64 - 1.0) + font.px() * 1.1 + 5.0;
         for (i, l) in lines.iter().enumerate() {
             out.text(
                 tx,
@@ -107,9 +111,11 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
             );
         }
         if ch.title_full.as_ref().and_then(|t| t.overlay) != Some(true) {
-            let bottom = ty + lh * lines.len() as f64 + 8.0;
+            let bottom = ty + lh * lines.len() as f64 + 20.0;
             inner.h -= bottom - inner.y;
             inner.y = bottom;
+        } else {
+            legend_top = 0.0;
         }
     }
 
@@ -123,7 +129,9 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
         let font = cx.font(ch.legend_props.tx_pr.as_ref(), None, base_font.size, false);
         let items = legend_items(ch, &groups, &cx, pie_like);
         if !items.is_empty() {
-            inner = draw_legend(&mut out, ch, pos, &items, &font, inner, w, h, &cx);
+            inner = draw_legend(
+                &mut out, ch, pos, &items, &font, inner, w, h, legend_top, &cx,
+            );
         }
     }
 
@@ -926,6 +934,7 @@ fn draw_legend(
     inner: Rect,
     w: f64,
     h: f64,
+    top: f64,
     cx: &Ctx,
 ) -> Rect {
     let fpx = font.px();
@@ -958,7 +967,7 @@ fn draw_legend(
             "l" => {
                 rest.x = inner.x + bw + plot_gap;
                 rest.w -= bw + plot_gap;
-                (inner.x, (h - bh) / 2.0)
+                (inner.x, (top + h - bh) / 2.0)
             }
             "t" => {
                 rest.y += bh + 12.0;
@@ -979,7 +988,7 @@ fn draw_legend(
                 // 오른쪽: 글 끝이 틀에서 11px, 세로 가운데는 틀 가운데, 그림 영역은 표지 15px 앞까지
                 let x = w - right - bw;
                 rest.w = x - plot_gap - inner.x;
-                (x, (h - bh) / 2.0)
+                (x, (top + h - bh) / 2.0)
             }
         },
     };
