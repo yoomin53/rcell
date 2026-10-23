@@ -188,10 +188,18 @@ impl Svg {
             esc(t)
         );
     }
-    /// 그림 영역 안으로 자르기 시작 (끝은 `end_clip`)
+    /// 그림 영역 안으로 자르기 시작 (끝은 `end_clip`). 한 문서에 차트가 여럿이면 id 가 겹친다 — 사각형 전체를
+    /// id 에 넣어 같은 id 는 같은 사각형이 되게 한다 (첫 정의가 이긴다)
     fn begin_clip(&mut self, r: &Rect) {
         self.clip += 1;
-        let id = format!("rcc{}x{:.0}{:.0}", self.clip, r.x * 3.0, r.y * 7.0);
+        let id = format!(
+            "rcc{}x{:.0}y{:.0}w{:.0}h{:.0}",
+            self.clip,
+            r.x * 8.0,
+            r.y * 8.0,
+            r.w * 8.0,
+            r.h * 8.0
+        );
         let _ = write!(
             self.defs,
             "<clipPath id=\"{id}\"><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\"/></clipPath>",

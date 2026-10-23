@@ -464,13 +464,13 @@ pub(super) fn layout(wb: &Workbook, sheet: &Sheet, nrows: u32, ncols: u32) -> La
         if h > 0.0 { h } else { book.row_pt }
     };
     // 행 요소가 없는 행도 열 서식 글꼴로 맞춘 높이 (defaultRowHeight 는 쓰지 않는다). 기본 높이를 직접 정한
-    // 시트(sheetFormatPr/@customHeight)는 높이를 정하지 않은 행 모두 그 높이 (값이 있는 행도 맞추지 않는다 — 차트 실험)
-    let custom_default = sheet
+    // 시트(sheetFormatPr/@customHeight)는 행 요소도 셀도 없는 행만 그 높이 — 셀이 있는 행은 그대로 맞춘다
+    // (15pt 기본 높이 시트에서 값이 있는 행은 22px, 빈 행은 20px — 차트 실험의 한셀 화면)
+    let sheet_default = sheet
         .default_row_custom
         .then_some(sheet.default_row_height)
         .flatten()
-        .map(|h| (h * 20.0 + 1e-7).floor() / 20.0);
-    let sheet_default = custom_default.unwrap_or(base_pt);
+        .map_or(base_pt, |h| (h * 20.0 + 1e-7).floor() / 20.0);
     let col_screen = |c: u32| {
         col_w
             .get(c as usize)
@@ -487,7 +487,6 @@ pub(super) fn layout(wb: &Workbook, sheet: &Sheet, nrows: u32, ncols: u32) -> La
             Some(i) if i.hidden => 0.0,
             Some(i) if i.custom_height && i.height.is_some() => stored(i.height.unwrap_or(0.0)),
             _ if info.is_none() && cells.is_empty() => sheet_default,
-            _ if custom_default.is_some() => sheet_default,
             _ => {
                 // 맞춘 높이: 레코드가 있는 칸 + 나머지 칸의 행·열 서식
                 let mut h: f64 = 0.0;
