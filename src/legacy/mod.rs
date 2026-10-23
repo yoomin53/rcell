@@ -19,6 +19,7 @@ pub mod formula;
 pub mod ftab;
 pub mod lossy;
 pub(crate) mod pivot;
+pub(crate) mod pivotw;
 pub mod props;
 pub mod reader;
 pub mod recdiff;
@@ -42,6 +43,11 @@ use crate::model::Workbook;
 
 /// 진단: 레거시 파일의 한컴 차트 레코드(0x7EF0)마다 Vt 아카이브를 `경로 = 값` 줄로 (리버스 엔지니어링용)
 pub fn chart_dumps(bytes: &[u8]) -> Result<Vec<String>> {
+    chart_dumps_with(bytes, false)
+}
+
+/// [`chart_dumps`] — `offsets` 면 레코드의 스트림 위치와 값마다 레코드 안 자리를 붙인다 (값을 바꿔 보는 실험용)
+pub fn chart_dumps_with(bytes: &[u8], offsets: bool) -> Result<Vec<String>> {
     let stream = container::read_entry(bytes, "/Workbook")?;
     let recs = biff::records(&stream);
     // 원본 범위 수식의 ixti 는 시트 순서 번호 (cell-legacy-chart.md 2절): BOUNDSHEET 이름
@@ -82,6 +88,13 @@ pub fn chart_dumps(bytes: &[u8]) -> Result<Vec<String>> {
         .iter()
         .filter(|r| r.rtype == vtchart::RECORD_TYPE)
         .map(|r| match vtchart::parse_with(r.data, sheets) {
+            Ok(rec) if offsets => format!(
+                "record = /Workbook @0x{:x} (내용 @0x{:x})
+{}",
+                r.offset,
+                r.offset + 4,
+                vtchart::dump_with(&rec, true)
+            ),
             Ok(rec) => vtchart::dump(&rec),
             Err(e) => format!("읽기 실패: {e}\n"),
         })

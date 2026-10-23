@@ -576,8 +576,8 @@ struct SeriesSpec<'a> {
     stack: Option<(u16, u16)>,
     /// 꺾은선·분산형·방사형 1
     show_line: bool,
-    /// 꺾은선의 표식 지정 (VtSeries.markerStyle, 크기 twip)
-    marker: Option<(u16, f32)>,
+    /// 꺾은선의 표식 지정 (VtSeries.markerStyle, 크기 twip, pen5 에 쓸 표식 채우기 색)
+    marker: Option<(u16, f32, Option<u32>)>,
     /// 데이터 레이블 (구성 비트, 위치 u16s3[8])
     labels: Option<(u16, u16)>,
     /// 거품형: Some(false) 값 계열, Some(true) 거품 크기 계열
@@ -588,18 +588,17 @@ struct SeriesSpec<'a> {
     smooth: bool,
 }
 
-/// `c:marker/c:symbol` → VtSeries.markerStyle (관측: 자동 4, square 5; 나머지는 MSChart VtMarkerStyle 순서로 본 추정)
+/// `c:marker/c:symbol` → VtSeries.markerStyle (표식 모양 실험: c2_e5_line_marker 의 모양을 바꾼 XML 을 한셀이 레거시로
+/// 저장한 것 — plus 1, x 2, star 3, circle·auto 4, square 5, diamond 6, triangle 7, 모양을 담을 자리가 없는 dash·dot·picture
+/// 는 6 (한셀의 레거시 읽기는 diamond). 거품형은 따로 9 — bubble_series)
 fn marker_style(symbol: Option<&str>) -> u16 {
     match symbol {
-        Some("dash") => 0,
         Some("plus") => 1,
         Some("x") => 2,
         Some("star") => 3,
         Some("square") => 5,
-        Some("diamond") => 6,
+        Some("diamond") | Some("dash") | Some("dot") | Some("picture") => 6,
         Some("triangle") => 7,
-        Some("circle") | Some("dot") => 9,
-        Some("none") => 15,
         _ => 4,
     }
 }
@@ -695,11 +694,12 @@ fn series(sp: &SeriesSpec) -> WObj {
         })),
         None => label(8.0, W::Null),
     };
-    // 표식 지정: u16_d 0, 표식·pen5 색 플래그 0x20 (chart_line, c2_e5_line_marker). 표식 채우기는 쓰지 않는다 — 표식
-    // 색 플래그만 0 으로 쓴 레코드를 한셀은 채우기 없이 읽는다 (c2_e6_bubble 레거시 입력의 한셀 판정)
-    let (u16_d, auto_flag, marker_size, style) = match sp.marker {
-        Some((style, size)) => (0, 0x20, size, style),
-        None => (1, 0, 200.0, 2),
+    // 표식 지정: u16_d 0, 표식·pen5 색 플래그 0x20 (chart_line, c2_e5_line_marker). 한셀의 레거시 읽기는 pen5 의 색을
+    // 표식 채우기로 읽고 검정이면 채우기 없음으로 읽는다 (거품형 표식 실험: 색 플래그와 상관없다). 한셀의 XML→레거시
+    // 저장은 꺾은선 표식의 채우기를 버리고 검정을 쓴다 (표식 채우기 실험 m1–m6) — 채우기 색은 레거시에서 읽은 문서만 준다
+    let (u16_d, auto_flag, marker_size, style, pen5_color) = match sp.marker {
+        Some((style, size, fill)) => (0, 0x20, size, style, fill),
+        None => (1, 0, 200.0, 2, None),
     };
     let o = WObj::new("VtSeries")
         .set("linePen", pen(1, 2, line_color, 0, line_width))
@@ -733,7 +733,13 @@ fn series(sp: &SeriesSpec) -> WObj {
         .ptr("dataLabel", data_label)
         .u16("u16_d", u16_d)
         .u16("u16_e", 2)
-        .set("pen5", pen(1, 0, 0, auto_flag, 20.0))
+        .set(
+            "pen5",
+            match pen5_color {
+                Some(c) => pen(1, 0, c, 0, 20.0),
+                None => pen(1, 0, 0, auto_flag, 20.0),
+            },
+        )
         .f32("markerSize", marker_size)
         .u16("showLine", sp.show_line as u16)
         .set("markerColor", W::Color(0, auto_flag))
@@ -800,6 +806,8 @@ pub(crate) struct GridData {
     pub has_names: bool,
     /// 거품형: 홀수 열(거품 크기)의 이름 칸은 비어 있다 (c2_e6_bubble)
     pub bubble: bool,
+    /// 꺾은선 표식의 단색 채우기를 pen5 에 쓴다 (레거시에서 읽은 문서 — 한셀의 XML→레거시 저장은 버린다)
+    pub marker_fill: bool,
     pub values: Vec<Vec<Option<f64>>>,
 }
 
@@ -1433,20 +1441,26 @@ fn chart(c: &Chart, data: &GridData) -> WObj {
             } else {
                 series_labels(model.and_then(|s| s.d_lbls.as_ref()))
             };
-            // 표식 `none` 크기 7 (채우기 없음) 은 레거시 읽기가 자동 표식(u16_d 1)을 읽은 꼴 — 자동으로 쓴다
-            // (추정: 읽기의 반대, XML 표본에는 `none` 이 없다)
+            // 표식 `none` 은 크기와 상관없이 자동 표식(u16_d 1)으로 쓴다 — 레거시 읽기는 `none` 크기 7 로 읽는다
+            // (표식 모양 실험: none 크기 9 → u16_d 1, 크기 200, 모양 2)
             let marker = (ty == 3 && c.kind == "line")
                 .then(|| model.and_then(|s| s.marker.as_ref()))
                 .flatten()
-                .filter(|m| {
-                    !(m.symbol.as_deref() == Some("none")
-                        && m.size.unwrap_or(7) == 7
-                        && m.sp_pr.is_none())
-                })
+                .filter(|m| m.symbol.as_deref() != Some("none"))
                 .map(|m| {
+                    let fill = m
+                        .sp_pr
+                        .as_ref()
+                        .and_then(|p| p.fill.as_ref())
+                        .and_then(|f| match f {
+                            ChartFill::Solid(c) => srgb_value(c),
+                            _ => None,
+                        })
+                        .filter(|_| data.marker_fill);
                     (
                         marker_style(m.symbol.as_deref()),
                         m.size.unwrap_or(7) as f32 * 20.0,
+                        fill,
                     )
                 });
             new(series(&SeriesSpec {

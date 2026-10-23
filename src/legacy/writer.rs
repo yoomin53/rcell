@@ -239,11 +239,14 @@ pub(crate) fn nearest_icv(rgb: u32) -> u16 {
     best.1
 }
 
-/// 팔레트 번호: 없으면 `none`, 자동 64
+/// 팔레트 번호: 없으면 `none`, 자동 64, 색인 65 (시스템 전경 — 피벗 서식의 테두리) 65
 pub(crate) fn icv_of(c: Option<&Color>, wb: &Workbook, none: u16) -> u16 {
     let Some(c) = c else { return none };
     if c.auto || c.indexed == Some(64) {
         return 0x40;
+    }
+    if c.indexed == Some(65) && c.rgb.is_none() {
+        return 0x41;
     }
     if let Some(i) = c.indexed.filter(|&i| i < 64) {
         return if i < 8 {
@@ -258,11 +261,14 @@ pub(crate) fn icv_of(c: Option<&Color>, wb: &Workbook, none: u16) -> u16 {
     }
 }
 
-/// 한컴 확장의 COLORREF: 없으면 `none`, 자동이면 `auto`
+/// 한컴 확장의 COLORREF: 없으면 `none`, 자동이면 `auto`, 색인 65 는 0x80800002 (5.3절 — 피벗 실험의 피벗 서식 테두리)
 fn cref_of(c: Option<&Color>, wb: &Workbook, none: u32, auto: u32) -> u32 {
     let Some(c) = c else { return none };
     if c.auto || c.indexed == Some(64) {
         return auto;
+    }
+    if c.indexed == Some(65) && c.rgb.is_none() {
+        return 0x8080_0002;
     }
     match rgb_of(c, wb) {
         Some(rgb) => colorref_of(rgb),
@@ -1175,6 +1181,12 @@ fn xf_exts(xf: &Xf, wb: &Workbook) -> Vec<ExtProp> {
     // 오른쪽 테두리는 검정·회색·흰색도 0x000A 로 쓴다. 왼쪽·위·아래는 팔레트 밖의 색만)
     let full_with = |c: Option<&Color>, always: bool| -> Option<Vec<u8>> {
         let c = c?;
+        // 색인 65 오른쪽 테두리: 색인 종류(1) + 번호 (피벗 실험 pa 의 XF 22·23·25 — 왼쪽·위·아래는 쓰지 않는다)
+        if always && c.indexed == Some(65) && c.rgb.is_none() {
+            let mut b = Buf::new();
+            b.u16(1).u16(0).u32(65).bytes(&[0; 8]);
+            return Some(b.take());
+        }
         if c.auto || c.indexed.is_some() && c.rgb.is_none() {
             return None;
         }
@@ -1786,6 +1798,8 @@ pub(crate) struct SheetEnc {
     cfvo: HashMap<(usize, usize, usize), Vec<u8>>,
     /// 한컴 차트 레코드 0x7EF0 의 내용 (차트 도형 차례)
     pub(crate) charts: Vec<Vec<u8>>,
+    /// 피벗 표마다 레코드 (SXVIEW …, [`super::pivotw`])
+    pub(crate) pivots: Vec<Vec<super::pivotw::Rec>>,
 }
 
 /// 시트의 차트 도형마다 0x7EF0 레코드 (docs/format/cell-legacy-chart.md, `vtbuild`). `base` 는 차트 번호 바탕
@@ -1923,6 +1937,7 @@ pub(crate) fn chart_record(
             .unwrap_or_default(),
         has_names: c.series.iter().any(|s| s.name.is_some()),
         bubble,
+        marker_fill: wb.styles.from_legacy,
         names,
         values,
     };
@@ -2025,7 +2040,7 @@ pub fn write_with_report(wb: &Workbook) -> Result<(Vec<u8>, Report)> {
 /// 설정을 주어 쓴다 ([`WriteOptions`]), 경고 목록을 함께 돌려준다
 pub fn write_with_options(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)> {
     let mut report = Report::default();
-    let stream = workbook_stream_with(wb, opts, &mut report)?;
+    let (stream, caches) = workbook_stream_and_caches(wb, opts, &mut report)?;
     let summary = super::props::write_summary(&wb.properties, wb.total_time);
     let modified = wb
         .properties
@@ -2048,7 +2063,21 @@ pub fn write_with_options(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>
         name: "\u{5}SummaryInformation",
         data: &summary,
     });
-    let bytes = crate::cfb_write::write(&streams, modified);
+    // 피벗 캐시: 저장소 `_SX_DB_CUR` 아래 스트림 번호(16진수 네 자리)마다 (11절)
+    let names: Vec<String> = caches.iter().map(|(id, _)| format!("{id:04X}")).collect();
+    let storages: Vec<crate::cfb_write::Storage> = if caches.is_empty() {
+        Vec::new()
+    } else {
+        vec![crate::cfb_write::Storage {
+            name: "_SX_DB_CUR",
+            streams: caches
+                .iter()
+                .zip(&names)
+                .map(|((_, data), name)| crate::cfb_write::Stream { name, data })
+                .collect(),
+        }]
+    };
+    let bytes = crate::cfb_write::write_with_storages(&streams, &storages, modified);
     Ok((bytes, report))
 }
 
@@ -2093,14 +2122,52 @@ pub(crate) fn with_comment_cells(wb: &Workbook) -> Option<Workbook> {
 
 /// `/Workbook` 스트림
 pub fn workbook_stream(wb: &Workbook, report: &mut Report) -> Result<Vec<u8>> {
-    workbook_stream_with(wb, &WriteOptions::default(), report)
+    workbook_stream_and_caches(wb, &WriteOptions::default(), report).map(|(s, _)| s)
 }
 
-fn workbook_stream_with(
+/// 피벗 캐시 스트림 (스트림 번호, 내용)
+type CacheStreams = Vec<(u16, Vec<u8>)>;
+
+/// XTI 하나 (SUPBOOK 번호, 첫 시트, 끝 시트)
+type XtiKey = (u16, u16, u16);
+
+/// 한 번 쓴 결과의 XTI 표와 SUPBOOK 차례 (None 이 이 문서, Some(n) 외부 연결 n)
+type XtiTables = (Vec<XtiKey>, Vec<Option<usize>>);
+
+/// `/Workbook` 스트림과 피벗 캐시 스트림. 한셀이 먼저 두는 XTI ([`Workbook::preset_xti`]) 는 수식이 쓰는 것만 남으므로,
+/// 후보가 있으면 한 번 써서 쓰이는 XTI 와 SUPBOOK 차례를 본 뒤 그것만 앞에 두고 다시 쓴다
+fn workbook_stream_and_caches(
     wb: &Workbook,
     opts: &WriteOptions,
     report: &mut Report,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, CacheStreams)> {
+    let candidates = wb.preset_xti();
+    if candidates.is_empty() {
+        return workbook_stream_inner(wb, opts, report, &[]).map(|(s, c, _)| (s, c));
+    }
+    let (_, _, (used, books)) = workbook_stream_inner(wb, opts, &mut Report::default(), &[])?;
+    let preset: Vec<XtiKey> = candidates
+        .into_iter()
+        .filter_map(|(book, a, b)| {
+            let sb = books.iter().position(|x| *x == book)? as u16;
+            Some((sb, a, b))
+        })
+        .filter(|k| used.contains(k))
+        .fold(Vec::new(), |mut v, k| {
+            if !v.contains(&k) {
+                v.push(k);
+            }
+            v
+        });
+    workbook_stream_inner(wb, opts, report, &preset).map(|(s, c, _)| (s, c))
+}
+
+fn workbook_stream_inner(
+    wb: &Workbook,
+    opts: &WriteOptions,
+    report: &mut Report,
+    preset: &[XtiKey],
+) -> Result<(Vec<u8>, CacheStreams, XtiTables)> {
     if wb.sheets.is_empty() {
         return Err(Error::InvalidValue {
             context: "레거시 쓰기".into(),
@@ -2139,12 +2206,12 @@ fn workbook_stream_with(
     for n in 1..=wb.external_links.len() {
         tables.supbook(Some(n));
     }
+    // 한셀이 먼저 두는 XTI (레거시에서 읽은 XTI 차례, 아니면 값 캐시가 시트 하나인 외부 연결 — 쓰이는 것만)
+    tables.xti.extend_from_slice(preset);
 
-    // 이름 수식 (참조 클래스, 3차원). 통합 문서 범위 이름을 먼저 부호화한다 — XTI 가 그 차례로 생긴다 (관측:
-    // Trade_Show_Budget 의 전역 이름 [2]Intro 가 지역 이름 [1]… 보다 앞 XTI)
-    let mut name_order: Vec<usize> = (0..tables.names.len()).collect();
-    name_order.sort_by_key(|&i| tables.names[i].local.is_some());
-    for i in name_order {
+    // 이름 수식 (참조 클래스, 3차원). 모델 차례로 부호화한다 — XTI 가 그 차례로 생긴다 (이름 XTI 차례 실험: 이름의 따옴표·
+    // 수식·전역/지역, 경로 잃음, 외부 시트 이름과 번호를 바꿔도 차례는 위의 앞선 XTI 다음 이름 차례다)
+    for i in 0..tables.names.len() {
         let f = tables.names[i].formula.clone();
         if f.is_empty() {
             continue;
@@ -2174,6 +2241,17 @@ fn workbook_stream_with(
     }
     // 표 (0xB005…0xB00D) — 요약 행 수식이 XTI 를 만들 수 있어 SUPBOOK 앞에 부호화한다
     let list_records = table_records(wb, &mut tables, report);
+    // 피벗: 캐시의 원본 시트는 모든 수식 다음에 XTI 를 받는다 (XTI 실험 px1: [셋째, 넷째, 다섯째, 첫째], 이름이 먼저
+    // 쓰면 그 번호 — px2)
+    let pivots = super::pivotw::build(wb, &mut report.warnings);
+    for c in &pivots.caches {
+        if let Some(si) = c.source_sheet.as_deref().and_then(|n| tables.sheet(n)) {
+            tables.xti(None, si, si);
+        }
+    }
+    for (e, t) in encs.iter_mut().zip(&pivots.tables) {
+        e.pivots = t.clone();
+    }
 
     // 전역
     let mut out = Out { buf: Vec::new() };
@@ -2528,6 +2606,12 @@ fn workbook_stream_with(
     for (_, d) in rest {
         out.rec(0x0293, &d);
     }
+    // 피벗 캐시마다 SXSTREAMID·SXVS·DCONREF/DCONNAME — STYLE 뒤, 차등 서식 앞 (피벗 실험 v_fmt)
+    for c in &pivots.caches {
+        for (rt, d) in &c.globals {
+            out.rec(*rt, d);
+        }
+    }
     // 차등 서식 (0x088D)
     for d in &wb.styles.dxfs {
         let mut b = frt(0x088D);
@@ -2734,7 +2818,12 @@ fn workbook_stream_with(
         out.buf[bound_at[i]..bound_at[i] + 4].copy_from_slice(&at.to_le_bytes());
         out.buf.extend_from_slice(s);
     }
-    Ok(out.buf)
+    let caches = pivots
+        .caches
+        .into_iter()
+        .map(|c| (c.id, c.stream))
+        .collect();
+    Ok((out.buf, caches, (tables.xti, tables.supbooks)))
 }
 
 /// 조건부 서식 틀 규칙의 수식 — 한셀이 레거시 CF 에 쓰는 꼴 (관측: craft/cf_dv·cfdv_x, R = 첫 범위 절대 참조,
