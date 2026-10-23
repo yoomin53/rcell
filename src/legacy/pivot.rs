@@ -809,52 +809,19 @@ fn view_record(t: u16) -> bool {
 /// 레거시 문서의 피벗을 XML 원본 파트와 관계로 읽는다 (`bytes`: 복합 문서, `stream`: `/Workbook`)
 pub(crate) fn read(bytes: &[u8], stream: &[u8], wb: &mut Workbook) {
     let recs = super::reader::logical_records(stream);
-    let mut sources: Vec<Source> = Vec::new();
+    let mut globals: Vec<(u16, &[u8])> = Vec::new();
     for rec in recs.iter().skip(1) {
-        let mut r = Rd::new(&rec.data);
         match rec.rtype {
             0x000A => break,
-            0x00D5 => sources.push(Source {
-                stream: r.u16().unwrap_or(0),
-                ..Default::default()
-            }),
-            0x0051 => {
-                if let Some(s) = sources.last_mut() {
-                    s.range = dconref(&rec.data);
-                }
-            }
-            0x0052 => {
-                if let Some(s) = sources.last_mut() {
-                    s.name = r.xst();
-                }
-            }
+            0x00D5 | 0x0051 | 0x0052 => globals.push((rec.rtype, &rec.data)),
             _ => {}
         }
     }
-    if sources.is_empty() {
+    if globals.is_empty() {
         return;
     }
-    // 캐시: 스트림 `/_SX_DB_CUR/` + 번호 16진수 네 자리
-    let mut caches: Vec<Option<String>> = Vec::new();
-    for (k, s) in sources.iter().enumerate() {
-        let data = crate::container::read_entry(bytes, &format!("/_SX_DB_CUR/{:04X}", s.stream));
-        let xml = data
-            .ok()
-            .and_then(|d| cache_bin(&d, s))
-            .and_then(|(def, rec)| crate::binary::pivot::cache_to_xml(&def, Some(&rec)));
-        caches.push(xml.map(|(def, rec)| {
-            crate::binary::pivot::add_cache_parts(
-                &mut wb.raw_parts,
-                &mut wb.part_links,
-                k + 1,
-                def,
-                rec,
-                Some(k as u32 + 1),
-            )
-        }));
-    }
     // 시트마다 피벗 표: 시트 BOF 부터 짝이 맞는 EOF 까지 (차트 BOF…EOF 는 안쪽)
-    let mut n = 0;
+    let mut sheets: Vec<(usize, Vec<Vec<&super::reader::Logical>>)> = Vec::new();
     for si in 0..wb.sheets.len() {
         if wb.sheets[si].kind != SheetKind::Worksheet {
             continue;
@@ -889,8 +856,98 @@ pub(crate) fn read(bytes: &[u8], stream: &[u8], wb: &mut Workbook) {
                 _ => {}
             }
         }
+        sheets.push((si, views));
+    }
+    // 캐시: 스트림 `/_SX_DB_CUR/` + 번호 16진수 네 자리
+    let stream_of =
+        |id: u16| crate::container::read_entry(bytes, &format!("/_SX_DB_CUR/{id:04X}")).ok();
+    apply(&globals, &stream_of, &sheets, wb);
+}
+
+/// 레거시 보기: 쓰기가 지은 피벗 레코드(`super::pivotw`)를 읽기와 같이 XML 파트로 둔다 (모델에 피벗 파트가 없어야 한다)
+pub(crate) fn view(p: &super::pivotw::Pivots, wb: &mut Workbook) {
+    let globals: Vec<(u16, &[u8])> = p
+        .caches
+        .iter()
+        .flat_map(|c| c.globals.iter().map(|(t, d)| (*t, d.as_slice())))
+        .collect();
+    let logical = |t: &Vec<super::pivotw::Rec>| -> Vec<super::reader::Logical> {
+        t.iter()
+            .map(|(rtype, data)| super::reader::Logical {
+                rtype: *rtype,
+                offset: 0,
+                data: data.clone(),
+            })
+            .collect()
+    };
+    let owned: Vec<(usize, Vec<Vec<super::reader::Logical>>)> = p
+        .tables
+        .iter()
+        .enumerate()
+        .map(|(si, ts)| (si, ts.iter().map(logical).collect()))
+        .collect();
+    let sheets: Vec<(usize, Vec<Vec<&super::reader::Logical>>)> = owned
+        .iter()
+        .map(|(si, ts)| (*si, ts.iter().map(|v| v.iter().collect()).collect()))
+        .collect();
+    let stream_of = |id: u16| {
+        p.caches
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.stream.clone())
+    };
+    apply(&globals, &stream_of, &sheets, wb);
+}
+
+/// 전역의 캐시 원본 레코드 (SXSTREAMID 0x00D5, DCONREF 0x0051, DCONNAME 0x0052), 캐시 스트림 (스트림 번호 → 내용),
+/// 시트마다 피벗 표 레코드 묶음 (SXVIEW 부터) → XML 피벗 파트와 관계
+fn apply(
+    globals: &[(u16, &[u8])],
+    stream_of: &dyn Fn(u16) -> Option<Vec<u8>>,
+    sheets: &[(usize, Vec<Vec<&super::reader::Logical>>)],
+    wb: &mut Workbook,
+) {
+    let mut sources: Vec<Source> = Vec::new();
+    for &(rtype, data) in globals {
+        let mut r = Rd::new(data);
+        match rtype {
+            0x00D5 => sources.push(Source {
+                stream: r.u16().unwrap_or(0),
+                ..Default::default()
+            }),
+            0x0051 => {
+                if let Some(s) = sources.last_mut() {
+                    s.range = dconref(data);
+                }
+            }
+            0x0052 => {
+                if let Some(s) = sources.last_mut() {
+                    s.name = r.xst();
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut caches: Vec<Option<String>> = Vec::new();
+    for (k, s) in sources.iter().enumerate() {
+        let xml = stream_of(s.stream)
+            .and_then(|d| cache_bin(&d, s))
+            .and_then(|(def, rec)| crate::binary::pivot::cache_to_xml(&def, Some(&rec)));
+        caches.push(xml.map(|(def, rec)| {
+            crate::binary::pivot::add_cache_parts(
+                &mut wb.raw_parts,
+                &mut wb.part_links,
+                k + 1,
+                def,
+                rec,
+                Some(k as u32 + 1),
+            )
+        }));
+    }
+    let mut n = 0;
+    for (si, views) in sheets {
         for v in views {
-            let Some((bin, include, icache)) = view_bin(&v) else {
+            let Some((bin, include, icache)) = view_bin(v) else {
                 continue;
             };
             let (Some(Some(cache)), Some(xml)) = (
@@ -902,7 +959,7 @@ pub(crate) fn read(bytes: &[u8], stream: &[u8], wb: &mut Workbook) {
             n += 1;
             crate::binary::pivot::add_table_part(
                 &mut wb.raw_parts,
-                &mut wb.sheets[si].part_links,
+                &mut wb.sheets[*si].part_links,
                 n,
                 xml,
                 &cache.clone(),

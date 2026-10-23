@@ -1519,6 +1519,15 @@ pub fn read_workbook_stream(stream: &[u8]) -> Result<Workbook> {
             d.fill.get_or_insert_with(Default::default).gradient = x.gradient;
         }
     }
+    // XTI 차례: 한셀은 레거시에서 읽은 XTI 표를 그대로 들고 있다가 저장한다 — 쓰기가 쓰이는 XTI 를 이 차례로 먼저 둔다
+    wb.legacy_xti = xti
+        .iter()
+        .filter_map(|&(sb, a, b)| match supbooks.get(sb as usize)? {
+            Book::Internal => Some((None, a, b)),
+            &Book::External(n) => Some((Some(n), a, b)),
+            Book::AddIn => None,
+        })
+        .collect();
     prune_external_links(&mut wb);
     let mut used: Vec<String> = Vec::new();
     fn targets(shapes: &[Shape], used: &mut Vec<String>) {
@@ -1615,6 +1624,14 @@ pub(crate) fn prune_external_links(wb: &mut Workbook) {
             f.text = map_external_books(&f.text, map);
         }
     }
+    wb.legacy_xti = wb
+        .legacy_xti
+        .iter()
+        .filter_map(|&(b, x, y)| match b {
+            None => Some((None, x, y)),
+            Some(n) => map(n).map(|m| (Some(m), x, y)),
+        })
+        .collect();
     let mut n = 0;
     wb.external_links.retain(|_| {
         n += 1;

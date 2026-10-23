@@ -384,12 +384,19 @@ pub(crate) fn after_cells(
         out.rec(0x7EF8, &[0xFF; 4]);
     }
     ctx.art.sheet_drawing(out, ctx)?;
+    // 피벗 표, 유효성, 조건부 서식, 하이퍼링크, 메모 차례 (배치 실험 place1: 그리기 → SXVIEW… → DVAL → CONDFMT →
+    // HLINK → NOTE → WINDOW2)
+    for t in &ctx.enc.pivots {
+        for (rt, d) in t {
+            out.rec(*rt, d);
+        }
+    }
+    data_validations(out, ctx);
+    super::cf::conditional_formats(out, ctx);
     for h in &sheet.hyperlinks {
         hlink(out, h, ctx.sheet, ctx.wb.styles.from_legacy);
     }
     ctx.art.notes(out, ctx);
-    data_validations(out, ctx);
-    super::cf::conditional_formats(out, ctx);
     window(out, ctx);
     let code = sheet
         .code_name

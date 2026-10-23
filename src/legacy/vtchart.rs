@@ -1092,6 +1092,8 @@ impl Value {
 pub(crate) struct Field {
     pub name: &'static str,
     pub value: Value,
+    /// 레코드 안에서 필드가 시작하는 자리 (`rcell vtdump --offsets`)
+    pub at: usize,
 }
 
 /// 같은 목록에서 이름으로 (기반 부분은 찾지 않는다)
@@ -1653,6 +1655,7 @@ impl ArchiveReader<'_> {
     }
 
     fn read_spec(&mut self, s: &'static Spec, out: &mut Vec<Field>) -> Res<()> {
+        let at = self.r.pos;
         let (name, value) = match s {
             S::U8(n) => {
                 if *n == "pad" {
@@ -1695,7 +1698,7 @@ impl ArchiveReader<'_> {
                 (*n, Value::Bytes(self.r.take(len)?.to_vec()))
             }
         };
-        out.push(Field { name, value });
+        out.push(Field { name, value, at });
         Ok(())
     }
 
@@ -2171,6 +2174,11 @@ pub(crate) fn parse_with(payload: &[u8], sheets: Sheets<'_>) -> Result<VtRecord,
 /// 레코드를 `경로 = 값` 줄로 (리버스 엔지니어링·쓰기 대조용). 새 객체는 `#번호 클래스`, 앞 객체 참조는
 /// `@번호`, 기반 부분은 경로에 `:클래스` 를 붙인다
 pub(crate) fn dump(rec: &VtRecord) -> String {
+    dump_with(rec, false)
+}
+
+/// [`dump`] — `offsets` 면 값마다 레코드 안 자리(`@0x…`)를 붙인다 (값을 바꿔 보는 실험용)
+pub(crate) fn dump_with(rec: &VtRecord, offsets: bool) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let e = &rec.envelope;
@@ -2200,12 +2208,28 @@ pub(crate) fn dump(rec: &VtRecord) -> String {
     }
     let arch = &rec.archive;
     let _ = writeln!(out, "root = #0 VtChart");
-    dump_fields(arch, &arch.nodes[arch.root].fields, "", &mut out);
+    dump_fields(arch, &arch.nodes[arch.root].fields, "", offsets, &mut out);
     out
 }
 
-fn dump_value(arch: &Archive, path: &str, v: &Value, out: &mut String) {
+/// 고정 크기 값의 바이트 수 (배열 항목의 자리 셈)
+fn scalar_size(v: &Value) -> Option<usize> {
+    Some(match v {
+        Value::U8(_) => 1,
+        Value::U16(_) | Value::I16(_) => 2,
+        Value::U32(_) | Value::I32(_) | Value::F32(_) => 4,
+        Value::F64(_) => 8,
+        Value::Color(_) => 6,
+        _ => return None,
+    })
+}
+
+fn dump_value(arch: &Archive, path: &str, v: &Value, at: Option<usize>, out: &mut String) {
     use std::fmt::Write as _;
+    let path = &match (at, scalar_size(v)) {
+        (Some(a), Some(_)) => format!("{path} @0x{a:x}"),
+        _ => path.to_string(),
+    };
     match v {
         Value::U8(x) => {
             let _ = writeln!(out, "{path} = {x}");
@@ -2244,18 +2268,26 @@ fn dump_value(arch: &Archive, path: &str, v: &Value, out: &mut String) {
             let node = &arch.nodes[ni];
             let class = arch.classes.get(node.class).map_or("?", |c| c.def.name);
             let _ = writeln!(out, "{path} = #{} {class}", p.id);
-            dump_fields(arch, &node.fields, path, out);
+            dump_fields(arch, &node.fields, path, at.is_some(), out);
         }
         Value::Embedded(ni) => {
             let node = &arch.nodes[*ni];
             let class = arch.classes.get(node.class).map_or("?", |c| c.def.name);
-            dump_fields(arch, &node.fields, &format!("{path}:{class}"), out);
+            dump_fields(
+                arch,
+                &node.fields,
+                &format!("{path}:{class}"),
+                at.is_some(),
+                out,
+            );
         }
-        Value::Group(fields) => dump_fields(arch, fields, path, out),
+        Value::Group(fields) => dump_fields(arch, fields, path, at.is_some(), out),
         Value::Array(items) => {
             let _ = writeln!(out, "{path} = [{}]", items.len());
+            let mut pos = at;
             for (i, it) in items.iter().enumerate() {
-                dump_value(arch, &format!("{path}[{i}]"), it, out);
+                dump_value(arch, &format!("{path}[{i}]"), it, pos, out);
+                pos = pos.zip(scalar_size(it)).map(|(p, n)| p + n);
             }
         }
         Value::Str(s) => {
@@ -2267,7 +2299,7 @@ fn dump_value(arch: &Archive, path: &str, v: &Value, out: &mut String) {
     }
 }
 
-fn dump_fields(arch: &Archive, fields: &[Field], path: &str, out: &mut String) {
+fn dump_fields(arch: &Archive, fields: &[Field], path: &str, offsets: bool, out: &mut String) {
     for f in fields {
         let p = if f.name == BASE {
             path.to_string()
@@ -2276,7 +2308,7 @@ fn dump_fields(arch: &Archive, fields: &[Field], path: &str, out: &mut String) {
         } else {
             format!("{path}.{}", f.name)
         };
-        dump_value(arch, &p, &f.value, out);
+        dump_value(arch, &p, &f.value, offsets.then_some(f.at), out);
     }
 }
 

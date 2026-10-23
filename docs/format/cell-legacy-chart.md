@@ -115,7 +115,7 @@ CONTINUE 를 합친 논리 레코드 하나가 차트 하나다 (한셀은 긴 �
 
 | 이름 | 부호화 |
 |---|---|
-| VtColor (6) | `u16 종류` (늘 2), `u8 R, G, B`, `u8 플래그` — 플래그는 거의 0, 계열 색 사본(`VtSeries.markerPen/color2/color3`) 0x80, `VtSeries.pen5/markerColor` 0x20 (뜻은 모름) |
+| VtColor (6) | `u16 종류` (늘 2), `u8 R, G, B`, `u8 플래그` — 플래그는 거의 0, 계열 색 사본(`VtSeries.markerPen/color2/color3`) 0x80, `VtSeries.pen5/markerColor` 0x20 (뜻은 모름 — 한셀의 레거시 읽기는 보지 않는다, 9.5절) |
 | VtString 내용 | `u32 cb` + cb 바이트 = cp949 글자 + `00`, 바이트 `00` 하나, UTF-16LE 글자 + `0000`. 표본의 문자열 5,218개 모두 두 부호화가 같다 → rcell 은 UTF-16 부분을 읽고, 쓸 때는 둘 다 쓴다 (cp949 에 없는 글자는 `?`). 내용 뒤 VtString 본문에는 **초기화되지 않은 바이트** 하나(`pad`, 값은 아무것 — 같은 문서를 한셀이 두 번 저장해도 다르다)가 기반 부분 앞에 온다. rcell 은 0 을 쓰고, `rec-diff --ignore-volatile` 은 이 바이트를 보지 않는다 |
 | VtDouble | `f64 값, u16 플래그 (늘 0xFFFF)` + 기반 부분 |
 | VtBytes | `u32 길이` + 바이트 (늘 0) + 기반 부분 |
@@ -281,7 +281,7 @@ VtTextBlock{backdrop → VtBackdrop | 없음, font → VtFont{name → VtString}
   `VtBytes`, `VtValueBlock.ptr_a`, `VtDataSourceSsLink.ptr_a/ptr_b`, `VtCLineItem.ptr_a` 는 표본에서 늘 비었다. 이것들을
   채우는 파일은 표에 없는 클래스나 배치를 가질 수 있다 — 그때 rcell 은 추측하지 않고 "배치를 모르는 클래스" 나 클래스
   불일치 오류를 낸다.
-- **뜻을 모르는 것.** `u16_*`·`f32_*` 필드 대부분, Pen 의 `u16_a/u16_b/u16_c`, VtColor 플래그 (0x20 은 표식 색 자동으로
+- **뜻을 모르는 것.** `u16_*`·`f32_*` 필드 대부분, Pen 의 `u16_a/u16_b/u16_c`, VtColor 플래그 (0x20 은 한셀의 읽기가 보지 않는다 — 표식 채우기는 pen5 의 색, 9.5절
   읽힌다, 9.5절), `VtSeries.typeTable` (27개, 늘 같음: 차트 종류별 계열 종류로 보인다), `VtFormatter` 의 숫자 필드
   (서식 코드의 부호는 9.6절), 광원 벡터, `VtChartSection.u16_a/u16_b` (160/150).
 - **수식.** 상대 참조가 표본에 없어 상대 비트는 BIFF8 과 같다고 보았다. `ixti` 해석은 2절의 대조 실험이다.
@@ -349,7 +349,7 @@ VtTextBlock{backdrop → VtBackdrop | 없음, font → VtFont{name → VtString}
 | OOXML | 값 | 근거 |
 |---|---|---|
 | `c:invertIfNegative` | 막대 계열 0 | 관측 |
-| `c:marker` | 꺾은선·방사형: `VtSeries.u16_d` 1 (자동) → `none` 크기 7. 0 (지정) → 모양 `markerStyle` (5 square, 9 circle 관측; 나머지는 MSChart VtMarkerStyle 순서 0 dash, 1 plus, 2 x, 3 star, 4 circle, 6 diamond, 7·8 triangle, 10 square, 11 diamond, 12·13 triangle, 14 circle, 15 none — 추정), 크기 `round(markerSize / 20)` (180 → 9, 600 → 30), 표식 색 플래그에 0x20 이 없으면 `spPr` = 계열 채우기 (거품형 8c8c8c — 저장된 `markerColor` 9999ff 가 아니다) | 관측 (`c2_e5_line_marker`, `c2_e6_bubble`) |
+| `c:marker` | 꺾은선·방사형: `VtSeries.u16_d` 1 (자동) → `none` 크기 7. 0 (지정) → 모양 `markerStyle` (1 plus, 2 x, 3 star, 4·9 circle, 5 square, 6 diamond, 7 triangle 관측 — 표식 모양 실험의 한셀 읽기; 나머지는 MSChart VtMarkerStyle 순서 0 dash, 8 triangle, 10 square, 11 diamond, 12·13 triangle, 14 circle, 15 none — 추정), 크기 `round(markerSize / 20)` (180 → 9, 600 → 30), **`spPr` 채우기 = `pen5` 의 색, 검정(000000)이면 `spPr` 없음** — 색 플래그(0x20)·pen5 의 선 모양·계열 칠·`markerColor` 는 보지 않는다 | 관측: 거품형 표식 실험 (한셀의 `c2_e6_bubble` 레거시에서 필드 하나씩 바꾼 사본 18개를 한셀이 읽은 것: pen5 색 ff0000 → 표식 ff0000, 000000 → 채우기 없음, 010101·ffffff 는 그 색; 꺾은선 `c2_e5_line_marker` 의 pen5 를 123456 으로 → 123456, 플래그 0x20 이어도. pen5·markerColor 플래그, pen5 선 모양, 계열 칠, `u16s1[0]`, `typeTable`, 선 모양, 표식 선 색을 바꿔도 그대로) |
 | `c:dLbls` | 위치 `u16s3[8]` ≠ 0 이 켬. 막대는 켰을 때만, 꺾은선·영역·방사형은 늘 (끄면 표시 0). `labelComponents` 비트 1 값, 2 백분율, 8 항목 (4 계열 이름, 추정). `delete 0`, 범례 표지·거품 크기·지시선 0, `dLblPos` 없음. 원형은 **한셀이 읽지 않는다** (`c2_e8_dl_pie_pct`: 위치 2 = outEnd, 백분율이 저장되어 있다) | 관측 |
 | `c:explosion` | 원형·도넛 0 | 관측 |
 | `c:smooth` | 꺾은선 계열 0 — 부드러운 선(`u16s3[5]` = 2)은 **한셀이 읽지 않는다** (`c2_e6_scatter_smooth`) | 관측 |
@@ -476,7 +476,7 @@ Y(`axesY[0]`) → `valAx` 번호 1 (`l`, 교차 0), 3차원이면 Z(`axisZ`) →
 | 범례 | 보임 = 모델에 범례, 위치 t 1, l 3, b 6, 그 밖 4 | `c2_e1_*` |
 | 계열 색 | 칠 = 계열 단색 채우기 (없으면 팔레트), 선·표식 선·색 사본 = 팔레트 (`chart_color`: 채우기 FF0000 이어도 선 73B1D1). 꺾은선 갈래는 계열 선(색, 두께 EMU/635 twip)이 `linePen`, 막대·영역은 `edgePen` (실선 20 twip) | `chart_color`, `c2_e5_ser_pen` |
 | 누적 | 누적·100% 의 실제 계열: `u16s2[6]` 1, `u16s2[7]` = 계열 차례 (그 밖 `u16s2[4..6]` = 계열 차례) | `c2_e3_*`, 서식 파일 |
-| 표식 | 2차원 꺾은선: 모델의 표식이면 `u16_d` 0, 모양 (자동 4, square 5, circle·dot 9 …), 크기 pt × 20, 표식·pen5 색 플래그 0x20. 표식 채우기가 있으면 표식 색 = 그 색, 플래그 0 (추정: 읽기는 플래그 0 이면 계열 채우기로 읽는다). `none` 크기 7 은 자동 (`u16_d` 1, 추정: 읽기의 반대) | `chart_line`, `c2_e5_line_marker` |
+| 표식 | 2차원 꺾은선: 모델의 표식이면 `u16_d` 0, 모양 (plus 1, x 2, star 3, circle·auto 4, square 5, diamond 6, triangle 7; 담을 자리가 없는 dash·dot·picture 도 6 — 한셀은 다시 읽을 때 diamond), 크기 pt × 20, 표식·pen5 색 (000000, 플래그 0x20). 한셀의 XML→레거시 저장은 표식 채우기를 버린다 (pen5 는 늘 검정) — 레거시에서 읽은 문서만 표식의 단색 채우기를 pen5 색으로 쓴다 (플래그 0; 읽기가 그 색을 표식 채우기로 읽는다). `none` 은 크기와 상관없이 자동 (`u16_d` 1, 크기 200, 모양 2 — 표식 모양 실험의 `none` 크기 9; 다시 읽으면 `none` 크기 7) | 표식 모양 실험 (c2_e5_line_marker 의 모양 11가지), 표식 채우기 실험 (채우기·선·`noFill`·검정 m1–m6) |
 | `showLine` / 부드러운 선 | 2차원 꺾은선·분산형·방사형의 실제 계열 1 / 분산형 `u16s3[5]` 2 | 관측 |
 | 데이터 레이블 | 구성 비트 (값 1, 백분율 2, 계열 이름 4, 항목 8), `u16s3[8]` 위치 (outEnd 2, 그 밖 1), 레이블 글 상자 `u16_b` 1 + 배경, 새 글꼴 `돋움` 10pt. 원형은 첫 계열의 레이블이 항목마다 | `c2_e8_*` |
 | 거품형 | 값 계열: 선·칠·표식 선·색 사본 8C8C8C (선 style 0), `u16s1[0]` 0, `u16_d` 0, pen5 (0, 8C8C8C), 표식 크기 600, 표식 색 9999FF, 모양 9, `typeTable[7, 8, 19]` = 5, 6, 6. 거품 크기 계열: 같은 표식 값에 크기 0, `u16s2[3]` 1 | `c2_e6_bubble` |
@@ -496,4 +496,6 @@ Y(`axesY[0]`) → `valAx` 번호 1 (`l`, 교차 0), 3차원이면 Z(`axisZ`) →
 | 레코드 (`rec-diff --ignore-volatile`, hx 기준) | 차트 문서의 0x7EF0 이 모두 같다 |
 | 레거시 입력 → 레거시 (원본 레코드 기준) | 문서 70 개 중 51 개 같다. 나머지는 한셀의 레거시 읽기가 버리는 것 (9절: 3차원 회전, 눈금 모양, 3차원 누적, 분산형·거품형 → 꺾은선, 글자 이름, 원형 레이블, 선 두께의 기본 두께 맞춤 40 → 45 twip, 100% 값 축 형식) — 다시 읽으면 같은 차트다 |
 | 왕복 (`legacy_writer_round_trip`) | 레거시 보기는 같은 레코드를 지어 읽기로 다시 읽은 차트 — 234 / 234 |
+| 표식 실험 (표식 채우기 m1–m6, 모양 11가지 — c2_e5_line_marker 를 고친 XML) | 0x7EF0 이 한셀 레거시와 17 / 17 같고, 한셀이 rcell 레거시를 읽은 것이 한셀 레거시를 읽은 것과 17 / 17 차이 0 |
+| 한셀 판정, 레거시 입력 (`legacy_writer_output_is_read_identically_by_hancell`) | 말뭉치 117 / 117 차이 0 — 거품형 `c2_e6_bubble` 의 표식 채우기(pen5 색)도 |
 

@@ -348,6 +348,8 @@ fn dxf_view(d: &mut crate::model::Dxf, wb: &Workbook) {
 }
 
 pub fn legacy_view(wb: &Workbook) -> Workbook {
+    // 피벗: 쓰기와 같은 레코드를 지어 읽기와 같이 다시 읽는다 (아래에서 원본 파트 관계를 지운 뒤)
+    let pivots = super::pivotw::build(wb, &mut Vec::new());
     // 셀이 없는 메모 자리에는 빈 셀이 생긴다 (writer::with_comment_cells)
     let mut w = super::writer::with_comment_cells(wb).unwrap_or_else(|| wb.clone());
     // 창 잠금: 한셀은 WINDOWPROTECT 를 늘 0 으로 쓴다
@@ -362,12 +364,15 @@ pub fn legacy_view(wb: &Workbook) -> Workbook {
     // 하나뿐)
     w.properties.category = None;
     w.properties.content_status = None;
-    // 원본 그대로 옮기는 패키지 파트(피벗·연결·사용자 지정 XML·프린터 설정 …)는 레거시에 없다 — 매크로
-    // 프로젝트만 `_VBS_PROJECT_W` 스트림으로 남는다
+    // 원본 그대로 옮기는 패키지 파트(연결·사용자 지정 XML·프린터 설정 …)는 레거시에 없다 — 매크로 프로젝트만
+    // `_VBS_PROJECT_W` 스트림으로 남는다. 피벗은 레거시 레코드(SXVIEW…·캐시 스트림)로 남는다
     w.part_links
         .retain(|l| l.rel_type == crate::ns::REL_HANCOM_VBS_PROJECT);
     for s in &mut w.sheets {
         s.part_links.clear();
+    }
+    super::pivot::view(&pivots, &mut w);
+    for s in &mut w.sheets {
         // pageSetup 이 없으면 한셀의 기본 SETUP (writer: 맞춤 0·0, 세로)
         s.page.setup.get_or_insert(crate::model::PageSetup {
             paper_size: Some(9),

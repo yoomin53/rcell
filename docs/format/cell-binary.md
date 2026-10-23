@@ -202,6 +202,10 @@ rcell diff X.bin.cell X.cell --ignore-hancom
   **표가 있는 시트**는 쓰이지 않아도 그 시트의 수식보다 먼저 XTI 를 받는다 (XTI 순서 실험: 시트 셋에 수식·표·이름을
   나눠 넣은 COM 문서 셋 — `S1` 에 표와 `=S3!A1+1`, `S2` 에 표 → `[S1, S3, S2]`; 이름 `'S1'!$A$1` 이 있으면 이름이 먼저).
   구조적 참조(PtgList)의 `ixti` 가 이 XTI 다. **피벗 캐시의 원본 시트**는 모든 시트의 수식 다음에 XTI 를 받는다 (5.1절).
+  그보다 먼저 **한셀이 문서를 열 때 만드는 XTI** — 레거시에서 읽은 문서는 읽은 XTI 차례, 아니면 값 캐시(`sheetDataSet`)가
+  시트 하나만 담은 외부 연결의 그 시트 — 를 두고, 수식이 쓰지 않는 것은 뺀다 (`Workbook::preset_xti`; 레거시와 같은 규칙 —
+  [cell-legacy.md](cell-legacy.md) 10.5절의 이름 XTI 차례 실험 58개에서 `BrtExternSheet`·`BrtName` 이 한셀과 바이트까지 같다.
+  레거시 문서 시트 번호는 모든 시트 차례라 워크시트 차례로 옮긴다).
 - **이름**: 모델 순서 그대로, `_xlnm.` 은 떼고 `fBuiltin`(0x20). 수식에 쓰였지만 정의되지 않은 이름은 수식 없는
   이름(cce 0)으로 덧붙인다 (`=XYZ` → `BrtName XYZ`). 주석은 0xFFFFFFFF.
 - 구조 잠금이 걸린 통합 문서는 ECMA-376 표준 암호화로 감싼다 (4.10절).
@@ -217,7 +221,7 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 
 | 레코드 | 한셀 |
 |---|---|
-| `BrtWsProp` | 1바이트째 0x08 을 늘 켠다(+ 0x01 자동 나누기, 0x40 요약 행 아래, 0x80 요약 열 오른쪽). 2바이트째 0x04 늘(+ 0x01 페이지에 맞추기; 0x02 는 숨은 상태), 3바이트째 0x02 늘(+ 0x01 필터 적용 중). 탭 색이 없으면 `01 00 00 00 FF FF FF FF`, `rwSync`·`colSync` 0xFFFFFFFF, 코드 이름이 없으면 `SheetN` |
+| `BrtWsProp` | 1바이트째 0x08 을 늘 켠다(+ 0x01 자동 나누기, 0x40 요약 행 아래, 0x80 요약 열 오른쪽). 2바이트째 0x04 늘(+ 0x01 페이지에 맞추기; 0x02 는 숨은 상태 — 4.9절), 3바이트째 0x02 늘(+ 0x01 필터 적용 중). 탭 색이 없으면 `01 00 00 00 FF FF FF FF`, `rwSync`·`colSync` 0xFFFFFFFF, 코드 이름이 없으면 `SheetN` |
 | `BrtBeginWsView` | 플래그 0x0300 늘(+ 0x02 수식, 0x04 눈금선, 0x08 머리글, 0x10 0 값, 0x40 선택), `icvHdr` 0x40, (24) 100. 기본 보기는 (20) = 현재 확대율, (22) = `zoomScaleNormal`, 페이지 나누기 미리 보기는 (20) = `zoomScaleNormal`, (22) = 현재 |
 | `BrtSel` | 활성 창의 선택 **하나만** (XML 의 창마다 `selection` 중). `iRfxAct` = 활성 셀을 담은 범위의 번호 |
 | `BrtWsFmtInfo` | 기본 열 너비 ×256, 8, 기본 행 높이(twips), 0, 개요 수준 0·0 (XML 의 `outlineLevelRow` 를 쓰지 않는다) |
@@ -226,7 +230,7 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 | 셀 | 수는 부동소수 상위 30비트로 정확히 나타낼 수 있으면 `BrtCellRk`(부동소수 꼴만; 정수·×100 꼴은 쓰지 않는다 — RK 8218개 모두), 아니면 `BrtCellReal`. 글은 모두 공유 문자열(`BrtCellIsst`). 수식 셀은 값 종류대로 `BrtFmla*`, 휘발성 함수가 있으면 `grbitFlags` 0x02 |
 | 공유 수식 | 기준 셀과 종속 셀 모두 `PtgExp`(행) + `rgcb` 의 열, 기준 셀 바로 뒤에 `BrtShrFmla`(범위 + 기준 셀에 대한 상대 토큰) |
 | `BrtSheetProtection` | 잠기지 않은 셀 선택을 막으면 잠긴 셀 선택도 막는다 |
-| 병합 | `BrtBeginMergeCells`(개수) — 순서는 XML 과 다르다 (숨은 상태, 해시 순서로 보인다) |
+| 병합 | `BrtBeginMergeCells`(개수) — 순서는 한셀의 메모리 차례로 XML 과 다르다 (4.9절; 같은 문서의 레거시 MERGECELLS 와는 같다) |
 | 하이퍼링크 | RfX, 관계 ID(내부면 없음), 위치, 설명, 표시 글 |
 | `BrtPrintOptions` | 0x10 은 숨은 상태: `printOptions` 가 없는 시트 104/108 에 켜고, 있는 시트 2/51 에 켠다 |
 | `BrtPageSetup` | 해상도는 XML 의 dpi 그대로, 끝의 관계 ID 는 빈 문자열(cch 0) |
@@ -242,7 +246,7 @@ rcell diff X.bin.cell X.cell --ignore-hancom
 |---|---|
 | 글꼴 | 계열·문자 집합이 없으면 2·0x81, 색은 RGB `05 00 00 00 R G B FF` |
 | 채우기 | 무늬 색이 없으면 `05 40 00 00 00 00 00 FF`, 배경색이 없으면 `01 41 00 00 FF FF FF FF`, RGB 는 icv 칸에 0x40(무늬)·0x41(배경), 색인 64 는 `03 40 00 00 FF FF FF DF`. 그라데이션은 두 색 칸에 `01 40 … DF`·`01 41 … FF` |
-| 테두리 | 선 종류가 없는 선(dg 0)에도 색이 있다 (한셀은 검정 RGB) — rcell 은 남겨 XML 에 쓴다 ([cell-2024.md](cell-2024.md) 7.10절의 `dataDxfId`). 선의 자동 색은 `01 00 00 00 FF FF FF DF` (서식 파일 683·조작 문서 33 선; 새 문서 15 선은 `FF` — 숨은 상태), 선 없음은 RGB 색 그대로, 자동·없음이면 검정 RGB |
+| 테두리 | 선 종류가 없는 선(dg 0)에도 색이 있다 (한셀은 검정 RGB) — rcell 은 남겨 XML 에 쓴다 ([cell-2024.md](cell-2024.md) 7.10절의 `dataDxfId`). 선의 자동 색은 `01 00 00 00 FF FF FF DF` (서식 파일 683·조작 문서 33 선; 새 문서 15 선은 `FF` — 숨은 상태), 선 없음은 RGB 색 그대로, 자동·없음이면 검정 RGB (문서에 따라 자동 표지 — 4.9절). 색인 65(피벗 서식의 테두리)는 `exact` 면 한셀처럼 RGB `05 00 00 00 02 00 80 FF` (레거시 COLORREF 0x80800002 의 아래 세 바이트 — 피벗 실험 pa 의 테두리 6개), 기본은 색인 그대로 `03 41 …` |
 | XF | 맞춤이 없으면 세로 아래(2), 보호가 없으면 잠금. 적용 비트는 XML 의 `apply*` 그대로 |
 | 스타일 | 모두 `fBuiltIn`, 사용자 정의 스타일은 앞 스타일의 내장 번호, 수준 없음 0xFF |
 | 차등 서식 | XFProp 은 채우기 → 글꼴 → 테두리 순, 묶음 안은 번호 순. `fNewBorder`(0x8000)는 위·아래·왼쪽·오른쪽을 모두 지정한 테두리. 속성 없는 글꼴은 0x18(이름)으로 자리를 남긴다 |
@@ -315,9 +319,28 @@ rcell 은 `BrtFmt` 에서 형식을 찾아 다시 읽는다.
 
 ### 4.9 숨은 상태 (레코드 대조에 남는 차이)
 
-XML 이 같은데 바이너리가 다른 칸 — rcell 은 가장 흔한 값을 쓴다: `BrtWsProp` 2바이트째 0x02, `BrtBeginWsView` 의
+XML 이 같은데 바이너리가 다른 칸 — rcell 은 가장 흔한 값을 쓴다. 아래 셋은 다시 조사했다 (말뭉치 114쌍과 피벗 실험 56개):
+
+- **병합 차례**: 한셀의 바이너리 저장과 레거시 저장은 같은 메모리 차례를 쓴다 (병합 둘 이상인 말뭉치 시트 12개 모두 `BrtMergeCell` 차례 =
+  레거시 MERGECELLS 차례), XML 은 행 차례로 정렬해 쓴다. 해시 표 순회로 설명되지 않는다 (열쇠 8가지 × 표 크기 44가지 × 차례 넷 —
+  12개 중 4개를 넘지 못한다). XML 입력에서는 정할 수 없고, 레거시 입력이면 모델 차례가 그 차례다 (Basic_Invoice 레거시 → rcell
+  바이너리의 병합 레코드가 한셀 바이너리와 같다).
+- **`BrtWsProp` 2바이트째 0x02**: 시트 160개 중 73개. 말뭉치 뿌리 문서·craft-charts2·craft 일부에는 켜지고 서식 파일·craft-charts 에는
+  꺼진다 — 같은 꼴의 시트 XML(차트 하나짜리 chart_area 대 c2_e1_leg_l, 셀 자료 말고 바이트까지 같다)에서도 갈리므로 문서를 만든
+  세션의 상태다.
+- **선 없는 가장자리의 자동 색** (`<x:left><x:color auto="1"/></x:left>`): 검정 RGB 881, 자동 표지 `…FF DF` 138 — 자동 표지는 서식
+  파일 넷(Cash_Flow_Sensitivity·College_Monthly_Budget·Portfolio_Allocation·Statement_of_Net_Worth)과 craft/odd_anchor, 피벗 실험
+  문서(피벗 서식의 테두리)의 0번이 아닌 테두리 전부다. 테두리의 꼴(선 있는 가장자리 수·색 종류)·쓰임과 상관없이 문서 단위로
+  갈리고 XML 은 같다 — 한셀 메모리의 '색 없음'과 '자동'이 XML 에서는 같은 `auto="1"` 로 나오는 것으로 보인다.
+
+세션 상태라는 증거 하나 더 (XTI 실험 xti12): 지금 한셀이 서식 파일 Marketing_Budget.cell 의 그대로 사본을 바이너리로 저장하면
+말뭉치의 Marketing_Budget.bin.cell 과 XML 이 같은데도 두 시트의 `BrtWsProp` 2바이트째 0x02 가 켜지고(말뭉치 파일은 꺼짐),
+테두리 10개의 선 없는 가장자리가 자동 표지 `…FF DF` 가 되고(말뭉치 파일은 검정 RGB), `BrtBeginWsView` (22) 가 0x64 (말뭉치 0x4B),
+공유 문자열 차례가 다르고, 쓰이지 않는 externalLink2 `Template` 과 그 XTI 가 빠진다 (말뭉치 파일은 담는다).
+
+그 밖에: `BrtWsProp` 2바이트째 0x02, `BrtBeginWsView` 의
 (22)·(24), `BrtPrintOptions` 0x10, 테두리 자동 색의 `DF`/`FF`, 머리글·바닥글 여백의 HWPUNIT 하나, 병합과 공유 문자열의
-순서, 몇몇 서식 파일의 XTI 순서와 쓰이지 않는 XTI, XF 의 순서가 바뀐 문서 하나, 쓰이지 않는 글꼴 하나, 차등 서식의
+순서, 서식 파일 Marketing_Budget 의 쓰이지 않는 외부 연결과 XTI (위), XF 의 순서가 바뀐 문서 하나, 쓰이지 않는 글꼴 하나, 차등 서식의
 이중 회계 밑줄(XML 은 단일 회계로 쓴다), 데이터 막대의 GUID, 동적 필터가 데이터로 계산한 값(원본에 없을 때),
 `BrtAbsPath15` 의 폴더, 메모 VML 의 `x:ShapeUri` (세션 GUID — 레코드 대조는 뺀다). rcell 모델에 없어 다른 것: 다시
 부호화한 그림과 조작한 XML 의 그림 앵커 정규화 (2.1절). 데이터 막대의 x14 확장(방향·축·플래그·x14 기준 값·색)은 모델(`DataBar::ext`)에서 쓰고 `rcell diff` 가
@@ -463,5 +486,6 @@ XML 에서만 어긋난다 — v_blank·v_dor). 한셀은 항목이 없는 피�
 - 한셀 대조 (`rcell diff`, 피벗 문서 56개 — pa–pi, v_*, XTI 실험 px1·px2, 하나만 바꾼 w_* 와 항목 300개 필드의 w_big):
   rcell 바이너리를 한셀이 읽은 것 대 한셀 자기 바이너리를 읽은 것, 바이너리 원본 → rcell 바이너리, 바이너리 원본 → rcell XML 대
   같은 문서의 XML 저장본 — 피벗 표 차이는 모두 0 (비교: 위치·캐시 원본과 필드·공유 항목 수·계산 필드 수식·필드 축·숨긴 항목·
-  부분합·행/열/페이지/데이터 필드·스타일·총합계). 남은 차이는 한셀이 바이너리 저장에서 테두리의 색인 65 를 RGB `020080` 으로
-  바꾸는 것뿐이다 (피벗 서식의 테두리; rcell 은 색인 65 를 쓴다). 바이너리 원본 → rcell 바이너리와 XML → rcell XML 은 차이 0.
+  부분합·행/열/페이지/데이터 필드·스타일·총합계). 한셀은 바이너리 저장에서 테두리의 색인 65 를 RGB `020080` 으로
+  바꾼다 (피벗 서식의 테두리) — rcell 은 기본으로 색인 65 를 쓰고, `exact` 는 한셀처럼 쓴다: 한셀이 rcell 의 `exact` 바이너리를 읽은 것이
+  한셀이 자기 바이너리를 읽은 것과 56개 모두 문서 전체 차이 0 (`rcell diff --ignore-hancom`). 바이너리 원본 → rcell 바이너리와 XML → rcell XML 은 차이 0.
