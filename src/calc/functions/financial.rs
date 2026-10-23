@@ -952,6 +952,15 @@ fn bond_period_days(pcd: f64, ncd: f64, fr: f64, b: u8) -> f64 {
     }
 }
 
+/// ODDF*·ODDL* 의 준이표 기간 정상 일수: 기준 1 은 그 기간의 실제 일수, 3 은 365/fr, 나머지는 360/fr
+fn odd_period_days(p: f64, q: f64, fr: f64, b: u8) -> f64 {
+    match b {
+        1 => q - p,
+        3 => 365.0 / fr,
+        _ => 360.0 / fr,
+    }
+}
+
 fn coup_days(pcd: f64, ncd: f64, fr: f64, b: u8, _d1904: bool) -> f64 {
     match b {
         1 => ncd - pcd,
@@ -1264,24 +1273,46 @@ fn odd_first(ctx: &mut Ctx, a: &[Value], yield_: bool) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let d1904 = ctx.date1904();
+    // 첫 기간을 첫 이자일에서 거꾸로 센 준이표 기간으로 나눠 기간마다 일수/정상 일수를 더한다
+    // (기간을 다 채우면 1 — 기준 3 의 분기 이자에서 드러난다). 발행→첫 이자일 dfc, 발행→결제 a,
+    // 결제→첫 이자일 dsc (대조 실험 x11)
+    let step = (12.0 / fr) as i64;
+    let (mut dfc, mut a_, mut dsc) = (0.0, 0.0, 0.0);
+    let mut q = fc;
+    let mut j = 1;
+    while q > iss && j < 100_000 {
+        let p = coupon_date(fc, j * step, d1904);
+        let nl = odd_period_days(p, q, fr, b);
+        let frac = |lo: f64, hi: f64| {
+            let (x, y) = (lo.max(p), hi.min(q));
+            if x == p && y == q {
+                1.0
+            } else if x < y {
+                day_count(x, y, b, d1904) / nl
+            } else {
+                0.0
+            }
+        };
+        dfc += frac(iss, fc);
+        a_ += frac(iss, s);
+        dsc += frac(s, fc);
+        q = p;
+        j += 1;
+    }
+    let (_, _, n) = coupon_dates(fc, m, fr, d1904);
+    // 경과 이자도 첫 이자일까지 할인한다 (Excel 과 다른 한셀 식: ODDFPRICE(39763,44256,39736,39873,
+    // 0.0785,0.0625,100,2,1) = 113.60856511556307, Excel 은 113.597717474079)
     let price = |yld: f64| -> f64 {
-        // 첫 이자일부터 만기까지의 정상 이자 + 첫 기간의 홀수 이자
-        let (_, _, n) = coupon_dates(fc, m, fr, d1904);
-        let pcd0 = coupon_date(fc, (12.0 / fr) as i64, d1904);
-        let e = coup_days(pcd0, fc, fr, b, d1904);
-        let dfc = day_count(iss, fc, b, d1904);
-        let dsc = day_count(s, fc, b, d1904);
-        let a_ = day_count(iss, s, b, d1904);
         let v = 1.0 + yld / fr;
         let c = 100.0 * rate / fr;
-        let mut p = red / v.mpow(n + dsc / e);
-        p += c * dfc / e / v.mpow(dsc / e);
+        let mut p = red / v.mpow(n + dsc);
+        p += c * dfc / v.mpow(dsc);
         let mut k = 1.0;
         while k <= n {
-            p += c / v.mpow(k + dsc / e);
+            p += c / v.mpow(k + dsc);
             k += 1.0;
         }
-        p - c * a_ / e
+        p - c * a_ / v.mpow(dsc)
     };
     if !yield_ {
         if x < 0.0 {
@@ -1306,11 +1337,30 @@ fn odd_last(ctx: &mut Ctx, a: &[Value], yield_: bool) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let d1904 = ctx.date1904();
-    let ncd = coupon_date(lc, -((12.0 / fr) as i64), d1904);
-    let nl = coup_days(lc, ncd, fr, b, d1904);
-    let dci = day_count(lc, m, b, d1904) / nl;
-    let a_ = day_count(lc, s, b, d1904) / nl;
-    let dsc = day_count(s, m, b, d1904) / nl;
+    // 마지막 기간을 만기에서 거꾸로 센 준이표 기간으로 나눠 기간마다 일수/정상 일수를 더한다
+    // (기준 1 은 기간마다 실제 일수, ODDLPRICE(39494,39762,39345,0,0.0405,100,2,1) = 97.12545994508676,
+    // 대조 실험 x11). 첫 기간과 달리 다 채운 기간도 일수/정상 일수 그대로
+    let step = (12.0 / fr) as i64;
+    let (mut dci, mut a_, mut dsc) = (0.0, 0.0, 0.0);
+    let mut q = m;
+    let mut k = 1;
+    while q > lc && k < 100_000 {
+        let p = coupon_date(m, k * step, d1904);
+        let nl = odd_period_days(p, q, fr, b);
+        let part = |lo: f64, hi: f64| {
+            let (x, y) = (lo.max(p), hi.min(q));
+            if x < y {
+                day_count(x, y, b, d1904) / nl
+            } else {
+                0.0
+            }
+        };
+        dci += part(lc, m);
+        a_ += part(lc, s);
+        dsc += part(s, m);
+        q = p;
+        k += 1;
+    }
     let c = 100.0 * rate / fr;
     if !yield_ {
         if x < 0.0 {
