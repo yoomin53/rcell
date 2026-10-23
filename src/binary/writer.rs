@@ -479,8 +479,10 @@ fn fill_record(f: &Fill) -> P {
 
 /// BrtBorder: 플래그 u8 (0x01 대각선 아래, 0x02 대각선 위), 위·아래·왼쪽·오른쪽·대각선 (dg u8, 예약 u8, BrtColor).
 /// 선의 자동 색은 한셀의 자동 색 표지 `01 00 00 00 FF FF FF DF` (관측: 서식 파일 683개·조작 문서 33개 선,
-/// 새 문서 15개 선만 `FF`), 선 없음은 RGB 색 그대로이고 자동·없음이면 검정 RGB (관측: 1101/1239)
-fn border_record(b: &Border) -> P {
+/// 새 문서 15개 선만 `FF`), 선 없음은 RGB 색 그대로이고 자동·없음이면 검정 RGB (관측: 1101/1239).
+/// `exact` 면 색인 65(시스템 전경 — 피벗 서식의 테두리)를 한셀처럼 RGB `02 00 80` 으로 쓴다 (한셀은 레거시 COLORREF
+/// 0x80800002 의 아래 세 바이트를 RGB 로 옮긴다 — 피벗 실험 pa 의 테두리 6개)
+fn border_record(b: &Border, exact: bool) -> P {
     const AUTO: [u8; 8] = [0x01, 0x00, 0, 0, 0xFF, 0xFF, 0xFF, 0xDF];
     let mut p = P::new();
     p.u8(u8::from(b.diagonal_down) | (u8::from(b.diagonal_up) << 1));
@@ -494,6 +496,9 @@ fn border_record(b: &Border) -> P {
             Some((i, e)) => {
                 let c = match &e.color {
                     Some(c) if c.auto => AUTO,
+                    Some(c) if exact && c.indexed == Some(65) && c.rgb.is_none() => {
+                        [0x05, 0x00, 0, 0, 0x02, 0x00, 0x80, 0xFF]
+                    }
                     Some(c) => brt_color(c, 0x00),
                     None => AUTO,
                 };
@@ -831,7 +836,7 @@ fn styles_bin(st: &Styles, fonts: &FontTable, exact: bool) -> Vec<u8> {
     };
     o.p(613, P::new().u32(borders.len() as u32));
     for b in &borders {
-        o.p(46, &border_record(b));
+        o.p(46, &border_record(b, exact));
     }
     o.e(614);
     let style_xfs: Vec<Xf> = if st.cell_style_xfs.is_empty() {
