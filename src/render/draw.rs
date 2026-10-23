@@ -1062,7 +1062,7 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
             .and_then(|x| x.attr_f64("indent"))
             .map_or(0.0, |v| v / EMU);
         // 문단의 글꼴은 첫 조각의 글꼴 (줄 상자의 기준이 조각과 같은 글꼴이어야 줄 높이가 늘지 않는다)
-        let face = p
+        let face_name = p
             .elements()
             .find(|e| e.is(shape::A, "r"))
             .and_then(|r| r.child_ns(shape::A, "rPr"))
@@ -1072,19 +1072,21 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
                     .or_else(|| r.child_ns(shape::A, "latin"))
             })
             .and_then(|f| f.attr("typeface"))
-            .and_then(|f| theme_font(f, theme))
+            .and_then(|f| theme_font(f, theme));
+        let face = face_name
             .map(|f| format!("font-family:{};", font_family(f)))
             .unwrap_or_default();
+        // 함초롬 글꼴의 첫 줄은 한셀이 브라우저보다 0.12 em 위에 그린다 (서식 파일 소개 글상자 24개, 글꼴 폭 실험의
+        // 함초롬돋움·바탕 9~16pt 는 0.06 em 쪽 — 사이 값). 맑은 고딕·돋움·Arial 은 같은 자리 (보정 문서 9·11·16pt)
+        let lift = if first_para && face_name.is_some_and(|f| f.starts_with("함초롬")) {
+            0.12 * size * 4.0 / 3.0
+        } else {
+            0.0
+        };
         let _ = write!(
             s,
             "<p style=\"text-align:{align};font-size:{size:.2}pt;{face}line-height:{line};margin:{:.1}px 0 {:.1}px {indent:.1}px;text-indent:{first:.1}px\">",
-            // 첫 줄의 글자는 한셀이 0.12 em 위에 그린다 (글꼴 폭 실험의 5 글꼴 × 5 크기, 서식 파일 소개 글상자)
-            space("spcBef")
-                - if first_para {
-                    0.12 * size * 4.0 / 3.0
-                } else {
-                    0.0
-                },
+            space("spcBef") - lift,
             space("spcAft")
         );
         first_para = false;
