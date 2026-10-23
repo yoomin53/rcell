@@ -21,6 +21,7 @@
 //! # Ok::<(), rcell::Error>(())
 //! ```
 
+mod cfpaste;
 pub mod clip;
 mod filter;
 pub mod input;
@@ -2269,10 +2270,7 @@ pub fn add_sheet(wb: &mut Workbook, name: Option<&str>, at: usize) -> crate::Res
     };
     wb.sheets.insert(at, sheet);
     remap_sheet_indexes(wb, &|i| Some(if i >= at { i + 1 } else { i }));
-    // 한셀은 새 시트를 선택한다 — 구조가 보호된 통합 문서에서는 (자동화로 더해도) 선택을 그대로 둔다
-    if !wb.protection.as_ref().is_some_and(|p| p.lock_structure) {
-        select_sheet(wb, at);
-    }
+    // 한셀 자동화는 새 시트를 선택하지 않는다 (시트 대조 실험 — 화면에서 더하면 웹 편집기가 새 시트로 간다)
     Ok(at)
 }
 
@@ -2344,7 +2342,7 @@ pub fn delete_sheet(wb: &mut Workbook, si: usize) -> crate::Result<()> {
     Ok(())
 }
 
-/// 시트를 옮긴다 (`to` = 옮긴 뒤의 자리)
+/// 시트를 옮긴다 (`to` = 옮긴 뒤의 자리). 옮긴 시트를 선택한다
 pub fn move_sheet(wb: &mut Workbook, from: usize, to: usize) -> crate::Result<()> {
     guard_structure(wb)?;
     if from >= wb.sheets.len() {
@@ -2368,6 +2366,8 @@ pub fn move_sheet(wb: &mut Workbook, from: usize, to: usize) -> crate::Result<()
             i
         })
     });
+    // 한셀 자동화는 옮긴 시트를 선택한다 (시트 대조 실험 — 시트를 더한 뒤 앞으로 옮기면 그 시트가 선택된다)
+    select_sheet(wb, to);
     Ok(())
 }
 

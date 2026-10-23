@@ -1343,6 +1343,80 @@ fn protection_like_hcell_automation_and_screen() {
     delete_rows(&mut wb, 0, 7, 1).unwrap();
 }
 
+// 조건부 서식 대조 실험: 붙인 규칙은 맨 위 우선순위, 데이터 막대 묶음은 두 번, 채우기·옮기기는 원래 규칙에 합친다
+#[test]
+fn pasted_conditional_formats_like_hcell() {
+    let book = || {
+        let mut wb = hcell_book();
+        let s = &mut wb.sheets[0];
+        for r in 1..=5 {
+            put(s, &format!("A{r}"), CellValue::Number(r as f64), None);
+            put(s, &format!("B{r}"), CellValue::Number(r as f64), None);
+        }
+        s.conditional_formats = vec![
+            ConditionalFormat {
+                sqref: "A1:A5".into(),
+                rules: vec![CfRule {
+                    kind: "cellIs".into(),
+                    priority: 1,
+                    dxf_id: Some(0),
+                    operator: Some("greaterThan".into()),
+                    formulas: vec!["3".into()],
+                    ..Default::default()
+                }],
+            },
+            ConditionalFormat {
+                sqref: "B1:B5".into(),
+                rules: vec![CfRule {
+                    kind: "dataBar".into(),
+                    priority: 2,
+                    ..Default::default()
+                }],
+            },
+        ];
+        wb
+    };
+    let list = |wb: &Workbook| {
+        let mut v: Vec<(String, u32)> = wb.sheets[0]
+            .conditional_formats
+            .iter()
+            .flat_map(|c| c.rules.iter().map(|r| (c.sqref.clone(), r.priority)))
+            .collect();
+        v.sort_by_key(|x| x.1);
+        v
+    };
+    let s = |a: &str, p: u32| (a.to_string(), p);
+    let mut wb = book();
+    let c = clip::copy(&wb, 0, parse_range("A1:A2").unwrap()).unwrap();
+    clip::paste(&mut wb, 0, CellRef::parse("A20").unwrap(), &c, None).unwrap();
+    assert_eq!(list(&wb), [s("A20:A21", 1), s("A1:A5", 2), s("B1:B5", 3)]);
+    let mut wb = book();
+    let c = clip::copy(&wb, 0, parse_range("B1:B2").unwrap()).unwrap();
+    clip::paste(&mut wb, 0, CellRef::parse("B20").unwrap(), &c, None).unwrap();
+    assert_eq!(
+        list(&wb),
+        [
+            s("B20:B21", 1),
+            s("B20:B21", 2),
+            s("A1:A5", 3),
+            s("B1:B5", 4)
+        ]
+    );
+    let mut wb = book();
+    clip::fill(&mut wb, 0, parse_range("A5:A7").unwrap(), true).unwrap();
+    assert_eq!(list(&wb), [s("A1:A7", 1), s("B1:B5", 4)]);
+    let mut wb = book();
+    clip::move_cells(
+        &mut wb,
+        0,
+        parse_range("A1").unwrap(),
+        0,
+        CellRef::parse("A30").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(list(&wb), [s("A2:A5 A30", 1), s("B1:B5", 3)]);
+}
+
 // 메모 상자 대조 실험: 칸이 옮겨진 메모의 상자는 메모 칸의 열 + 14px, 두 행 위 + 10px 로 가고 크기는 그대로
 // (A 열 메모는 옮길 때마다 상자가 A 열 너비 − 1px 만큼 좁아진다)
 #[test]

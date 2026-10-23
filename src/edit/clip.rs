@@ -244,7 +244,7 @@ pub fn paste(
     clip: &Clip,
     fill: Option<CellRange>,
 ) -> crate::Result<CellRange> {
-    paste_with(wb, si, at, clip, fill, true)
+    paste_with(wb, si, at, clip, fill, false)
 }
 
 /// 수식이 쓰는 통합 문서 이름을 붙인 시트의 시트 범위 이름으로 복사한다 — 한셀은 이름을 쓰는 수식을 복사해
@@ -290,26 +290,36 @@ fn localize_names(wb: &mut Workbook, si: usize, formulas: &[String]) {
 
 /// 조건부 서식·유효성 범위에서 덮어쓰는 자리를 뺀다 (모두 빠지면 없앤다)
 fn cut_out(sheet: &mut Sheet, area: (u32, u32, u32, u32)) {
-    let rest = |sqref: &str| -> Option<String> {
-        let areas = refs::parse_sqref(sqref);
-        if !areas.iter().any(|a| overlaps(a.bounds(), area)) {
-            return None;
-        }
-        let rest: Vec<Area> = areas
-            .iter()
-            .flat_map(|a| subtract(a.bounds(), area))
-            .map(rect_area)
-            .collect();
-        Some(refs::sqref_text(&rest))
-    };
+    cut_out_cf(sheet, area);
+    cut_out_dv(sheet, area);
+}
+
+/// 범위가 덮는 몫을 뺀 sqref (겹치지 않으면 None)
+fn sqref_without(sqref: &str, area: (u32, u32, u32, u32)) -> Option<String> {
+    let areas = refs::parse_sqref(sqref);
+    if !areas.iter().any(|a| overlaps(a.bounds(), area)) {
+        return None;
+    }
+    let rest: Vec<Area> = areas
+        .iter()
+        .flat_map(|a| subtract(a.bounds(), area))
+        .map(rect_area)
+        .collect();
+    Some(refs::sqref_text(&rest))
+}
+
+fn cut_out_cf(sheet: &mut Sheet, area: (u32, u32, u32, u32)) {
     for cf in &mut sheet.conditional_formats {
-        if let Some(r) = rest(&cf.sqref) {
+        if let Some(r) = sqref_without(&cf.sqref, area) {
             cf.sqref = r;
         }
     }
     sheet.conditional_formats.retain(|cf| !cf.sqref.is_empty());
+}
+
+fn cut_out_dv(sheet: &mut Sheet, area: (u32, u32, u32, u32)) {
     for dv in &mut sheet.data_validations {
-        if let Some(r) = rest(&dv.sqref) {
+        if let Some(r) = sqref_without(&dv.sqref, area) {
             dv.sqref = r;
         }
     }
@@ -323,8 +333,10 @@ pub fn paste_with(
     at: CellRef,
     clip: &Clip,
     fill: Option<CellRange>,
-    localize: bool,
+    filling: bool,
 ) -> crate::Result<CellRange> {
+    // 채우기는 이름을 시트 범위로 복사하지 않고, 조건부 서식을 채우기 규칙으로 놓는다 (cfpaste)
+    let localize = !filling;
     let (mut reps_r, mut reps_c) = (1, 1);
     if let Some(f) = fill {
         let (h, w) = (f.end.row - f.start.row + 1, f.end.col - f.start.col + 1);
@@ -404,10 +416,11 @@ pub fn paste_with(
         }
     }
     // 조건부 서식·유효성: 덮어쓴 자리의 것은 떼고, 복사한 조각을 옮겨 붙인다
-    let mut cfs = Vec::new();
+    let mut cf_lines: Vec<Vec<ConditionalFormat>> = Vec::new();
     let mut dvs = Vec::new();
     for i in 0..reps_r {
         for j in 0..reps_c {
+            let mut cfs = Vec::new();
             let drow = (at.row + i * clip.rows) as i64 - clip.origin.row as i64;
             let dcol = (at.col + j * clip.cols) as i64 - clip.origin.col as i64;
             let place = |cut: &[(u32, u32, u32, u32)]| -> String {
@@ -435,6 +448,7 @@ pub fn paste_with(
                 m.sqref = place(cut);
                 cfs.push(m);
             }
+            cf_lines.push(cfs);
             for (k, (cut, dv)) in clip.dvs.iter().enumerate() {
                 let mut m = dv.clone();
                 for f in [&mut m.formula1, &mut m.formula2].into_iter().flatten() {
@@ -456,7 +470,11 @@ pub fn paste_with(
     sheet.merges.retain(|m| !overlaps(rect(m), area));
     sheet.merges.extend(merges);
     cut_out(sheet, area);
-    sheet.conditional_formats.extend(cfs);
+    if filling {
+        super::cfpaste::place_filled(sheet, cf_lines);
+    } else {
+        super::cfpaste::place_pasted(sheet, cf_lines.concat());
+    }
     // 같은 시트에 붙인 유효성은 원본 개체에 범위를 더한다 (원본이 그대로 있으면)
     for (k, m) in dvs {
         let target = clip.dv_src.get(k).and_then(|(i, orig)| {
@@ -470,6 +488,7 @@ pub fn paste_with(
             None => sheet.data_validations.push(m),
         }
     }
+    reverse_dv_areas(sheet);
     replace_cells(sheet, area, new);
     unshare(sheet);
     update_dimension(sheet);
@@ -518,7 +537,19 @@ pub fn fill(wb: &mut Workbook, si: usize, range: CellRange, down: bool) -> crate
             end: range.end,
         }
     };
-    paste_with(wb, si, target.start, &clip, Some(target), false).map(|_| ())
+    paste_with(wb, si, target.start, &clip, Some(target), true).map(|_| ())
+}
+
+/// 붙이기·채우기·옮기기를 하면 한셀은 시트의 유효성마다 범위 목록의 차례를 뒤집는다 (유효성 대조 실험: `M1:M5 O2`
+/// 는 복사 한 번에 `O2 M1:M5`, 두 번이면 그대로. 붙인 범위는 목록 끝에 더한 뒤 뒤집으므로 맨 앞에 온다)
+fn reverse_dv_areas(sheet: &mut Sheet) {
+    for dv in &mut sheet.data_validations {
+        let mut areas = refs::parse_sqref(&dv.sqref);
+        if areas.len() > 1 {
+            areas.reverse();
+            dv.sqref = refs::sqref_text(&areas);
+        }
+    }
 }
 
 /// 직사각형에서 구멍을 뺀 조각들 (위, 왼쪽, 오른쪽, 아래 순)
@@ -717,6 +748,10 @@ pub fn move_cells(
     {
         let sheet = &mut wb.sheets[si];
         let here = src_name.clone();
+        // 같은 시트로 옮기면 대상 자리의 유효성을 먼저 뗀다 (옮긴 몫을 남은 몫 뒤에 더하므로)
+        if si == dsi {
+            cut_out_dv(sheet, d);
+        }
         let mut keep_cf = Vec::new();
         for mut cf in std::mem::take(&mut sheet.conditional_formats) {
             let areas = refs::parse_sqref(&cf.sqref);
@@ -750,17 +785,27 @@ pub fn move_cells(
                     .filter_map(|&x| rect_area(x).offset(mv.drow, mv.dcol))
                     .collect();
                 m.sqref = refs::sqref_text(&list);
-                moved_cf.push(m);
+                moved_cf.push((cf.rules.iter().map(|r| r.priority).collect::<Vec<u32>>(), m));
             }
             if rest.is_empty() {
                 continue;
             }
+            // 남은 몫: 상대 참조는 남은 몫의 새 왼쪽 위 칸에 맞추고 (한셀 — B1:B5 에서 B1 을 옮기면
+            // MOD(B1,2)=0 이 MOD(B2,2)=0), 옮긴 칸을 가리키는 절대 참조는 새 자리를 따라간다
+            let mut rest_areas: Vec<Area> = rest.iter().map(|&x| rect_area(x)).collect();
+            rest_areas.sort_by_key(|a| {
+                let b = a.bounds();
+                (b.0, b.1)
+            });
+            let ntl = rest_areas[0].bounds();
+            let (dr, dc) = (ntl.0 as i64 - tl.0 as i64, ntl.1 as i64 - tl.1 as i64);
             for r in &mut cf.rules {
                 for f in &mut r.formulas {
-                    *f = refs::move_formula(f, &here, &mv);
+                    let anchored = crate::formula_text::shift_references(f, dr, dc);
+                    *f = refs::move_formula(&anchored, &here, &mv);
                 }
             }
-            cf.sqref = refs::sqref_text(&rest.iter().map(|&x| rect_area(x)).collect::<Vec<_>>());
+            cf.sqref = refs::sqref_text(&rest_areas);
             keep_cf.push(cf);
         }
         sheet.conditional_formats = keep_cf;
@@ -768,16 +813,19 @@ pub fn move_cells(
         for mut dv in std::mem::take(&mut sheet.data_validations) {
             let areas = refs::parse_sqref(&dv.sqref);
             if si == dsi && areas.iter().any(|a| overlaps(a.bounds(), s)) {
+                // 남은 몫 다음에 옮긴 몫 (차례는 마지막에 뒤집는다 — reverse_dv_areas)
                 let mut list: Vec<Area> = Vec::new();
+                let mut moved: Vec<Area> = Vec::new();
                 for a in &areas {
                     let b = a.bounds();
                     list.extend(subtract(b, s).into_iter().map(rect_area));
                     if let Some(x) = intersect(b, s)
                         && let Some(m) = rect_area(x).offset(mv.drow, mv.dcol)
                     {
-                        list.push(m);
+                        moved.push(m);
                     }
                 }
+                list.extend(moved);
                 for f in [&mut dv.formula1, &mut dv.formula2].into_iter().flatten() {
                     *f = refs::move_formula(f, &here, &mv);
                 }
@@ -865,9 +913,13 @@ pub fn move_cells(
     });
     dst.hyperlinks
         .retain(|h| !CellRange::parse(&h.range).is_some_and(|r| overlaps(rect(&r), d)));
-    cut_out(dst, d);
-    dst.conditional_formats.extend(moved_cf);
+    cut_out_cf(dst, d);
+    if si != dsi {
+        cut_out_dv(dst, d);
+    }
+    super::cfpaste::place_moved(dst, moved_cf, si == dsi);
     dst.data_validations.extend(moved_dv);
+    reverse_dv_areas(dst);
     for m in merges {
         dst.merges.push(CellRange {
             start: CellRef {
