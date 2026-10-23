@@ -573,23 +573,59 @@ fn marker_def(defs: &mut String, id: &str, end: &(String, String, String), color
     );
 }
 
-/// 겹선 마스크: 선 굵기 W 를 바깥 → 안 띠로 나눈다. dbl 은 1:1:1, tri 는 1:1:2:1:1 (가운데가 굵다). thickThin·
-/// thinThick 은 안팎을 가르지 않고 dbl 로 그린다 (한셀은 굵은 쪽이 바깥·안 — 근사)
+/// 겹선 마스크: 선 굵기 W 를 바깥 → 안 띠로 나눈다. dbl 은 1:1:1, tri 는 1:1:2:1:1 (가운데가 굵다), thickThin 은
+/// 굵은 바깥 3 : 틈 1 : 가는 안 1, thinThick 은 그 반대 (도형 실험의 6pt 사각형: 바깥 4.9px·틈 1.5·안 1.6). 안팎이
+/// 있는 닫힌 경로만 안쪽 자르기로 가르고, 열린 경로는 dbl 로 그린다
 fn compound_mask(id: &str, line: &Line, paths: &[&str], w: f64, h: f64) -> String {
     let wpx = line.px;
-    // (너비 비율, 흰/검) — 뒤에 칠한 것이 앞을 덮는다
-    let bands: &[(f64, &str)] = match line.compound.as_deref() {
-        Some("tri") => &[(1.0, "#fff"), (2.0 / 3.0, "#000"), (1.0 / 3.0, "#fff")],
-        _ => &[(1.0, "#fff"), (1.0 / 3.0, "#000")],
+    let closed = !paths.is_empty() && paths.iter().all(|d| d.trim_end().ends_with(['Z', 'z']));
+    let kind = match line.compound.as_deref() {
+        Some(k @ ("thickThin" | "thinThick")) if closed => k,
+        Some("tri") => "tri",
+        _ => "dbl",
     };
-    let mut m = format!(
+    // (너비 비율, 흰/검, 안쪽만) — 뒤에 칠한 것이 앞을 덮는다
+    let bands: &[(f64, &str, bool)] = match kind {
+        "tri" => &[
+            (1.0, "#fff", false),
+            (2.0 / 3.0, "#000", false),
+            (1.0 / 3.0, "#fff", false),
+        ],
+        // 바깥 [−0.1W, 0.5W] 와 안 [−0.5W, −0.3W] (가운데에서 바깥쪽이 +)
+        "thickThin" => &[
+            (1.0, "#fff", false),
+            (0.6, "#000", true),
+            (0.2, "#fff", true),
+        ],
+        // 바깥 [0.3W, 0.5W] 와 안 [−0.5W, 0.1W]
+        "thinThick" => &[
+            (1.0, "#fff", false),
+            (0.6, "#000", false),
+            (0.2, "#fff", false),
+            (1.0, "#fff", true),
+        ],
+        _ => &[(1.0, "#fff", false), (1.0 / 3.0, "#000", false)],
+    };
+    let mut m = String::new();
+    if bands.iter().any(|b| b.2) {
+        let _ = write!(m, "<clipPath id=\"{id}i\">");
+        for d in paths {
+            let _ = write!(m, "<path d=\"{d}\"/>");
+        }
+        m.push_str("</clipPath>");
+    }
+    let _ = write!(
+        m,
         "<mask id=\"{id}\" maskUnits=\"userSpaceOnUse\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\">",
         -wpx * 2.0 - 2.0,
         -wpx * 2.0 - 2.0,
         w + wpx * 4.0 + 4.0,
         h + wpx * 4.0 + 4.0
     );
-    for (k, c) in bands {
+    for (k, c, inside) in bands {
+        if *inside {
+            let _ = write!(m, "<g clip-path=\"url(#{id}i)\">");
+        }
         for d in paths {
             let _ = write!(
                 m,
@@ -597,6 +633,9 @@ fn compound_mask(id: &str, line: &Line, paths: &[&str], w: f64, h: f64) -> Strin
                 wpx * k,
                 line.join
             );
+        }
+        if *inside {
+            m.push_str("</g>");
         }
     }
     m.push_str("</mask>");
@@ -707,9 +746,11 @@ fn shape_body(
             });
             let mut defs = String::new();
             let attrs = stroke_attrs(&line, &mut defs, &id);
-            // 연결선 모양: 직선 또는 꺾인·굽은 연결선 (뒤집기는 경로를 뒤집어 그린다)
-            let flip_h = sh.xfrm.as_ref().is_some_and(|x| x.flip_h);
-            let flip_v = sh.xfrm.as_ref().is_some_and(|x| x.flip_v);
+            // 연결선 모양: 직선 또는 꺾인·굽은 연결선 (뒤집기는 경로를 뒤집어 그린다). 크기가 0 인 a:xfrm(앵커가
+            // 크기를 정한다)의 뒤집기는 한셀이 쓰지 않는다 (도형 실험의 flipV 연결선: 왼쪽 위 → 오른쪽 아래 그대로)
+            let sized = sh.xfrm.as_ref().is_some_and(|x| x.cx != 0 || x.cy != 0);
+            let flip_h = sized && sh.xfrm.as_ref().is_some_and(|x| x.flip_h);
+            let flip_v = sized && sh.xfrm.as_ref().is_some_and(|x| x.flip_v);
             let prst = obj
                 .and_then(shape::geometry)
                 .and_then(|g| g.attr("prst"))

@@ -82,10 +82,15 @@ fn data_bar_svg(b: &crate::cf_eval::BarDraw, w: u32, h: u32) -> String {
         }
     }
     if let (Some((_, c)), Some(ax)) = (&b.axis, ax) {
+        // 오른쪽에서 왼쪽 막대의 축은 뒤집은 자리보다 2px 왼쪽 (x14 실험의 rightToLeft 열: 칸 폭 82 에서 77 번째 픽셀)
+        let x = if b.rtl {
+            flip(ax + 0.5) - 2.0
+        } else {
+            ax + 0.5
+        };
         let _ = write!(
             g,
-            "<path d=\"M{:.1},0V{h}\" stroke=\"{c}\" stroke-width=\"1\" stroke-dasharray=\"2 1\"/>",
-            flip(ax + 0.5)
+            "<path d=\"M{x:.1},0V{h}\" stroke=\"{c}\" stroke-width=\"1\" stroke-dasharray=\"2 1\"/>"
         );
     }
     format!("<svg class=\"rc-bar\" width=\"{iw:.0}\" height=\"{h}\">{g}</svg>")
