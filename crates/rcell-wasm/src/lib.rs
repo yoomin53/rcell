@@ -206,6 +206,8 @@ fn info_json(doc: &Doc) -> Value {
         "canRedo": !doc.redo.is_empty(),
         "application": wb.application,
         "fonts": wb.styles.fonts.first().and_then(|f| f.name.clone()),
+        // 통합 문서 구조 보호: 시트 추가·삭제·이름 바꾸기·옮기기를 끈다
+        "structure": wb.protection.as_ref().is_some_and(|p| p.lock_structure),
     })
 }
 
@@ -379,6 +381,19 @@ pub extern "C" fn rcell_doc_render(id: u32, sheet: u32, min_rows: u32, min_cols:
             "merges": merges,
             "used": used,
             "protected": s.protection.as_ref().is_some_and(|p| p.flag("sheet")),
+            // 보호된 시트에서 막힌 동작 — 한셀 화면처럼 단추를 끈다
+            "blocked": s
+                .protection
+                .as_ref()
+                .filter(|p| p.flag("sheet"))
+                .map(|p| {
+                    rcell::model::SHEET_PROTECTION_FLAGS
+                        .iter()
+                        .map(|(k, _)| *k)
+                        .filter(|k| *k != "sheet" && p.flag(k))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
         }))
     }))
 }
@@ -482,7 +497,7 @@ pub unsafe extern "C" fn rcell_doc_edit(id: u32, ptr: *const u8, len: usize) -> 
     run_json(with_doc(id, |d| {
         let e: edit::Edit = serde_json::from_slice(&bytes)
             .map_err(|e| err(format!("편집 명령을 읽지 못했습니다: {e}")))?;
-        apply_edit(d, |wb| edit::apply(wb, &e))
+        apply_edit(d, |wb| edit::apply_ui(wb, &e))
     }))
 }
 

@@ -22,6 +22,7 @@
 //! ```
 
 pub mod clip;
+mod filter;
 pub mod input;
 pub mod refs;
 pub mod structure;
@@ -288,8 +289,31 @@ pub fn sheet_index(wb: &Workbook, sel: Option<&SheetSel>) -> crate::Result<usize
     }
 }
 
-/// 편집 하나를 적용한다. 바뀐(또는 새로 만든) 시트 번호를 돌려준다
+/// 한셀 화면(UI)에서만 막히는 편집: 한셀 자동화(COM)는 보호된 시트의 열 너비와 구조가 보호된 통합 문서의 시트
+/// 추가·이름 바꾸기·삭제를 그대로 하지만, 한셀 화면은 보호 설정에 따라 단추·메뉴를 끈다 (보호 대조 실험 — docs/editing.md
+/// 7절). [`apply`] 는 한셀 자동화와 같은 결과를 내고, 웹 편집기는 [`apply_ui`] 로 한셀 화면처럼 막는다
+pub fn check_ui(wb: &Workbook, e: &Edit) -> crate::Result<()> {
+    match e {
+        Edit::ColWidth { sheet, .. } | Edit::ColWidthPx { sheet, .. } => {
+            guard_action(wb, sheet_index(wb, sheet.as_ref())?, "formatColumns")
+        }
+        Edit::AddSheet { .. } | Edit::RenameSheet { .. } | Edit::DeleteSheet { .. } => {
+            guard_structure(wb)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 한셀 화면과 같은 보호 규칙으로 편집한다 ([`check_ui`] 뒤 [`apply`])
+pub fn apply_ui(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
+    check_ui(wb, e)?;
+    apply(wb, e)
+}
+
+/// 편집 하나를 적용한다. 바뀐(또는 새로 만든) 시트 번호를 돌려준다. 보호 규칙은 한셀 자동화와 같다 (화면에서만
+/// 막히는 것은 [`check_ui`])
 pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
+    filter::fill_thresholds(wb);
     let si = |wb: &Workbook, s: &Option<SheetSel>| sheet_index(wb, s.as_ref());
     match e {
         Edit::Set { sheet, cell, input } => {
@@ -535,15 +559,41 @@ pub fn guard_cells(wb: &Workbook, si: usize, range: CellRange) -> crate::Result<
             .and_then(|p| p.locked)
             != Some(false)
     };
-    let (h, w) = (
-        (range.end.row - range.start.row) as u64 + 1,
-        (range.end.col - range.start.col) as u64 + 1,
+    let (r0, r1, c0, c1) = (
+        range.start.row,
+        range.end.row,
+        range.start.col,
+        range.end.col,
     );
-    let any_locked = h * w > 1_000_000
-        || (range.start.row..=range.end.row).any(|r| {
-            (range.start.col..=range.end.col)
-                .any(|c| locked(style_at(sheet, CellRef { row: r, col: c })))
-        });
+    // 셀 기록이 있는 칸, 행 서식이 있는 행, 그 밖의 칸(열 정보의 열 서식, 없으면 기본 서식)으로 나눠 본다 —
+    // 행 전체·열 전체 범위도 칸마다 보지 않는다
+    let cells = sheet
+        .cells
+        .iter()
+        .filter(|c| (r0..=r1).contains(&c.r.row) && (c0..=c1).contains(&c.r.col))
+        .any(|c| locked(c.style));
+    let styled_rows: Vec<(u32, u32)> = sheet
+        .rows
+        .iter()
+        .filter_map(|r| Some((r.index - 1, r.style?)))
+        .filter(|(i, _)| (r0..=r1).contains(i))
+        .collect();
+    let rows = styled_rows.iter().any(|&(_, st)| locked(st));
+    let plain_rows = (r1 - r0 + 1) as usize > styled_rows.len();
+    let cols = plain_rows && {
+        let mut covered = 0u64;
+        let mut any = false;
+        for ci in &sheet.cols {
+            let (a, b) = ((ci.min - 1).max(c0), (ci.max - 1).min(c1));
+            if a > b {
+                continue;
+            }
+            covered += (b - a + 1) as u64;
+            any |= locked(ci.style.unwrap_or(0));
+        }
+        any || (covered < (c1 - c0 + 1) as u64 && locked(0))
+    };
+    let any_locked = cells || rows || cols;
     if any_locked {
         return Err(err(
             "변경하려는 셀은 보호되어 있으므로 읽기 전용입니다 (시트 보호)",
@@ -1086,6 +1136,18 @@ pub fn insert_rows(wb: &mut Workbook, si: usize, at: u32, n: u32) -> crate::Resu
 
 pub fn delete_rows(wb: &mut Workbook, si: usize, at: u32, n: u32) -> crate::Result<()> {
     guard_action(wb, si, "deleteRows")?;
+    // 행 삭제가 허용된 보호 시트도 지울 행의 칸이 모두 잠기지 않아야 한다 (한셀 — 보호 대조 실험)
+    guard_cells(
+        wb,
+        si,
+        CellRange {
+            start: CellRef { row: at, col: 0 },
+            end: CellRef {
+                row: (at + n.max(1) - 1).min(refs::MAX_ROWS - 1),
+                col: refs::MAX_COLS - 1,
+            },
+        },
+    )?;
     structure::shift(wb, si, Shift::DelRows { at, n: n.max(1) })
 }
 
@@ -1096,6 +1158,18 @@ pub fn insert_cols(wb: &mut Workbook, si: usize, at: u32, n: u32) -> crate::Resu
 
 pub fn delete_cols(wb: &mut Workbook, si: usize, at: u32, n: u32) -> crate::Result<()> {
     guard_action(wb, si, "deleteColumns")?;
+    // 열 삭제가 허용된 보호 시트도 지울 열의 칸이 모두 잠기지 않아야 한다
+    guard_cells(
+        wb,
+        si,
+        CellRange {
+            start: CellRef { row: 0, col: at },
+            end: CellRef {
+                row: refs::MAX_ROWS - 1,
+                col: (at + n.max(1) - 1).min(refs::MAX_COLS - 1),
+            },
+        },
+    )?;
     structure::shift(wb, si, Shift::DelCols { at, n: n.max(1) })
 }
 
@@ -1119,7 +1193,7 @@ pub fn set_col_width(
     if si >= wb.sheets.len() {
         return Err(err("시트가 없습니다"));
     }
-    guard_action(wb, si, "formatColumns")?;
+    // 한셀 자동화(COM `ColumnWidth`)는 열 서식이 막힌 보호 시트에서도 너비를 바꾼다 — 화면에서는 막힌다 (`check_ui`)
     let k = crate::render::book_metrics(wb).k;
     let old: Vec<f64> = (c0..=c1.min(c0 + 16_384))
         .map(|c| col_px_of(wb, si, c, k))
@@ -1462,20 +1536,28 @@ fn restyle(
     Ok(())
 }
 
-/// 서식을 바꾸지 않는 칸: 개요를 접어 숨긴 행·열, 범위 밖으로 걸친 병합의 칸 (한셀은 이런 칸을 건너뛴다 — 편집
-/// 대조 실험. 그냥 숨긴 행·열은 바꾼다)
+/// 서식을 바꾸지 않는 칸: 조건이 있는 자동 필터 범위 안의 숨긴 행, 범위 밖으로 걸친 병합의 칸 (한셀은 이런 칸을
+/// 건너뛴다 — 서식 대조 실험: 필터가 걸린 시트에서는 숨긴 행을 건너뛰고, 필터가 없거나 조건이 없으면 개요로 접은
+/// 행·열도 바꾼다. 숨긴 열은 언제나 바꾼다)
 fn format_skips(sheet: &Sheet, range: CellRange) -> impl Fn(CellRef) -> bool + use<> {
+    let filtered = filter::has_criteria(sheet)
+        .then(|| {
+            sheet
+                .auto_filter
+                .as_ref()
+                .and_then(|af| refs::parse_area(&af.range))
+                .map(|a| {
+                    let (r0, _, r1, _) = a.bounds();
+                    (r0 + 1, r1)
+                })
+        })
+        .flatten();
     let hidden_rows: std::collections::HashSet<u32> = sheet
         .rows
         .iter()
-        .filter(|r| r.hidden && r.outline_level > 0)
+        .filter(|r| r.hidden)
         .map(|r| r.index - 1)
-        .collect();
-    let hidden_cols: Vec<(u32, u32)> = sheet
-        .cols
-        .iter()
-        .filter(|c| c.hidden && c.outline_level > 0)
-        .map(|c| (c.min - 1, c.max - 1))
+        .filter(|&i| filtered.is_some_and(|(a, b)| (a..=b).contains(&i)))
         .collect();
     let partial: Vec<CellRange> = sheet
         .merges
@@ -1489,11 +1571,7 @@ fn format_skips(sheet: &Sheet, range: CellRange) -> impl Fn(CellRef) -> bool + u
         })
         .copied()
         .collect();
-    move |at: CellRef| {
-        hidden_rows.contains(&at.row)
-            || hidden_cols.iter().any(|&(a, b)| (a..=b).contains(&at.col))
-            || partial.iter().any(|m| m.contains(at))
-    }
+    move |at: CellRef| hidden_rows.contains(&at.row) || partial.iter().any(|m| m.contains(at))
 }
 
 /// 글꼴·채우기·맞춤·줄 바꿈·표시 형식
@@ -2130,7 +2208,7 @@ fn ensure_code_names(wb: &mut Workbook) {
 
 /// 시트를 더한다 (`at` 자리에). 이름이 없으면 한셀처럼 쓰지 않은 가장 작은 `SheetN`
 pub fn add_sheet(wb: &mut Workbook, name: Option<&str>, at: usize) -> crate::Result<usize> {
-    guard_structure(wb)?;
+    // 구조가 보호된 통합 문서: 한셀 자동화는 시트를 더한다 — 화면에서는 막힌다 (`check_ui`)
     ensure_code_names(wb);
     let at = at.min(wb.sheets.len());
     let name = match name {
@@ -2179,14 +2257,16 @@ pub fn add_sheet(wb: &mut Workbook, name: Option<&str>, at: usize) -> crate::Res
     };
     wb.sheets.insert(at, sheet);
     remap_sheet_indexes(wb, &|i| Some(if i >= at { i + 1 } else { i }));
-    // 한셀은 새 시트를 선택한다
-    select_sheet(wb, at);
+    // 한셀은 새 시트를 선택한다 — 구조가 보호된 통합 문서에서는 (자동화로 더해도) 선택을 그대로 둔다
+    if !wb.protection.as_ref().is_some_and(|p| p.lock_structure) {
+        select_sheet(wb, at);
+    }
     Ok(at)
 }
 
 /// 시트 이름을 바꾼다 (그 시트를 가리키는 수식·이름·차트·하이퍼링크도)
 pub fn rename_sheet(wb: &mut Workbook, si: usize, name: &str) -> crate::Result<()> {
-    guard_structure(wb)?;
+    // 구조가 보호된 통합 문서: 한셀 자동화는 이름을 바꾼다 — 화면에서는 막힌다 (`check_ui`)
     if si >= wb.sheets.len() {
         return Err(err("시트가 없습니다"));
     }
@@ -2202,7 +2282,7 @@ pub fn rename_sheet(wb: &mut Workbook, si: usize, name: &str) -> crate::Result<(
 
 /// 시트를 지운다 (그 시트를 가리키는 참조는 `#REF!`). 보이는 시트가 하나뿐이면 지울 수 없다
 pub fn delete_sheet(wb: &mut Workbook, si: usize) -> crate::Result<()> {
-    guard_structure(wb)?;
+    // 구조가 보호된 통합 문서: 한셀 자동화는 시트를 지운다 — 화면에서는 막힌다 (`check_ui`)
     if si >= wb.sheets.len() {
         return Err(err("시트가 없습니다"));
     }

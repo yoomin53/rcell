@@ -1438,9 +1438,16 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
         tables.push(t);
     }
     sheet.tables = tables;
+    // 필터 범위의 첫 칸(머리글)이 옮겨지면 한셀은 필터를 다시 적용한다 (마지막에)
+    let mut filter_moved = false;
     if let Some(af) = &mut sheet.auto_filter {
+        let start = |r: &str| area_of(r).map(|a| (a.bounds().0, a.bounds().1));
+        let before = start(&af.range);
         match shift_range_text(&af.range, op, false) {
-            Some(r) => af.range = r,
+            Some(r) => {
+                filter_moved = before.is_some() && start(&r) != before;
+                af.range = r;
+            }
             None => sheet.auto_filter = None,
         }
     }
@@ -1489,7 +1496,12 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
 
     update_dimension(sheet);
 
-    // 11. 자리가 바뀐 메모 상자
+    // 11. 필터 다시 적용
+    if filter_moved {
+        super::filter::reapply(wb, si);
+    }
+
+    // 12. 자리가 바뀐 메모 상자
     if let Some((old, ext)) = boxes_before
         && !moved_boxes.is_empty()
     {

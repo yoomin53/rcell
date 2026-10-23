@@ -250,6 +250,7 @@
       merges: res.merges || [],
       used: res.used,
       prot: res.protected,
+      blocked: res.blocked || [],
       canvas: canvas,
       zoom: (g.zoom || 100) / 100,
       cols: {},
@@ -276,6 +277,24 @@
     area.scrollLeft = sl;
     drawSelection();
     updateCell();
+    applyProtection();
+  }
+
+  // 보호된 시트·통합 문서: 한셀 화면처럼 막힌 동작의 단추를 끈다 (docs/editing.md 7절)
+  function blocked(flag) {
+    return !!(view && view.blocked.indexOf(flag) >= 0);
+  }
+  var FORMAT_IDS = ["bold", "italic", "underline", "strike", "wrap", "font-name", "font-size", "font-color",
+    "fill-color", "no-fill", "border", "h-left", "h-center", "h-right", "v-top", "v-center", "v-bottom", "merge", "num-fmt"];
+  function applyProtection() {
+    FORMAT_IDS.forEach(function (id) { if ($(id)) $(id).disabled = blocked("formatCells"); });
+    $("ins-row").disabled = blocked("insertRows");
+    $("del-row").disabled = blocked("deleteRows");
+    $("ins-col").disabled = blocked("insertColumns");
+    $("del-col").disabled = blocked("deleteColumns");
+  }
+  function structureLocked() {
+    return !!(doc && doc.info.structure);
   }
 
   function colBox(c) {
@@ -420,10 +439,15 @@
       b.textContent = s.name;
       b.title = s.chart ? "차트 시트 (편집할 수 없음)" : "두 번 눌러 이름 바꾸기";
       b.onclick = function () { switchSheet(s.index); };
-      b.ondblclick = function () { renameSheet(s.index); };
+      b.ondblclick = function () { if (!structureLocked()) renameSheet(s.index); };
       b.oncontextmenu = function (e) {
         e.preventDefault();
         switchSheet(s.index);
+        // 통합 문서 구조가 보호되면 시트 메뉴를 끈다 (한셀 화면)
+        if (structureLocked()) {
+          status("통합 문서가 보호되어 있어서 변경할 수 없습니다", true);
+          return;
+        }
         showMenu(e.clientX, e.clientY, [
           ["시트 추가", function () { addSheet(); }],
           ["이름 바꾸기", function () { renameSheet(s.index); }],
@@ -438,6 +462,7 @@
     var add = document.createElement("button");
     add.textContent = "+";
     add.title = "시트 추가";
+    add.disabled = structureLocked();
     add.onclick = addSheet;
     tabs.appendChild(add);
   }
@@ -798,7 +823,7 @@
     }
     if (inColHdr && g.header_h) {
       var ce = colEdge(p.x);
-      if (ce >= 0) {
+      if (ce >= 0 && !blocked("formatColumns")) {
         commitEdit();
         drag = { kind: "colsize", col: ce, start: colBox(ce)[0], x: p.x };
         e.preventDefault();
@@ -825,7 +850,7 @@
     }
     if (inRowHdr && g.header_w) {
       var re = rowEdge(p.y);
-      if (re >= 0) {
+      if (re >= 0 && !blocked("formatRows")) {
         commitEdit();
         drag = { kind: "rowsize", row: re, start: rowBox(re)[0], y: p.y };
         e.preventDefault();
@@ -873,8 +898,8 @@
         var p0 = canvasPoint(e);
         var g0 = view.grid;
         var cur0 = "";
-        if (p0.y < g0.header_h && p0.x >= g0.header_w && colEdge(p0.x) >= 0) cur0 = "col-resize";
-        else if (p0.x < g0.header_w && p0.y >= g0.header_h && rowEdge(p0.y) >= 0) cur0 = "row-resize";
+        if (p0.y < g0.header_h && p0.x >= g0.header_w && colEdge(p0.x) >= 0 && !blocked("formatColumns")) cur0 = "col-resize";
+        else if (p0.x < g0.header_w && p0.y >= g0.header_h && rowEdge(p0.y) >= 0 && !blocked("formatRows")) cur0 = "row-resize";
         $("area").style.cursor = cur0;
       }
       return;

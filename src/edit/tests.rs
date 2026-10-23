@@ -1180,6 +1180,151 @@ fn merge_like_hcell() {
     assert!(wb.sheets[0].cell(c24).is_some_and(|c| c.value.is_empty()));
 }
 
+/// 보호·필터 대조 실험의 문서 모양: A1:E12 에 값, 1행이 머리글인 자동 필터 (A 열 값 7·9, C 열 20 초과 100 미만)
+fn filter_book() -> Workbook {
+    let mut wb = Workbook {
+        sheets: vec![Sheet {
+            name: "Sheet1".into(),
+            ..Default::default()
+        }],
+        styles: styles(),
+        ..Default::default()
+    };
+    let a = [7, 1, 8, 2, 9, 3, 10, 4, 11, 5, 12, 6];
+    for (i, v) in a.iter().enumerate() {
+        let r = i + 1;
+        put(
+            &mut wb.sheets[0],
+            &format!("A{r}"),
+            CellValue::Number(*v as f64),
+            None,
+        );
+        put(
+            &mut wb.sheets[0],
+            &format!("C{r}"),
+            CellValue::Number(r as f64 * 10.0),
+            None,
+        );
+    }
+    wb.sheets[0].auto_filter = Some(crate::model::AutoFilter {
+        range: "A1:E12".into(),
+        columns: vec![
+            crate::model::FilterColumn {
+                col_id: 0,
+                values: vec!["7".into(), "9".into()],
+                ..Default::default()
+            },
+            crate::model::FilterColumn {
+                col_id: 2,
+                custom: vec![
+                    ("greaterThan".into(), "20".into()),
+                    ("lessThan".into(), "100".into()),
+                ],
+                custom_and: true,
+                ..Default::default()
+            },
+        ],
+    });
+    wb.sheets[0].filter_mode = true;
+    for r in [6, 7] {
+        wb.sheets[0].rows.push(RowInfo {
+            index: r,
+            hidden: true,
+            ..Default::default()
+        });
+    }
+    wb
+}
+
+fn hidden_rows(wb: &Workbook) -> Vec<u32> {
+    wb.sheets[0]
+        .rows
+        .iter()
+        .filter(|r| r.hidden)
+        .map(|r| r.index)
+        .collect()
+}
+
+// 필터 대조 실험: 머리글이 옮겨지면 필터를 다시 적용하고, 범위 안에 넣거나 지우면 그대로 둔다
+#[test]
+fn filters_reapply_when_the_header_moves() {
+    let mut wb = filter_book();
+    insert_rows(&mut wb, 0, 2, 1).unwrap();
+    assert_eq!(hidden_rows(&wb), [7, 8]);
+    let mut wb = filter_book();
+    insert_rows(&mut wb, 0, 0, 1).unwrap();
+    // 새 머리글은 2행, 조건에 맞는 것은 옛 5행(A=9, C=50)뿐
+    assert_eq!(hidden_rows(&wb), [3, 4, 5, 7, 8, 9, 10, 11, 12, 13]);
+    // 조건이 있는 필터에서는 숨긴 행의 서식을 바꾸지 않는다 (숨긴 열은 바꾼다)
+    let mut wb = filter_book();
+    wb.sheets[0].cols.push(ColInfo {
+        min: 4,
+        max: 4,
+        hidden: true,
+        ..Default::default()
+    });
+    let p = FormatPatch {
+        bold: Some(true),
+        ..Default::default()
+    };
+    format(&mut wb, 0, parse_range("B5:D8").unwrap(), &p).unwrap();
+    let bold = |wb: &Workbook, a: &str| {
+        let st = style_at(&wb.sheets[0], CellRef::parse(a).unwrap());
+        wb.styles.font_of(st).is_some_and(|f| f.bold)
+    };
+    assert!(bold(&wb, "D5") && bold(&wb, "B8") && !bold(&wb, "B6") && !bold(&wb, "C7"));
+}
+
+// 보호 대조 실험: 한셀 자동화는 열 너비·시트 추가·이름 바꾸기에 보호를 보지 않는다 (화면은 막는다).
+// 행 삭제가 허용된 시트도 잠긴 칸이 있는 행은 지울 수 없다
+#[test]
+fn protection_like_hcell_automation_and_screen() {
+    let mut wb = filter_book();
+    wb.sheets[0].protection = Some(crate::model::SheetProtection {
+        password: None,
+        flags: vec![("sheet".into(), true), ("deleteRows".into(), false)],
+    });
+    wb.protection = Some(crate::model::WorkbookProtection {
+        lock_structure: true,
+        ..Default::default()
+    });
+    let width: Edit = serde_json::from_str(r#"{"op":"colWidth","col":"B","width":18}"#).unwrap();
+    let add: Edit = serde_json::from_str(r#"{"op":"addSheet","name":"새 시트"}"#).unwrap();
+    assert!(check_ui(&wb, &width).is_err());
+    assert!(check_ui(&wb, &add).is_err());
+    apply(&mut wb, &width).unwrap();
+    apply(&mut wb, &add).unwrap();
+    assert_eq!(wb.sheets.len(), 2);
+    // 구조가 보호되면 더한 시트를 선택하지 않고, 지우기도 자동화로는 된다 (옮기기는 막힌다)
+    assert!(!wb.sheets[1].view.tab_selected);
+    let del: Edit = serde_json::from_str(r#"{"op":"deleteSheet","sheet":1}"#).unwrap();
+    let mv: Edit = serde_json::from_str(r#"{"op":"moveSheet","sheet":1,"to":0}"#).unwrap();
+    assert!(check_ui(&wb, &del).is_err());
+    assert!(apply(&mut wb, &mv).is_err());
+    apply(&mut wb, &del).unwrap();
+    assert_eq!(wb.sheets.len(), 1);
+    assert!(delete_rows(&mut wb, 0, 7, 1).is_err());
+    assert!(insert_rows(&mut wb, 0, 7, 1).is_err());
+    // 행 서식으로 잠금을 푼 행은 지울 수 있다
+    wb.styles.cell_xfs.push(Xf {
+        protection: Some(crate::model::Protection {
+            locked: Some(false),
+            hidden: None,
+        }),
+        ..Default::default()
+    });
+    let unlocked = wb.styles.cell_xfs.len() as u32 - 1;
+    let s = &mut wb.sheets[0];
+    s.cells.retain(|c| c.r.row != 7);
+    s.rows.push(RowInfo {
+        index: 8,
+        style: Some(unlocked),
+        ..Default::default()
+    });
+    s.rows.sort_by_key(|r| r.index);
+    delete_rows(&mut wb, 0, 7, 1).unwrap();
+}
+
 // 메모 상자 대조 실험: 칸이 옮겨진 메모의 상자는 메모 칸의 열 + 14px, 두 행 위 + 10px 로 가고 크기는 그대로
 // (A 열 메모는 옮길 때마다 상자가 A 열 너비 − 1px 만큼 좁아진다)
 #[test]
