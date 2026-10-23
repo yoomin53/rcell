@@ -1178,6 +1178,24 @@ fn merge_like_hcell() {
     assert_eq!(edges(&wb, "C24"), "- - auto -");
     assert_eq!(edges(&wb, "D25"), "- - - auto");
     assert!(wb.sheets[0].cell(c24).is_some_and(|c| c.value.is_empty()));
+    // 자동 높이가 적힌 행: 병합한 첫 행은 고정 높이, 나머지 행은 높이를 지운다
+    let mut wb = hcell_book();
+    for index in [24, 25] {
+        wb.sheets[0].rows.push(RowInfo {
+            index,
+            height: Some(16.75),
+            ..Default::default()
+        });
+    }
+    merge(&mut wb, 0, parse_range("B24:D25").unwrap(), true).unwrap();
+    assert_eq!(
+        wb.sheets[0]
+            .rows
+            .iter()
+            .map(|r| (r.index, r.height, r.custom_height))
+            .collect::<Vec<_>>(),
+        [(24, Some(16.75), true), (25, None, false)]
+    );
 }
 
 /// 보호·필터 대조 실험의 문서 모양: A1:E12 에 값, 1행이 머리글인 자동 필터 (A 열 값 7·9, C 열 20 초과 100 미만)

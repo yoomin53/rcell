@@ -2002,6 +2002,18 @@ pub fn merge(wb: &mut Workbook, si: usize, range: CellRange, center: bool) -> cr
             }
         }
         sheet.merges.push(range);
+        // 자동 높이가 적힌 행: 첫 행은 그 높이를 고정 높이로, 나머지 행은 높이를 지운다 (한셀 — 병합 대조 실험)
+        for info in &mut sheet.rows {
+            let i = info.index - 1;
+            if i < range.start.row || i > range.end.row || info.custom_height {
+                continue;
+            }
+            if i == range.start.row {
+                info.custom_height = info.height.is_some();
+            } else {
+                info.height = None;
+            }
+        }
     }
     // 병합 안쪽의 칸 사이 선은 지운다 (한셀 — 병합 대조 실험)
     clear_inner_edges(wb, si, range);
