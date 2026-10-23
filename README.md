@@ -37,9 +37,9 @@ XML, 바이너리, 한셀 2010 이하의 레거시 — 을 모두 읽고, 한셀
 > **[온라인 데모](https://yoomin53.github.io/rcell/?file=samples/demo.cell)** | **[포맷 명세](docs/format/cell-2024.md)** | **[분석 방법](docs/reverse-engineering.md)** | **[로드맵](docs/ROADMAP.md)**
 
 <p align="center">
-  <img src="assets/screenshots/render-example.png" alt="rcell 웹 뷰어 — 표시 형식, 조건부 서식(색조·데이터 막대·아이콘), 차트, 글상자" width="760" />
+  <img src="assets/screenshots/render-example.png" alt="rcell 웹 편집기 — 표시 형식, 조건부 서식(색조·데이터 막대·아이콘), 차트, 글상자" width="760" />
 </p>
-<p align="center"><sub>rcell 웹 뷰어가 그린 데모 문서 — <code>tools/demo/make-demo.js</code> 로 만든 문서이며 데이터는 지어낸 것입니다.</sub></p>
+<p align="center"><sub>rcell 웹 편집기가 그린 데모 문서 — <code>tools/demo/make-demo.js</code> 로 만든 문서이며 데이터는 지어낸 것입니다.</sub></p>
 
 ## 로드맵
 
