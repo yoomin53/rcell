@@ -142,17 +142,17 @@ fn esc(s: &str) -> String {
 }
 
 /// XML 속성 → 참/거짓 (없으면 기본값)
-fn ab(e: &Element, name: &str, default: bool) -> bool {
+pub(crate) fn ab(e: &Element, name: &str, default: bool) -> bool {
     e.attr_bool(name).unwrap_or(default)
 }
 
-fn au(e: &Element, name: &str, default: u32) -> u32 {
+pub(crate) fn au(e: &Element, name: &str, default: u32) -> u32 {
     e.attr(name)
         .and_then(|v| v.trim().parse::<i64>().ok())
         .map_or(default, |v| v as u32)
 }
 
-fn ai(e: &Element, name: &str, default: i32) -> i32 {
+pub(crate) fn ai(e: &Element, name: &str, default: i32) -> i32 {
     e.attr(name)
         .and_then(|v| v.trim().parse::<i64>().ok())
         .map_or(default, |v| v as i32)
@@ -200,7 +200,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 const SERIAL_EPOCH: i64 = -25_569; // 1899-12-30 의 days_from_civil
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct DateTime {
+pub(crate) struct DateTime {
     y: u16,
     mo: u16,
     d: u8,
@@ -210,7 +210,7 @@ struct DateTime {
 }
 
 impl DateTime {
-    fn parse(v: &str) -> Option<DateTime> {
+    pub(crate) fn parse(v: &str) -> Option<DateTime> {
         // 2025-12-09T00:00:00.000 (시각은 없어도 된다)
         let (date, time) = v.split_once('T').unwrap_or((v, "00:00:00"));
         let mut it = date.split('-');
@@ -233,7 +233,7 @@ impl DateTime {
             self.y, self.mo, self.d, self.h, self.mi, self.s
         )
     }
-    fn bytes(&self, b: &mut B) {
+    pub(crate) fn bytes(&self, b: &mut B) {
         b.u16(self.y)
             .u16(self.mo)
             .u8(self.d)
@@ -252,7 +252,7 @@ impl DateTime {
         })
     }
     /// 일련번호 (DateAsXnum)
-    fn serial(&self) -> f64 {
+    pub(crate) fn serial(&self) -> f64 {
         let days = days_from_civil(i64::from(self.y), i64::from(self.mo), i64::from(self.d))
             - SERIAL_EPOCH;
         days as f64
@@ -407,13 +407,13 @@ const VD_FLAGS2: &[Flag] = &[
 ];
 
 /// 피벗 항목 종류 (PivotItemType 0–14) = XML `item/@t`·`i/@t`
-const ITEM_TYPES: [&str; 15] = [
+pub(crate) const ITEM_TYPES: [&str; 15] = [
     "data", "default", "sum", "countA", "avg", "max", "min", "product", "count", "stdDev",
     "stdDevP", "var", "varP", "grand", "blank",
 ];
 
 /// 데이터 필드 함수 (DataConsolidationFunction) = XML `dataField/@subtotal`
-const SUBTOTALS: [&str; 11] = [
+pub(crate) const SUBTOTALS: [&str; 11] = [
     "sum",
     "count",
     "average",
@@ -428,7 +428,7 @@ const SUBTOTALS: [&str; 11] = [
 ];
 
 /// 값 표시 (ShowDataAs) = XML `dataField/@showDataAs`
-const SHOW_DATA_AS: [&str; 9] = [
+pub(crate) const SHOW_DATA_AS: [&str; 9] = [
     "normal",
     "difference",
     "percent",
@@ -445,7 +445,7 @@ fn unless(exact: bool, v: Option<&str>) -> Option<&str> {
     if exact { None } else { v }
 }
 
-fn index_of(list: &[&str], v: Option<&str>, default: usize) -> usize {
+pub(crate) fn index_of(list: &[&str], v: Option<&str>, default: usize) -> usize {
     v.and_then(|v| list.iter().position(|x| *x == v))
         .unwrap_or(default)
 }
@@ -812,7 +812,7 @@ struct FieldKind {
 
 /// 공유 항목의 값
 #[derive(Debug, Clone, PartialEq)]
-enum Item {
+pub(crate) enum Item {
     Missing,
     Num(f64),
     Bool(bool),
@@ -821,7 +821,7 @@ enum Item {
     Date(DateTime),
 }
 
-const ERRORS: [(&str, u8); 7] = [
+pub(crate) const ERRORS: [(&str, u8); 7] = [
     ("#NULL!", 0x00),
     ("#DIV/0!", 0x07),
     ("#VALUE!", 0x0F),
@@ -831,7 +831,7 @@ const ERRORS: [(&str, u8); 7] = [
     ("#N/A", 0x2A),
 ];
 
-fn item_of(e: &Element) -> Option<Item> {
+pub(crate) fn item_of(e: &Element) -> Option<Item> {
     let v = e.attr("v");
     Some(match e.name.as_str() {
         "m" => Item::Missing,
@@ -924,12 +924,12 @@ const ATBL_FLAGS: &[Flag] = &[
 ];
 
 /// 계산 필드 수식의 이름 풀이: 캐시 필드 이름 → 이름 목록 번호 (처음 쓰인 순서)
-struct PivotNames<'a> {
-    fields: &'a [&'a str],
+pub(crate) struct PivotNames<'a> {
+    pub(crate) fields: &'a [&'a str],
     /// 목록: 캐시 필드 번호 (ifdb)
-    used: Vec<u32>,
+    pub(crate) used: Vec<u32>,
     /// 필드가 아닌 이름 (계산 필드 수식에 쓸 수 없다)
-    unknown: Option<String>,
+    pub(crate) unknown: Option<String>,
 }
 
 impl super::formula::Resolver for PivotNames<'_> {
@@ -2324,7 +2324,10 @@ pub(crate) struct BinPivots {
 }
 
 /// 원본 파트(`raw_parts`)의 관계 목록
-fn raw_rels(raw: &[crate::model::RawPart], name: &str) -> Vec<crate::package::Relationship> {
+pub(crate) fn raw_rels(
+    raw: &[crate::model::RawPart],
+    name: &str,
+) -> Vec<crate::package::Relationship> {
     let rels = crate::package::rels_part_for(name);
     raw.iter()
         .find(|p| p.name == rels)
@@ -2333,7 +2336,7 @@ fn raw_rels(raw: &[crate::model::RawPart], name: &str) -> Vec<crate::package::Re
         .unwrap_or_default()
 }
 
-fn raw_text(raw: &[crate::model::RawPart], name: &str) -> Option<String> {
+pub(crate) fn raw_text(raw: &[crate::model::RawPart], name: &str) -> Option<String> {
     raw.iter()
         .find(|p| p.name == name)
         .map(|p| String::from_utf8_lossy(&p.data).into_owned())

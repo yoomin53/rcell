@@ -696,8 +696,10 @@ fn series_sp_pr(e: Obj<'_>, family: Family) -> ChartShapeProps {
     }
 }
 
-/// 표식: VtSeries.u16_d 1 = 자동 (한셀은 `none` 크기 7 로 읽는다), 0 = 지정 (모양, 크기 twip/20 pt,
-/// 표식 색이 자동(플래그 0x20)이 아니면 계열 채우기 색)
+/// 표식: VtSeries.u16_d 1 = 자동 (한셀은 `none` 크기 7 로 읽는다), 0 = 지정 (모양, 크기 twip/20 pt, 채우기 = pen5 의 색 —
+/// 검정이면 채우기 없음. 거품형 표식 실험: c2_e6_bubble 의 pen5 색을 ff0000 으로 바꾸면 표식이 ff0000, 000000 이면 채우기
+/// 없음; 꺾은선 c2_e5_line_marker 의 pen5 를 123456 으로 바꾸면 123456. 색 플래그 0x20·pen5 의 선 모양·계열 칠·표식 색
+/// markerColor 는 보지 않는다)
 fn series_marker(e: Obj<'_>) -> ChartMarker {
     if e.u16("u16_d").unwrap_or(1) != 0 {
         return ChartMarker {
@@ -709,12 +711,14 @@ fn series_marker(e: Obj<'_>) -> ChartMarker {
     let size = e
         .f32("markerSize")
         .map_or(7, |s| (f64::from(s) / 20.0).round().clamp(2.0, 72.0) as u32);
-    let auto = e.color("markerColor").is_some_and(|c| c.flags & 0x20 != 0);
-    let fill = e.group("brush").and_then(|b| b.color("fill"));
+    let fill = e
+        .group("pen5")
+        .and_then(|p| p.color("color"))
+        .filter(|c| c.rgb != [0, 0, 0]);
     ChartMarker {
         symbol: Some(marker_symbol(e.u16("markerStyle").unwrap_or(15)).into()),
         size: Some(size),
-        sp_pr: fill.filter(|_| !auto).map(|c| ChartShapeProps {
+        sp_pr: fill.map(|c| ChartShapeProps {
             fill: Some(srgb(c)),
             line: None,
         }),

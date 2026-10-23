@@ -479,8 +479,10 @@ fn fill_record(f: &Fill) -> P {
 
 /// BrtBorder: 플래그 u8 (0x01 대각선 아래, 0x02 대각선 위), 위·아래·왼쪽·오른쪽·대각선 (dg u8, 예약 u8, BrtColor).
 /// 선의 자동 색은 한셀의 자동 색 표지 `01 00 00 00 FF FF FF DF` (관측: 서식 파일 683개·조작 문서 33개 선,
-/// 새 문서 15개 선만 `FF`), 선 없음은 RGB 색 그대로이고 자동·없음이면 검정 RGB (관측: 1101/1239)
-fn border_record(b: &Border) -> P {
+/// 새 문서 15개 선만 `FF`), 선 없음은 RGB 색 그대로이고 자동·없음이면 검정 RGB (관측: 1101/1239).
+/// `exact` 면 색인 65(시스템 전경 — 피벗 서식의 테두리)를 한셀처럼 RGB `02 00 80` 으로 쓴다 (한셀은 레거시 COLORREF
+/// 0x80800002 의 아래 세 바이트를 RGB 로 옮긴다 — 피벗 실험 pa 의 테두리 6개)
+fn border_record(b: &Border, exact: bool) -> P {
     const AUTO: [u8; 8] = [0x01, 0x00, 0, 0, 0xFF, 0xFF, 0xFF, 0xDF];
     let mut p = P::new();
     p.u8(u8::from(b.diagonal_down) | (u8::from(b.diagonal_up) << 1));
@@ -494,6 +496,9 @@ fn border_record(b: &Border) -> P {
             Some((i, e)) => {
                 let c = match &e.color {
                     Some(c) if c.auto => AUTO,
+                    Some(c) if exact && c.indexed == Some(65) && c.rgb.is_none() => {
+                        [0x05, 0x00, 0, 0, 0x02, 0x00, 0x80, 0xFF]
+                    }
                     Some(c) => brt_color(c, 0x00),
                     None => AUTO,
                 };
@@ -831,7 +836,7 @@ fn styles_bin(st: &Styles, fonts: &FontTable, exact: bool) -> Vec<u8> {
     };
     o.p(613, P::new().u32(borders.len() as u32));
     for b in &borders {
-        o.p(46, &border_record(b));
+        o.p(46, &border_record(b, exact));
     }
     o.e(614);
     let style_xfs: Vec<Xf> = if st.cell_style_xfs.is_empty() {
@@ -1050,6 +1055,8 @@ struct Book<'a> {
     links: &'a [crate::model::ExternalLink],
     /// XTI: (연결, 첫 시트, 끝 시트). 연결 번호는 다 모은 뒤에 정한다 ([`Book::supbooks`])
     xtis: Vec<(SupBook, i32, i32)>,
+    /// 앞에 둔 XTI 가 수식에 쓰였는지 ([`write_report`])
+    hits: Vec<bool>,
     names: Vec<NameEntry>,
     /// 지금 수식을 쓰는 시트 (지역 이름 찾기)
     cur: Option<u32>,
@@ -1100,7 +1107,12 @@ impl Resolver for Book<'_> {
         };
         let key = (sb, f.min(l), f.max(l));
         Some(match self.xtis.iter().position(|x| *x == key) {
-            Some(i) => i as u16,
+            Some(i) => {
+                if let Some(h) = self.hits.get_mut(i) {
+                    *h = true;
+                }
+                i as u16
+            }
             None => {
                 self.xtis.push(key);
                 (self.xtis.len() - 1) as u16
@@ -2863,7 +2875,54 @@ fn external_default(target: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// 통합 문서를 바이너리 `.cell` 로 쓰고 경고를 함께 돌려준다.
+///
+/// 한셀이 먼저 두는 XTI ([`Workbook::preset_xti`]) 를 이름·수식의 XTI 보다 앞에 둔다. 수식이 쓰는 것만 남으므로 한 번
+/// 써서 쓰이지 않은 것이 있으면 빼고 다시 쓴다 (레거시 쓰기와 같은 규칙 — 한셀은 저장 형식과 상관없이 같은 XTI 표를 쓴다)
 pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
+    // 레거시 XTI 의 문서 시트 번호는 모든 시트 차례 — 여기 XTI 는 워크시트 차례
+    let sheet_pos = |i: u16| {
+        let s = wb.sheets.get(i as usize)?;
+        (s.kind == SheetKind::Worksheet).then(|| {
+            wb.sheets[..i as usize]
+                .iter()
+                .filter(|x| x.kind == SheetKind::Worksheet)
+                .count() as i32
+        })
+    };
+    let mut preset: Vec<(SupBook, i32, i32)> = Vec::new();
+    for (b, f, l) in wb.preset_xti() {
+        let key = match b {
+            None => (SupBook::This, sheet_pos(f), sheet_pos(l)),
+            Some(n) if (1..=wb.external_links.len()).contains(&n) => {
+                (SupBook::Ext(n - 1), Some(f as i32), Some(l as i32))
+            }
+            Some(_) => continue,
+        };
+        let (Some(f), Some(l)) = (key.1, key.2) else {
+            continue;
+        };
+        let key = (key.0, f.min(l), f.max(l));
+        if !preset.contains(&key) {
+            preset.push(key);
+        }
+    }
+    let (out, hits) = write_with_preset(wb, opts, preset.clone())?;
+    if hits.iter().all(|&h| h) {
+        return Ok(out);
+    }
+    let kept = preset
+        .into_iter()
+        .zip(hits)
+        .filter_map(|(k, h)| h.then_some(k))
+        .collect();
+    write_with_preset(wb, opts, kept).map(|(o, _)| o)
+}
+
+fn write_with_preset(
+    wb: &Workbook,
+    opts: &Options,
+    preset: Vec<(SupBook, i32, i32)>,
+) -> Result<(Output, Vec<bool>)> {
     let mut warnings = Vec::new();
     let worksheets: Vec<&Sheet> = wb
         .sheets
@@ -2875,7 +2934,8 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
     let mut book = Book {
         sheets: worksheets.iter().map(|s| s.name.as_str()).collect(),
         links: &wb.external_links,
-        xtis: Vec::new(),
+        hits: vec![false; preset.len()],
+        xtis: preset,
         names: wb
             .defined_names
             .iter()
@@ -3555,7 +3615,7 @@ pub fn write_report(wb: &Workbook, opts: &Options) -> Result<Output> {
     if wb.protection.as_ref().is_some_and(|p| p.lock_structure) {
         bytes = super::encrypt::wrap(&bytes);
     }
-    Ok(Output { bytes, warnings })
+    Ok((Output { bytes, warnings }, book.hits))
 }
 
 /// docProps/app.xml — 한셀이 쓰는 꼴 (프로그램 이름, 시트 이름 목록, 편집 시간, 버전).
