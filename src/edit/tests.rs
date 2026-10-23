@@ -1180,6 +1180,82 @@ fn merge_like_hcell() {
     assert!(wb.sheets[0].cell(c24).is_some_and(|c| c.value.is_empty()));
 }
 
+// 메모 상자 대조 실험: 칸이 옮겨진 메모의 상자는 메모 칸의 열 + 14px, 두 행 위 + 10px 로 가고 크기는 그대로
+// (A 열 메모는 옮길 때마다 상자가 A 열 너비 − 1px 만큼 좁아진다)
+#[test]
+fn comment_boxes_follow_moved_cells_like_hcell() {
+    let mut wb = hcell_book();
+    wb.sheets[0].default_col_width = Some(9.00390625);
+    wb.sheets[0].default_row_height = Some(16.4);
+    let note = |a1: &str, anchor: [u32; 8]| Comment {
+        cell: CellRef::parse(a1).unwrap(),
+        shape: Some(CommentShape::hcell_default(anchor)),
+        ..Default::default()
+    };
+    wb.sheets[0].comments = vec![
+        note("A10", [0, 14, 7, 10, 1, 69, 11, 1]),
+        note("B10", [2, 14, 8, 10, 3, 69, 12, 1]),
+    ];
+    put(&mut wb.sheets[0], "Z1", CellValue::Number(1.0), None);
+    let boxes = |wb: &Workbook| {
+        wb.sheets[0]
+            .comments
+            .iter()
+            .map(|c| (c.cell.to_string(), c.shape.as_ref().unwrap().anchor))
+            .collect::<Vec<_>>()
+    };
+    // 메모 아래에 넣으면 그대로
+    insert_rows(&mut wb, 0, 29, 1).unwrap();
+    assert_eq!(boxes(&wb)[1].1, [2, 14, 8, 10, 3, 69, 12, 1]);
+    insert_rows(&mut wb, 0, 0, 1).unwrap();
+    assert_eq!(
+        boxes(&wb),
+        [
+            ("A11".to_string(), [0, 14, 8, 10, 0, 70, 12, 1]),
+            ("B11".to_string(), [1, 14, 8, 10, 2, 69, 12, 1])
+        ]
+    );
+    insert_rows(&mut wb, 0, 0, 1).unwrap();
+    assert_eq!(
+        boxes(&wb),
+        [
+            ("A12".to_string(), [0, 14, 9, 10, 0, 0, 13, 1]),
+            ("B12".to_string(), [1, 14, 9, 10, 2, 69, 13, 1])
+        ]
+    );
+}
+
+// 페이지 나누기 대조 실험: 여러 행·열을 넣거나 지우면 범위의 첫·끝 자리 나누기는 그대로 둔다
+#[test]
+fn page_breaks_like_hcell() {
+    let run = |f: &dyn Fn(&mut Workbook)| {
+        let mut wb = refbase();
+        wb.sheets[0].page.col_breaks = vec![2, 3, 4, 5, 6, 8];
+        f(&mut wb);
+        wb.sheets[0].page.col_breaks.clone()
+    };
+    assert_eq!(
+        run(&|wb| delete_cols(wb, 0, 2, 2).unwrap()),
+        [2, 3, 2, 3, 4, 6]
+    );
+    assert_eq!(
+        run(&|wb| delete_cols(wb, 0, 4, 3).unwrap()),
+        [2, 3, 4, 6, 5]
+    );
+    assert_eq!(
+        run(&|wb| delete_cols(wb, 0, 3, 1).unwrap()),
+        [2, 3, 4, 5, 7]
+    );
+    assert_eq!(
+        run(&|wb| insert_cols(wb, 0, 2, 2).unwrap()),
+        [2, 3, 6, 7, 8, 10]
+    );
+    assert_eq!(
+        run(&|wb| insert_cols(wb, 0, 3, 1).unwrap()),
+        [2, 4, 5, 6, 7, 9]
+    );
+}
+
 // 병합 대조 실험: 열을 지워 병합이 한 칸이 되거나 왼쪽 위 칸이 지워질 때
 #[test]
 fn merges_shrunk_by_deleted_columns_like_hcell() {

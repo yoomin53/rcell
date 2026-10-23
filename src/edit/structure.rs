@@ -258,6 +258,86 @@ pub(crate) fn keep_comment_boxes(
     }
 }
 
+/// 화면 px 자리 → (칸, 칸 안 px)
+fn locate_px(list: &[(u32, u32)], pos: i64) -> (u32, u32) {
+    for (i, &(l, w)) in list.iter().enumerate() {
+        if pos >= l as i64 && pos < (l + w) as i64 {
+            return (i as u32, (pos - l as i64) as u32);
+        }
+    }
+    match list.last() {
+        Some(&(l, _)) => ((list.len() - 1) as u32, (pos - l as i64).max(0) as u32),
+        None => (0, pos.max(0) as u32),
+    }
+}
+
+/// (칸, 칸 안 px) → 화면 px (칸 안 px 는 칸 너비까지)
+fn at_px(list: &[(u32, u32)], i: u32, off: u32) -> i64 {
+    match list.get(i as usize) {
+        Some(&(l, w)) => l as i64 + off.min(w) as i64,
+        None => list.last().map_or(0, |&(l, w)| (l + w) as i64) + off as i64,
+    }
+}
+
+/// 메모 상자를 다시 정할 때 쓰는 배치 (상자가 있는 메모가 없으면 None)
+fn comment_geometry(
+    wb: &Workbook,
+    si: usize,
+    extra: u32,
+) -> Option<(crate::render::Geometry, (u32, u32))> {
+    let sheet = &wb.sheets[si];
+    if !sheet.comments.iter().any(|c| c.shape.is_some()) {
+        return None;
+    }
+    let (r, c) = comments_extent(sheet);
+    let (cr, cc) = sheet
+        .comments
+        .iter()
+        .fold((0, 0), |(r, c), x| (r.max(x.cell.row), c.max(x.cell.col)));
+    let ext = (r.max(cr) + 64 + extra, c.max(cc) + 32 + extra);
+    Some((crate::render::sheet_geometry(wb, sheet, ext.0, ext.1), ext))
+}
+
+/// 메모 상자 앵커의 열 배치: 한셀 VML 앵커의 열 px 는 화면 너비보다 1 작다 (기본 너비 54pt = 72px 열이 71)
+fn anchor_cols(g: &crate::render::Geometry) -> Vec<(u32, u32)> {
+    let mut x = 0;
+    g.cols
+        .iter()
+        .map(|&(_, w)| {
+            let w = w.saturating_sub(1);
+            let c = (x, w);
+            x += w;
+            c
+        })
+        .collect()
+}
+
+/// 행·열 삽입·삭제로 칸이 옮겨진 메모의 상자 (메모 상자 대조 실험). 한셀은 상자 왼쪽 위를 메모 칸의 열 + 14px,
+/// 두 행 위 + 10px 에 다시 두고 크기(px)는 그대로 둔다 — 기본 자리(오른쪽 열, 한 행 위)의 상자는 처음 옮길 때
+/// 한 열 왼쪽·한 행 위로 간다. 다만 옛 상자 왼쪽이 A 열에 있으면 그 왼쪽을 A 열 너비 − 1px 만큼 오른쪽에서 잰다:
+/// A 열 메모의 상자는 칸이 옮겨질 때마다 그만큼 좁아진다 (A10 메모는 행 삽입 세 번이면 오른쪽 끝이 A 열 처음).
+/// 열 너비가 기본이 아닌 열에서는 한셀의 오프셋이 1px 다를 수 있다 (docs/editing.md 11절)
+fn moved_comment_box(
+    old: &crate::render::Geometry,
+    new: &crate::render::Geometry,
+    a: [u32; 8],
+    cell: CellRef,
+) -> [u32; 8] {
+    let (oc, nc) = (anchor_cols(old), anchor_cols(new));
+    let left = if a[0] == 0 {
+        oc.first().map_or(0, |c| c.1 as i64 - 1) + a[1] as i64
+    } else {
+        at_px(&oc, a[0], a[1])
+    };
+    let width = at_px(&oc, a[4], a[5]) - left;
+    let height = at_px(&old.rows, a[6], a[7]) - at_px(&old.rows, a[2], a[3]);
+    let (lc, lo) = (cell.col, 14);
+    let (tr, to) = (cell.row.saturating_sub(2), 10);
+    let (rc, ro) = locate_px(&nc, (at_px(&nc, lc, lo) + width).max(0));
+    let (br, bo) = locate_px(&new.rows, (at_px(&new.rows, tr, to) + height).max(0));
+    [lc, lo, tr, to, rc, ro, br, bo]
+}
+
 /// 메모 상자가 닿는 가장 큰 행·열
 pub(crate) fn comments_extent(sheet: &Sheet) -> (u32, u32) {
     let mut r = 0;
@@ -1044,6 +1124,7 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
     map_all_charts(wb, &|x| refs::shift_formula(x, "", &target, op));
 
     let default_width = default_col_width(wb, si);
+    let boxes_before = comment_geometry(wb, si, 0);
     let (raw_parts, styles, sheet) = (&mut wb.raw_parts, &mut wb.styles, &mut wb.sheets[si]);
     let rows = op.on_rows();
 
@@ -1268,26 +1349,32 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
             Some(h)
         })
         .collect();
-    sheet.comments = std::mem::take(&mut sheet.comments)
-        .into_iter()
-        .filter_map(|mut c: Comment| {
-            let row = op.point(true, c.cell.row)?;
-            let col = op.point(false, c.cell.col)?;
-            let (dr, dc) = (
-                row as i64 - c.cell.row as i64,
-                col as i64 - c.cell.col as i64,
-            );
-            c.cell = CellRef { row, col };
-            if let Some(s) = &mut c.shape {
-                let a = &mut s.anchor;
-                for k in [0usize, 4] {
-                    a[k] = (a[k] as i64 + dc).max(0) as u32;
-                    a[k + 2] = (a[k + 2] as i64 + dr).max(0) as u32;
-                }
+    // 자리가 바뀐 메모 (새 목록의 번호, 옛 상자 앵커) — 상자는 마지막에 새 배치로 다시 정한다
+    let mut moved_boxes: Vec<(usize, [u32; 8])> = Vec::new();
+    let mut comments = Vec::with_capacity(sheet.comments.len());
+    for mut c in std::mem::take(&mut sheet.comments) {
+        let (Some(row), Some(col)) = (op.point(true, c.cell.row), op.point(false, c.cell.col))
+        else {
+            continue;
+        };
+        let (dr, dc) = (
+            row as i64 - c.cell.row as i64,
+            col as i64 - c.cell.col as i64,
+        );
+        c.cell = CellRef { row, col };
+        if let Some(s) = &mut c.shape {
+            let a = &mut s.anchor;
+            if dr != 0 || dc != 0 {
+                moved_boxes.push((comments.len(), *a));
             }
-            Some(c)
-        })
-        .collect();
+            for k in [0usize, 4] {
+                a[k] = (a[k] as i64 + dc).max(0) as u32;
+                a[k + 2] = (a[k + 2] as i64 + dr).max(0) as u32;
+            }
+        }
+        comments.push(c);
+    }
+    sheet.comments = comments;
 
     // 7. 도형·차트 앵커. 지운 행·열 안에 모두 든 두 칸 앵커 도형은 함께 지운다 (한셀)
     sheet.shapes.retain(|s| !inside_deleted(s, op));
@@ -1376,16 +1463,53 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
         }
     }
 
-    // 10. 페이지 나누기
+    // 10. 페이지 나누기 (페이지 나누기 대조 실험): 여러 행·열을 넣거나 지우면 한셀은 범위의 첫 자리와 끝 자리의
+    // 나누기를 그대로 두고 (E:G 삭제 → E·G 앞 나누기는 그대로, F 앞 나누기는 없어진다), 나머지는 하나일 때와 같이
+    // 옮긴다. 차례를 바꾸거나 겹친 것을 합치지 않는다
+    let (at, n) = match op {
+        Shift::InsRows { at, n }
+        | Shift::DelRows { at, n }
+        | Shift::InsCols { at, n }
+        | Shift::DelCols { at, n } => (at, n),
+    };
     let breaks = if rows {
         &mut sheet.page.row_breaks
     } else {
         &mut sheet.page.col_breaks
     };
-    *breaks = breaks.iter().filter_map(|&b| op.point(rows, b)).collect();
-    breaks.dedup();
+    *breaks = breaks
+        .iter()
+        .filter_map(|&b| {
+            if n >= 2 && (b == at || b == at + n - 1) {
+                Some(b)
+            } else {
+                op.point(rows, b)
+            }
+        })
+        .collect();
 
     update_dimension(sheet);
+
+    // 11. 자리가 바뀐 메모 상자
+    if let Some((old, ext)) = boxes_before
+        && !moved_boxes.is_empty()
+    {
+        let n = match op {
+            Shift::InsRows { n, .. }
+            | Shift::DelRows { n, .. }
+            | Shift::InsCols { n, .. }
+            | Shift::DelCols { n, .. } => n.min(1024),
+        };
+        let new = crate::render::sheet_geometry(wb, &wb.sheets[si], ext.0 + n, ext.1 + n);
+        let sheet = &mut wb.sheets[si];
+        for (i, a) in moved_boxes {
+            let c = &mut sheet.comments[i];
+            let cell = c.cell;
+            if let Some(s) = &mut c.shape {
+                s.anchor = moved_comment_box(&old, &new, a, cell);
+            }
+        }
+    }
     Ok(())
 }
 
