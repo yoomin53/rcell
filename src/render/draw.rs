@@ -80,7 +80,14 @@ pub(super) fn shapes_html(
                 h.round() + 1.0,
             ),
             crate::model::ShapeKind::Picture => (x1 - 1.0, y1 - 1.0, w, h),
-            _ => (x1 - 0.5, y1 - 0.5, w, h),
+            // 도형: 상자는 경계 1px 앞 정수 픽셀 (선은 shape_body 가 반 픽셀 안쪽에 — 브라우저가 SVG 상자를 정수
+            // 픽셀에 맞추므로 상자를 반 픽셀에 두면 선이 두 픽셀에 번진다)
+            _ => (
+                x1.round() - 1.0,
+                y1.round() - 1.0,
+                (x2.round() - x1.round()).max(0.0),
+                (y2.round() - y1.round()).max(0.0),
+            ),
         };
         let obj = sh.raw.as_deref().and_then(shape::object_element);
         s.push_str(&object_html(wb, sh, obj.as_ref(), r, theme));
@@ -654,8 +661,12 @@ fn shadow_filter(sh: &Shape, theme: &Theme, id: &str) -> Option<String> {
         .map_or(1.0, |(_, v)| *v as f64 / 100_000.0);
     let dist = sd.dist as f64 / EMU;
     let dir = (sd.dir as f64 / 60_000.0).to_radians();
-    let (dx, dy) = (dist * dir.cos(), dist * dir.sin());
+    let (mut dx, mut dy) = (dist * dir.cos(), dist * dir.sin());
     let blur = sd.blur as f64 / EMU / 2.0;
+    // 흐림 없는 그림자는 정수 픽셀만큼 옮긴다 (서식 파일 소개 시트: 거리 1.89px·45도 → 오른쪽·아래 1px)
+    if blur == 0.0 {
+        (dx, dy) = (dx.round(), dy.round());
+    }
     Some(format!(
         "<filter id=\"{id}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\" color-interpolation-filters=\"sRGB\"><feDropShadow dx=\"{dx:.2}\" dy=\"{dy:.2}\" stdDeviation=\"{blur:.2}\" flood-color=\"{color}\" flood-opacity=\"{alpha:.3}\"/></filter>"
     ))
@@ -772,10 +783,10 @@ fn shape_body(
                     if flip_v { -1 } else { 1 }
                 ),
             };
-            // 가로·세로 선은 크기가 0 이다 — SVG 상자는 1px 로 두고 넘쳐 그린다
+            // 가로·세로 선은 크기가 0 이다 — SVG 상자는 1px 로 두고 넘쳐 그린다. 선은 반 픽셀 안쪽 (도형과 같이)
             let _ = write!(
                 inner,
-                "<svg class=\"rc-geom\" width=\"{:.1}\" height=\"{:.1}\"><defs>{defs}</defs><path d=\"{d}\" fill=\"none\"{attrs}{tf}/></svg>",
+                "<svg class=\"rc-geom\" width=\"{:.1}\" height=\"{:.1}\"><defs>{defs}</defs><g transform=\"translate(0.5 0.5)\"><path d=\"{d}\" fill=\"none\"{attrs}{tf}/></g></svg>",
                 w.max(1.0),
                 h.max(1.0)
             );
@@ -807,33 +818,33 @@ fn shape_body(
                 });
                 let mut body = String::new();
                 for p in &paths {
-                    let fill_attr = match (&fill, p.fill) {
-                        (Some((f, a)), pf) if pf != shape::PathFill::None => {
-                            let mut v = format!(" fill=\"{f}\"");
-                            if *a < 1.0 {
-                                let _ = write!(v, " fill-opacity=\"{a:.3}\"");
-                            }
-                            v
-                        }
-                        _ => " fill=\"none\"".to_string(),
-                    };
+                    let filled = fill.is_some() && p.fill != shape::PathFill::None;
                     let st = if p.stroke && cmask.is_none() {
                         stroke.as_str()
                     } else {
                         ""
                     };
-                    let _ = write!(
-                        body,
-                        "<path d=\"{}\" fill-rule=\"evenodd\"{fill_attr}{st}/>",
-                        p.d
-                    );
+                    // 상자는 칸 경계 1px 앞 정수 픽셀: 채우기는 상자 그대로, 선은 반 픽셀 안쪽에 가운데 (한셀은
+                    // 채우기가 경계 앞 픽셀부터 폭만큼, 1px 선은 그 픽셀 — 서식 파일 소개 시트의 채운 사각형, 앵커 실험)
+                    if let Some((f, a)) = fill.as_ref().filter(|_| filled) {
+                        let mut v = format!(" fill=\"{f}\"");
+                        if *a < 1.0 {
+                            let _ = write!(v, " fill-opacity=\"{a:.3}\"");
+                        }
+                        let _ = write!(body, "<path d=\"{}\" fill-rule=\"evenodd\"{v}/>", p.d);
+                    }
                     // 어둡게·밝게: 같은 경로에 반투명 검정·흰색을 덧칠한다
-                    if fill.is_some()
-                        && let Some((c, o)) = p.fill.overlay()
-                    {
+                    if filled && let Some((c, o)) = p.fill.overlay() {
                         let _ = write!(
                             body,
                             "<path d=\"{}\" fill-rule=\"evenodd\" fill=\"{c}\" fill-opacity=\"{o}\"/>",
+                            p.d
+                        );
+                    }
+                    if !st.is_empty() {
+                        let _ = write!(
+                            body,
+                            "<path d=\"{}\" fill=\"none\"{st} transform=\"translate(0.5 0.5)\"/>",
                             p.d
                         );
                     }
@@ -842,7 +853,7 @@ fn shape_body(
                     {
                         let _ = write!(
                             body,
-                            "<path d=\"{}\" fill=\"none\"{stroke} mask=\"url(#{m})\"/>",
+                            "<path d=\"{}\" fill=\"none\"{stroke} mask=\"url(#{m})\" transform=\"translate(0.5 0.5)\"/>",
                             p.d
                         );
                     }
@@ -986,7 +997,7 @@ fn txbody_html(tx: &Element, theme: &Theme, base_color: Option<&str>) -> String 
         .and_then(|a| a.attr_f64("fontScale"))
         .map_or(1.0, |v| v / 100_000.0);
     let mut s = format!(
-        "<div class=\"rc-text\" style=\"justify-content:{justify};padding:{:.1}px {:.1}px {:.1}px {:.1}px;{wrap};{vert}\">",
+        "<div class=\"rc-text\" style=\"left:0.5px;top:0.5px;justify-content:{justify};padding:{:.1}px {:.1}px {:.1}px {:.1}px;{wrap};{vert}\">",
         ins("tIns", 45720.0),
         ins("rIns", 91440.0),
         ins("bIns", 45720.0),
@@ -1139,7 +1150,7 @@ fn text_html(t: &TextBody, theme: &Theme) -> String {
         _ => "",
     };
     let mut s = format!(
-        "<div class=\"rc-text\" style=\"justify-content:{justify};padding:{:.1}px {:.1}px {:.1}px {:.1}px;{}{vert}\">",
+        "<div class=\"rc-text\" style=\"left:0.5px;top:0.5px;justify-content:{justify};padding:{:.1}px {:.1}px {:.1}px {:.1}px;{}{vert}\">",
         pad(t.insets[1], 45720),
         pad(t.insets[2], 91440),
         pad(t.insets[3], 45720),
