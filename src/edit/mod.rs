@@ -27,6 +27,7 @@ pub mod collate;
 mod collate_data;
 pub mod fill;
 mod filter;
+pub mod find;
 pub mod input;
 pub mod refs;
 pub mod sort;
@@ -317,6 +318,23 @@ pub enum Edit {
         stop: Option<f64>,
         #[serde(default)]
         trend: bool,
+    },
+    /// 바꾸기 (14절). `all` 이면 모든 시트, `range` 가 있으면 그 안에서만
+    Replace {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        find: String,
+        #[serde(default)]
+        replace: String,
+        #[serde(default)]
+        match_case: bool,
+        /// 셀 전체 (한셀: 공백으로 나뉜 낱말 전체)
+        #[serde(default)]
+        whole_cell: bool,
+        #[serde(default)]
+        all: bool,
+        #[serde(default)]
+        range: Option<String>,
     },
     /// 자동 필터로 정렬 (필터 범위를 첫 행을 머리글로 두고 한 열로 정렬하고 `sortState` 를 남긴다)
     SortFilter {
@@ -670,6 +688,27 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
                 trend: *trend,
             };
             fill::data_series(wb, i, rg, &o)?;
+            Ok(i)
+        }
+        Edit::Replace {
+            sheet,
+            find,
+            replace,
+            match_case,
+            whole_cell,
+            all,
+            range,
+        } => {
+            let i = si(wb, sheet)?;
+            let o = find::FindOptions {
+                what: find.clone(),
+                match_case: *match_case,
+                whole: *whole_cell,
+                in_values: false,
+                all_sheets: *all,
+                range: range.as_deref().map(parse_range).transpose()?,
+            };
+            find::replace_all(wb, i, &o, replace)?;
             Ok(i)
         }
         Edit::SortFilter {

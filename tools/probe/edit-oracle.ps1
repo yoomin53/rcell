@@ -185,6 +185,16 @@ function Invoke-Edit($wb, $e) {
             $stop = if ($null -ne $e.stop) { [double]$e.stop } else { $M }
             $rg.DataSeries($rowcol, $t, $d, $step, $stop, [bool]$e.trend) | Out-Null
         }
+        "replace" {
+            # 바꾸기 (Range.Replace — LookAt 1 = 셀 전체, 2 = 일부). all 이면 모든 시트
+            $look = if ($e.wholeCell) { 1 } else { 2 }
+            $n = if ($e.all) { $wb.Worksheets.Count } else { 1 }
+            for ($k = 1; $k -le $n; $k++) {
+                $s = if ($e.all) { $wb.Worksheets.Item($k) } else { $ws }
+                $rg = if ($e.range) { $s.Range([string]$e.range) } else { $s.UsedRange }
+                [void]$rg.Replace([string]$e.find, [string]$e.replace, $look, 1, [bool]$e.matchCase)
+            }
+        }
         "sortFilter" {
             # 자동 필터의 정렬 (AutoFilter.Sort): 필터 범위의 그 열
             $af = $ws.AutoFilter

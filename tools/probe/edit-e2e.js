@@ -92,6 +92,12 @@ const SCRIPTS = {
     { op: "set", sheet: 0, cell: "AB1", input: "월" },
     { op: "autoFill", sheet: 0, range: "AB1", to: "AB1:AB9" },
   ],
+  replace: [
+    { op: "replace", sheet: 0, find: "1", replace: "7" },
+    { op: "replace", sheet: 0, find: "SUM", replace: "sum", matchCase: true },
+    { op: "replace", find: "합계", replace: "총계", all: true },
+    { op: "replace", sheet: 0, find: "a", replace: "Ä", wholeCell: true },
+  ],
   sort: [
     { op: "sort", sheet: 0, range: "A1:H40", keys: [{ by: "B" }], header: true },
     { op: "sort", sheet: 0, range: "B3:F30", keys: [{ by: "C", desc: true }, { by: "B" }] },
