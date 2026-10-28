@@ -166,6 +166,25 @@ function Invoke-Edit($wb, $e) {
             $orient = if ($e.leftToRight) { 2 } else { 1 }
             $rg.Sort($keys[0], $orders[0], $keys[1], $M, $orders[1], $keys[2], $orders[2], $hdr, $M, [bool]$e.matchCase, $orient) | Out-Null
         }
+        "autoFill" {
+            # 자동 채우기 (Range.AutoFill, XlAutoFillType)
+            $types = @{ "default" = 0; "copy" = 1; "series" = 2; "formats" = 3; "values" = 4; "days" = 5; "weekdays" = 6; "months" = 7; "years" = 8 }
+            $t = if ($e.type) { $types[[string]$e.type] } else { 0 }
+            $ws.Range([string]$e.range).AutoFill($ws.Range([string]$e.to), $t) | Out-Null
+        }
+        "series" {
+            # 연속 데이터 (Range.DataSeries)
+            $rg = $ws.Range([string]$e.range)
+            $M = [Type]::Missing
+            $rowcol = if ($null -ne $e.rows) { if ($e.rows) { 1 } else { 2 } } elseif ($rg.Columns.Count -gt $rg.Rows.Count) { 1 } else { 2 }
+            $types = @{ "linear" = -4132; "growth" = 2; "date" = 3; "autoFill" = 4 }
+            $dates = @{ "day" = 1; "weekday" = 2; "month" = 3; "year" = 4 }
+            $t = if ($e.type) { $types[[string]$e.type] } else { -4132 }
+            $d = if ($e.date) { $dates[[string]$e.date] } else { 1 }
+            $step = if ($null -ne $e.step) { [double]$e.step } else { 1.0 }
+            $stop = if ($null -ne $e.stop) { [double]$e.stop } else { $M }
+            $rg.DataSeries($rowcol, $t, $d, $step, $stop, [bool]$e.trend) | Out-Null
+        }
         "sortFilter" {
             # 자동 필터의 정렬 (AutoFilter.Sort): 필터 범위의 그 열
             $af = $ws.AutoFilter

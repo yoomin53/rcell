@@ -84,6 +84,14 @@ const SCRIPTS = {
     { op: "renameSheet", sheet: 0, name: "편집됨" },
     { op: "moveSheet", sheet: 1, to: 0 },
   ],
+  fill: [
+    { op: "autoFill", sheet: 0, range: "A3:B4", to: "A3:B12" },
+    { op: "autoFill", sheet: 0, range: "C2", to: "C2:H2" },
+    { op: "autoFill", sheet: 0, range: "D6:D7", to: "D1:D7" },
+    { op: "series", sheet: 0, range: "AA1:AA8", step: 3 },
+    { op: "set", sheet: 0, cell: "AB1", input: "월" },
+    { op: "autoFill", sheet: 0, range: "AB1", to: "AB1:AB9" },
+  ],
   sort: [
     { op: "sort", sheet: 0, range: "A1:H40", keys: [{ by: "B" }], header: true },
     { op: "sort", sheet: 0, range: "B3:F30", keys: [{ by: "C", desc: true }, { by: "B" }] },

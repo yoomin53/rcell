@@ -25,6 +25,7 @@ mod cfpaste;
 pub mod clip;
 pub mod collate;
 mod collate_data;
+pub mod fill;
 mod filter;
 pub mod input;
 pub mod refs;
@@ -94,6 +95,10 @@ pub enum SheetSel {
 
 fn one() -> u32 {
     1
+}
+
+fn one_f() -> f64 {
+    1.0
 }
 
 /// 편집 명령 하나. 행은 1부터(한셀 화면과 같다), 열은 이름(`C`), 셀·범위는 A1 표기.
@@ -281,6 +286,37 @@ pub enum Edit {
         match_case: bool,
         #[serde(default)]
         left_to_right: bool,
+    },
+    /// 자동 채우기 (채우기 핸들 — 13절): `range` 씨앗으로 `to` 를 채운다
+    AutoFill {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        to: String,
+        /// `default` `copy` `series` `formats` `values` `days` `weekdays` `months` `years`
+        #[serde(default, rename = "type")]
+        kind: fill::FillType,
+    },
+    /// 연속 데이터 채우기 (연속 데이터 대화상자)
+    Series {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        /// 행 방향(오른쪽으로). 빼면 범위 모양으로 (열이 행보다 많으면 행 방향)
+        #[serde(default)]
+        rows: Option<bool>,
+        /// `linear` `growth` `date` `autoFill`
+        #[serde(default, rename = "type")]
+        kind: fill::SeriesType,
+        /// `day` `weekday` `month` `year`
+        #[serde(default)]
+        date: fill::DateUnit,
+        #[serde(default = "one_f")]
+        step: f64,
+        #[serde(default)]
+        stop: Option<f64>,
+        #[serde(default)]
+        trend: bool,
     },
     /// 자동 필터로 정렬 (필터 범위를 첫 행을 머리글로 두고 한 열로 정렬하고 `sortState` 를 남긴다)
     SortFilter {
@@ -600,6 +636,40 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
                 left_to_right: *left_to_right,
             };
             sort::sort(wb, i, parse_range(range)?, &opt)?;
+            Ok(i)
+        }
+        Edit::AutoFill {
+            sheet,
+            range,
+            to,
+            kind,
+        } => {
+            let i = si(wb, sheet)?;
+            fill::auto_fill(wb, i, parse_range(range)?, parse_range(to)?, *kind)?;
+            Ok(i)
+        }
+        Edit::Series {
+            sheet,
+            range,
+            rows,
+            kind,
+            date,
+            step,
+            stop,
+            trend,
+        } => {
+            let i = si(wb, sheet)?;
+            let rg = parse_range(range)?;
+            let by_rows = rows.unwrap_or(rg.end.col - rg.start.col > rg.end.row - rg.start.row);
+            let o = fill::SeriesOptions {
+                rows: by_rows,
+                kind: *kind,
+                date: *date,
+                step: *step,
+                stop: *stop,
+                trend: *trend,
+            };
+            fill::data_series(wb, i, rg, &o)?;
             Ok(i)
         }
         Edit::SortFilter {
