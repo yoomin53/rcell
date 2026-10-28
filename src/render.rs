@@ -28,6 +28,7 @@ pub mod page;
 mod paint;
 mod shape;
 mod sparkline;
+mod svgops;
 mod table;
 
 use std::collections::{HashMap, HashSet};

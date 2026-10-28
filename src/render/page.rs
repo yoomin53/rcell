@@ -32,9 +32,33 @@ pub trait TextMeasure {
     fn width(&self, font: &FontKey, size: f64, text: &str) -> f64;
 }
 
+/// 경로 조각 (장치 단위)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Seg {
+    Move(f64, f64),
+    Line(f64, f64),
+    Cubic(f64, f64, f64, f64, f64, f64),
+    Close,
+}
+
 /// 그리기 하나 (장치 단위, 위가 0). 색은 RGB
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
+    /// 경로: 채우기, 선 (굵기, 색, 점선)
+    Path {
+        segs: Vec<Seg>,
+        fill: Option<[u8; 3]>,
+        stroke: Option<(f64, [u8; 3], Vec<f64>)>,
+        even_odd: bool,
+    },
+    /// 그림 (PNG·JPEG 바이트)
+    Image {
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        data: std::sync::Arc<Vec<u8>>,
+    },
     Rect {
         x0: f64,
         y0: f64,
@@ -64,6 +88,8 @@ pub enum Op {
         strike: bool,
         /// 가로 장평 (1 = 그대로)
         stretch: f64,
+        /// 기준선 왼쪽 끝을 중심으로 돌린 각도 (도, 시계 방향 — 장치 좌표는 아래가 +)
+        angle: f64,
     },
     /// 사각형으로 자르기 시작 / 끝
     Clip {
@@ -628,6 +654,7 @@ pub fn page_ops(
                 underline,
                 strike,
                 stretch,
+                angle: 0.0,
             });
         }
         if need_clip {
@@ -703,6 +730,657 @@ pub fn page_ops(
         }
     }
     ops.push(Op::Unclip);
+    ops
+}
+
+// ---------------------------------------------------------------------------
+// 그리기 개체 (도형·글상자·그림·차트·그룹)
+// ---------------------------------------------------------------------------
+
+/// EMU → 화면 px
+const EMU: f64 = crate::units::EMU_PER_PX as f64;
+
+/// `html` 안의 맨 바깥 `<svg …>…</svg>` 조각들
+fn svg_blocks(html: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(off) = html[i..].find("<svg") {
+        let start = i + off;
+        let mut depth = 0;
+        let mut j = start;
+        let mut end = None;
+        while j < html.len() {
+            if html[j..].starts_with("<svg") {
+                depth += 1;
+                j += 4;
+            } else if html[j..].starts_with("</svg>") {
+                depth -= 1;
+                j += 6;
+                if depth == 0 {
+                    end = Some(j);
+                    break;
+                }
+            } else {
+                j += html[j..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
+        let Some(e) = end else { break };
+        out.push(&html[start..e]);
+        i = e;
+    }
+    out
+}
+
+/// 상자 (x, y, w, h — 장치 단위)를 도는 변환: 가운데를 중심으로 회전·뒤집기, 그다음 px → 장치 단위 (k 배)
+#[allow(clippy::too_many_arguments)]
+fn box_matrix(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    k: f64,
+    rot: f64,
+    flip_h: bool,
+    flip_v: bool,
+) -> [f64; 6] {
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let (s, c) = rot.to_radians().sin_cos();
+    let fx = if flip_h { -1.0 } else { 1.0 };
+    let fy = if flip_v { -1.0 } else { 1.0 };
+    // p(px) → (p·k − 반 크기)·뒤집기 → 회전 → + 가운데
+    let (a, b, cc, d) = (c * fx * k, s * fx * k, -s * fy * k, c * fy * k);
+    let (ox, oy) = (-w / 2.0 * fx, -h / 2.0 * fy);
+    let (ox, oy) = (c * ox - s * oy, s * ox + c * oy);
+    [a, b, cc, d, cx + ox, cy + oy]
+}
+
+/// 도형 글 조각
+struct TRun {
+    text: String,
+    key: FontKey,
+    size_pt: f64,
+    color: [u8; 3],
+    under: bool,
+}
+
+/// 도형 글 문단 (간격은 pt)
+struct TPara {
+    align: String,
+    size_pt: f64,
+    /// 줄 높이 (pt). None = 1.2 × 크기
+    line_pt: Option<f64>,
+    before_pt: f64,
+    after_pt: f64,
+    /// 왼쪽 들여쓰기 (화면 px)
+    indent_px: f64,
+    /// 첫 줄을 올리는 거리 (pt) — 화면 규칙과 같게 함초롬 글꼴의 첫 문단 0.12 em
+    lift_pt: f64,
+    runs: Vec<TRun>,
+}
+
+/// 도형 글 전체
+struct TBody {
+    anchor: String,
+    wrap: bool,
+    /// 안쪽 여백 왼·위·오른·아래 (EMU)
+    insets: [f64; 4],
+    paras: Vec<TPara>,
+}
+
+/// 모델의 글상자 글 (원본 XML 이 없을 때)
+fn model_body(t: &crate::model::TextBody, theme: &crate::theme::Theme) -> TBody {
+    let mut paras = Vec::new();
+    for p in &t.paragraphs {
+        let size_pt = p
+            .runs
+            .iter()
+            .filter_map(|r| r.size)
+            .max()
+            .map_or(11.0, |z| z as f64 / 100.0);
+        let runs = p
+            .runs
+            .iter()
+            .map(|run| TRun {
+                text: run.text.clone(),
+                key: FontKey {
+                    name: run
+                        .ea
+                        .as_deref()
+                        .or(run.latin.as_deref())
+                        .and_then(|n| super::draw::theme_font(n, theme))
+                        .unwrap_or("맑은 고딕")
+                        .to_string(),
+                    bold: run.bold.unwrap_or(false),
+                    italic: run.italic.unwrap_or(false),
+                },
+                size_pt: run.size.map_or(size_pt, |z| z as f64 / 100.0),
+                color: run
+                    .color
+                    .as_ref()
+                    .and_then(|c| super::draw::draw_color(c, theme))
+                    .and_then(|c| rgb(&c))
+                    .unwrap_or(BLACK),
+                under: run.underline.as_deref().is_some_and(|u| u != "none"),
+            })
+            .collect();
+        paras.push(TPara {
+            align: p.align.clone().unwrap_or_else(|| "l".into()),
+            size_pt,
+            line_pt: None,
+            before_pt: 0.0,
+            after_pt: 0.0,
+            indent_px: 0.0,
+            lift_pt: 0.0,
+            runs,
+        });
+    }
+    TBody {
+        anchor: t.anchor.clone().unwrap_or_else(|| "t".into()),
+        wrap: t.wrap.as_deref() != Some("none"),
+        insets: [
+            t.insets[0].unwrap_or(91440) as f64,
+            t.insets[1].unwrap_or(45720) as f64,
+            t.insets[2].unwrap_or(91440) as f64,
+            t.insets[3].unwrap_or(45720) as f64,
+        ],
+        paras,
+    }
+}
+
+/// 원본 txBody (화면 렌더러 [`super::draw`] 의 txbody_html 과 같은 규칙: 빈 문단, 줄·문단 간격, 글꼴 줄이기)
+fn raw_body(tx: &crate::xml::Element, theme: &crate::theme::Theme) -> TBody {
+    use super::shape::A;
+    let body = tx.child_ns(A, "bodyPr");
+    let ins = |n: &str, d: f64| body.and_then(|b| b.attr_f64(n)).unwrap_or(d);
+    let scale = body
+        .and_then(|b| b.child_ns(A, "normAutofit"))
+        .and_then(|a| a.attr_f64("fontScale"))
+        .map_or(1.0, |v| v / 100_000.0);
+    let lvl1 = tx
+        .child_ns(A, "lstStyle")
+        .and_then(|l| l.child_ns(A, "lvl1pPr"))
+        .and_then(|p| p.child_ns(A, "defRPr"));
+    let mut paras = Vec::new();
+    let mut first = true;
+    for p in tx.elements().filter(|e| e.is(A, "p")) {
+        let ppr = p.child_ns(A, "pPr");
+        let mut size: Option<f64> = None;
+        for r in p
+            .elements()
+            .filter(|e| e.is(A, "r") || e.is(A, "endParaRPr"))
+        {
+            let rp = if r.is(A, "r") {
+                r.child_ns(A, "rPr")
+            } else {
+                Some(r)
+            };
+            if let Some(z) = rp.and_then(|x| x.attr_f64("sz")) {
+                size = Some(size.map_or(z / 100.0, |s: f64| s.max(z / 100.0)));
+            }
+        }
+        let size = size.or_else(|| lvl1.and_then(|d| d.attr_f64("sz")).map(|v| v / 100.0));
+        let has_text = p
+            .elements()
+            .any(|e| e.is(A, "r") || e.is(A, "fld") || e.is(A, "br"));
+        if size.is_none() && !has_text {
+            continue;
+        }
+        let size = size.unwrap_or(11.0) * scale;
+        let lnspc = ppr.and_then(|x| x.child_ns(A, "lnSpc"));
+        let line_pt = match lnspc.and_then(|l| l.child_ns(A, "spcPct")) {
+            Some(pct) => Some(1.2 * pct.attr_f64("val").unwrap_or(100_000.0) / 100_000.0 * size),
+            None => lnspc
+                .and_then(|l| l.child_ns(A, "spcPts"))
+                .map(|pts| pts.attr_f64("val").unwrap_or(0.0) / 100.0),
+        };
+        let space = |n: &str| -> f64 {
+            let Some(sp) = ppr.and_then(|x| x.child_ns(A, n)) else {
+                return 0.0;
+            };
+            if let Some(p) = sp.child_ns(A, "spcPts") {
+                p.attr_f64("val").unwrap_or(0.0) / 100.0
+            } else if let Some(p) = sp.child_ns(A, "spcPct") {
+                p.attr_f64("val").unwrap_or(0.0) / 100_000.0 * size * 1.2
+            } else {
+                0.0
+            }
+        };
+        let face_of = |rp: Option<&crate::xml::Element>| {
+            rp.and_then(|r| r.child_ns(A, "ea").or_else(|| r.child_ns(A, "latin")))
+                .and_then(|f| f.attr("typeface"))
+                .and_then(|f| super::draw::theme_font(f, theme))
+                .map(str::to_string)
+        };
+        let para_face = face_of(
+            p.elements()
+                .find(|e| e.is(A, "r"))
+                .and_then(|r| r.child_ns(A, "rPr"))
+                .or(lvl1),
+        );
+        let lift = if first
+            && para_face
+                .as_deref()
+                .is_some_and(|f| f.starts_with("함초롬"))
+        {
+            0.12 * size
+        } else {
+            0.0
+        };
+        first = false;
+        let mut runs = Vec::new();
+        if let Some(bu) = ppr.and_then(|x| x.child_ns(A, "buChar")) {
+            runs.push(TRun {
+                text: format!("{} ", bu.attr("char").unwrap_or("•")),
+                key: FontKey {
+                    name: para_face.clone().unwrap_or_else(|| "맑은 고딕".into()),
+                    bold: false,
+                    italic: false,
+                },
+                size_pt: size,
+                color: BLACK,
+                under: false,
+            });
+        }
+        for r in p.elements() {
+            if r.is(A, "br") {
+                if let Some(last) = runs.last_mut() {
+                    last.text.push('\n');
+                }
+                continue;
+            }
+            if !(r.is(A, "r") || r.is(A, "fld")) {
+                continue;
+            }
+            let rp = r.child_ns(A, "rPr").or(lvl1);
+            let text = r.child_ns(A, "t").map(|t| t.text()).unwrap_or_default();
+            let color = rp
+                .and_then(|x| x.child_ns(A, "solidFill"))
+                .and_then(|f| f.elements().next())
+                .map(crate::parser::drawing::color)
+                .and_then(|c| super::draw::draw_color(&c, theme))
+                .and_then(|c| rgb(&c))
+                .unwrap_or(BLACK);
+            runs.push(TRun {
+                text,
+                key: FontKey {
+                    name: face_of(rp)
+                        .or_else(|| para_face.clone())
+                        .unwrap_or_else(|| "맑은 고딕".into()),
+                    bold: rp.and_then(|x| x.attr_bool("b")).unwrap_or(false),
+                    italic: rp.and_then(|x| x.attr_bool("i")).unwrap_or(false),
+                },
+                size_pt: rp
+                    .and_then(|x| x.attr_f64("sz"))
+                    .map_or(size, |z| z / 100.0 * scale),
+                color,
+                under: rp.and_then(|x| x.attr("u")).is_some_and(|u| u != "none"),
+            });
+        }
+        paras.push(TPara {
+            align: ppr.and_then(|x| x.attr("algn")).unwrap_or("l").to_string(),
+            size_pt: size,
+            line_pt,
+            before_pt: space("spcBef"),
+            after_pt: space("spcAft"),
+            indent_px: ppr
+                .and_then(|x| x.attr_f64("marL"))
+                .map_or(0.0, |v| v / EMU),
+            lift_pt: lift,
+            runs,
+        });
+    }
+    TBody {
+        anchor: body
+            .and_then(|b| b.attr("anchor"))
+            .unwrap_or("t")
+            .to_string(),
+        wrap: body.and_then(|b| b.attr("wrap")) != Some("none"),
+        insets: [
+            ins("lIns", 91440.0),
+            ins("tIns", 45720.0),
+            ins("rIns", 91440.0),
+            ins("bIns", 45720.0),
+        ],
+        paras,
+    }
+}
+
+/// 도형 글을 상자 (x, y, w, h — 장치 단위) 안에: 안쪽 여백, 줄 바꿈, 가로·세로 맞춤
+#[allow(clippy::too_many_arguments)]
+fn shape_text(
+    t: &TBody,
+    (x, y, w, h): (f64, f64, f64, f64),
+    k: f64,
+    zoom: f64,
+    measure: &dyn TextMeasure,
+    mono: bool,
+    ops: &mut Vec<Op>,
+) {
+    let dev_pt = 25.0 / 3.0 * zoom;
+    let ins = |v: f64| v / EMU * k;
+    let (bx0, by0, bx1, by1) = (
+        x + ins(t.insets[0]),
+        y + ins(t.insets[1]),
+        x + w - ins(t.insets[2]),
+        y + h - ins(t.insets[3]),
+    );
+    // (줄 조각들, 줄 높이, 맞춤, 들여쓰기, 줄 위 여백)
+    type Piece = (String, FontKey, f64, [u8; 3], bool);
+    let mut lines: Vec<(Vec<Piece>, f64, String, f64, f64)> = Vec::new();
+    for (pi, p) in t.paras.iter().enumerate() {
+        let lh = p.line_pt.unwrap_or(1.2 * p.size_pt) * dev_pt;
+        let indent = p.indent_px * k;
+        let avail = (bx1 - bx0 - indent).max(k);
+        let mut before = p.before_pt * dev_pt - p.lift_pt * dev_pt;
+        if pi > 0 {
+            before += t.paras[pi - 1].after_pt * dev_pt;
+        }
+        let mut cur: Vec<Piece> = Vec::new();
+        let mut used = 0.0;
+        let push_line =
+            |cur: &mut Vec<Piece>,
+             before: &mut f64,
+             lines: &mut Vec<(Vec<Piece>, f64, String, f64, f64)>| {
+                lines.push((std::mem::take(cur), lh, p.align.clone(), indent, *before));
+                *before = 0.0;
+            };
+        for run in &p.runs {
+            let size = (run.size_pt * dev_pt).max(1.0);
+            let color = bw(run.color, mono);
+            // 낱말(끝 공백 포함)·전각 글자 단위
+            let mut tokens: Vec<String> = Vec::new();
+            for ch in run.text.chars() {
+                if ch == '\n' || ch == '\u{b}' {
+                    tokens.push("\n".into());
+                    continue;
+                }
+                let wide = super::metrics::is_wide(ch);
+                match tokens.last_mut() {
+                    Some(tk)
+                        if !wide
+                            && tk != "\n"
+                            && !tk.ends_with(' ')
+                            && !tk.chars().any(super::metrics::is_wide) =>
+                    {
+                        tk.push(ch)
+                    }
+                    _ => tokens.push(ch.to_string()),
+                }
+            }
+            for tok in tokens {
+                if tok == "\n" {
+                    push_line(&mut cur, &mut before, &mut lines);
+                    used = 0.0;
+                    continue;
+                }
+                let tw = measure.width(&run.key, size, &tok);
+                if t.wrap && used + tw > avail && used > 0.0 {
+                    push_line(&mut cur, &mut before, &mut lines);
+                    used = 0.0;
+                    if tok.trim().is_empty() {
+                        continue;
+                    }
+                }
+                used += tw;
+                match cur.last_mut() {
+                    Some(last)
+                        if last.1 == run.key
+                            && last.2 == size
+                            && last.3 == color
+                            && last.4 == run.under =>
+                    {
+                        last.0.push_str(&tok)
+                    }
+                    _ => cur.push((tok, run.key.clone(), size, color, run.under)),
+                }
+            }
+        }
+        push_line(&mut cur, &mut before, &mut lines);
+    }
+    let total: f64 = lines.iter().map(|l| l.1 + l.4).sum();
+    let mut ly = match t.anchor.as_str() {
+        "ctr" => (by0 + by1) / 2.0 - total / 2.0,
+        "b" => by1 - total,
+        _ => by0,
+    };
+    for (pieces, lh, align, indent, before) in lines {
+        ly += before;
+        let widths: Vec<f64> = pieces
+            .iter()
+            .map(|(s, key, size, _, _)| measure.width(key, *size, s.trim_end()))
+            .collect();
+        let tw: f64 = widths.iter().sum();
+        let mut lx = match align.as_str() {
+            "ctr" => (bx0 + indent + bx1) / 2.0 - tw / 2.0,
+            "r" => bx1 - tw,
+            _ => bx0 + indent,
+        };
+        // 기준선: 줄 상자(1.2 em)의 반 줄 간격 + 오름 ≈ 위에서 1.02 em (맑은 고딕·함초롬)
+        let size_max = pieces.iter().map(|p| p.2).fold(0.0, f64::max);
+        let base = ly + (lh - 1.2 * size_max) / 2.0 + 1.02 * size_max;
+        for ((s, key, size, color, under), w) in pieces.into_iter().zip(widths) {
+            ops.push(Op::Text {
+                x: lx,
+                y: base,
+                size,
+                font: key,
+                color,
+                text: s,
+                underline: under,
+                strike: false,
+                stretch: 1.0,
+                angle: 0.0,
+            });
+            lx += w;
+        }
+        ly += lh;
+    }
+}
+
+/// 개체 하나 (그룹이면 자식들을 그룹 상자 안에)
+#[allow(clippy::too_many_arguments)]
+fn object_ops(
+    wb: &Workbook,
+    sh: &crate::model::Shape,
+    obj: Option<&crate::xml::Element>,
+    (x, y, w, h): (f64, f64, f64, f64),
+    frame: &PageFrame,
+    theme: &crate::theme::Theme,
+    measure: &dyn TextMeasure,
+    ops: &mut Vec<Op>,
+) {
+    use crate::model::ShapeKind;
+    let k = frame.px;
+    let (wp, hp) = (w / k, h / k);
+    let (rot, fh, fv) = sh.xfrm.as_ref().map_or((0.0, false, false), |xf| {
+        (
+            xf.rot as f64 / 60000.0,
+            xf.flip_h && sh.kind != ShapeKind::Connector,
+            xf.flip_v && sh.kind != ShapeKind::Connector,
+        )
+    });
+    let m = box_matrix(x, y, w, h, k, rot, fh, fv);
+    let mw = |key: &FontKey, size: f64, s: &str| measure.width(key, size, s);
+    match sh.kind {
+        ShapeKind::Group => {
+            let xf = obj
+                .and_then(super::shape::sp_pr)
+                .and_then(|p| p.child_ns(super::shape::A, "xfrm"));
+            let num = |e: Option<&crate::xml::Element>, n: &str| {
+                e.and_then(|e| e.attr(n))
+                    .and_then(|v| v.parse::<f64>().ok())
+            };
+            let ch_off = xf.and_then(|x| x.child_ns(super::shape::A, "chOff"));
+            let ch_ext = xf.and_then(|x| x.child_ns(super::shape::A, "chExt"));
+            let (cx0, cy0) = (
+                num(ch_off, "x").unwrap_or(0.0),
+                num(ch_off, "y").unwrap_or(0.0),
+            );
+            let (cw, chh) = (
+                num(ch_ext, "cx").filter(|v| *v > 0.0),
+                num(ch_ext, "cy").filter(|v| *v > 0.0),
+            );
+            let raw_kids: Vec<&crate::xml::Element> = obj
+                .map(|o| {
+                    o.elements()
+                        .filter(|c| {
+                            c.ns.as_deref() == Some(super::shape::XDR)
+                                && matches!(
+                                    c.name.as_str(),
+                                    "sp" | "cxnSp" | "pic" | "graphicFrame" | "grpSp"
+                                )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (i, kid) in sh.children.iter().enumerate().filter(|(_, c)| !c.hidden) {
+                let Some(kx) = kid.xfrm.as_ref() else {
+                    continue;
+                };
+                let sx = cw.map_or(k / EMU, |cw| w / cw);
+                let sy = chh.map_or(k / EMU, |ch| h / ch);
+                let r = (
+                    x + (kx.x as f64 - cx0) * sx,
+                    y + (kx.y as f64 - cy0) * sy,
+                    kx.cx as f64 * sx,
+                    kx.cy as f64 * sy,
+                );
+                object_ops(
+                    wb,
+                    kid,
+                    raw_kids.get(i).copied(),
+                    r,
+                    frame,
+                    theme,
+                    measure,
+                    ops,
+                );
+            }
+        }
+        ShapeKind::Picture => {
+            let img = sh
+                .target
+                .as_ref()
+                .and_then(|t| wb.raw_parts.iter().find(|p| &p.name == t));
+            if let Some(p) = img {
+                ops.push(Op::Image {
+                    x0: x,
+                    y0: y,
+                    x1: x + w,
+                    y1: y + h,
+                    data: std::sync::Arc::new(p.data.clone()),
+                });
+            }
+        }
+        ShapeKind::Chart => {
+            // 차트는 인쇄 크기의 px 로 다시 짠다 (한셀 PDF: 배율 34% 차트의 눈금 간격 수가 인쇄 크기를 따른다)
+            if let Some(ch) = &sh.chart {
+                let svg = crate::chart_svg::chart_svg(ch, w / 6.25, h / 6.25, theme, &|c| {
+                    super::draw::draw_color(c, theme)
+                });
+                let m = box_matrix(x, y, w, h, 6.25, rot, fh, fv);
+                super::svgops::svg_ops(&svg, m, &mw, ops);
+            }
+        }
+        _ => {
+            let html = super::draw::shape_body(wb, sh, obj, wp, hp, theme);
+            for b in svg_blocks(&html) {
+                super::svgops::svg_ops(b, m, &mw, ops);
+            }
+            let body = obj
+                .and_then(|o| o.child_ns(super::shape::XDR, "txBody"))
+                .map(|tx| raw_body(tx, theme))
+                .or_else(|| sh.text.as_ref().map(|t| model_body(t, theme)));
+            if let Some(t) = body {
+                shape_text(
+                    &t,
+                    (x, y, w, h),
+                    k,
+                    frame.zoom as f64 / 100.0,
+                    measure,
+                    frame.black_and_white,
+                    ops,
+                );
+            }
+        }
+    }
+}
+
+/// 페이지에 걸친 그리기 개체들을 그린다 (페이지 영역으로 자른다)
+pub fn objects_ops(
+    wb: &Workbook,
+    sheet: &Sheet,
+    frame: &PageFrame,
+    measure: &dyn TextMeasure,
+) -> Vec<Op> {
+    let mut ops = Vec::new();
+    if frame.rows.is_empty() || frame.cols.is_empty() || sheet.shapes.is_empty() {
+        return ops;
+    }
+    let theme = wb.theme.clone().unwrap_or_default();
+    let ax = Axis::new(&frame.cols, &frame.col_dev);
+    let ay = Axis::new(&frame.rows, &frame.row_dev);
+    let area = (
+        frame.cols.iter().map(|c| c.1).fold(f64::MAX, f64::min) - SHIFT,
+        frame.rows.iter().map(|r| r.1).fold(f64::MAX, f64::min) - SHIFT,
+        frame.cols.iter().map(|c| c.2).fold(f64::MIN, f64::max) - SHIFT,
+        frame.rows.iter().map(|r| r.2).fold(f64::MIN, f64::max) - SHIFT,
+    );
+    let k = frame.px;
+    let at = |m: &crate::model::Marker| -> Option<(f64, f64)> {
+        let x = ax.start(m.col)? + (m.col_off as f64 / EMU * k).min(ax.size(m.col)).max(0.0);
+        let y = ay.start(m.row)? + (m.row_off as f64 / EMU * k).min(ay.size(m.row)).max(0.0);
+        Some((x, y))
+    };
+    let mut inner = Vec::new();
+    for sh in sheet
+        .shapes
+        .iter()
+        .filter(|s| !s.hidden && s.prints_with_sheet != Some(false))
+    {
+        let a = &sh.anchor;
+        let first = match (a.kind, a.pos) {
+            (crate::model::AnchorKind::Absolute, Some((px, py))) => ax
+                .start(0)
+                .zip(ay.start(0))
+                .map(|(x0, y0)| (x0 + px as f64 / EMU * k, y0 + py as f64 / EMU * k)),
+            _ => at(&a.from),
+        };
+        let Some((x1, y1)) = first else { continue };
+        let second = match (&a.to, a.ext) {
+            (Some(t), _) if a.kind == crate::model::AnchorKind::TwoCell => at(t),
+            (_, Some((cx, cy))) => Some((x1 + cx as f64 / EMU * k, y1 + cy as f64 / EMU * k)),
+            (Some(t), None) => at(t),
+            _ => Some((x1, y1)),
+        };
+        let Some((x2, y2)) = second else { continue };
+        // 한셀 화면처럼 경계 1px 앞 (선 가운데)
+        let (x1, y1, x2, y2) = (x1 - SHIFT, y1 - SHIFT, x2 - SHIFT, y2 - SHIFT);
+        if x2 < area.0 || x1 > area.2 || y2 < area.1 || y1 > area.3 {
+            continue;
+        }
+        let obj = sh.raw.as_deref().and_then(super::shape::object_element);
+        object_ops(
+            wb,
+            sh,
+            obj.as_ref(),
+            (x1, y1, (x2 - x1).max(0.0), (y2 - y1).max(0.0)),
+            frame,
+            &theme,
+            measure,
+            &mut inner,
+        );
+    }
+    if !inner.is_empty() {
+        ops.push(Op::Clip {
+            x0: area.0,
+            y0: area.1,
+            x1: area.2,
+            y1: area.3,
+        });
+        ops.extend(inner);
+        ops.push(Op::Unclip);
+    }
     ops
 }
 

@@ -17,12 +17,13 @@ pub mod hf;
 mod paginate;
 pub mod paper;
 mod pdf;
+mod pdfimage;
 
 pub use font::FontDb;
 pub use paginate::{Area, Page, Scaling, Settings, SheetPrint, settings, sheet_print, used_end};
 
 use crate::model::Workbook;
-use crate::render::page::{ErrorPrint, FontKey, Op, PageFrame, TextMeasure, page_ops};
+use crate::render::page::{ErrorPrint, FontKey, Op, PageFrame, TextMeasure, objects_ops, page_ops};
 use pdf::{FontSet, PageSize};
 
 /// PDF 만들기 설정
@@ -186,6 +187,7 @@ fn hf_ops(
                 underline: r.underline,
                 strike: r.strike,
                 stretch: 1.0,
+                angle: 0.0,
             });
             x += w;
         }
@@ -230,6 +232,7 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
             fr.black_and_white = setup.is_some_and(|s| s.black_and_white);
             fr.draft = setup.is_some_and(|s| s.draft);
             let mut ops = page_ops(wb, sheet, &fr, &fonts);
+            ops.extend(objects_ops(wb, sheet, &fr, &fonts));
             // 머리글·바닥글
             if let Some(h) = hfd {
                 let no = first_no + pi as u32;

@@ -15,7 +15,30 @@ use pdf_writer::types::{CidFontType, FontFlags, SystemInfo, UnicodeCmap};
 use pdf_writer::{Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 
 use super::font::{FaceRef, FontDb, LoadedFace};
-use crate::render::page::{FontKey, Op, TextMeasure};
+use super::pdfimage::{PdfImage, decode};
+use crate::render::page::{FontKey, Op, Seg, TextMeasure};
+
+/// 페이지들이 쓴 그림 (같은 바이트는 한 번만)
+#[derive(Default)]
+struct Images {
+    list: Vec<PdfImage>,
+    by_ptr: HashMap<usize, Option<usize>>,
+}
+
+impl Images {
+    fn add(&mut self, data: &std::sync::Arc<Vec<u8>>) -> Option<usize> {
+        let key = std::sync::Arc::as_ptr(data) as usize;
+        if let Some(&k) = self.by_ptr.get(&key) {
+            return k;
+        }
+        let k = decode(data).map(|img| {
+            self.list.push(img);
+            self.list.len() - 1
+        });
+        self.by_ptr.insert(key, k);
+        k
+    }
+}
 
 /// 넣은 글꼴 하나 (얼굴 + 쓴 글리프)
 struct Embedded {
@@ -215,7 +238,7 @@ fn color(c: [u8; 3]) -> String {
 }
 
 /// 그리기 목록 → 내용 스트림 (장치 단위). 글꼴은 `/F{n}` (넣은 글꼴 번호), 표준 CID 글꼴은 `/FK`
-fn content(ops: &[Op], size: PageSize, fonts: &FontSet) -> (Vec<u8>, bool) {
+fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> (Vec<u8>, bool) {
     let mut s = String::new();
     let sx = size.width / (size.dev_w * 0.12);
     let sy = size.height / (size.dev_h * 0.12);
@@ -286,6 +309,69 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet) -> (Vec<u8>, bool) {
                 );
             }
             Op::Unclip => s.push_str("Q\n"),
+            Op::Path {
+                segs,
+                fill,
+                stroke,
+                even_odd,
+            } => {
+                let mut d = String::new();
+                for sg in segs {
+                    let _ = match *sg {
+                        Seg::Move(x, y) => write!(d, "{} {} m ", num(px(x)), num(py(y))),
+                        Seg::Line(x, y) => write!(d, "{} {} l ", num(px(x)), num(py(y))),
+                        Seg::Cubic(x1, y1, x2, y2, x, y) => write!(
+                            d,
+                            "{} {} {} {} {} {} c ",
+                            num(px(x1)),
+                            num(py(y1)),
+                            num(px(x2)),
+                            num(py(y2)),
+                            num(px(x)),
+                            num(py(y))
+                        ),
+                        Seg::Close => write!(d, "h "),
+                    };
+                }
+                let mut pre = String::new();
+                if let Some(c) = fill {
+                    let _ = write!(pre, "{} rg ", color(*c));
+                }
+                if let Some((w, c, dash)) = stroke {
+                    let dd = dash
+                        .iter()
+                        .map(|v| num(v * 0.12))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let _ = write!(pre, "{} RG {} w [{dd}] 0 d ", color(*c), num(w * 0.12));
+                }
+                let op = match (fill.is_some(), stroke.is_some(), even_odd) {
+                    (true, true, false) => "B",
+                    (true, true, true) => "B*",
+                    (true, false, false) => "f",
+                    (true, false, true) => "f*",
+                    _ => "S",
+                };
+                let _ = writeln!(s, "{pre}{d}{op}");
+            }
+            Op::Image {
+                x0,
+                y0,
+                x1,
+                y1,
+                data,
+            } => {
+                if let Some(k) = images.add(data) {
+                    let _ = writeln!(
+                        s,
+                        "q {} 0 0 {} {} {} cm /Im{k} Do Q",
+                        num((x1 - x0) * 0.12 * sx),
+                        num((y1 - y0) * 0.12 * sy),
+                        num(px(*x0)),
+                        num(py(*y1))
+                    );
+                }
+            }
             Op::Text {
                 x,
                 y,
@@ -296,9 +382,12 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet) -> (Vec<u8>, bool) {
                 underline,
                 strike,
                 stretch,
+                angle,
             } => {
                 let runs = fonts.runs(font, text, true);
                 let mut cx = *x;
+                let mut cy = *y;
+                let (ca, sa) = (angle.to_radians().cos(), angle.to_radians().sin());
                 let _ = writeln!(
                     s,
                     "q {} 0 0 {} 0 {} cm {} rg {} RG",
@@ -331,16 +420,22 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet) -> (Vec<u8>, bool) {
                     } else {
                         String::new()
                     };
+                    // 글리프 공간(위가 +) → 장치(아래가 +): 기준선 방향 (cos, sin), 위 방향 (sin, −cos)
                     let _ = writeln!(
                         s,
-                        "BT /{name} {} Tf {tz}{mode} Tr {} w 1 0 {} -1 {} {} Tm <{hex}> Tj ET",
+                        "BT /{name} {} Tf {tz}{mode} Tr {} w {} {} {} {} {} {} Tm <{hex}> Tj ET",
                         num(*sz),
                         num(lw),
-                        num(shear),
+                        num(ca),
+                        num(sa),
+                        num(sa + shear * ca),
+                        num(-ca + shear * sa),
                         num(cx),
-                        num(*y)
+                        num(cy)
                     );
-                    cx += r.advance * sz / 1000.0 * stretch;
+                    let adv = r.advance * sz / 1000.0 * stretch;
+                    cx += adv * ca;
+                    cy += adv * sa;
                 }
                 let lw = (sz / 18.0).max(3.0);
                 if *underline {
@@ -408,14 +503,20 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
     // 내용 먼저 (글리프를 모은다)
     let mut contents = Vec::new();
     let mut any_plain = false;
+    let mut images = Images::default();
     for (size, ops) in pages {
-        let (c, plain) = content(ops, *size, fonts);
+        let (c, plain) = content(ops, *size, fonts, &mut images);
         any_plain |= plain;
         contents.push(c);
     }
     let st = fonts.state.borrow();
     let font_refs: Vec<Ref> = st.fonts.iter().map(|_| alloc()).collect();
     let plain_ref = alloc();
+    let image_refs: Vec<(Ref, Option<Ref>)> = images
+        .list
+        .iter()
+        .map(|im| (alloc(), im.alpha.as_ref().map(|_| alloc())))
+        .collect();
     let page_refs: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
     let content_refs: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
 
@@ -440,6 +541,13 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
             f.pair(Name(b"FK"), plain_ref);
         }
         f.finish();
+        if !image_refs.is_empty() {
+            let mut x = res.x_objects();
+            for (k, (r, _)) in image_refs.iter().enumerate() {
+                x.pair(Name(format!("Im{k}").as_bytes()), *r);
+            }
+            x.finish();
+        }
         res.finish();
         page.finish();
         let z = deflate(&contents[i]);
@@ -514,6 +622,44 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
         }
         let buf = cmap.finish();
         pdf.cmap(tu, buf.as_slice());
+    }
+    // 그림
+    for (im, (r, mask)) in images.list.iter().zip(&image_refs) {
+        let z;
+        let data: &[u8] = if im.dct {
+            &im.data
+        } else {
+            z = deflate(&im.data);
+            &z
+        };
+        let mut x = pdf.image_xobject(*r, data);
+        x.filter(if im.dct {
+            Filter::DctDecode
+        } else {
+            Filter::FlateDecode
+        });
+        x.width(im.width as i32);
+        x.height(im.height as i32);
+        x.bits_per_component(8);
+        if im.components == 1 {
+            x.color_space().device_gray();
+        } else {
+            x.color_space().device_rgb();
+        }
+        if let Some(m) = mask {
+            x.s_mask(*m);
+        }
+        x.finish();
+        if let (Some(m), Some(a)) = (mask, &im.alpha) {
+            let z = deflate(a);
+            let mut x = pdf.image_xobject(*m, &z);
+            x.filter(Filter::FlateDecode);
+            x.width(im.width as i32);
+            x.height(im.height as i32);
+            x.bits_per_component(8);
+            x.color_space().device_gray();
+            x.finish();
+        }
     }
     // 글꼴 파일이 없는 글자: 한국어 표준 CID 글꼴 (보는 프로그램의 대체 글꼴)
     if any_plain {
