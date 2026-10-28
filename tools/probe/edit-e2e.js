@@ -107,6 +107,13 @@ const SCRIPTS = {
     { op: "hideCols", sheet: 0, col: "F" },
     { op: "tabColor", sheet: 0, color: "00B050" },
   ],
+  paste: [
+    { op: "pasteSpecial", sheet: 0, from: "A1:D6", to: "AF1", paste: "values" },
+    { op: "pasteSpecial", sheet: 0, from: "A1:D6", to: "AK1", paste: "formats" },
+    { op: "pasteSpecial", sheet: 0, from: "A1:D6", to: "AP1", paste: "all", transpose: true },
+    { op: "pasteSpecial", sheet: 0, from: "B2:C5", to: "AF10", paste: "formulas", skipBlanks: true },
+    { op: "pasteSpecial", sheet: 0, from: "C3:D4", to: "AF1", paste: "values", operation: "add" },
+  ],
   sort: [
     { op: "sort", sheet: 0, range: "A1:H40", keys: [{ by: "B" }], header: true },
     { op: "sort", sheet: 0, range: "B3:F30", keys: [{ by: "C", desc: true }, { by: "B" }] },

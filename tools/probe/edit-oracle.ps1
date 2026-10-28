@@ -198,6 +198,17 @@ function Invoke-Edit($wb, $e) {
                 [void]$rg.Replace([string]$e.find, [string]$e.replace, $look, 1, [bool]$e.matchCase)
             }
         }
+        "pasteSpecial" {
+            # 선택하여 붙이기 (Copy → PasteSpecial). paste: all values formats formulas comments validation
+            # allExceptBorders formulasAndNumberFormats valuesAndNumberFormats, operation: none add subtract multiply divide
+            $kinds = @{ "all" = -4104; "values" = -4163; "formats" = -4122; "formulas" = -4123; "comments" = -4144; "validation" = 6; "allExceptBorders" = 7; "columnWidths" = 8; "formulasAndNumberFormats" = 11; "valuesAndNumberFormats" = 12 }
+            $ops = @{ "none" = -4142; "add" = 2; "subtract" = 3; "multiply" = 4; "divide" = 5 }
+            $dst = Get-Sheet $wb $(if ($e.toSheet) { $e.toSheet } else { $e.sheet })
+            $k = if ($e.paste) { $kinds[[string]$e.paste] } else { -4104 }
+            $o = if ($e.operation) { $ops[[string]$e.operation] } else { -4142 }
+            [void]$ws.Range([string]$e.from).Copy()
+            [void]$dst.Range([string]$e.to).PasteSpecial($k, $o, [bool]$e.skipBlanks, [bool]$e.transpose)
+        }
         "insertCells" {
             # 셀 삽입 (아래로 -4121, 오른쪽으로 -4161)
             $sh = if ([string]$e.shift -eq "right") { -4161 } else { -4121 }

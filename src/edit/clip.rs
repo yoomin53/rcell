@@ -51,6 +51,25 @@ pub struct Clip {
     pub dvs: Vec<(Vec<Rect>, DataValidation)>,
     /// 유효성마다 원본 시트의 개체 (같은 시트에 붙이면 그 개체에 범위를 더한다 — 한셀)
     pub dv_src: Vec<(usize, DataValidation)>,
+    /// 범위 안의 메모 (붙이면 함께 간다 — 한셀)
+    pub comments: Vec<ClipComment>,
+}
+
+/// 복사한 메모 하나
+#[derive(Debug, Clone)]
+pub struct ClipComment {
+    pub dr: u32,
+    pub dc: u32,
+    pub comment: crate::model::Comment,
+}
+
+impl PartialEq for ClipComment {
+    fn eq(&self, o: &Self) -> bool {
+        self.dr == o.dr
+            && self.dc == o.dc
+            && self.comment.author == o.comment.author
+            && self.comment.text.text == o.comment.text.text
+    }
 }
 
 fn err(m: &str) -> crate::Error {
@@ -179,6 +198,15 @@ pub fn copy(wb: &Workbook, si: usize, range: CellRange) -> crate::Result<Clip> {
         }
         clip.dvs.push((cut, m));
         clip.dv_src.push((k, dv.clone()));
+    }
+    for cm in &sheet.comments {
+        if range.contains(cm.cell) {
+            clip.comments.push(ClipComment {
+                dr: cm.cell.row - r0,
+                dc: cm.cell.col - c0,
+                comment: cm.clone(),
+            });
+        }
     }
     // 병합: 범위에 걸친 것은 범위 안 몫만 (한셀 — B4:I4 에 걸친 A1:D6 를 붙이면 B4:D4 몫이 병합된다)
     for m in &sheet.merges {
@@ -465,6 +493,50 @@ pub fn paste_with(
             .filter_map(|c| c.formula.as_ref().map(|f| f.text.clone()))
             .collect();
         localize_names(wb, si, &texts);
+    }
+    // 메모 (채우기는 빼고): 붙인 칸의 메모를 바꾼다. 상자는 칸이 옮겨진 메모처럼 다시 둔다
+    if !filling && !clip.comments.is_empty() {
+        let geo = super::structure::comment_geometry(wb, si, total_r.max(total_c) + 8)
+            .map(|(g, _)| g)
+            .unwrap_or_else(|| {
+                crate::render::sheet_geometry(wb, &wb.sheets[si], area.2 + 64, area.3 + 32)
+            });
+        let sheet = &mut wb.sheets[si];
+        let inside =
+            |r: CellRef| r.row >= area.0 && r.row <= area.2 && r.col >= area.1 && r.col <= area.3;
+        sheet.comments.retain(|c| !inside(c.cell));
+        let mut next = sheet
+            .comments
+            .iter()
+            .filter_map(|c| {
+                c.shape
+                    .as_ref()
+                    .and_then(|s| s.name.as_deref())
+                    .and_then(|n| n.strip_prefix("메모 "))
+                    .and_then(|n| n.parse::<u32>().ok())
+            })
+            .max()
+            .unwrap_or(0);
+        for i in 0..reps_r {
+            for j in 0..reps_c {
+                for cc in &clip.comments {
+                    let to = CellRef {
+                        row: at.row + i * clip.rows + cc.dr,
+                        col: at.col + j * clip.cols + cc.dc,
+                    };
+                    let mut c = cc.comment.clone();
+                    c.cell = to;
+                    if let Some(s) = &mut c.shape {
+                        s.anchor = super::structure::moved_comment_box(&geo, &geo, s.anchor, to);
+                        if s.name.is_some() {
+                            next += 1;
+                            s.name = Some(format!("메모 {next}"));
+                        }
+                    }
+                    sheet.comments.push(c);
+                }
+            }
+        }
     }
     let sheet = &mut wb.sheets[si];
     sheet.merges.retain(|m| !overlaps(rect(m), area));

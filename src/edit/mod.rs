@@ -32,6 +32,7 @@ pub mod find;
 pub mod input;
 pub mod refs;
 pub mod sort;
+pub mod special;
 pub mod structure;
 pub mod style;
 pub mod view;
@@ -345,6 +346,24 @@ pub enum Edit {
         all: bool,
         #[serde(default)]
         range: Option<String>,
+    },
+    /// 선택하여 붙이기 (16절): `paste` = `all` `values` `formats` `formulas` `allExceptBorders`
+    /// `formulasAndNumberFormats` `valuesAndNumberFormats`, `operation` = `none` `add` `subtract` `multiply` `divide`
+    PasteSpecial {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        from: String,
+        to: String,
+        #[serde(default)]
+        to_sheet: Option<SheetSel>,
+        #[serde(default)]
+        paste: special::PasteWhat,
+        #[serde(default)]
+        operation: special::PasteOp,
+        #[serde(default)]
+        skip_blanks: bool,
+        #[serde(default)]
+        transpose: bool,
     },
     /// 셀 삽입 (`shift`: `down` 아래로 밀기, `right` 오른쪽으로 밀기)
     InsertCells {
@@ -874,6 +893,30 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             let c = parse_col(col)?;
             view::group_cols(wb, i, c, c + count.max(&1) - 1, false)?;
             Ok(i)
+        }
+        Edit::PasteSpecial {
+            sheet,
+            from,
+            to,
+            to_sheet,
+            paste,
+            operation,
+            skip_blanks,
+            transpose,
+        } => {
+            let i = si(wb, sheet)?;
+            let d = match to_sheet {
+                Some(s) => sheet_index(wb, Some(s))?,
+                None => i,
+            };
+            let o = special::PasteOptions {
+                what: *paste,
+                op: *operation,
+                skip_blanks: *skip_blanks,
+                transpose: *transpose,
+            };
+            special::paste_special(wb, i, parse_range(from)?, d, parse_range(to)?, &o)?;
+            Ok(d)
         }
         Edit::InsertCells {
             sheet,
