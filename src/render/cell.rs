@@ -366,7 +366,40 @@ pub(super) fn cell_content(
     if v.rotation != 0 {
         return out + &rotated(v, &fcss, &body, bw, bh, line);
     }
-    // 여러 줄 (줄 바꿈·양쪽 맞춤·균등 분할)
+    // 균등 분할 글: 들여쓰기를 양쪽에 두고, 넘치면 줄을 바꿔 줄마다 글자 사이(공백도 한 글자)를 고르게 벌린다
+    // (한셀 화면 — 들여쓰기 실험). 한 글자 줄은 가운데
+    if v.h == HAlign::Distributed && matches!(v.value, CellValue::Text(_)) && !v.shrink {
+        let ind = v.indent as f64 * INDENT_PX;
+        let avail = (bw - PAD - PAD_R - 2.0 * ind).max(1.0);
+        let k = ratio.unwrap_or(1.0);
+        let jc = match v.v {
+            VAlign::Top => "flex-start",
+            VAlign::Center => "center",
+            VAlign::Bottom => "flex-end",
+        };
+        let mut inner = String::new();
+        for l in super::layout::wrap_split(&text, avail / k, &v.m) {
+            let n = l.chars().count();
+            let tw = v.m.text_width(&l) * k;
+            let (gap, lead) = match n {
+                0 => (0.0, 0.0),
+                1 => (0.0, ((avail - tw) / 2.0).max(0.0)),
+                _ => (((avail - tw) / (n - 1) as f64).max(0.0), 0.0),
+            };
+            let _ = write!(
+                inner,
+                "<div style=\"padding-left:{:.1}px;letter-spacing:{gap:.2}px\">{}</div>",
+                PAD + ind + lead,
+                scaled(esc(&l), "left")
+            );
+        }
+        let _ = write!(
+            out,
+            "<div class=\"rc-t rc-w\" style=\"{fcss}width:{bw:.0}px;height:{bh:.0}px;justify-content:{jc};padding:0\">{inner}</div>"
+        );
+        return out;
+    }
+    // 여러 줄 (줄 바꿈·양쪽 맞춤)
     if v.wrap {
         let ta = match v.h {
             HAlign::Right => "right",

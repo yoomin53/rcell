@@ -80,6 +80,23 @@ impl Default for Options {
 /// 들여쓰기 한 단계 (px): 한셀 1134 HWPUNIT = 4mm (hs:parashape leftMargin)
 pub(crate) const INDENT_PX: f64 = 1134.0 / 7200.0 * 96.0;
 
+/// 들여쓰기 단계: `indent` 가 없으면 문단 모양 여백 (한셀은 균등 분할의 들여쓰기를 `hs:parashape` 의
+/// leftMargin·rightMargin 에만 적는다 — 들여쓰기 실험)
+pub(crate) fn indent_level(xf: Option<&Xf>) -> u32 {
+    let a = xf.and_then(|x| x.alignment.as_ref());
+    if let Some(i) = a.and_then(|a| a.indent) {
+        return i;
+    }
+    if a.and_then(|a| a.horizontal.as_deref()) != Some("distributed") {
+        return 0;
+    }
+    xf.and_then(|x| x.hancom.as_ref())
+        .and_then(|h| h.parashape.as_ref())
+        .and_then(|p| p.left_margin)
+        .filter(|&m| m > 0)
+        .map_or(0, |m| (m as f64 / 1134.0).round() as u32)
+}
+
 /// 칸에 들어가는 숫자의 폭 (px): 칸 너비 − 4 (좁은 칸 숫자 대조 실험)
 const NUM_SLACK: f64 = 4.0;
 
@@ -445,10 +462,13 @@ pub fn sheet_table_grid(
         let shown = crate::numfmt::format(&value, &code, wb.date1904);
         // 양쪽 맞춤·균등 분할은 줄을 바꾼다
         let wrap = align.is_some_and(|a| a.wrap_text)
-            || (matches!(h, HAlign::Justify | HAlign::Distributed)
+            || ((matches!(h, HAlign::Justify | HAlign::Distributed)
+                || align.is_some_and(|a| {
+                    matches!(a.vertical.as_deref(), Some("justify" | "distributed"))
+                }))
                 && matches!(value, CellValue::Text(_)));
         let shrink = align.is_some_and(|a| a.shrink_to_fit);
-        let indent = align.and_then(|a| a.indent).unwrap_or(0);
+        let indent = indent_level(xf);
         // 숫자: 일반 서식은 칸에 맞춰 줄이고, 다른 서식은 넘치면 # 로 채운다
         let avail = w_px as f64 - NUM_SLACK - indent as f64 * INDENT_PX;
         let text = if shown.overflow {
