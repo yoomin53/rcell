@@ -909,6 +909,9 @@ pub struct Chart {
     /// 그림 영역의 `c:spPr`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plot_sp_pr: Option<ChartShapeProps>,
+    /// 그림 영역의 `c:dTable` (데이터 표)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub d_table: Option<ChartDataTable>,
     /// 범례의 위치 밖 값. `legend` 가 있을 때만 쓴다
     #[serde(skip_serializing_if = "ChartLegendProps::is_empty")]
     pub legend_props: ChartLegendProps,
@@ -1015,6 +1018,93 @@ pub struct ChartSeries {
     /// `c:smooth` (꺾은선·분산형 계열)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smooth: Option<bool>,
+    /// `c:trendline` (막대·꺾은선·영역·분산형·거품형 계열)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub trendlines: Vec<ChartTrendline>,
+    /// `c:errBars` (분산형·거품형은 x·y 둘까지)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub err_bars: Vec<ChartErrBars>,
+}
+
+/// 추세선 (`c:trendline`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartTrendline {
+    /// `c:name` (범례 글. 없으면 "선형 (계열 이름)" 꼴)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+    /// `c:trendlineType` (`exp`/`linear`/`log`/`movingAvg`/`poly`/`power`)
+    pub kind: String,
+    /// `c:order` (다항식 차수)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
+    /// `c:period` (이동 평균 구간)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forward: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backward: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intercept: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disp_r_sqr: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disp_eq: Option<bool>,
+}
+
+/// 오차 막대 (`c:errBars`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartErrBars {
+    /// `c:errDir` (`x`/`y`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// `c:errBarType` (`both`/`plus`/`minus`)
+    pub bar_type: String,
+    /// `c:errValType` (`cust`/`fixedVal`/`percentage`/`stdDev`/`stdErr`)
+    pub val_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_end_cap: Option<bool>,
+    /// 사용자 지정 값 (`c:plus`·`c:minus`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plus: Option<ChartData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minus: Option<ChartData>,
+    /// `c:val`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+}
+
+/// 데이터 표 (`c:dTable`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartDataTable {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_horz_border: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_vert_border: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_outline: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_keys: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sp_pr: Option<ChartShapeProps>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_pr: Option<ChartRich>,
+}
+
+/// 양선·음선 (`c:upDownBars` — 주식형 시가·종가 막대)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ChartUpDownBars {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gap_width: Option<u32>,
+    /// `c:upBars` (있으면 Some — 서식이 없어도)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub up: Option<ChartShapeProps>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub down: Option<ChartShapeProps>,
 }
 
 /// 그림 영역의 둘째 이후 차트 하나 (`c:barChart` …). 첫 차트는 [`Chart`] 의 앞 필드와 `group` 이다.
@@ -1072,6 +1162,9 @@ pub struct ChartGroupProps {
     pub drop_lines: Option<ChartLines>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hi_low_lines: Option<ChartLines>,
+    /// `c:upDownBars` (꺾은선·주식형)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub up_down_bars: Option<ChartUpDownBars>,
     /// `c:gapDepth` (3차원, %)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gap_depth: Option<u32>,

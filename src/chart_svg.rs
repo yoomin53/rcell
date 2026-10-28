@@ -18,8 +18,9 @@
 use std::fmt::Write as _;
 
 use crate::model::{
-    Chart, ChartAxis, ChartDataLabels, ChartFill, ChartFont, ChartGroupProps, ChartLayout,
-    ChartLine, ChartMarker, ChartRich, ChartSeries, ChartShapeProps, DrawColor,
+    Chart, ChartAxis, ChartDataLabels, ChartErrBars, ChartFill, ChartFont, ChartGroupProps,
+    ChartLayout, ChartLine, ChartMarker, ChartRich, ChartSeries, ChartShapeProps, ChartTrendline,
+    DrawColor,
 };
 use crate::theme::Theme;
 use crate::writer::esc;
@@ -797,6 +798,26 @@ fn legend_items(ch: &Chart, groups: &[Group], cx: &Ctx, pie_like: bool) -> Vec<L
             items.push(item);
         }
     }
+    // 추세선: 계열 다음에 (점선 표지 — 한셀 화면: "선형 (계열1)")
+    for g in groups {
+        for (i, s) in g.series.iter().enumerate() {
+            for t in &s.trendlines {
+                let color = series_color(s, g.offset + i, cx);
+                let mut st = cx
+                    .line_of(t.sp_pr.as_ref(), Some((&color, 1.5)))
+                    .unwrap_or_else(|| Stroke::new(&color, 1.5));
+                if st.dash.is_none() {
+                    st.dash = Some("1.5 1.5".into());
+                }
+                items.push(LegendItem {
+                    name: trend_name(t, s.name.as_deref().unwrap_or("")),
+                    fill: None,
+                    stroke: Some(st),
+                    marker: None,
+                });
+            }
+        }
+    }
     // 범례는 보이는 차례대로 (한셀 화면, 차트 종류 실험): 누적(세로 막대·꺾은선·영역)은 위가 먼저라 거꾸로,
     // 가로 막대는 누적이 아니면 거꾸로 (첫 계열이 아래), 가로 누적 막대는 그대로
     let reversed = groups.len() == 1
@@ -1446,6 +1467,10 @@ fn value_range(groups: &[&Group]) -> (f64, f64, bool) {
                     lo = lo.min(*v);
                     hi = hi.max(*v);
                 }
+                if let Some((a, b)) = err_extent(s, false) {
+                    lo = lo.min(a);
+                    hi = hi.max(b);
+                }
                 if g.kind == "stock" || g.props.hi_low_lines.is_some() {
                     continue;
                 }
@@ -1690,6 +1715,53 @@ fn draw_axis_chart(
             }
         }
     };
+    // 데이터 표 (한셀 화면 — 데이터 표 실험): 그림 영역 아래가 표 (머리글 줄 = 항목 레이블, 계열마다 한 줄,
+    // 줄 높이 9pt 의 2.46 배 = 29.5px), 표 아래는 틀에서 8px. 왼쪽 칸(표지 + 계열 이름)이 값 레이블 자리보다 넓으면
+    // 그림 영역 왼쪽이 그만큼 안으로
+    let dtable = ch.d_table.as_ref().filter(|_| {
+        !horizontal
+            && !xy
+            && !legacy
+            && ch
+                .plot_layout
+                .as_ref()
+                .and_then(|l| l.manual.as_ref())
+                .is_none()
+    });
+    let dt_rows = groups.iter().map(|g| g.series.len()).sum::<usize>();
+    let dt_row_h = (cat_font.px() * 2.46).round();
+    let dt_key_w = if let Some(d) = dtable {
+        let names = groups
+            .iter()
+            .flat_map(|g| {
+                g.series
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, s)| (g.offset + i, s))
+            })
+            .map(|(k, s)| {
+                cat_font.width(&s.name.clone().unwrap_or_else(|| format!("계열{}", k + 1)))
+            })
+            .fold(0.0, f64::max);
+        let key = if d.show_keys != Some(false) {
+            17.0
+        } else {
+            0.0
+        };
+        6.0 + key + names + 4.0
+    } else {
+        0.0
+    };
+    if dtable.is_some() {
+        let table_h = dt_row_h * (dt_rows + 1) as f64;
+        let bottom = h - 8.0 - table_h;
+        plot.h = (bottom - plot.y).max(10.0);
+        let left = 7.0 + dt_key_w;
+        if plot.x < left {
+            plot.w -= left - plot.x;
+            plot.x = left;
+        }
+    }
     // 가로 막대·분산형: 값 레이블이 눈금 가운데에 오므로 마지막 레이블의 반을 오른쪽에 남긴다
     if (horizontal || xy)
         && !legacy
@@ -1767,6 +1839,10 @@ fn draw_axis_chart(
                 for x in x_values(s) {
                     lo = lo.min(x);
                     hi = hi.max(x);
+                }
+                if let Some((a, b)) = err_extent(s, true) {
+                    lo = lo.min(a);
+                    hi = hi.max(b);
                 }
             }
         }
@@ -1930,6 +2006,106 @@ fn draw_axis_chart(
                 }
             }
             _ => draw_lines(out, g, cx, sc, n_cat, &cat_mid, &vpos, false),
+        }
+        if g.kind == "stock" || g.props.up_down_bars.is_some() {
+            draw_up_down(out, g, cx, sc, n_cat, band, &cat_mid, &vpos);
+        }
+    }
+    // 오차 막대·추세선 (계열 위에)
+    for g in groups {
+        let sc = if secondary.iter().any(|s| std::ptr::eq(*s, g)) {
+            sec_scale.as_ref().unwrap_or(&scale)
+        } else {
+            &scale
+        };
+        if g.three_d {
+            continue;
+        }
+        let stacked = matches!(g.grouping, "stacked" | "percentStacked") && g.kind != "scatter";
+        let mut acc = vec![0.0; n_cat];
+        for (i, s) in g.series.iter().enumerate() {
+            if s.err_bars.is_empty() && s.trendlines.is_empty() {
+                if stacked {
+                    for (k, a) in acc.iter_mut().enumerate() {
+                        *a += s.values.get(k).copied().flatten().unwrap_or(0.0);
+                    }
+                }
+                continue;
+            }
+            let color = series_color(s, g.offset + i, cx);
+            if matches!(g.kind, "scatter" | "bubble") {
+                let Some(xs) = &xscale else { continue };
+                let xpos = |v: f64| plot.x + xs.t(v) * plot.w;
+                let xv = x_values(s);
+                let pts: Vec<Option<(f64, f64, f64)>> = s
+                    .values
+                    .iter()
+                    .enumerate()
+                    .map(|(k, v)| Some((xpos(*xv.get(k)?), (*v)?, (*v)?)))
+                    .collect();
+                draw_err_bars(out, s, cx, &pts, &|v| vpos(sc, v), true, false);
+                let xpts: Vec<Option<(f64, f64, f64)>> = s
+                    .values
+                    .iter()
+                    .enumerate()
+                    .map(|(k, v)| {
+                        let x = *xv.get(k)?;
+                        Some((vpos(sc, (*v)?), x, x))
+                    })
+                    .collect();
+                draw_err_bars(out, s, cx, &xpts, &xpos, false, true);
+                let (fx, fy): (Vec<f64>, Vec<f64>) = s
+                    .values
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(k, v)| Some((*xv.get(k)?, (*v)?)))
+                    .unzip();
+                draw_trendlines(
+                    out,
+                    s,
+                    &color,
+                    cx,
+                    &fx,
+                    &fy,
+                    &|x, v| (xpos(x), vpos(sc, v)),
+                    base,
+                );
+                continue;
+            }
+            let pts: Vec<Option<(f64, f64, f64)>> = (0..n_cat)
+                .map(|k| {
+                    let v = s.values.get(k).copied().flatten()?;
+                    let top = if stacked { acc[k] + v } else { v };
+                    let at = if g.kind == "bar" {
+                        bar_center(g, i, k, band, &cat_mid, horizontal)
+                    } else {
+                        cat_mid(k)
+                    };
+                    Some((at, top, v))
+                })
+                .collect();
+            if stacked {
+                for (k, a) in acc.iter_mut().enumerate() {
+                    *a += s.values.get(k).copied().flatten().unwrap_or(0.0);
+                }
+            }
+            draw_err_bars(out, s, cx, &pts, &|v| vpos(sc, v), !horizontal, false);
+            if !horizontal {
+                let (fx, fy): (Vec<f64>, Vec<f64>) = (0..n_cat)
+                    .filter_map(|k| Some(((k + 1) as f64, s.values.get(k).copied().flatten()?)))
+                    .unzip();
+                let x0 = cat_mid(0);
+                draw_trendlines(
+                    out,
+                    s,
+                    &color,
+                    cx,
+                    &fx,
+                    &fy,
+                    &|x, v| (x0 + (x - 1.0) * band, vpos(sc, v)),
+                    base,
+                );
+            }
         }
     }
     out.end_clip();
@@ -2113,7 +2289,7 @@ fn draw_axis_chart(
                     out.line(p, y + ti, p, y + to, st);
                 }
             }
-            if labels_on(cat_ax) {
+            if labels_on(cat_ax) && dtable.is_none() {
                 // 레이블이 겹치면 건너뛴다
                 let skip = cat_ax
                     .and_then(|a| a.tick_lbl_skip)
@@ -2133,6 +2309,22 @@ fn draw_axis_chart(
                 }
             }
         }
+    }
+    if let Some(d) = dtable {
+        draw_data_table(
+            out,
+            d,
+            groups,
+            cx,
+            &cat_font,
+            &cats,
+            cat_fmt.as_deref(),
+            &plot,
+            band,
+            n_cat,
+            dt_row_h,
+            dt_key_w,
+        );
     }
     // 축 제목
     if let Some((t, f)) = val_title {
@@ -2208,6 +2400,125 @@ fn grid_line(out: &mut Svg, vertical: bool, p: f64, plot: &Rect, st: &Stroke, sn
     }
 }
 
+/// 데이터 표: 그림 영역 바로 아래, 머리글 줄은 항목 이름, 계열마다 한 줄 (표지·이름 칸 + 값). 선은 축 회색 1px —
+/// 가로선(showHorzBorder)·세로선(showVertBorder)·바깥선(showOutline), 머리글 줄의 왼쪽 칸은 비운다
+#[allow(clippy::too_many_arguments)]
+fn draw_data_table(
+    out: &mut Svg,
+    d: &crate::model::ChartDataTable,
+    groups: &[Group],
+    cx: &Ctx,
+    font: &Font,
+    cats: &[String],
+    cat_fmt: Option<&str>,
+    plot: &Rect,
+    band: f64,
+    n_cat: usize,
+    row_h: f64,
+    key_w: f64,
+) {
+    let st = cx
+        .line_of(d.sp_pr.as_ref(), Some((AXIS_GRAY, 1.0)))
+        .unwrap_or_else(|| Stroke::new(AXIS_GRAY, 1.0));
+    let snap = |v: f64| v.round() + 0.5;
+    let top = plot.y + plot.h;
+    let rows: Vec<(usize, &ChartSeries, &Group)> = groups
+        .iter()
+        .flat_map(|g| {
+            g.series
+                .iter()
+                .enumerate()
+                .map(move |(i, s)| (g.offset + i, s, g))
+        })
+        .collect();
+    let n = rows.len();
+    let x0 = plot.x - key_w;
+    let x1 = plot.x + plot.w;
+    let bottom = top + row_h * (n + 1) as f64;
+    let (hz, vt, ol) = (
+        d.show_horz_border != Some(false),
+        d.show_vert_border != Some(false),
+        d.show_outline != Some(false),
+    );
+    // 가로선: 계열 줄 사이 (머리글 줄 아래 포함), 바깥선은 표 아래·왼쪽 칸 위
+    for r in 1..=n {
+        let y = snap(top + row_h * r as f64);
+        if (r < n && hz) || (r == n && ol) {
+            out.line(snap(x0), y, snap(x1), y, &st);
+        }
+    }
+    if hz || ol {
+        let y = snap(top + row_h);
+        out.line(snap(x0), y, plot.x, y, &st);
+    }
+    // 세로선: 항목 띠 경계 (머리글 줄도), 바깥은 왼쪽 칸 왼쪽·표 오른쪽
+    for k in 0..=n_cat {
+        let x = snap(plot.x + band * k as f64);
+        let outer = k == 0 || k == n_cat;
+        if (outer && ol) || (!outer && vt) || (k == 0 && vt) {
+            out.line(x, top, x, bottom, &st);
+        }
+    }
+    if ol {
+        out.line(snap(x0), top + row_h, snap(x0), bottom, &st);
+    }
+    let base = font.px() * 0.35;
+    for (k, c) in cats.iter().enumerate().take(n_cat) {
+        let t = cat_text(c, cat_fmt);
+        out.text(
+            plot.x + band * (k as f64 + 0.5),
+            top + row_h / 2.0 + base,
+            &t,
+            font,
+            "middle",
+        );
+    }
+    for (r, (idx, s, g)) in rows.iter().enumerate() {
+        let y = top + row_h * (r as f64 + 1.5);
+        let mut x = x0 + 6.0;
+        if d.show_keys != Some(false) {
+            let color = series_color(s, *idx, cx);
+            if matches!(g.kind, "line" | "scatter" | "radar") {
+                if let Some(ls) = series_stroke(s, &color, cx) {
+                    out.line(x, y.round(), x + 12.0, y.round(), &ls);
+                }
+            } else {
+                let fs = cx.shape(s.sp_pr.as_ref(), Some(&color), None);
+                out.rect(
+                    x,
+                    (y - 4.0).round(),
+                    8.0,
+                    8.0,
+                    &Style {
+                        fill: fs.fill,
+                        stroke: None,
+                    },
+                );
+            }
+            x += 17.0;
+        }
+        let name = s.name.clone().unwrap_or_else(|| format!("계열{}", idx + 1));
+        out.text(x, y + base, &name, font, "start");
+        let fmt = s
+            .val
+            .as_ref()
+            .and_then(|d| d.cache.as_ref())
+            .and_then(|c| c.format_code.clone());
+        for k in 0..n_cat {
+            if let Some(v) = s.values.get(k).copied().flatten() {
+                let t = tick_label(v, None, fmt.as_deref(), false);
+                out.text(
+                    plot.x + band * (k as f64 + 0.5),
+                    y + base,
+                    &t,
+                    font,
+                    "middle",
+                );
+            }
+        }
+    }
+}
+
 /// 항목 레이블 글 (숫자 항목은 형식대로)
 fn cat_text(c: &str, fmt: Option<&str>) -> String {
     match (c.trim().parse::<f64>(), fmt) {
@@ -2223,6 +2534,38 @@ fn cat_text(c: &str, fmt: Option<&str>) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// 묶은 막대 하나의 가운데 (항목 축 좌표 — draw_bars 와 같은 자리)
+fn bar_center(
+    g: &Group,
+    i: usize,
+    k: usize,
+    band: f64,
+    cat_mid: &dyn Fn(usize) -> f64,
+    horizontal: bool,
+) -> f64 {
+    let stacked = matches!(g.grouping, "stacked" | "percentStacked");
+    let ns = g.series.len().max(1) as f64;
+    let gap = g.props.gap_width.unwrap_or(150) as f64 / 100.0;
+    let overlap = g
+        .props
+        .overlap
+        .map_or(if stacked { 1.0 } else { 0.0 }, |o| o as f64 / 100.0);
+    let slots = if stacked {
+        1.0
+    } else {
+        ns - (ns - 1.0) * overlap
+    };
+    let bw = band / (slots + gap);
+    let step = bw * (1.0 - overlap);
+    let group_w = if stacked { bw } else { bw + step * (ns - 1.0) };
+    let off = if stacked { 0.0 } else { step * i as f64 };
+    if horizontal {
+        cat_mid(k) + group_w / 2.0 - off - bw / 2.0
+    } else {
+        cat_mid(k) - group_w / 2.0 + off + bw / 2.0
+    }
+}
+
 fn draw_bars(
     out: &mut Svg,
     g: &Group,
@@ -2775,6 +3118,424 @@ fn draw_lines(
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 오차 막대·추세선 (한셀 화면 — 콤보·오차·추세선 실험)
+// ---------------------------------------------------------------------------
+
+/// 오차 막대 기본 선 (한셀 화면: 2F4F4F 1px, 끝 막대 폭 10px)
+const ERR_COLOR: &str = "#2F4F4F";
+const ERR_CAP: f64 = 5.0;
+
+/// 오차 막대의 (아래, 위) 값. 표준 편차는 계열 평균 둘레, 표준 오차는 점 둘레 (표본 표준 편차 — 한셀 화면:
+/// 12~47 의 표준 편차 막대가 16.4~42.6)
+fn err_span(e: &ChartErrBars, vals: &[f64], k: usize, v: f64) -> Option<(f64, f64)> {
+    let n = vals.len() as f64;
+    let mean = vals.iter().sum::<f64>() / n.max(1.0);
+    let sd = if n > 1.0 {
+        (vals.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
+    } else {
+        0.0
+    };
+    let amt = e.val.unwrap_or(match e.val_type.as_str() {
+        "percentage" => 5.0,
+        _ => 1.0,
+    });
+    let (c, minus, plus) = match e.val_type.as_str() {
+        "fixedVal" => (v, amt, amt),
+        "percentage" => (v, v.abs() * amt / 100.0, v.abs() * amt / 100.0),
+        "stdDev" => (mean, sd * amt, sd * amt),
+        "stdErr" => (v, sd / n.max(1.0).sqrt(), sd / n.max(1.0).sqrt()),
+        "cust" => {
+            let get = |d: &Option<crate::model::ChartData>| {
+                d.as_ref()
+                    .and_then(|d| d.dense().get(k).cloned().flatten())
+                    .and_then(|t| t.trim().parse::<f64>().ok())
+                    .unwrap_or(0.0)
+            };
+            (v, get(&e.minus), get(&e.plus))
+        }
+        _ => return None,
+    };
+    Some(match e.bar_type.as_str() {
+        "plus" => (c, c + plus),
+        "minus" => (c - minus, c),
+        _ => (c - minus, c + plus),
+    })
+}
+
+/// 계열의 값 오차 막대가 넓히는 범위 (값 축 자동 범위에 넣는다 — 한셀 화면: 47 + 5 → 끝값 60)
+fn err_extent(s: &ChartSeries, xy_x: bool) -> Option<(f64, f64)> {
+    let vals: Vec<f64> = if xy_x {
+        x_values(s)
+    } else {
+        s.values.iter().flatten().copied().collect()
+    };
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for e in &s.err_bars {
+        let is_x = e.dir.as_deref() == Some("x");
+        if is_x != xy_x {
+            continue;
+        }
+        for (k, v) in vals.iter().enumerate() {
+            if let Some((a, b)) = err_span(e, &vals, k, *v) {
+                lo = lo.min(a);
+                hi = hi.max(b);
+            }
+        }
+    }
+    (lo.is_finite()).then_some((lo, hi))
+}
+
+/// 오차 막대 하나: `at` 은 막대가 서는 자리(값 축과 수직인 좌표), p0·p1 은 값 축 좌표
+fn err_line(out: &mut Svg, at: f64, p0: f64, p1: f64, along_y: bool, cap: bool, st: &Stroke) {
+    let at = at.round() + 0.5;
+    if along_y {
+        out.line(at, p0, at, p1, st);
+        if cap {
+            for p in [p0, p1] {
+                let p = p.round() + 0.5;
+                out.line(at - ERR_CAP, p, at + ERR_CAP, p, st);
+            }
+        }
+    } else {
+        out.line(p0, at, p1, at, st);
+        if cap {
+            for p in [p0, p1] {
+                let p = p.round() + 0.5;
+                out.line(p, at - ERR_CAP, p, at + ERR_CAP, st);
+            }
+        }
+    }
+}
+
+/// 계열의 오차 막대 (값 방향). `pts` 는 점마다 (서는 자리, 값 — 누적이면 쌓인 끝, 그 점 자체의 값)
+#[allow(clippy::too_many_arguments)]
+fn draw_err_bars(
+    out: &mut Svg,
+    s: &ChartSeries,
+    cx: &Ctx,
+    pts: &[Option<(f64, f64, f64)>],
+    val_pos: &dyn Fn(f64) -> f64,
+    along_y: bool,
+    x_dir: bool,
+) {
+    let vals: Vec<f64> = if x_dir {
+        x_values(s)
+    } else {
+        s.values.iter().flatten().copied().collect()
+    };
+    for e in &s.err_bars {
+        if (e.dir.as_deref() == Some("x")) != x_dir {
+            continue;
+        }
+        let st = cx
+            .line_of(e.sp_pr.as_ref(), Some((ERR_COLOR, 1.0)))
+            .unwrap_or_else(|| Stroke::new(ERR_COLOR, 1.0));
+        let cap = e.no_end_cap != Some(true);
+        for (k, p) in pts.iter().enumerate() {
+            let Some((at, top, v)) = p else { continue };
+            let Some((a, b)) = err_span(e, &vals, k, *v) else {
+                continue;
+            };
+            // 누적이면 쌓인 끝에서 같은 폭
+            let shift = top - v;
+            err_line(
+                out,
+                *at,
+                val_pos(a + shift),
+                val_pos(b + shift),
+                along_y,
+                cap,
+                &st,
+            );
+        }
+    }
+}
+
+/// 추세선의 범례 글 (한셀 화면: "선형 (계열1)", "다항식 ()", "2 구간의 이동 평균 ()")
+fn trend_name(t: &ChartTrendline, series: &str) -> String {
+    if let Some(n) = &t.name {
+        return n.clone();
+    }
+    let k = match t.kind.as_str() {
+        "exp" => "지수".to_string(),
+        "log" => "로그".to_string(),
+        "poly" => "다항식".to_string(),
+        "power" => "거듭제곱".to_string(),
+        "movingAvg" => format!("{} 구간의 이동 평균", t.period.unwrap_or(2)),
+        _ => "선형".to_string(),
+    };
+    format!("{k} ({series})")
+}
+
+/// 추세선 계수: 최소 제곱 다항식 (차수 d) — 정규 방정식을 가우스 소거로
+fn poly_fit(xs: &[f64], ys: &[f64], d: usize, intercept: Option<f64>) -> Option<Vec<f64>> {
+    let m = d + 1;
+    let start = usize::from(intercept.is_some());
+    let n = m - start;
+    if n == 0 || xs.len() < n {
+        return None;
+    }
+    let mut a = vec![vec![0.0; n + 1]; n];
+    for (x, y) in xs.iter().zip(ys) {
+        let y = y - intercept.unwrap_or(0.0);
+        for r in 0..n {
+            for c in 0..n {
+                a[r][c] += x.powi((r + start + c + start) as i32);
+            }
+            a[r][n] += y * x.powi((r + start) as i32);
+        }
+    }
+    for i in 0..n {
+        let p = (i..n).max_by(|&p, &q| a[p][i].abs().total_cmp(&a[q][i].abs()))?;
+        a.swap(i, p);
+        if a[i][i].abs() < 1e-12 {
+            return None;
+        }
+        for r in 0..n {
+            if r != i {
+                let f = a[r][i] / a[i][i];
+                for c in i..=n {
+                    a[r][c] -= f * a[i][c];
+                }
+            }
+        }
+    }
+    let mut coef = vec![intercept.unwrap_or(0.0); m];
+    for i in 0..n {
+        coef[i + start] = a[i][n] / a[i][i];
+    }
+    Some(coef)
+}
+
+/// 추세선 식과 결정 계수: (값 함수, 식 글, R²)
+type TrendFit = (Box<dyn Fn(f64) -> f64>, String, f64);
+
+fn trend_fit(t: &ChartTrendline, xs: &[f64], ys: &[f64]) -> Option<TrendFit> {
+    let r2 = |f: &dyn Fn(f64) -> f64, xs: &[f64], ys: &[f64]| {
+        let mean = ys.iter().sum::<f64>() / ys.len().max(1) as f64;
+        let tot: f64 = ys.iter().map(|y| (y - mean).powi(2)).sum();
+        let res: f64 = xs.iter().zip(ys).map(|(x, y)| (y - f(*x)).powi(2)).sum();
+        if tot > 0.0 { 1.0 - res / tot } else { 1.0 }
+    };
+    let g = |v: f64| trend_num(v);
+    match t.kind.as_str() {
+        "exp" | "power" | "log" => {
+            let log_x = t.kind != "exp";
+            let log_y = t.kind != "log";
+            let pts: Vec<(f64, f64)> = xs
+                .iter()
+                .zip(ys)
+                .filter(|(x, y)| (!log_x || **x > 0.0) && (!log_y || **y > 0.0))
+                .map(|(x, y)| {
+                    (
+                        if log_x { x.ln() } else { *x },
+                        if log_y { y.ln() } else { *y },
+                    )
+                })
+                .collect();
+            let (px, py): (Vec<f64>, Vec<f64>) = pts.into_iter().unzip();
+            let c = poly_fit(&px, &py, 1, None)?;
+            let (b0, b1) = (c[0], c[1]);
+            let rr = r2(&|x| b0 + b1 * x, &px, &py);
+            Some(match t.kind.as_str() {
+                "exp" => {
+                    let a = b0.exp();
+                    (
+                        Box::new(move |x: f64| a * (b1 * x).exp()) as Box<dyn Fn(f64) -> f64>,
+                        format!("y = {}e{}x", g(a), g(b1)),
+                        rr,
+                    )
+                }
+                "power" => {
+                    let a = b0.exp();
+                    (
+                        Box::new(move |x: f64| a * x.powf(b1)),
+                        format!("y = {}x{}", g(a), g(b1)),
+                        rr,
+                    )
+                }
+                _ => (
+                    Box::new(move |x: f64| b0 + b1 * x.ln()),
+                    format!("y = {}ln(x){}", g(b1), signed(b0)),
+                    rr,
+                ),
+            })
+        }
+        _ => {
+            let d = if t.kind == "poly" {
+                t.order.unwrap_or(2).clamp(2, 6) as usize
+            } else {
+                1
+            };
+            let c = poly_fit(xs, ys, d, t.intercept)?;
+            let cc = c.clone();
+            let f = move |x: f64| cc.iter().rev().fold(0.0, |acc, k| acc * x + k);
+            let rr = r2(&f, xs, ys);
+            let mut eq = String::from("y = ");
+            for (p, k) in c.iter().enumerate().rev() {
+                let term = match p {
+                    0 => String::new(),
+                    1 => "x".to_string(),
+                    _ => format!("x{p}"),
+                };
+                if p == c.len() - 1 {
+                    let _ = write!(eq, "{}{term}", g(*k));
+                } else {
+                    let _ = write!(eq, "{}{term}", signed(*k));
+                }
+            }
+            Some((Box::new(f), eq, rr))
+        }
+    }
+}
+
+/// 추세선 식의 수 (일반 서식 6글자 안 — 한셀 화면: 16.3167 → 16.317, 0.16734 → 0.1673)
+fn trend_num(v: f64) -> String {
+    let neg = v < 0.0;
+    let a = v.abs();
+    let mut s = String::new();
+    for d in (0..=5).rev() {
+        s = format!("{a:.d$}");
+        if s.contains('.') {
+            s = s.trim_end_matches('0').trim_end_matches('.').to_string();
+        }
+        if s.len() <= 6 {
+            break;
+        }
+    }
+    if neg { format!("-{s}") } else { s }
+}
+
+fn signed(v: f64) -> String {
+    if v < 0.0 {
+        format!(" - {}", trend_num(-v))
+    } else {
+        format!(" + {}", trend_num(v))
+    }
+}
+
+/// 계열의 추세선. `xs`·`ys` 는 맞출 점 (항목 차트는 x = 1, 2, …), `to_screen` 은 (x, 값) → 화면
+fn draw_trendlines(
+    out: &mut Svg,
+    s: &ChartSeries,
+    color: &str,
+    cx: &Ctx,
+    xs: &[f64],
+    ys: &[f64],
+    to_screen: &dyn Fn(f64, f64) -> (f64, f64),
+    font: &Font,
+) {
+    if xs.len() < 2 {
+        return;
+    }
+    let (x0, x1) = xs
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), x| {
+            (a.min(*x), b.max(*x))
+        });
+    for t in &s.trendlines {
+        // 기본: 계열 색 점선 (한셀 화면: 1.5px 굵기, 점·틈 1.5px)
+        let mut st = cx
+            .line_of(t.sp_pr.as_ref(), Some((color, 1.5)))
+            .unwrap_or_else(|| Stroke::new(color, 1.5));
+        if st.dash.is_none() && t.sp_pr.as_ref().and_then(|p| p.line.as_ref()).is_none() {
+            st.dash = Some("1.5 1.5".into());
+        }
+        let line_st = Style {
+            fill: None,
+            stroke: Some(st),
+        };
+        if t.kind == "movingAvg" {
+            let p = t.period.unwrap_or(2).max(2) as usize;
+            let mut d = String::new();
+            for k in p - 1..ys.len() {
+                let avg = ys[k + 1 - p..=k].iter().sum::<f64>() / p as f64;
+                let (a, b) = to_screen(xs[k], avg);
+                let _ = write!(d, "{}{a:.1},{b:.1}", if d.is_empty() { "M" } else { "L" });
+            }
+            out.path(&d, &line_st);
+            continue;
+        }
+        let Some((f, eq, r2)) = trend_fit(t, xs, ys) else {
+            continue;
+        };
+        let lo = x0 - t.backward.unwrap_or(0.0);
+        let hi = x1 + t.forward.unwrap_or(0.0);
+        let mut d = String::new();
+        let steps = if t.kind == "linear" { 1 } else { 60 };
+        for i in 0..=steps {
+            let x = lo + (hi - lo) * i as f64 / steps as f64;
+            if matches!(t.kind.as_str(), "log" | "power") && x <= 0.0 {
+                continue;
+            }
+            let (a, b) = to_screen(x, f(x));
+            if a.is_finite() && b.is_finite() {
+                let _ = write!(d, "{}{a:.1},{b:.1}", if d.is_empty() { "M" } else { "L" });
+            }
+        }
+        out.path(&d, &line_st);
+        // 식·R²: 추세선 끝 왼쪽 위에 두 줄
+        let mut lines = Vec::new();
+        if t.disp_eq == Some(true) {
+            lines.push(eq);
+        }
+        if t.disp_r_sqr == Some(true) {
+            lines.push(format!("R² = {}", trend_num(r2)));
+        }
+        if !lines.is_empty() {
+            let (ex, ey) = to_screen(hi, f(hi));
+            let lh = font.px() * 1.2;
+            let y0 = ey - 12.0 - lh * (lines.len() as f64 - 1.0);
+            for (i, l) in lines.iter().enumerate() {
+                out.text(ex - 4.0, y0 + lh * i as f64, l, font, "end");
+            }
+        }
+    }
+}
+
+/// 주식형 양선·음선 (시가 → 종가 몸통): 오르면 흰 몸통·검은 테, 내리면 검정 (한셀 화면 — 주식 실험)
+#[allow(clippy::too_many_arguments)]
+fn draw_up_down(
+    out: &mut Svg,
+    g: &Group,
+    cx: &Ctx,
+    sc: &Scale,
+    n_cat: usize,
+    band: f64,
+    cat_mid: &dyn Fn(usize) -> f64,
+    vpos: &dyn Fn(&Scale, f64) -> f64,
+) {
+    let Some(ud) = &g.props.up_down_bars else {
+        return;
+    };
+    if g.series.len() < 4 {
+        return;
+    }
+    let gap = ud.gap_width.unwrap_or(150) as f64 / 100.0;
+    let w = band / (1.0 + gap);
+    let up = cx.shape(ud.up.as_ref(), Some("#FFFFFF"), Some(("#000000", 1.0)));
+    let down = cx.shape(ud.down.as_ref(), Some("#000000"), Some(("#000000", 1.0)));
+    let (o, c) = (&g.series[0], &g.series[g.series.len() - 1]);
+    for k in 0..n_cat {
+        let (Some(a), Some(b)) = (
+            o.values.get(k).copied().flatten(),
+            c.values.get(k).copied().flatten(),
+        ) else {
+            continue;
+        };
+        let (y0, y1) = (vpos(sc, a), vpos(sc, b));
+        let x = (cat_mid(k) - w / 2.0).round() + 0.5;
+        out.rect(
+            x,
+            y0.min(y1).round() + 0.5,
+            w.round(),
+            (y0 - y1).abs().round().max(1.0),
+            if b >= a { &up } else { &down },
+        );
     }
 }
 
