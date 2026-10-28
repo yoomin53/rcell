@@ -10,7 +10,8 @@
 //! 비교는 정렬 키를 바이트로 견주는 것과 같다 — 키는 글자마다 주 가중치를 잇고, 이어서 발음 구별·대소문자
 //! 가중치(뒤쪽 기본값 2 는 뗀다), 끝에 단어 정렬에서 건너뛴 글자(`'` `-` 와 제어 문자)의 자리·가중치를 둔다.
 //! 글자의 가중치는 `collate_data` 표(라틴·그리스·키릴·기호·가나·한글 자모·전각 문자)와 한글 음절 규칙으로 얻고,
-//! 표에 없는 글자(한자 …)는 그 뒤에 코드 차례로 둔다 (한셀은 한자를 그 음의 한글 음절 자리에 둔다 — 남은 차이).
+//! 한자는 그 음의 한글 음절 자리(같은 음이면 발음 구별 가중치 차례 — `collate_hanja.bin`)에 두고, 표에 없는 글자는
+//! 모두 그 뒤에 코드 차례로 둔다.
 
 use std::cmp::Ordering;
 
@@ -35,8 +36,29 @@ fn table_value(cp: u32) -> Option<u32> {
     })
 }
 
+/// 한자의 정렬 가중치 (자동 생성 — 그 음의 한글 음절 자리): 범위마다 글자당 3바이트, 주 가중치(u16 LE, 0 은 표에
+/// 없음) + 발음 구별
+static HANJA: &[u8] = include_bytes!("collate_hanja.bin");
+const HANJA_RANGES: [(u32, u32); 3] = [(0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF)];
+
+fn hanja(cp: u32) -> Option<Weight> {
+    let mut base = 0usize;
+    for (a, b) in HANJA_RANGES {
+        if (a..=b).contains(&cp) {
+            let o = (base + (cp - a) as usize) * 3;
+            let prim = u16::from_le_bytes([*HANJA.get(o)?, *HANJA.get(o + 1)?]);
+            return (prim != 0).then(|| Weight::One(prim as u32, HANJA[o + 2], 2));
+        }
+        base += (b - a + 1) as usize;
+    }
+    None
+}
+
 fn weight(c: char, ignore_case: bool) -> Weight {
     let cp = c as u32;
+    if let Some(w) = hanja(cp) {
+        return w;
+    }
     if (0xAC00..=0xD7A3).contains(&cp) {
         let i = HANGUL.partition_point(|&(s, _)| s <= cp) - 1;
         let (s, p) = HANGUL[i];
@@ -146,7 +168,7 @@ mod tests {
         let want = [
             "", " x", "!x", "#x", "_x", "~x", "10", "1a", "9", "a", "Ａ", "a1", "a10", "a2",
             "apple", "Apple", "APPLE", "B", "banana", "Banana", "e", "é", "f", "'x", "-x", "xy",
-            "x-y", "z", "Z", "ㄱ", "가", "가가", "가나", "각", "나", "ㅏ",
+            "x-y", "z", "Z", "あ", "ㄱ", "가", "가가", "가나", "각", "나", "漢", "ㅏ",
         ];
         let mut input: Vec<&str> = want.to_vec();
         input.reverse();
@@ -191,5 +213,10 @@ mod tests {
         assert_eq!(compare("ㄲ", "까", false), Less);
         assert_eq!(compare("깋", "ㄲ", false), Less);
         assert_eq!(compare("힣", "ㅏ", false), Less);
+        // 한자는 그 음의 음절 자리 (漢 = 한): 나 < 漢 < 핟, 한 < 漢 < 韓
+        assert_eq!(compare("나", "漢", false), Less);
+        assert_eq!(compare("漢", "핟", false), Less);
+        assert_eq!(compare("한", "漢", false), Less);
+        assert_eq!(compare("漢", "韓", false), Less);
     }
 }
