@@ -21,6 +21,7 @@
 //! # Ok::<(), rcell::Error>(())
 //! ```
 
+pub mod cells;
 mod cfpaste;
 pub mod clip;
 pub mod collate;
@@ -97,6 +98,14 @@ pub enum SheetSel {
 
 fn one() -> u32 {
     1
+}
+
+fn shift_down() -> cells::ShiftDir {
+    cells::ShiftDir::Down
+}
+
+fn shift_up() -> cells::ShiftDir {
+    cells::ShiftDir::Up
 }
 
 fn one_f() -> f64 {
@@ -336,6 +345,22 @@ pub enum Edit {
         all: bool,
         #[serde(default)]
         range: Option<String>,
+    },
+    /// 셀 삽입 (`shift`: `down` 아래로 밀기, `right` 오른쪽으로 밀기)
+    InsertCells {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(default = "shift_down")]
+        shift: cells::ShiftDir,
+    },
+    /// 셀 삭제 (`shift`: `up` 위로 당기기, `left` 왼쪽으로 당기기)
+    DeleteCells {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(default = "shift_up")]
+        shift: cells::ShiftDir,
     },
     /// 행 숨기기
     HideRows {
@@ -848,6 +873,30 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             let i = si(wb, sheet)?;
             let c = parse_col(col)?;
             view::group_cols(wb, i, c, c + count.max(&1) - 1, false)?;
+            Ok(i)
+        }
+        Edit::InsertCells {
+            sheet,
+            range,
+            shift,
+        } => {
+            let i = si(wb, sheet)?;
+            if !matches!(shift, cells::ShiftDir::Down | cells::ShiftDir::Right) {
+                return Err(err("셀 삽입은 아래(down)·오른쪽(right)으로 밉니다"));
+            }
+            cells::shift_cells(wb, i, parse_range(range)?, *shift)?;
+            Ok(i)
+        }
+        Edit::DeleteCells {
+            sheet,
+            range,
+            shift,
+        } => {
+            let i = si(wb, sheet)?;
+            if !matches!(shift, cells::ShiftDir::Up | cells::ShiftDir::Left) {
+                return Err(err("셀 삭제는 위(up)·왼쪽(left)으로 당깁니다"));
+            }
+            cells::shift_cells(wb, i, parse_range(range)?, *shift)?;
             Ok(i)
         }
         Edit::HideSheet { sheet } => {

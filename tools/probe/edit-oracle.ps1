@@ -198,6 +198,16 @@ function Invoke-Edit($wb, $e) {
                 [void]$rg.Replace([string]$e.find, [string]$e.replace, $look, 1, [bool]$e.matchCase)
             }
         }
+        "insertCells" {
+            # 셀 삽입 (아래로 -4121, 오른쪽으로 -4161)
+            $sh = if ([string]$e.shift -eq "right") { -4161 } else { -4121 }
+            [void]$ws.Range([string]$e.range).Insert($sh)
+        }
+        "deleteCells" {
+            # 셀 삭제 (위로 -4162, 왼쪽으로 -4159)
+            $sh = if ([string]$e.shift -eq "left") { -4159 } else { -4162 }
+            [void]$ws.Range([string]$e.range).Delete($sh)
+        }
         "hideRows" { $ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.Hidden = $true }
         "unhideRows" { $ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.Hidden = $false }
         "hideCols" { $ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.Hidden = $true }

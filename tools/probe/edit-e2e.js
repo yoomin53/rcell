@@ -98,6 +98,15 @@ const SCRIPTS = {
     { op: "replace", find: "합계", replace: "총계", all: true },
     { op: "replace", sheet: 0, find: "a", replace: "Ä", wholeCell: true },
   ],
+  cells: [
+    { op: "insertCells", sheet: 0, range: "B3:C4", shift: "down" },
+    { op: "deleteCells", sheet: 0, range: "D6:E6", shift: "left" },
+    { op: "insertCells", sheet: 0, range: "A10:B10", shift: "right" },
+    { op: "deleteCells", sheet: 0, range: "C2", shift: "up" },
+    { op: "hideRows", sheet: 0, row: 7, count: 2 },
+    { op: "hideCols", sheet: 0, col: "F" },
+    { op: "tabColor", sheet: 0, color: "00B050" },
+  ],
   sort: [
     { op: "sort", sheet: 0, range: "A1:H40", keys: [{ by: "B" }], header: true },
     { op: "sort", sheet: 0, range: "B3:F30", keys: [{ by: "C", desc: true }, { by: "B" }] },

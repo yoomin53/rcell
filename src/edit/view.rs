@@ -89,10 +89,24 @@ fn each_col(wb: &mut Workbook, si: usize, c0: u32, c1: u32, f: &dyn Fn(&mut ColI
 }
 
 /// 행 숨기기·보이기 (0부터)
-pub fn hide_rows(wb: &mut Workbook, si: usize, r0: u32, r1: u32, hidden: bool) -> crate::Result<()> {
-    let sheet = wb.sheets.get_mut(si).ok_or_else(|| err("시트가 없습니다"))?;
+pub fn hide_rows(
+    wb: &mut Workbook,
+    si: usize,
+    r0: u32,
+    r1: u32,
+    hidden: bool,
+) -> crate::Result<()> {
+    let sheet = wb
+        .sheets
+        .get_mut(si)
+        .ok_or_else(|| err("시트가 없습니다"))?;
     for r in r0..=r1.min(r0 + 100_000) {
-        if !hidden && sheet.rows.binary_search_by_key(&(r + 1), |x| x.index).is_err() {
+        if !hidden
+            && sheet
+                .rows
+                .binary_search_by_key(&(r + 1), |x| x.index)
+                .is_err()
+        {
             continue;
         }
         row_info(sheet, r).hidden = hidden;
@@ -101,7 +115,13 @@ pub fn hide_rows(wb: &mut Workbook, si: usize, r0: u32, r1: u32, hidden: bool) -
 }
 
 /// 열 숨기기·보이기 (0부터)
-pub fn hide_cols(wb: &mut Workbook, si: usize, c0: u32, c1: u32, hidden: bool) -> crate::Result<()> {
+pub fn hide_cols(
+    wb: &mut Workbook,
+    si: usize,
+    c0: u32,
+    c1: u32,
+    hidden: bool,
+) -> crate::Result<()> {
     if si >= wb.sheets.len() {
         return Err(err("시트가 없습니다"));
     }
@@ -157,7 +177,10 @@ pub fn hide_sheet(wb: &mut Workbook, si: usize, hidden: bool) -> crate::Result<(
 
 /// 틀 고정: `cell` 의 왼쪽·위를 고정한다 (A1 이면 풀기)
 pub fn freeze(wb: &mut Workbook, si: usize, cell: crate::model::CellRef) -> crate::Result<()> {
-    let sheet = wb.sheets.get_mut(si).ok_or_else(|| err("시트가 없습니다"))?;
+    let sheet = wb
+        .sheets
+        .get_mut(si)
+        .ok_or_else(|| err("시트가 없습니다"))?;
     if cell.row == 0 && cell.col == 0 {
         sheet.view.pane = None;
         return Ok(());
@@ -182,14 +205,20 @@ pub fn freeze(wb: &mut Workbook, si: usize, cell: crate::model::CellRef) -> crat
 
 /// 틀 고정 풀기
 pub fn unfreeze(wb: &mut Workbook, si: usize) -> crate::Result<()> {
-    let sheet = wb.sheets.get_mut(si).ok_or_else(|| err("시트가 없습니다"))?;
+    let sheet = wb
+        .sheets
+        .get_mut(si)
+        .ok_or_else(|| err("시트가 없습니다"))?;
     sheet.view.pane = None;
     Ok(())
 }
 
 /// 시트 탭 색 (`RRGGBB`, 빈 글이면 없앤다)
 pub fn tab_color(wb: &mut Workbook, si: usize, color: &str) -> crate::Result<()> {
-    let sheet = wb.sheets.get_mut(si).ok_or_else(|| err("시트가 없습니다"))?;
+    let sheet = wb
+        .sheets
+        .get_mut(si)
+        .ok_or_else(|| err("시트가 없습니다"))?;
     let c = color.trim().trim_start_matches('#');
     if c.is_empty() {
         sheet.tab_color = None;
@@ -206,10 +235,24 @@ pub fn tab_color(wb: &mut Workbook, si: usize, color: &str) -> crate::Result<()>
 }
 
 /// 행 그룹 (개요 수준 +1, 해제면 −1)
-pub fn group_rows(wb: &mut Workbook, si: usize, r0: u32, r1: u32, group: bool) -> crate::Result<()> {
-    let sheet = wb.sheets.get_mut(si).ok_or_else(|| err("시트가 없습니다"))?;
+pub fn group_rows(
+    wb: &mut Workbook,
+    si: usize,
+    r0: u32,
+    r1: u32,
+    group: bool,
+) -> crate::Result<()> {
+    let sheet = wb
+        .sheets
+        .get_mut(si)
+        .ok_or_else(|| err("시트가 없습니다"))?;
     for r in r0..=r1.min(r0 + 100_000) {
-        if !group && sheet.rows.binary_search_by_key(&(r + 1), |x| x.index).is_err() {
+        if !group
+            && sheet
+                .rows
+                .binary_search_by_key(&(r + 1), |x| x.index)
+                .is_err()
+        {
             continue;
         }
         let info = row_info(sheet, r);
@@ -223,7 +266,13 @@ pub fn group_rows(wb: &mut Workbook, si: usize, r0: u32, r1: u32, group: bool) -
 }
 
 /// 열 그룹 (개요 수준 +1, 해제면 −1)
-pub fn group_cols(wb: &mut Workbook, si: usize, c0: u32, c1: u32, group: bool) -> crate::Result<()> {
+pub fn group_cols(
+    wb: &mut Workbook,
+    si: usize,
+    c0: u32,
+    c1: u32,
+    group: bool,
+) -> crate::Result<()> {
     if si >= wb.sheets.len() {
         return Err(err("시트가 없습니다"));
     }

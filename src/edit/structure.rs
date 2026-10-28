@@ -318,7 +318,7 @@ pub(crate) fn anchor_cols(g: &crate::render::Geometry) -> Vec<(u32, u32)> {
 /// 한 열 왼쪽·한 행 위로 간다. 다만 옛 상자 왼쪽이 A 열에 있으면 그 왼쪽을 A 열 너비 − 1px 만큼 오른쪽에서 잰다:
 /// A 열 메모의 상자는 칸이 옮겨질 때마다 그만큼 좁아진다 (A10 메모는 행 삽입 세 번이면 오른쪽 끝이 A 열 처음).
 /// 열 너비가 기본이 아닌 열에서는 한셀의 오프셋이 1px 다를 수 있다 (docs/editing.md 11절)
-fn moved_comment_box(
+pub(crate) fn moved_comment_box(
     old: &crate::render::Geometry,
     new: &crate::render::Geometry,
     a: [u32; 8],
