@@ -14,6 +14,7 @@
 //!   자릿수와 영어 서수 꼬리(`st` `nd` `rd` `th`)를 맞추고, 0 아래로 가면 절댓값.
 //! - 한셀 기본 목록 18가지(요일·월·분기·간지 …)의 항목: 목록을 돈다 (영어는 대소문자 꼴을 따른다).
 //! - 그 밖의 글·논리값·오류: 복사.
+//!
 //! 위·왼쪽으로 채우면 거꾸로 이어 간다 (한셀: 날짜·시각 하나는 멀어질수록 늘고, 둘 이상인 글·목록 묶음은 마지막
 //! 항목에서 앞으로 이어 간 값을 쓴다).
 
@@ -733,9 +734,9 @@ fn autofill_ranges(
             let at = CellRef { row: r, col: c };
             if (0..n).any(|b| skip[b] && has(b, at)) {
                 // 건드리지 않는 칸: 다른 묶음의 그 칸도 그대로 둔다
-                for b in 0..n {
+                for (b, kc) in keep_cells.iter_mut().enumerate() {
                     if has(b, at) {
-                        keep_cells[b].push((r, c, r, c));
+                        kc.push((r, c, r, c));
                     }
                 }
                 continue;
