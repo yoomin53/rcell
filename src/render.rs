@@ -459,7 +459,21 @@ pub fn sheet_table_grid(
         let code = xf
             .map(|x| crate::numfmt::code_for(st, x.num_fmt_id))
             .unwrap_or_else(|| "General".into());
-        let shown = crate::numfmt::format(&value, &code, wb.date1904);
+        let shown = crate::numfmt::format_layout(&value, &code, wb.date1904);
+        let (shown_text, shown_pads, shown_fill) =
+            (shown.text.clone(), shown.pads.clone(), shown.fill);
+        // 글 구역(@)으로 보인 숫자는 일반 맞춤에서 글처럼 왼쪽
+        let h = if shown.as_text
+            && h == HAlign::Right
+            && align
+                .and_then(|a| a.horizontal.as_deref())
+                .is_none_or(|x| x == "general")
+            && align.and_then(|a| a.text_rotation).unwrap_or(0) == 0
+        {
+            HAlign::Left
+        } else {
+            h
+        };
         // 양쪽 맞춤·균등 분할은 줄을 바꾼다
         let wrap = align.is_some_and(|a| a.wrap_text)
             || ((matches!(h, HAlign::Justify | HAlign::Distributed)
@@ -490,6 +504,12 @@ pub fn sheet_table_grid(
             }
         } else {
             shown.text
+        };
+        // 서식의 빈 자리·채움은 글을 그대로 쓸 때만
+        let (pads, fill_char) = if text == shown_text {
+            (shown_pads, shown_fill)
+        } else {
+            (Vec::new(), None)
         };
         let hashed = !text.is_empty()
             && text.bytes().all(|b| b == b'#')
@@ -544,6 +564,8 @@ pub fn sheet_table_grid(
             wrap,
             shrink,
             rotation: align.and_then(|a| a.text_rotation).unwrap_or(0),
+            pads,
+            fill_char,
             indent,
             fill,
             borders,

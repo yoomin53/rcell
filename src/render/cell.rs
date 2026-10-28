@@ -112,6 +112,10 @@ pub(super) struct CellView<'a> {
     pub wrap: bool,
     pub shrink: bool,
     pub rotation: i32,
+    /// 서식의 `_x` 빈 자리 (글의 바이트 위치, x)
+    pub pads: Vec<(usize, char)>,
+    /// 서식의 `*x` 채움 (글의 바이트 위치, x)
+    pub fill_char: Option<(usize, char)>,
     pub indent: u32,
     pub fill: Option<paint::FillPaint>,
     pub borders: paint::CellBorders,
@@ -438,7 +442,36 @@ pub(super) fn cell_content(
     }
 
     let avail = (bw - PAD - PAD_R - indent).max(1.0);
-    let mut body = body;
+    // 서식의 `*x` 채움: 앞 글은 왼쪽, 뒤 글은 오른쪽 끝에 붙이고 사이를 x 로 채운다 (맞춤과 상관없이 —
+    // 표시 형식 실험 `0*-`·`@*.`·회계 서식). `_x` 는 x 폭의 보이지 않는 글자
+    if let Some((at, fc)) = v
+        .fill_char
+        .filter(|&(at, _)| at <= text.len() && v.text == text)
+    {
+        let (l, r) = text.split_at(at);
+        let lp: Vec<(usize, char)> = v.pads.iter().copied().filter(|p| p.0 <= at).collect();
+        let rp: Vec<(usize, char)> = v
+            .pads
+            .iter()
+            .filter(|p| p.0 > at)
+            .map(|&(p, c)| (p - at, c))
+            .collect();
+        let n = (avail / v.m.char_width(fc).max(1.0)).ceil() as usize + 1;
+        let filler = esc(&fc.to_string().repeat(n));
+        let _ = write!(
+            out,
+            "<div class=\"rc-t\" style=\"left:0;width:{bw:.0}px;height:{bh:.0}px;{fcss}\"><span style=\"left:{:.1}px;width:{avail:.1}px;{vpos};transform:translateY({vshift});display:flex\"><span>{}</span><span style=\"flex:1 1 0;overflow:hidden\">{filler}</span><span>{}</span></span></div>",
+            PAD + indent,
+            with_pads(l, &lp),
+            with_pads(r, &rp)
+        );
+        return out;
+    }
+    let mut body = if v.pads.is_empty() || v.rich.is_some() || v.text != text {
+        body
+    } else {
+        with_pads(&text, &v.pads)
+    };
     // 줄여 맞춤: 글꼴을 칸 너비에 맞게 줄인다
     if v.shrink {
         let tw = v.text_px();
@@ -501,6 +534,26 @@ pub(super) fn cell_content(
         scaled(body, origin)
     );
     out
+}
+
+/// 서식의 `_x` 빈 자리를 x 폭의 보이지 않는 글자로 넣은 HTML
+fn with_pads(text: &str, pads: &[(usize, char)]) -> String {
+    let mut s = String::new();
+    let mut last = 0;
+    for &(p, x) in pads {
+        if p < last || p > text.len() || !text.is_char_boundary(p) {
+            continue;
+        }
+        s.push_str(&esc(&text[last..p]));
+        let _ = write!(
+            s,
+            "<span style=\"visibility:hidden\">{}</span>",
+            esc(&x.to_string())
+        );
+        last = p;
+    }
+    s.push_str(&esc(&text[last..]));
+    s
 }
 
 /// 돌린 글자의 여백 (px): 왼쪽, 오른쪽, 위, 아래 (회전 실험 — 10 각도 × 맞춤 12가지)
