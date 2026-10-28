@@ -84,11 +84,14 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
         h: h - PAD.2 - PAD.3,
     };
 
-    // 제목: 위 가운데 (한셀 화면: 14pt, 굵게 — b="0" 이어도 굵다, 글자 윗변이 틀에서 14px, 그림 영역은 제목 줄 아래
-    // 20px 뒤 — c2_e2_title_*: 맨 위 눈금선이 틀 + 60.5, 18pt 는 + 66.5). 범례는 제목 아래 자리의 가운데
+    // 제목: 위 가운데 (한셀 화면: 14pt, 굵게 — 글(c:tx)이 있으면 b="0" 이어도 굵다, 글자 윗변이 틀에서 14px, 그림
+    // 영역은 제목 줄 아래 20px 뒤 — c2_e2_title_*: 맨 위 눈금선이 틀 + 60.5, 18pt 는 + 66.5). 자동 제목("차트 제목",
+    // 한셀이 COM 으로 만든 차트)은 c:txPr 의 b 를 따른다 (차트 종류 실험: b="0" → 보통 굵기). 범례는 제목 아래 자리의 가운데
     let mut legend_top = 0.0;
     if let Some((text, mut font)) = title_of(ch, &cx, &base_font) {
-        font.bold = true;
+        if ch.title_full.as_ref().is_some_and(|t| t.tx.is_some()) {
+            font.bold = true;
+        }
         let lines: Vec<&str> = text.split('\n').collect();
         let lh = font.px() * 1.25;
         let manual = ch
@@ -743,7 +746,12 @@ fn legend_items(ch: &Chart, groups: &[Group], cx: &Ctx, pie_like: bool) -> Vec<L
             let n = s.values.len().max(s.categories.len());
             for k in 0..n {
                 let base = pie_color(ch, cx, k);
-                let st = point_style(s, 0, k, cx, &base);
+                // 레거시 원형: 범례 표지는 계열 목록 색 (조각만 요소 서식 색 — 차트 종류 실험의 레거시 원형)
+                let st = if ch.legacy.is_some() {
+                    Style::default()
+                } else {
+                    point_style(s, 0, k, cx, &base)
+                };
                 let name = s
                     .categories
                     .get(k)
@@ -3112,6 +3120,19 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
     } else {
         0.0
     };
+    // 쪼갠 조각이 그림 자리 안에 들도록 원을 줄인다 (한셀 화면: 쪼갠 원형은 반지름 / (1 + 가장 큰 쪼개기))
+    let max_ex = rings
+        .iter()
+        .flat_map(|s| {
+            s.d_pts
+                .iter()
+                .filter_map(|d| d.explosion)
+                .chain(s.explosion)
+        })
+        .max()
+        .unwrap_or(0) as f64
+        / 100.0;
+    let r_out = r_out / (1.0 + max_ex);
     let ring_w = (r_out * (1.0 - hole)) / rings.len().max(1) as f64;
     for (ri, s) in rings.iter().enumerate() {
         let vals: Vec<f64> = s.values.iter().map(|v| v.unwrap_or(0.0).abs()).collect();

@@ -260,6 +260,8 @@ VtTextBlock{backdrop → VtBackdrop | 없음, font → VtFont{name → VtString}
 | VtCLineItem (1) | reserved[4], u16_a, brush Brush, pen Pen, →ptr_a (늘 없음), **기반** VtObject |
 | VtSeries (5) | linePen, edgePen (Pen), u16_a, brush Brush, →ptr_a (늘 없음), →points VtArray, u16s1[4], pen3 Pen, u16s2[18], markerPen Pen, u16_b, →name VtString, →seriesLabel VtSeriesLabel, →textBlock VtTextBlock, labelComponents, →valueFormat VtTextFormat, →percentFormat VtTextFormat, →dataLabel VtSeriesLabel, u16_c, u16_d, u16_e, pen5 Pen, markerSize f32, showLine, markerColor 색, →picture VtPicture, markerStyle, u16_f, u16_g, f32_a f32, color2 색, color3 색, index, typeCount u32 (27), typeTable[typeCount], u16s3[10], **기반** VtObject |
 | VtSeriesLabel (1) | **기반** VtTextBlock |
+| VtSeriesPoint (1) | →label VtSeriesLabel, explode f32 (쪼개기 비율, 0.25 = 25%), u16s[4], →element VtSeriesPointElement, →ptr_a (늘 없음), **기반** VtObject |
+| VtSeriesPointElement (1) | u16_a, brush Brush (요소 채우기), edgePen Pen, →ptr_a (늘 없음), u16_b, markerPen Pen, markerSize f32, showLine, markerColor 색, →picture VtPicture, markerStyle, **기반** VtObject |
 | VtChartTitle (1) | **기반** VtChartText |
 | VtList (2) | u32_a u32 (3), count (0), **기반** VtObject, →items[count] (추정, 표본에서 늘 빔) |
 | VtChSsLink (2) | u16_a, →dataSource VtDataSourceSsLink, **기반** VtObject |
@@ -277,10 +279,12 @@ VtTextBlock{backdrop → VtBackdrop | 없음, font → VtFont{name → VtString}
   뒤에서 끝난다고 보았다).
 - **`XYScale` 의 자리.** 분산형 X 축의 24바이트는 `f32_d` 와 `u16_r` 사이에 둔다. 이웃이 0 이라 2바이트 뒤(`u16_r` 다음)에
   두어도 표본과 맞는다. 붙는 조건은 `xy == 1` 로 보았다 (축 385개에서 성립).
-- **채워진 적 없는 그릇.** `VtList` 항목, `VtSeries.points`, `VtChartPlot.ptr_a`, `VtSurfaceDesc.list`, `VtPicture.data`,
+- **채워진 적 없는 그릇.** `VtList` 항목, `VtChartPlot.ptr_a`, `VtSurfaceDesc.list`, `VtPicture.data`,
   `VtBytes`, `VtValueBlock.ptr_a`, `VtDataSourceSsLink.ptr_a/ptr_b`, `VtCLineItem.ptr_a` 는 표본에서 늘 비었다. 이것들을
   채우는 파일은 표에 없는 클래스나 배치를 가질 수 있다 — 그때 rcell 은 추측하지 않고 "배치를 모르는 클래스" 나 클래스
-  불일치 오류를 낸다.
+  불일치 오류를 낸다. `VtSeries.points` 는 한셀이 COM 으로 만든 원형·도넛 차트(요소마다 색)를 레거시로 저장하면
+  채워진다 (차트 종류 실험 73종: VtSeriesPoint 요소 서식 — 한셀 화면은 원형 조각 k 를 계열 목록 k 번째의 요소 서식 0 번
+  칠 색으로 그리고, 범례 표지는 그 계열의 칠, 쪼개기는 explode).
 - **뜻을 모르는 것.** `u16_*`·`f32_*` 필드 대부분, Pen 의 `u16_a/u16_b/u16_c`, VtColor 플래그 (0x20 은 한셀의 읽기가 보지 않는다 — 표식 채우기는 pen5 의 색, 9.5절
   읽힌다, 9.5절), `VtSeries.typeTable` (27개, 늘 같음: 차트 종류별 계열 종류로 보인다), `VtFormatter` 의 숫자 필드
   (서식 코드의 부호는 9.6절), 광원 벡터, `VtChartSection.u16_a/u16_b` (160/150).

@@ -15,10 +15,10 @@
 use super::vtchart::{ChartFormula, ChartRef, Fields, Obj, VtRecord};
 use crate::model::{
     Cell, CellValue, Chart, ChartAxis, ChartCache, ChartColor, ChartData, ChartDataLabels,
-    ChartFill, ChartFont, ChartGroupProps, ChartLayout, ChartLine, ChartLines, ChartManualLayout,
-    ChartMarker, ChartNumFmt, ChartPara, ChartPoint, ChartRich, ChartRun, ChartScaling,
-    ChartSeries, ChartShapeProps, ChartTitle, ChartTx, ChartView3D, HncChartStyle, LegacyChartView,
-    Sheet, Styles,
+    ChartDataPoint, ChartFill, ChartFont, ChartGroupProps, ChartLayout, ChartLine, ChartLines,
+    ChartManualLayout, ChartMarker, ChartNumFmt, ChartPara, ChartPoint, ChartRich, ChartRun,
+    ChartScaling, ChartSeries, ChartShapeProps, ChartTitle, ChartTx, ChartView3D, HncChartStyle,
+    LegacyChartView, Sheet, Styles,
 };
 
 /// 한셀이 빈 글꼴 이름 대신 쓰는 글꼴 (제목·축 제목, 관측)
@@ -697,6 +697,40 @@ fn series_sp_pr(e: Obj<'_>, family: Family) -> ChartShapeProps {
     }
 }
 
+/// 원형 조각 k 의 서식: 계열 목록 k 번째(VtSeries)의 요소 서식 0 번(VtSeriesPoint) — 한셀 화면은 그 칠 색으로 조각을
+/// 그리고 (범례 표지는 VtSeries 의 칠), 쪼개기 비율을 쓴다 (COM 으로 만든 원형 차트: 조각 0 만 6182D6, 나머지는 목록 색)
+fn pie_points(pool: &[Option<Obj<'_>>], n: usize) -> Vec<ChartDataPoint> {
+    let mut out = Vec::new();
+    for (k, e) in pool.iter().enumerate().take(n) {
+        let Some(pt) = e
+            .and_then(|e| e.ptr("points"))
+            .and_then(|a| a.ptrs("items"))
+            .and_then(|v| v.into_iter().next().flatten())
+        else {
+            continue;
+        };
+        let fill = pt
+            .ptr("element")
+            .and_then(|el| el.group("brush"))
+            .filter(|b| b.u16("style") != Some(0))
+            .and_then(|b| b.color("fill"));
+        let explode = pt.f32("explode").map_or(0.0, f64::from);
+        if fill.is_none() && explode <= 0.0 {
+            continue;
+        }
+        out.push(ChartDataPoint {
+            idx: k as u32,
+            explosion: (explode > 0.0).then(|| (explode * 100.0).round() as u32),
+            sp_pr: fill.map(|c| ChartShapeProps {
+                fill: Some(srgb(c)),
+                line: None,
+            }),
+            ..Default::default()
+        });
+    }
+    out
+}
+
 /// 표식: VtSeries.u16_d 1 = 자동 (한셀은 `none` 크기 7 로 읽는다), 0 = 지정 (모양, 크기 twip/20 pt, 채우기 = pen5 의 색 —
 /// 검정이면 채우기 없음. 거품형 표식 실험: c2_e6_bubble 의 pen5 색을 ff0000 으로 바꾸면 표식이 ff0000, 000000 이면 채우기
 /// 없음; 꺾은선 c2_e5_line_marker 의 pen5 를 123456 으로 바꾸면 123456. 색 플래그 0x20·pen5 의 선 모양·계열 칠·표식 색
@@ -870,7 +904,10 @@ pub(crate) fn map(rec: &VtRecord, book: &Book<'_>) -> Chart {
         }
         match k.family {
             Family::Bar => s.invert_if_negative = Some(false),
-            Family::Pie => s.explosion = Some(0),
+            Family::Pie => {
+                s.explosion = Some(0);
+                s.d_pts = pie_points(&pool, s.val.as_ref().map_or(0, |v| v.dense().len()));
+            }
             // 한셀은 부드러운 선(u16s3[5] = 2)을 읽지 않는다 (`c2_e6_scatter_smooth`)
             Family::Line => s.smooth = Some(false),
             _ => {}
