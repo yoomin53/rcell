@@ -797,12 +797,13 @@ fn legend_items(ch: &Chart, groups: &[Group], cx: &Ctx, pie_like: bool) -> Vec<L
             items.push(item);
         }
     }
-    // 누적 막대는 쌓인 순서(위가 먼저)로 보인다 (한셀 화면)
-    let stacked_bar = groups.len() == 1
-        && groups[0].kind == "bar"
-        && groups[0].bar_dir != Some("bar")
-        && matches!(groups[0].grouping, "stacked" | "percentStacked");
-    if stacked_bar && matches!(ch.legend.as_deref(), Some("r" | "l" | "tr")) {
+    // 범례는 보이는 차례대로 (한셀 화면, 차트 종류 실험): 누적(세로 막대·꺾은선·영역)은 위가 먼저라 거꾸로,
+    // 가로 막대는 누적이 아니면 거꾸로 (첫 계열이 아래), 가로 누적 막대는 그대로
+    let reversed = groups.len() == 1
+        && matches!(groups[0].kind, "bar" | "line" | "area")
+        && (matches!(groups[0].grouping, "stacked" | "percentStacked")
+            != (groups[0].kind == "bar" && groups[0].bar_dir == Some("bar")));
+    if reversed && matches!(ch.legend.as_deref(), Some("r" | "l" | "tr")) {
         items.reverse();
     }
     items
@@ -1538,10 +1539,9 @@ fn draw_axis_chart(
     // 끝 여유: 3차원은 없고 (chart_col3d 의 20~60 이 0~60), 100% 누적은 100% 에서 끝난다
     let room = !first.three_d && !percent;
     let legacy = ch.legacy.is_some();
+    // 가로 막대의 값 축도 세로 값 축과 같은 25px 규칙 (차트 종류 실험: 길이 255px 에 0~50, 단위 5)
     let vrule = if legacy {
         TickRule::Legacy { room }
-    } else if horizontal {
-        TickRule::Horizontal { room }
     } else {
         TickRule::Xml { room }
     };
