@@ -35,6 +35,7 @@ pub mod engine;
 pub mod eval;
 pub mod fm;
 pub mod functions;
+pub mod hcmath;
 pub mod parser;
 pub mod value;
 
