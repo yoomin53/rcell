@@ -23,7 +23,9 @@ pub use font::FontDb;
 pub use paginate::{Area, Page, Scaling, Settings, SheetPrint, settings, sheet_print, used_end};
 
 use crate::model::Workbook;
-use crate::render::page::{ErrorPrint, FontKey, Op, PageFrame, TextMeasure, objects_ops, page_ops};
+use crate::render::page::{
+    ErrorPrint, FontKey, Op, PageFrame, SheetPainter, TextMeasure, objects_ops,
+};
 use pdf::{FontSet, PageSize};
 
 /// PDF 만들기 설정
@@ -37,9 +39,14 @@ pub struct PdfOptions {
     /// `&D`·`&T` 에 넣을 날짜·시간 글 (한셀 꼴: `2026-10-28`, `06:13 오후`)
     pub date: String,
     pub time: String,
+    /// 쓸 페이지 수 한도 (None 이면 [`MAX_PAGES`])
+    pub max_pages: Option<usize>,
     /// 흑백 인쇄·간단히 인쇄 설정을 따른다 (한셀 PDF 저장은 둘 다 따르지 않는다 — 기본 거짓)
     pub quality_settings: bool,
 }
+
+/// PDF 페이지 수 기본 한도
+pub const MAX_PAGES: usize = 5000;
 
 /// 장치 단위 (600 dpi) 1pt
 const DEV_PT: f64 = 25.0 / 3.0;
@@ -329,7 +336,27 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
         let hfd = sheet.page.header_footer.as_ref();
         let total = sp.pages.len() as u32;
         let first_no = sp.settings.first_page_number.unwrap_or(1);
+        // 그릴 범위 (모든 페이지의 행·열)
+        let max_r = sp
+            .pages
+            .iter()
+            .flat_map(|p| p.rows.iter().chain(&p.title_rows))
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let max_c = sp
+            .pages
+            .iter()
+            .flat_map(|p| p.cols.iter().chain(&p.title_cols))
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let painter = SheetPainter::new(wb, sheet, max_r, max_c);
         for (pi, page) in sp.pages.iter().enumerate() {
+            // 아주 큰 범위(마지막 칸에 값이 있는 문서 — 80만 페이지)는 앞 페이지들만
+            if pages.len() >= opts.max_pages.unwrap_or(MAX_PAGES) {
+                break;
+            }
             let headings = po.is_some_and(|o| o.headings);
             let z = if sp.tall { 100 } else { sp.print_scale };
             let hpx = headings.then(|| heading_px(wb, z));
@@ -343,7 +370,7 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
                 Some("NA") => ErrorPrint::Na,
                 _ => ErrorPrint::Displayed,
             };
-            let mut ops = page_ops(wb, sheet, &fr, &fonts);
+            let mut ops = painter.page_ops(&fr, &fonts);
             ops.extend(objects_ops(wb, sheet, &fr, &fonts));
             if let Some((hw, hh)) = hpx {
                 heading_ops(&fr, hw * 6.25, hh * 6.25, &default_font, &fonts, &mut ops);

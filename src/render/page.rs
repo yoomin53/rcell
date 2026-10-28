@@ -356,22 +356,57 @@ pub fn page_ops(
     frame: &PageFrame,
     measure: &dyn TextMeasure,
 ) -> Vec<Op> {
+    let max_r = frame.rows.iter().map(|r| r.0).max().unwrap_or(0);
+    let max_c = frame.cols.iter().map(|c| c.0).max().unwrap_or(0);
+    SheetPainter::new(wb, sheet, max_r, max_c).page_ops(frame, measure)
+}
+
+/// 시트 하나의 인쇄 페이지들을 그린다 (배치·조건부 서식 결과를 페이지마다 다시 짓지 않게 한 번만)
+pub struct SheetPainter<'a> {
+    wb: &'a Workbook,
+    sheet: &'a Sheet,
+    ctx: Views<'a>,
+    lay_c: u32,
+}
+
+impl<'a> SheetPainter<'a> {
+    /// 행 0..=max_r, 열 0..=max_c 를 그릴 수 있는 배치 (병합·넘치는 글자 자리까지 넓힌다)
+    pub fn new(wb: &'a Workbook, sheet: &'a Sheet, max_r: u32, max_c: u32) -> SheetPainter<'a> {
+        let mut lay_r = max_r + 1;
+        let mut lay_c = max_c + 1;
+        for m in &sheet.merges {
+            lay_r = lay_r.max(m.end.row + 1);
+            lay_c = lay_c.max(m.end.col + 1);
+        }
+        let lay_c = (lay_c + 32).min(16_384);
+        SheetPainter {
+            wb,
+            sheet,
+            ctx: Views::new(wb, sheet, lay_r, lay_c),
+            lay_c,
+        }
+    }
+
+    /// 페이지 한 장의 칸들
+    pub fn page_ops(&self, frame: &PageFrame, measure: &dyn TextMeasure) -> Vec<Op> {
+        let (wb, sheet, ctx, lay_c) = (self.wb, self.sheet, &self.ctx, self.lay_c);
+        page_body(wb, sheet, ctx, lay_c, frame, measure)
+    }
+}
+
+fn page_body(
+    wb: &Workbook,
+    sheet: &Sheet,
+    ctx: &Views,
+    lay_c: u32,
+    frame: &PageFrame,
+    measure: &dyn TextMeasure,
+) -> Vec<Op> {
     let mut ops = Vec::new();
     if frame.rows.is_empty() || frame.cols.is_empty() {
         return ops;
     }
     let mono = frame.black_and_white;
-    let max_r = frame.rows.iter().map(|r| r.0).max().unwrap_or(0);
-    let max_c = frame.cols.iter().map(|c| c.0).max().unwrap_or(0);
-    // 병합·넘침을 볼 수 있게 조금 넓게
-    let mut lay_r = max_r + 1;
-    let mut lay_c = max_c + 1;
-    for m in &sheet.merges {
-        lay_r = lay_r.max(m.end.row + 1);
-        lay_c = lay_c.max(m.end.col + 1);
-    }
-    let lay_c = (lay_c + 32).min(16_384);
-    let ctx = Views::new(wb, sheet, lay_r, lay_c);
     let lay = &ctx.lay;
     let rows_set: HashSet<u32> = frame.rows.iter().map(|r| r.0).collect();
     let cols_set: HashSet<u32> = frame.cols.iter().map(|c| c.0).collect();
