@@ -198,14 +198,23 @@ impl Axis {
 /// 칸 상자가 경계에서 들어가는 거리 (장치 단위): 화면에서 칸의 마지막 픽셀이 격자선 자리인 것과 같다
 const SHIFT: f64 = 6.0;
 
-/// 선 굵기 (장치 단위)와 경계에서 선 가운데까지 (굵은 선은 경계 위)
-fn line_geom(style: &str) -> (f64, f64, bool) {
-    let (w, _, double) = paint::line_style(style).unwrap_or((1, &[], false));
-    match (w, double) {
-        (_, true) => (6.0, -SHIFT, true),
-        (1, _) => (6.0, -SHIFT, false),
-        (2, _) => (13.0, -SHIFT, false),
-        _ => (19.0, 0.0, false),
+/// 선 굵기, 경계에서 선 가운데까지, 이중선, 점선 무늬 (장치 단위, 배율 99 의 한셀 PDF 테두리 실험 — 13 가지)
+fn line_geom(style: &str) -> (f64, f64, bool, &'static [f64]) {
+    match style {
+        "medium" => (13.0, -SHIFT, false, &[]),
+        "thick" => (19.0, 0.0, false, &[]),
+        "double" => (6.0, -SHIFT, true, &[]),
+        "hair" => (1.0, -SHIFT, false, &[]),
+        // 한셀은 dashed 를 짧은 점, dotted 를 긴 점으로 그린다
+        "dashed" => (6.0, -SHIFT, false, &[9.0, 13.0]),
+        "dotted" => (6.0, -SHIFT, false, &[18.0, 10.0]),
+        "dashDot" => (6.0, -SHIFT, false, &[64.0, 16.0, 18.0, 16.0]),
+        "dashDotDot" => (6.0, -SHIFT, false, &[64.0, 16.0, 18.0, 16.0, 18.0, 16.0]),
+        "mediumDashed" => (13.0, -SHIFT, false, &[37.0, 15.0]),
+        "mediumDashDot" => (13.0, -SHIFT, false, &[73.0, 16.0, 18.0, 16.0]),
+        "mediumDashDotDot" => (13.0, -SHIFT, false, &[73.0, 16.0, 18.0, 16.0, 18.0, 16.0]),
+        "slantDashDot" => (13.0, -SHIFT, false, &[73.0, 16.0, 18.0, 16.0]),
+        _ => (6.0, -SHIFT, false, &[]),
     }
 }
 
@@ -221,14 +230,14 @@ fn edge_ops(
     px: f64,
     mono: bool,
 ) {
-    let (width, off, double) = line_geom(&e.style);
+    let (width, off, double, pattern) = line_geom(&e.style);
     let color = bw(rgb(&e.color).unwrap_or(BLACK), mono);
-    let dash: Vec<f64> = paint::line_style(&e.style)
-        .map(|(_, d, _)| d.iter().map(|&v| v as f64 * px).collect())
-        .unwrap_or_default();
+    // 무늬는 배율 99 에서 잰 길이 — 배율에 맞춘다
+    let dash: Vec<f64> = pattern.iter().map(|v| v * px / 6.1875).collect();
     let mid = at + off;
+    // 이중선: 가는 선 둘, 2px 떨어져
     let lines: Vec<f64> = if double {
-        vec![mid - 2.0 * px, mid + px]
+        vec![mid - 6.0, mid + 6.0]
     } else {
         vec![mid]
     };
@@ -676,7 +685,7 @@ pub fn page_ops(
         }
         for (e, up) in [(&b.down, false), (&b.up, true)] {
             let Some(e) = e else { continue };
-            let (width, _, _) = line_geom(&e.style);
+            let (width, _, _, _) = line_geom(&e.style);
             let (ya, yb) = if up {
                 (y1 - SHIFT, y0 - SHIFT)
             } else {

@@ -41,15 +41,17 @@ pub struct PdfOptions {
 /// 장치 단위 (600 dpi) 1pt
 const DEV_PT: f64 = 25.0 / 3.0;
 
-/// 한셀 PDF 의 용지: mm 정수로 반올림 (Letter 215.9×279.4 → 216×279 → MediaBox 612×790)
+/// 한셀 PDF 의 용지: 그리기는 참 용지 크기의 600 dpi 장치 단위(Letter 5100×6600), PDF 용지는 mm 정수로
+/// 반올림한 크기를 pt 정수로 자른 것(Letter 215.9×279.4 → 216×279 → MediaBox 612×790). 내용은 둘의 비율로
+/// 줄여 넣는다 (Letter 세로 790/(6600×0.12) — 한셀 PDF 의 `cm`)
 pub fn page_size(s: &Settings) -> PageSize {
     let mm = |pt: f64| (pt / 72.0 * 25.4).round();
     let (w, h) = (mm(s.paper.width), mm(s.paper.height));
     PageSize {
         width: (w / 25.4 * 72.0).floor(),
         height: (h / 25.4 * 72.0).floor(),
-        dev_w: (w / 25.4 * 600.0).round(),
-        dev_h: (h / 25.4 * 600.0).round(),
+        dev_w: (s.paper.width / 72.0 * 600.0).round(),
+        dev_h: (s.paper.height / 72.0 * 600.0).round(),
     }
 }
 
@@ -87,16 +89,13 @@ pub fn frame(sp: &SheetPrint, page: &Page, size: PageSize) -> PageFrame {
     let h: f64 = rows.iter().map(|r| r.1).sum::<f64>() * 6.25;
     let avail_w = size.dev_w - x0 - (s.right * DEV_PT).round();
     let avail_h = size.dev_h - y0 - (s.bottom * DEV_PT).round();
-    let dx = if s.center_h {
-        ((avail_w - w) / 2.0).floor().max(0.0)
-    } else {
-        0.0
+    // 가운데 맞춤: 화면 px 로 (쓸 자리 px 를 내림, 남는 px 의 반을 내림) 옮긴다 — Holiday_Budget·center 실험
+    let center = |avail: f64, content: f64| {
+        let px = ((avail / 6.25).floor() - content / 6.25) / 2.0;
+        (px.floor().max(0.0) * 6.25 + 0.5).floor()
     };
-    let dy = if s.center_v {
-        ((avail_h - h) / 2.0).floor().max(0.0)
-    } else {
-        0.0
-    };
+    let dx = if s.center_h { center(avail_w, w) } else { 0.0 };
+    let dy = if s.center_v { center(avail_h, h) } else { 0.0 };
     let z = if sp.tall { 100 } else { sp.print_scale };
     PageFrame {
         cols: bounds(x0 + dx, &cols),

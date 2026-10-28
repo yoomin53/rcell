@@ -219,13 +219,9 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet) -> (Vec<u8>, bool) {
     let mut s = String::new();
     let sx = size.width / (size.dev_w * 0.12);
     let sy = size.height / (size.dev_h * 0.12);
-    let _ = writeln!(
-        s,
-        "q {} 0 0 {} 0 {} cm",
-        num(0.12 * sx),
-        num(-0.12 * sy),
-        num(size.height)
-    );
+    // 선·채우기는 pt 좌표로 (한셀 PDF 처럼 — 같은 렌더러에서 선 굵기·자리가 같게 그려진다), 글자만 장치 단위 cm 아래
+    let px = |x: f64| x * 0.12 * sx;
+    let py = |y: f64| size.height - y * 0.12 * sy;
     let mut plain = false;
     for op in ops {
         match op {
@@ -238,12 +234,16 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet) -> (Vec<u8>, bool) {
             } => {
                 let _ = writeln!(
                     s,
-                    "{} rg {} {} {} {} re f",
+                    "{} rg {} {} m {} {} l {} {} l {} {} l h f",
                     color(*c),
-                    num(*x0),
-                    num(*y0),
-                    num(x1 - x0),
-                    num(y1 - y0)
+                    num(px(*x0)),
+                    num(py(*y0)),
+                    num(px(*x1)),
+                    num(py(*y0)),
+                    num(px(*x1)),
+                    num(py(*y1)),
+                    num(px(*x0)),
+                    num(py(*y1))
                 );
             }
             Op::Line {
@@ -255,26 +255,34 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet) -> (Vec<u8>, bool) {
                 color: c,
                 dash,
             } => {
-                let d = dash.iter().map(|v| num(*v)).collect::<Vec<_>>().join(" ");
+                let d = dash
+                    .iter()
+                    .map(|v| num(v * 0.12))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let _ = writeln!(
                     s,
                     "{} RG {} w [{d}] 0 d {} {} m {} {} l S",
                     color(*c),
-                    num(*width),
-                    num(*x0),
-                    num(*y0),
-                    num(*x1),
-                    num(*y1)
+                    num(width * 0.12),
+                    num(px(*x0)),
+                    num(py(*y0)),
+                    num(px(*x1)),
+                    num(py(*y1))
                 );
             }
             Op::Clip { x0, y0, x1, y1 } => {
                 let _ = writeln!(
                     s,
-                    "q {} {} {} {} re W n",
-                    num(*x0),
-                    num(*y0),
-                    num(x1 - x0),
-                    num(y1 - y0)
+                    "q {} {} m {} {} l {} {} l {} {} l h W n",
+                    num(px(*x0)),
+                    num(py(*y0)),
+                    num(px(*x1)),
+                    num(py(*y0)),
+                    num(px(*x1)),
+                    num(py(*y1)),
+                    num(px(*x0)),
+                    num(py(*y1))
                 );
             }
             Op::Unclip => s.push_str("Q\n"),
@@ -291,7 +299,15 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet) -> (Vec<u8>, bool) {
             } => {
                 let runs = fonts.runs(font, text, true);
                 let mut cx = *x;
-                let _ = writeln!(s, "{} rg {} RG", color(*c), color(*c));
+                let _ = writeln!(
+                    s,
+                    "q {} 0 0 {} 0 {} cm {} rg {} RG",
+                    num(0.12 * sx),
+                    num(-0.12 * sy),
+                    num(size.height),
+                    color(*c),
+                    color(*c)
+                );
                 for r in &runs {
                     let name = match r.font {
                         Some(i) => format!("F{i}"),
@@ -351,10 +367,10 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet) -> (Vec<u8>, bool) {
                         num(sy2)
                     );
                 }
+                s.push_str("Q\n");
             }
         }
     }
-    s.push_str("Q\n");
     (s.into_bytes(), plain)
 }
 
