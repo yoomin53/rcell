@@ -355,31 +355,45 @@ fn offsets(e: &Edge) -> (&'static [i64], &'static [u32]) {
 
 /// 칸의 테두리를 그리는 SVG. 칸 박스는 w×h px(오른쪽·아래 끝 픽셀이 격자선 자리),
 /// SVG 는 칸 왼쪽 위에서 (-2,-2) 만큼 밖으로 나가 (w+3)×(h+3) 을 덮는다.
-pub fn borders_svg(b: &CellBorders, w: u32, h: u32) -> String {
+/// 이중선의 가운데 틈(경계 픽셀)은 `gap` 색으로 칠한다 — 칸 채우기, 없으면 흰색 (한셀 화면: 격자선이 보이지 않는다,
+/// 표 스타일 실험의 요약 행 위 이중선)
+pub fn borders_svg(b: &CellBorders, w: u32, h: u32, gap: &str) -> String {
     let (w, h) = (w as i64, h as i64);
     // SVG 좌표의 경계 픽셀: 왼쪽 = 이전 칸의 격자선, 오른쪽 = 이 칸의 마지막 픽셀
     let (bl, br, bt, bb) = (1i64, w + 1, 1i64, h + 1);
     let mut s = String::new();
     if let Some(e) = &b.top {
         let (o, d) = offsets(e);
+        if o.len() == 2 && o[0] == -1 && o[1] == 1 {
+            hline(&mut s, bt, bl, br, &[], gap);
+        }
         for &k in o {
             hline(&mut s, bt + k, bl, br, d, &e.color);
         }
     }
     if let Some(e) = &b.bottom {
         let (o, d) = offsets(e);
+        if o.len() == 2 && o[0] == -1 && o[1] == 1 {
+            hline(&mut s, bb, bl, br, &[], gap);
+        }
         for &k in o {
             hline(&mut s, bb + k, bl, br, d, &e.color);
         }
     }
     if let Some(e) = &b.left {
         let (o, d) = offsets(e);
+        if o.len() == 2 && o[0] == -1 && o[1] == 1 {
+            vline(&mut s, bl, bt, bb, &[], gap);
+        }
         for &k in o {
             vline(&mut s, bl + k, bt, bb, d, &e.color);
         }
     }
     if let Some(e) = &b.right {
         let (o, d) = offsets(e);
+        if o.len() == 2 && o[0] == -1 && o[1] == 1 {
+            vline(&mut s, br, bt, bb, &[], gap);
+        }
         for &k in o {
             vline(&mut s, br + k, bt, bb, d, &e.color);
         }
@@ -459,7 +473,7 @@ mod tests {
             ..Default::default()
         };
         // 72×22 칸의 아래 굵은 선: 경계(y=23) ±1, 왼쪽 경계(x=1)부터 오른쪽 경계(x=73)까지
-        let s = borders_svg(&b, 72, 22);
+        let s = borders_svg(&b, 72, 22, "#FFFFFF");
         assert!(s.contains("<rect x='1' y='22' width='73' height='1'"));
         assert!(s.contains("<rect x='1' y='24' width='73' height='1'"));
     }

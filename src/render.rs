@@ -835,6 +835,9 @@ pub fn sheet_table_grid(
                 let span = ov.span.get(&(r, c)).copied().unwrap_or((0, 0));
                 inner = cell::cell_content(v, merged.as_ref().or(cf), &theme, w, h, span);
             }
+            if tlooks.get(&(r, c)).is_some_and(|t| t.handle) {
+                inner.push_str(&table::handle_svg(w, h));
+            }
             if tlooks.get(&(r, c)).is_some_and(|t| t.button) {
                 inner.push_str(&table::button_svg(w, h));
             }
@@ -874,7 +877,12 @@ pub fn sheet_table_grid(
                 b.left = None;
             }
             if !b.is_empty() {
-                inner.push_str(&paint::borders_svg(&b, w, h));
+                let gap = views
+                    .get(&(r, c))
+                    .and_then(|v| v.fill.as_ref())
+                    .and_then(|f| f.color.clone())
+                    .unwrap_or_else(|| "#FFFFFF".into());
+                inner.push_str(&paint::borders_svg(&b, w, h, &gap));
             }
             if let Some((gi, vals)) = sparks.get(&(r, c))
                 && let Some(g) = spark_groups.get(*gi)
@@ -920,7 +928,7 @@ table.rc-sheet th{box-sizing:border-box;background:#F5F5F5;border:0 solid #CCCCC
 table.rc-sheet thead th.rc-corner{left:0;z-index:5}\
 table.rc-sheet tbody th{position:sticky;left:0;text-align:center}\
 .rc-t{position:absolute;left:0;top:0;overflow:hidden;box-sizing:border-box;white-space:pre;z-index:1}\
-.rc-t>span{position:absolute;white-space:pre}\
+.rc-t>span{position:absolute;white-space:pre;text-decoration:inherit}\
 .rc-w,.rc-flex{display:flex;flex-direction:column;padding:0 2px}\
 .rc-w>span,.rc-flex>span{position:static}\
 .rc-ov{z-index:2}\

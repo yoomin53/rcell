@@ -1316,7 +1316,7 @@ pub(crate) fn draw_rgb(c: &DrawColor, theme: &Theme) -> Option<(u8, u8, u8)> {
     Some((c(rgb.0), c(rgb.1), c(rgb.2)))
 }
 
-fn rgb_to_hsl((r, g, b): (f64, f64, f64)) -> (f64, f64, f64) {
+pub(super) fn rgb_to_hsl((r, g, b): (f64, f64, f64)) -> (f64, f64, f64) {
     let (r, g, b) = (r / 255.0, g / 255.0, b / 255.0);
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
@@ -1340,7 +1340,7 @@ fn rgb_to_hsl((r, g, b): (f64, f64, f64)) -> (f64, f64, f64) {
     (h / 6.0, s, l)
 }
 
-fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
+pub(super) fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
     if s == 0.0 {
         return (l * 255.0, l * 255.0, l * 255.0);
     }

@@ -364,7 +364,24 @@ pub(super) fn cell_content(
         VAlign::Bottom => "bottom:0".to_string(),
     };
     let vshift = if v.v == VAlign::Center { "-50%" } else { "0" };
-    let body = rich_html(v, &text, theme);
+    let mut body = rich_html(v, &text, theme);
+    // 칸 전체 위·아래 첨자: 60% 글꼴을 기준선에서 올리거나 내린다 (한셀 화면 — 글꼴 실험의 11pt: 위 첨자 잉크
+    // 1–9px, 아래 첨자 10–17px, 보통 글 3–16px)
+    if let Some(va) = v.font.and_then(|f| f.vert_align.as_deref()) {
+        let px = v.font.and_then(|f| f.size).unwrap_or(metrics::DEFAULT_SIZE) * 4.0 / 3.0;
+        let dy = match va {
+            "superscript" => -0.45 * px,
+            "subscript" => 0.19 * px,
+            _ => 0.0,
+        };
+        if dy != 0.0 {
+            fcss = fcss.replace("vertical-align:super;font-size:smaller;", "");
+            fcss = fcss.replace("vertical-align:sub;font-size:smaller;", "");
+            body = format!(
+                "<span style=\"font-size:60%;position:relative;top:{dy:.1}px\">{body}</span>"
+            );
+        }
+    }
 
     // 돌린 글자·세로 쓰기
     if v.rotation != 0 {
