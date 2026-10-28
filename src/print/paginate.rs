@@ -488,7 +488,26 @@ pub fn sheet_print(wb: &Workbook, sheet_index: usize) -> SheetPrint {
     // 서식 파일 Basic_Invoice 서식 시트: 행 높이 합 817.45pt 로 85%, 반올림한 px 합(1096)이면 84%
     let row_round: Vec<f64> = row_px.iter().map(|&v| v as f64).collect();
     let col_round: Vec<f64> = col_px.iter().map(|&v| v as f64).collect();
-    let row_exact: Vec<f64> = geo.row_pt.iter().map(|&v| v / PX).collect();
+    // 직접 정한 높이(customHeight)는 pt 그대로, 자동 높이 행은 화면 px (CM_and_BreakEven_Analysis: 빈 자동 행
+    // 13.2pt 를 18px 로 세야 33%)
+    let custom: std::collections::HashSet<u32> = sheet
+        .rows
+        .iter()
+        .filter(|r| r.custom_height && r.index >= 1)
+        .map(|r| r.index - 1)
+        .collect();
+    let row_exact: Vec<f64> = geo
+        .row_pt
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            if custom.contains(&(i as u32)) {
+                v / PX
+            } else {
+                row_px[i] as f64
+            }
+        })
+        .collect();
     let col_exact: Vec<f64> = geo.col_px.clone();
 
     let (pw, ph) = printable(&s);
