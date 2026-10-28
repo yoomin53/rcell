@@ -30,6 +30,7 @@ pub mod fill;
 mod filter;
 pub mod find;
 pub mod input;
+pub mod objects;
 pub mod refs;
 pub mod sort;
 pub mod special;
@@ -364,6 +365,134 @@ pub enum Edit {
         skip_blanks: bool,
         #[serde(default)]
         transpose: bool,
+    },
+    /// 메모 더하기 (`author` 가 있으면 글 앞에 `작성자:` 줄)
+    AddComment {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        cell: String,
+        text: String,
+        #[serde(default)]
+        author: String,
+    },
+    /// 메모 고치기 (글 전체)
+    EditComment {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        cell: String,
+        text: String,
+    },
+    /// 범위의 메모 지우기
+    DeleteComment {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+    },
+    /// 하이퍼링크 더하기 (`address` 바깥 주소 또는 `location` 문서 안 자리)
+    AddHyperlink {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        cell: String,
+        #[serde(default)]
+        address: Option<String>,
+        #[serde(default)]
+        location: Option<String>,
+        #[serde(default)]
+        tooltip: Option<String>,
+        #[serde(default)]
+        display: Option<String>,
+    },
+    /// 범위의 하이퍼링크 지우기
+    RemoveHyperlink {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+    },
+    /// 이름 정의 (`local` 이면 `sheet` 의 시트 범위)
+    AddName {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        name: String,
+        refers_to: String,
+        #[serde(default)]
+        local: bool,
+    },
+    /// 이름 지우기
+    DeleteName {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        name: String,
+        #[serde(default)]
+        local: bool,
+    },
+    /// 데이터 유효성 더하기 (`type`: `whole` `decimal` `list` `date` `time` `textLength` `custom`)
+    AddValidation {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        operator: Option<String>,
+        #[serde(default)]
+        formula1: String,
+        #[serde(default)]
+        formula2: Option<String>,
+        /// `stop`(기본) `warning` `information`
+        #[serde(default)]
+        error_style: Option<String>,
+        #[serde(default)]
+        prompt: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    /// 범위의 데이터 유효성 지우기
+    DeleteValidation {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+    },
+    /// 조건부 서식 규칙 더하기 (`type`: `cellIs` `expression` …, 서식은 `fill` `fontColor` `bold`)
+    AddCf {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        operator: Option<String>,
+        #[serde(default)]
+        formula1: Option<String>,
+        #[serde(default)]
+        formula2: Option<String>,
+        #[serde(default)]
+        fill: Option<String>,
+        #[serde(default)]
+        font_color: Option<String>,
+        #[serde(default)]
+        bold: bool,
+    },
+    /// 범위의 조건부 서식 지우기
+    DeleteCf {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+    },
+    /// 열 너비 자동 맞춤
+    AutoFitCols {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 행 높이 자동 맞춤
+    AutoFitRows {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        row: u32,
+        #[serde(default = "one")]
+        count: u32,
     },
     /// 셀 삽입 (`shift`: `down` 아래로 밀기, `right` 오른쪽으로 밀기)
     InsertCells {
@@ -917,6 +1046,149 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             };
             special::paste_special(wb, i, parse_range(from)?, d, parse_range(to)?, &o)?;
             Ok(d)
+        }
+        Edit::AddComment {
+            sheet,
+            cell,
+            text,
+            author,
+        } => {
+            let i = si(wb, sheet)?;
+            objects::add_comment(wb, i, cell.parse()?, author, text)?;
+            Ok(i)
+        }
+        Edit::EditComment { sheet, cell, text } => {
+            let i = si(wb, sheet)?;
+            objects::edit_comment(wb, i, cell.parse()?, text)?;
+            Ok(i)
+        }
+        Edit::DeleteComment { sheet, range } => {
+            let i = si(wb, sheet)?;
+            objects::delete_comments(wb, i, parse_range(range)?)?;
+            Ok(i)
+        }
+        Edit::AddHyperlink {
+            sheet,
+            cell,
+            address,
+            location,
+            tooltip,
+            display,
+        } => {
+            let i = si(wb, sheet)?;
+            objects::add_hyperlink(
+                wb,
+                i,
+                cell.parse()?,
+                address.as_deref(),
+                location.as_deref(),
+                tooltip.as_deref(),
+                display.as_deref(),
+            )?;
+            Ok(i)
+        }
+        Edit::RemoveHyperlink { sheet, range } => {
+            let i = si(wb, sheet)?;
+            objects::remove_hyperlinks(wb, i, parse_range(range)?)?;
+            Ok(i)
+        }
+        Edit::AddName {
+            sheet,
+            name,
+            refers_to,
+            local,
+        } => {
+            let i = si(wb, sheet)?;
+            objects::add_name(wb, local.then_some(i), name, refers_to)?;
+            Ok(i)
+        }
+        Edit::DeleteName { sheet, name, local } => {
+            let i = si(wb, sheet)?;
+            objects::delete_name(wb, local.then_some(i), name)?;
+            Ok(i)
+        }
+        Edit::AddValidation {
+            sheet,
+            range,
+            kind,
+            operator,
+            formula1,
+            formula2,
+            error_style,
+            prompt,
+            error,
+        } => {
+            let i = si(wb, sheet)?;
+            let f1 = if kind == "list" && !formula1.starts_with('=') {
+                format!("\"{formula1}\"")
+            } else {
+                formula1.trim_start_matches('=').to_string()
+            };
+            let dv = crate::model::DataValidation {
+                kind: kind.clone(),
+                operator: operator.clone(),
+                formula1: Some(f1),
+                formula2: formula2
+                    .as_ref()
+                    .map(|f| f.trim_start_matches('=').to_string()),
+                allow_blank: true,
+                show_input: true,
+                show_error: true,
+                error_style: error_style.clone(),
+                prompt: prompt.clone(),
+                error: error.clone(),
+                ..Default::default()
+            };
+            objects::add_validation(wb, i, parse_range(range)?, dv)?;
+            Ok(i)
+        }
+        Edit::DeleteValidation { sheet, range } => {
+            let i = si(wb, sheet)?;
+            objects::delete_validation(wb, i, parse_range(range)?)?;
+            Ok(i)
+        }
+        Edit::AddCf {
+            sheet,
+            range,
+            kind,
+            operator,
+            formula1,
+            formula2,
+            fill,
+            font_color,
+            bold,
+        } => {
+            let i = si(wb, sheet)?;
+            let formulas = formula1.iter().chain(formula2.iter()).cloned().collect();
+            objects::add_cf(
+                wb,
+                i,
+                parse_range(range)?,
+                kind,
+                operator.as_deref(),
+                formulas,
+                fill.as_deref(),
+                font_color.as_deref(),
+                *bold,
+            )?;
+            Ok(i)
+        }
+        Edit::DeleteCf { sheet, range } => {
+            let i = si(wb, sheet)?;
+            objects::delete_cf(wb, i, parse_range(range)?)?;
+            Ok(i)
+        }
+        Edit::AutoFitCols { sheet, col, count } => {
+            let i = si(wb, sheet)?;
+            let c = parse_col(col)?;
+            objects::autofit_cols(wb, i, c, c + count.max(&1) - 1)?;
+            Ok(i)
+        }
+        Edit::AutoFitRows { sheet, row, count } => {
+            let i = si(wb, sheet)?;
+            let r = row.saturating_sub(1);
+            objects::autofit_rows(wb, i, r, r + count.max(&1) - 1)?;
+            Ok(i)
         }
         Edit::InsertCells {
             sheet,

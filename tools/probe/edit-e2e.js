@@ -93,10 +93,10 @@ const SCRIPTS = {
     { op: "autoFill", sheet: 0, range: "AB1", to: "AB1:AB9" },
   ],
   replace: [
-    { op: "replace", sheet: 0, find: "1", replace: "7" },
-    { op: "replace", sheet: 0, find: "SUM", replace: "sum", matchCase: true },
-    { op: "replace", find: "합계", replace: "총계", all: true },
-    { op: "replace", sheet: 0, find: "a", replace: "Ä", wholeCell: true },
+    { op: "replace", sheet: 0, find: "1", replace: "7", range: "A1:Z200" },
+    { op: "replace", sheet: 0, find: "SUM", replace: "sum", matchCase: true, range: "A1:Z200" },
+    { op: "replace", find: "합계", replace: "총계", all: true, range: "A1:Z200" },
+    { op: "replace", sheet: 0, find: "a", replace: "Ä", wholeCell: true, range: "A1:Z200" },
   ],
   cells: [
     { op: "insertCells", sheet: 0, range: "B3:C4", shift: "down" },
@@ -113,6 +113,14 @@ const SCRIPTS = {
     { op: "pasteSpecial", sheet: 0, from: "A1:D6", to: "AP1", paste: "all", transpose: true },
     { op: "pasteSpecial", sheet: 0, from: "B2:C5", to: "AF10", paste: "formulas", skipBlanks: true },
     { op: "pasteSpecial", sheet: 0, from: "C3:D4", to: "AF1", paste: "values", operation: "add" },
+  ],
+  objects: [
+    { op: "addComment", sheet: 0, cell: "E8", text: "새 메모", author: "media" },
+    { op: "addHyperlink", sheet: 0, cell: "AA3", address: "https://example.com/", tooltip: "팁" },
+    { op: "addName", name: "범위1", refersTo: "$A$1:$C$4" },
+    { op: "deleteCf", sheet: 0, range: "A1:B20" },
+    { op: "deleteValidation", sheet: 0, range: "A1:B20" },
+    { op: "deleteComment", sheet: 0, range: "A1:D20" },
   ],
   sort: [
     { op: "sort", sheet: 0, range: "A1:H40", keys: [{ by: "B" }], header: true },

@@ -209,6 +209,55 @@ function Invoke-Edit($wb, $e) {
             [void]$ws.Range([string]$e.from).Copy()
             [void]$dst.Range([string]$e.to).PasteSpecial($k, $o, [bool]$e.skipBlanks, [bool]$e.transpose)
         }
+        "addComment" { [void]$ws.Range([string]$e.cell).AddComment([string]$e.text) }
+        "editComment" { [void]$ws.Range([string]$e.cell).Comment.Text([string]$e.text) }
+        "deleteComment" { [void]$ws.Range([string]$e.range).ClearComments() }
+        "addHyperlink" {
+            $M = [Type]::Missing
+            $addr = if ($e.address) { [string]$e.address } else { "" }
+            $sub = if ($e.location) { [string]$e.location } else { $M }
+            $tip = if ($e.tooltip) { [string]$e.tooltip } else { $M }
+            $disp = if ($e.display) { [string]$e.display } else { $M }
+            [void]$ws.Hyperlinks.Add($ws.Range([string]$e.cell), $addr, $sub, $tip, $disp)
+        }
+        "removeHyperlink" { [void]$ws.Range([string]$e.range).ClearHyperlinks() }
+        "addName" {
+            if ($null -ne $e.local) { [void]$ws.Names.Add([string]$e.name, "=" + [string]$e.refersTo) }
+            else { [void]$wb.Names.Add([string]$e.name, "=" + [string]$e.refersTo) }
+        }
+        "deleteName" {
+            $n = $null
+            foreach ($x in @($wb.Names)) { if ($x.Name -eq [string]$e.name -or $x.Name -like "*!$([string]$e.name)") { $n = $x; break } }
+            if ($n) { $n.Delete() } else { throw "이름 없음" }
+        }
+        "addValidation" {
+            # Validation.Add 는 선택한 칸에 적용된다 (관측) — 범위를 먼저 고른다
+            $types = @{ "whole" = 1; "decimal" = 2; "list" = 3; "date" = 4; "time" = 5; "textLength" = 6; "custom" = 7 }
+            $opsV = @{ "between" = 1; "notBetween" = 2; "equal" = 3; "notEqual" = 4; "greaterThan" = 5; "lessThan" = 6; "greaterThanOrEqual" = 7; "lessThanOrEqual" = 8 }
+            $M = [Type]::Missing
+            $rg = $ws.Range([string]$e.range)
+            $ws.Activate(); [void]$rg.Select()
+            $f2 = if ($e.formula2) { [string]$e.formula2 } else { $M }
+            $op = if ($e.operator) { $opsV[[string]$e.operator] } else { 1 }
+            $rg.Validation.Delete()
+            $rg.Validation.Add($types[[string]$e.type], 1, $op, [string]$e.formula1, $f2)
+        }
+        "deleteValidation" { $ws.Range([string]$e.range).Validation.Delete() }
+        "addCf" {
+            $types = @{ "cellIs" = 1; "expression" = 2 }
+            $opsC = @{ "between" = 1; "notBetween" = 2; "equal" = 3; "notEqual" = 4; "greaterThan" = 5; "lessThan" = 6; "greaterThanOrEqual" = 7; "lessThanOrEqual" = 8 }
+            $M = [Type]::Missing
+            $op = if ($e.operator) { $opsC[[string]$e.operator] } else { $M }
+            $f2 = if ($e.formula2) { [string]$e.formula2 } else { $M }
+            $f1 = if ([string]$e.type -eq "expression" -and -not ([string]$e.formula1).StartsWith("=")) { "=" + [string]$e.formula1 } else { [string]$e.formula1 }
+            $fc = $ws.Range([string]$e.range).FormatConditions.Add($types[[string]$e.type], $op, $f1, $f2)
+            if ($e.fill) { $fc.Interior.Color = (Get-Bgr $e.fill) }
+            if ($e.fontColor) { $fc.Font.Color = (Get-Bgr $e.fontColor) }
+            if ($e.bold) { $fc.Font.Bold = $true }
+        }
+        "deleteCf" { $ws.Range([string]$e.range).FormatConditions.Delete() }
+        "autoFitCols" { [void]$ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.AutoFit() }
+        "autoFitRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.AutoFit() }
         "insertCells" {
             # 셀 삽입 (아래로 -4121, 오른쪽으로 -4161)
             $sh = if ([string]$e.shift -eq "right") { -4161 } else { -4121 }
