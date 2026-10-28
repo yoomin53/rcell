@@ -18,9 +18,9 @@
 
 use std::cmp::Ordering;
 
+use super::err;
 use super::refs::{self, Area};
-use super::structure::{anchor_cols, at_px, locate_px, unshare, update_dimension};
-use super::{err, guard_action, guard_cells};
+use super::structure::{unshare, update_dimension};
 use crate::model::{CellRange, CellRef, CellValue, ConditionalFormat, FormulaKind, Workbook};
 
 /// 정렬 열쇠: 왼쪽에서 오른쪽 정렬이 아니면 열 번호, 맞으면 행 번호 (0부터, 시트 기준)
@@ -94,14 +94,21 @@ pub fn sort(
     if opt.keys.is_empty() {
         return Err(err("정렬 기준이 없습니다"));
     }
-    guard_action(wb, si, "sort")?;
+    // 보호된 시트: 정렬이 막혔으면 할 수 없다. 잠긴 칸은 따지지 않는다 (한셀 자동화 — corpus 대조: 정렬을 허용한
+    // 보호 시트의 잠긴 칸도 정렬한다)
+    super::guard_action(wb, si, "sort")?;
     // 열·행 전체 범위는 쓰는 범위까지
     let mut range = range;
+    let whole_cols = range.start.row == 0 && range.end.row >= refs::MAX_ROWS - 1;
+    let whole_rows = range.start.col == 0 && range.end.col >= refs::MAX_COLS - 1;
     if let Some(used) = wb.sheets[si].used_range() {
-        range.end.row = range.end.row.min(used.end.row.max(range.start.row));
-        range.end.col = range.end.col.min(used.end.col.max(range.start.col));
+        if whole_cols {
+            range.end.row = used.end.row.max(range.start.row);
+        }
+        if whole_rows {
+            range.end.col = used.end.col.max(range.start.col);
+        }
     }
-    guard_cells(wb, si, range)?;
     let sheet = &wb.sheets[si];
     let (r0, c0, r1, c1) = (
         range.start.row,
@@ -111,13 +118,10 @@ pub fn sort(
     );
     let inside = |r: CellRef| r.row >= r0 && r.row <= r1 && r.col >= c0 && r.col <= c1;
     let overlaps = |a: (u32, u32, u32, u32)| !(a.2 < r0 || a.0 > r1 || a.3 < c0 || a.1 > c1);
-    if sheet
+    let merged = sheet
         .merges
         .iter()
-        .any(|m| overlaps((m.start.row, m.start.col, m.end.row, m.end.col)))
-    {
-        return Err(err("병합된 셀이 있는 범위는 정렬할 수 없습니다"));
-    }
+        .any(|m| overlaps((m.start.row, m.start.col, m.end.row, m.end.col)));
     if sheet.cells.iter().any(|c| {
         inside(c.r)
             && c.formula
@@ -146,7 +150,19 @@ pub fn sort(
     // 정렬 기준 값 (수식은 지금 값 — 다시 계산해 둔다)
     crate::calc::recalculate(wb);
     let sheet = &wb.sheets[si];
-    let lines: Vec<u32> = (first..=last).collect();
+    // 필터가 걸린 시트에서는 숨긴 행을 그 자리에 두고 보이는 행만 정렬한다 (corpus 대조 — 필터 문서)
+    let filtered = !ltr && super::filter::has_criteria(sheet);
+    let hidden: std::collections::HashSet<u32> = if filtered {
+        sheet
+            .rows
+            .iter()
+            .filter(|r| r.hidden)
+            .map(|r| r.index - 1)
+            .collect()
+    } else {
+        Default::default()
+    };
+    let lines: Vec<u32> = (first..=last).filter(|l| !hidden.contains(l)).collect();
     let value_at = |line: u32, key: u32| -> CellValue {
         let r = if ltr {
             CellRef {
@@ -175,10 +191,14 @@ pub fn sort(
         }
         Ordering::Equal
     });
+    // 병합된 셀이 있으면 줄을 옮길 수 없다 (한셀은 차례가 그대로면 오류 없이 지나간다 — corpus 대조)
+    if merged && order.iter().enumerate().any(|(d, &s)| d != s) {
+        return Err(err("병합된 셀이 있는 범위는 정렬할 수 없습니다"));
+    }
     // 원본 줄 → 새 줄
-    let mut dest_of = vec![0u32; lines.len()];
+    let mut dest_of: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     for (d, &s) in order.iter().enumerate() {
-        dest_of[s] = lines[d];
+        dest_of.insert(lines[s], lines[d]);
     }
     let line_of = |r: CellRef| if ltr { r.col } else { r.row };
     let cross_ok = |r: CellRef| {
@@ -189,11 +209,10 @@ pub fn sort(
         }
     };
     let new_pos = |r: CellRef| -> Option<CellRef> {
-        let l = line_of(r);
-        if l < first || l > last || !cross_ok(r) {
+        if !cross_ok(r) {
             return None;
         }
-        let d = dest_of[(l - first) as usize];
+        let d = *dest_of.get(&line_of(r))?;
         Some(if ltr {
             CellRef { row: r.row, col: d }
         } else {
@@ -211,6 +230,18 @@ pub fn sort(
     );
     // 메모 상자를 다시 둘 배치 (옮기기 전)
     let geo = super::structure::comment_geometry(wb, si, 0);
+
+    // 테두리는 자리에 남는다 (한셀 — 테두리 서식 문서의 정렬 대조): 옮기기 전 자리마다 테두리
+    let old_borders: Vec<(CellRef, u32)> = {
+        let sheet = &wb.sheets[si];
+        let mut v = Vec::new();
+        for c in &sheet.cells {
+            if new_pos(c.r).is_some() {
+                v.push((c.r, wb.styles.xf(c.style).map_or(0, |x| x.border_id)));
+            }
+        }
+        v
+    };
 
     let sheet = &mut wb.sheets[si];
     sheet.conditional_formats = cfs;
@@ -231,6 +262,8 @@ pub fn sort(
     }
     sheet.cells.sort_by_key(|c| (c.r.row, c.r.col));
     unshare(sheet);
+    keep_borders(wb, si, &old_borders, &new_pos);
+    let sheet = &mut wb.sheets[si];
     // 하이퍼링크 (한 칸짜리)
     for h in &mut sheet.hyperlinks {
         if let Some(rg) = CellRange::parse(&h.range)
@@ -261,6 +294,51 @@ pub fn sort(
     sheet.comments = kept;
     update_dimension(sheet);
     Ok(())
+}
+
+/// 정렬로 옮긴 셀에 그 자리에 있던 테두리를 다시 준다
+fn keep_borders(
+    wb: &mut Workbook,
+    si: usize,
+    old: &[(CellRef, u32)],
+    moved: &dyn Fn(CellRef) -> Option<CellRef>,
+) {
+    let old_at: std::collections::HashMap<CellRef, u32> = old.iter().copied().collect();
+    // 셀이 옮겨 온 자리와 셀이 있던 자리
+    let mut spots: Vec<CellRef> = old.iter().map(|&(r, _)| r).collect();
+    spots.extend(
+        wb.sheets[si]
+            .cells
+            .iter()
+            .map(|c| c.r)
+            .filter(|&r| moved(r).is_some()),
+    );
+    spots.sort_by_key(|r| (r.row, r.col));
+    spots.dedup();
+    for at in spots {
+        let sheet = &wb.sheets[si];
+        let base = sheet.effective_style(at.row, at.col);
+        let border_of = |st: u32| wb.styles.xf(st).map_or(0, |x| x.border_id);
+        let want = old_at.get(&at).copied().unwrap_or_else(|| border_of(base));
+        let (cur, exists) = match sheet.cell(at) {
+            Some(c) => (c.style, true),
+            None => (base, false),
+        };
+        if border_of(cur) == want {
+            continue;
+        }
+        let mut xf = wb.styles.xf(cur).cloned().unwrap_or_default();
+        xf.border_id = want;
+        let n = super::style::intern_xf(&mut wb.styles, xf);
+        let sheet = &mut wb.sheets[si];
+        if exists {
+            if let Some(c) = sheet.cells.iter_mut().find(|c| c.r == at) {
+                c.style = n;
+            }
+        } else {
+            super::cell_mut(sheet, at).style = n;
+        }
+    }
 }
 
 /// 옮긴 메모의 이름 (`메모 N`): 한셀은 새 줄을 위에서부터 채우며 줄마다 원본 줄의 메모를 새 자리에 만들고 그 줄에
@@ -340,34 +418,59 @@ fn rename_moved(
     }
 }
 
-/// 정렬로 옮겨진 메모의 상자 (정렬 대조 실험): 열은 앞 열의 앵커 너비 + 1px (A 열이면 A 열 너비 + 1px), 행은 앞 행
-/// 높이 + 1px (1행이면 1행 높이) 만큼 왼쪽·위로. 왼쪽·위가 시트 밖으로 나가면 첫 칸에 두고 오프셋을 2px 줄인다
+/// 정렬로 옮겨진 메모의 상자 (정렬 대조 실험): 앵커의 칸마다 한 칸 앞(숨긴 행·열은 건너뛴다)으로, 오프셋은 1px
+/// 줄인 뒤 앵커 좌표(열 너비·행 높이 − 1px)로 넘치거나 모자란 오프셋을 이웃 칸으로 옮긴다. 앞 칸이 없으면 첫 칸에
+/// 두고 왼쪽·위는 2px, 오른쪽·아래는 첫 칸 너비 + 1px 줄인다. 기본 너비가 아닌 열에서는 1px 다를 수 있다 (docs/editing.md 13절)
 fn sorted_box(g: &crate::render::Geometry, a: [u32; 8]) -> [u32; 8] {
-    let cols = anchor_cols(g);
-    let rows = &g.rows;
-    let w = |list: &[(u32, u32)], i: u32| list.get(i as usize).map_or(0, |p| p.1) as i64;
-    let dx = if a[0] > 0 {
-        w(&cols, a[0] - 1) + 1
-    } else {
-        w(&cols, 0) + 1
+    let size = |list: &[(u32, u32)]| -> Vec<i64> {
+        list.iter().map(|p| (p.1 as i64 - 1).max(0)).collect()
     };
-    let dy = if a[2] > 0 {
-        w(rows, a[2] - 1) + 1
-    } else {
-        w(rows, 0)
-    };
-    let from = |list: &[(u32, u32)], i: u32, off: u32, d: i64| -> (u32, u32) {
-        let p = at_px(list, i, off) - d;
-        if p < 0 {
-            (0, off.saturating_sub(2))
-        } else {
-            locate_px(list, p)
+    let (cols, rows) = (size(&g.cols), size(&g.rows));
+    let back = |sz: &[i64], i: u32, off: u32, first: bool| -> (u32, u32) {
+        let visible = |j: i64| sz.get(j as usize).is_some_and(|&w| w > 0);
+        let mut j = i as i64 - 1;
+        while j >= 0 && !visible(j) {
+            j -= 1;
         }
+        if j < 0 {
+            // 앞 칸이 없으면: 왼쪽·위는 2px, 오른쪽·아래는 첫 칸 너비 + 1px 줄인다
+            let d = if first {
+                2
+            } else {
+                sz.first().copied().unwrap_or(0) as u32 + 1
+            };
+            return (0, off.saturating_sub(d));
+        }
+        let mut o = off as i64 - 1;
+        // 앵커 좌표로 고른다
+        loop {
+            if o < 0 {
+                let mut k = j - 1;
+                while k >= 0 && !visible(k) {
+                    k -= 1;
+                }
+                if k < 0 {
+                    o = 0;
+                    break;
+                }
+                j = k;
+                o += sz[j as usize];
+            } else if visible(j) && o >= sz[j as usize] && (j as usize) + 1 < sz.len() {
+                o -= sz[j as usize];
+                j += 1;
+                while (j as usize) + 1 < sz.len() && !visible(j) {
+                    j += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        (j as u32, o as u32)
     };
-    let (lc, lo) = from(&cols, a[0], a[1], dx);
-    let (tr, to) = from(rows, a[2], a[3], dy);
-    let (rc, ro) = locate_px(&cols, (at_px(&cols, a[4], a[5]) - dx).max(0));
-    let (br, bo) = locate_px(rows, (at_px(rows, a[6], a[7]) - dy).max(0));
+    let (lc, lo) = back(&cols, a[0], a[1], true);
+    let (tr, to) = back(&rows, a[2], a[3], true);
+    let (rc, ro) = back(&cols, a[4], a[5], false);
+    let (br, bo) = back(&rows, a[6], a[7], false);
     [lc, lo, tr, to, rc, ro, br, bo]
 }
 

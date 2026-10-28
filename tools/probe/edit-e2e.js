@@ -12,7 +12,7 @@
 //   5. 차이가 나면 한셀 결과도 다시 저장해(X.S.hcell.as.cell) 한셀이 다시 연 결과끼리 한 번 더 비교한다
 //      (한셀은 문서를 열면서 기록 없는 행을 자동 높이로 맞추는 등 고치는 것이 있다)
 //
-// 사용: node tools/probe/edit-e2e.js <corpus 폴더> <작업 폴더> [--skip-hcell] [--diff-only] [--reuse-hcell] [--only 이름]
+// 사용: node tools/probe/edit-e2e.js <corpus 폴더> <작업 폴더> [--skip-hcell] [--diff-only] [--reuse-hcell] [--only 이름] [--scripts 대본,…]
 //   --reuse-hcell : 한셀 편집 결과(X.S.hcell.cell)는 그대로 두고 rcell 쪽과 한셀 다시 저장만 새로 한다
 // (rcell 은 target/release/rcell(.exe), 한셀은 COM 자동화 — 한셀이 설치된 Windows 에서)
 "use strict";
@@ -84,7 +84,14 @@ const SCRIPTS = {
     { op: "renameSheet", sheet: 0, name: "편집됨" },
     { op: "moveSheet", sheet: 1, to: 0 },
   ],
+  sort: [
+    { op: "sort", sheet: 0, range: "A1:H40", keys: [{ by: "B" }], header: true },
+    { op: "sort", sheet: 0, range: "B3:F30", keys: [{ by: "C", desc: true }, { by: "B" }] },
+  ],
 };
+// --scripts 이름,이름 : 그 대본만
+const pick = process.argv.includes("--scripts") ? process.argv[process.argv.indexOf("--scripts") + 1].split(",") : null;
+if (pick) for (const k of Object.keys(SCRIPTS)) if (!pick.includes(k)) delete SCRIPTS[k];
 
 fs.mkdirSync(work, { recursive: true });
 const jobs = [];
