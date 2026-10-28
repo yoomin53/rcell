@@ -148,22 +148,23 @@ function Invoke-Edit($wb, $e) {
         "fillDown" { $ws.Range([string]$e.range).FillDown() | Out-Null }
         "fillRight" { $ws.Range([string]$e.range).FillRight() | Out-Null }
         "sort" {
-            # 정렬 (Sort 개체): 열쇠마다 범위 안의 그 열(왼쪽에서 오른쪽이면 그 행)
+            # 정렬 (Range.Sort — 열쇠 3개까지). Sort 개체(Worksheet.Sort)는 여러 열 범위에서 Header=xlNo 를 따르지
+            # 않고 첫 행을 머리글로 둔다 (관측). 왼쪽에서 오른쪽은 Orientation 2
             $rg = $ws.Range([string]$e.range)
-            $s = $ws.Sort
-            $s.SortFields.Clear()
+            $M = [Type]::Missing
+            $keys = @($M, $M, $M); $orders = @(1, 1, 1)
+            $i = 0
             foreach ($k in $e.keys) {
                 $by = [string]$k.by
-                if ($e.leftToRight) { $key = $ws.Range($ws.Cells.Item([int]$by, $rg.Column), $ws.Cells.Item([int]$by, $rg.Column + $rg.Columns.Count - 1)) }
-                else { $c = $ws.Range("$($by)1").Column; $key = $ws.Range($ws.Cells.Item($rg.Row, $c), $ws.Cells.Item($rg.Row + $rg.Rows.Count - 1, $c)) }
-                $order = if ($k.desc) { 2 } else { 1 }
-                $s.SortFields.Add($key, 0, $order) | Out-Null
+                # 왼쪽에서 오른쪽: 한셀 자동화는 열쇠 칸의 (열 − 범위 첫 열) 을 행 차례로 쓴다 (관측) — 그 자리의 칸을 준다
+                if ($e.leftToRight) { $keys[$i] = $ws.Cells.Item($rg.Row, $rg.Column + [int]$by - $rg.Row) }
+                else { $keys[$i] = $ws.Cells.Item($rg.Row, $ws.Range("$($by)1").Column) }
+                if ($k.desc) { $orders[$i] = 2 }
+                $i++
             }
-            $s.SetRange($rg)
-            $s.Header = if ($e.header) { 1 } else { 2 }
-            $s.MatchCase = [bool]$e.matchCase
-            $s.Orientation = if ($e.leftToRight) { 2 } else { 1 }
-            $s.Apply()
+            $hdr = if ($e.header) { 1 } else { 2 }
+            $orient = if ($e.leftToRight) { 2 } else { 1 }
+            $rg.Sort($keys[0], $orders[0], $keys[1], $M, $orders[1], $keys[2], $orders[2], $hdr, $M, [bool]$e.matchCase, $orient) | Out-Null
         }
         default { throw "모르는 편집 $($e.op)" }
     }

@@ -260,7 +260,7 @@ pub(crate) fn keep_comment_boxes(
 }
 
 /// 화면 px 자리 → (칸, 칸 안 px)
-fn locate_px(list: &[(u32, u32)], pos: i64) -> (u32, u32) {
+pub(crate) fn locate_px(list: &[(u32, u32)], pos: i64) -> (u32, u32) {
     for (i, &(l, w)) in list.iter().enumerate() {
         if pos >= l as i64 && pos < (l + w) as i64 {
             return (i as u32, (pos - l as i64) as u32);
@@ -273,7 +273,7 @@ fn locate_px(list: &[(u32, u32)], pos: i64) -> (u32, u32) {
 }
 
 /// (칸, 칸 안 px) → 화면 px (칸 안 px 는 칸 너비까지)
-fn at_px(list: &[(u32, u32)], i: u32, off: u32) -> i64 {
+pub(crate) fn at_px(list: &[(u32, u32)], i: u32, off: u32) -> i64 {
     match list.get(i as usize) {
         Some(&(l, w)) => l as i64 + off.min(w) as i64,
         None => list.last().map_or(0, |&(l, w)| (l + w) as i64) + off as i64,
@@ -281,7 +281,7 @@ fn at_px(list: &[(u32, u32)], i: u32, off: u32) -> i64 {
 }
 
 /// 메모 상자를 다시 정할 때 쓰는 배치 (상자가 있는 메모가 없으면 None)
-fn comment_geometry(
+pub(crate) fn comment_geometry(
     wb: &Workbook,
     si: usize,
     extra: u32,
@@ -300,7 +300,7 @@ fn comment_geometry(
 }
 
 /// 메모 상자 앵커의 열 배치: 한셀 VML 앵커의 열 px 는 화면 너비보다 1 작다 (기본 너비 54pt = 72px 열이 71)
-fn anchor_cols(g: &crate::render::Geometry) -> Vec<(u32, u32)> {
+pub(crate) fn anchor_cols(g: &crate::render::Geometry) -> Vec<(u32, u32)> {
     let mut x = 0;
     g.cols
         .iter()

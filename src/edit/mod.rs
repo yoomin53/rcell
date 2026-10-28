@@ -23,9 +23,12 @@
 
 mod cfpaste;
 pub mod clip;
+pub mod collate;
+mod collate_data;
 mod filter;
 pub mod input;
 pub mod refs;
+pub mod sort;
 pub mod structure;
 pub mod style;
 
@@ -96,7 +99,7 @@ fn one() -> u32 {
 /// 편집 명령 하나. 행은 1부터(한셀 화면과 같다), 열은 이름(`C`), 셀·범위는 A1 표기.
 /// `sheet` 를 빼면 첫 시트
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(tag = "op", rename_all = "camelCase")]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Edit {
     /// 셀에 입력 (한셀 입력 규칙 — 숫자·날짜·백분율·`'글`·논리값·오류·`=수식`)
     Set {
@@ -265,6 +268,62 @@ pub enum Edit {
         cell: String,
         text: String,
     },
+    /// 정렬 (12절). 열쇠는 열 이름 (왼쪽에서 오른쪽이면 행 번호)
+    Sort {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        keys: Vec<SortBy>,
+        /// 첫 행(열)은 머리글
+        #[serde(default)]
+        header: bool,
+        #[serde(default)]
+        match_case: bool,
+        #[serde(default)]
+        left_to_right: bool,
+    },
+}
+
+/// 정렬 열쇠 하나 (`{"by":"B","desc":true}`)
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct SortBy {
+    pub by: ColOrRow,
+    #[serde(default)]
+    pub desc: bool,
+}
+
+/// 열 이름 또는 행 번호 (1부터)
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ColOrRow {
+    Num(u32),
+    Name(String),
+}
+
+impl ColOrRow {
+    /// 열 번호 (0부터)
+    pub fn col(&self) -> crate::Result<u32> {
+        match self {
+            ColOrRow::Num(n) if *n >= 1 => Ok(n - 1),
+            ColOrRow::Num(_) => Err(err("열 번호는 1부터입니다")),
+            ColOrRow::Name(s) => match s.trim().parse::<u32>() {
+                Ok(n) if n >= 1 => Ok(n - 1),
+                _ => parse_col(s),
+            },
+        }
+    }
+
+    /// 행 번호 (0부터)
+    pub fn row(&self) -> crate::Result<u32> {
+        let n = match self {
+            ColOrRow::Num(n) => *n,
+            ColOrRow::Name(s) => s
+                .trim()
+                .parse()
+                .map_err(|_| err(format!("행 번호가 아닙니다: {s}")))?,
+        };
+        n.checked_sub(1).ok_or_else(|| err("행 번호는 1부터입니다"))
+    }
 }
 
 /// 편집 대본 (`{"edits": [...]}`)
@@ -499,6 +558,38 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
         Edit::PasteText { sheet, cell, text } => {
             let i = si(wb, sheet)?;
             paste_text(wb, i, cell.parse()?, text)?;
+            Ok(i)
+        }
+        Edit::Sort {
+            sheet,
+            range,
+            keys,
+            header,
+            match_case,
+            left_to_right,
+        } => {
+            let i = si(wb, sheet)?;
+            let keys = keys
+                .iter()
+                .map(|k| {
+                    let index = if *left_to_right {
+                        k.by.row()?
+                    } else {
+                        k.by.col()?
+                    };
+                    Ok(sort::SortKey {
+                        index,
+                        desc: k.desc,
+                    })
+                })
+                .collect::<crate::Result<Vec<_>>>()?;
+            let opt = sort::SortOptions {
+                keys,
+                header: *header,
+                match_case: *match_case,
+                left_to_right: *left_to_right,
+            };
+            sort::sort(wb, i, parse_range(range)?, &opt)?;
             Ok(i)
         }
     }
