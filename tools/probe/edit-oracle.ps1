@@ -147,6 +147,24 @@ function Invoke-Edit($wb, $e) {
         }
         "fillDown" { $ws.Range([string]$e.range).FillDown() | Out-Null }
         "fillRight" { $ws.Range([string]$e.range).FillRight() | Out-Null }
+        "sort" {
+            # 정렬 (Sort 개체): 열쇠마다 범위 안의 그 열(왼쪽에서 오른쪽이면 그 행)
+            $rg = $ws.Range([string]$e.range)
+            $s = $ws.Sort
+            $s.SortFields.Clear()
+            foreach ($k in $e.keys) {
+                $by = [string]$k.by
+                if ($e.leftToRight) { $key = $ws.Range($ws.Cells.Item([int]$by, $rg.Column), $ws.Cells.Item([int]$by, $rg.Column + $rg.Columns.Count - 1)) }
+                else { $c = $ws.Range("$($by)1").Column; $key = $ws.Range($ws.Cells.Item($rg.Row, $c), $ws.Cells.Item($rg.Row + $rg.Rows.Count - 1, $c)) }
+                $order = if ($k.desc) { 2 } else { 1 }
+                $s.SortFields.Add($key, 0, $order) | Out-Null
+            }
+            $s.SetRange($rg)
+            $s.Header = if ($e.header) { 1 } else { 2 }
+            $s.MatchCase = [bool]$e.matchCase
+            $s.Orientation = if ($e.leftToRight) { 2 } else { 1 }
+            $s.Apply()
+        }
         default { throw "모르는 편집 $($e.op)" }
     }
 }
