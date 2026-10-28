@@ -324,7 +324,7 @@ impl Value {
         match self {
             Value::Empty => CellValue::Number(0.0),
             Value::Number(n) => CellValue::Number(*n),
-            Value::Text(s) => CellValue::Text(s.to_string()),
+            Value::Text(s) => CellValue::Text(lone_to_fffd(s)),
             Value::Bool(b) => CellValue::Bool(*b),
             Value::Error(e) => CellValue::Error(e.as_str().into()),
             Value::Array(a) => a
@@ -496,6 +496,65 @@ pub fn parse_number(s: &str, date1904: bool) -> Option<f64> {
 /// 숫자 꼴 (앞뒤 공백·탭·전각 공백은 무시, 전각 숫자는 숫자):
 /// `[+-]? [$₩\]? [+-]? 숫자(,세 자리 이상)* [.숫자] [E[+-]숫자] (%|[$₩\])?` 또는 `(…)` (음수, 안에 부호 없이).
 /// 통화 기호와 % 는 함께 쓸 수 없다. 공백이 끼면 숫자가 아니다 (`- 5`, `$ 5`, `50 %`).
+/// 짝 없는 UTF-16 대리 반쪽(U+D800–DFFF)을 글 안에 담는 자리 (U+10F000 + 코드 − D800). 한셀의 글은 UTF-16 이라
+/// MID("😀a",2,1) 처럼 반쪽만 남을 수 있다 (UNICODE 는 56832, 파일에는 U+FFFD 로 쓴다, 대조 실험 cmisc)
+pub const LONE_BASE: u32 = 0x10F000;
+
+/// 대리 반쪽 자리 글자인가
+pub fn is_lone(c: char) -> bool {
+    (LONE_BASE..LONE_BASE + 0x800).contains(&(c as u32))
+}
+
+fn unit_char(u: u16) -> char {
+    if (0xD800..0xE000).contains(&u) {
+        char::from_u32(LONE_BASE + (u as u32 - 0xD800)).unwrap_or('\u{FFFD}')
+    } else {
+        char::from_u32(u as u32).unwrap_or('\u{FFFD}')
+    }
+}
+
+/// 글 → UTF-16 단위마다 한 글자 (BMP 글자는 그대로, 대리 쌍은 반쪽 자리 글자 둘)
+pub fn utf16_chars(s: &str) -> Vec<char> {
+    let mut out = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        if is_lone(c) {
+            out.push(c);
+            continue;
+        }
+        let mut b = [0u16; 2];
+        for &u in c.encode_utf16(&mut b).iter() {
+            out.push(unit_char(u));
+        }
+    }
+    out
+}
+
+/// [`utf16_chars`] 의 거꾸로: 이웃한 대리 반쪽은 다시 한 글자로
+pub fn from_utf16_chars(v: &[char]) -> String {
+    let mut units: Vec<u16> = Vec::with_capacity(v.len());
+    for &c in v {
+        if is_lone(c) {
+            units.push((0xD800 + c as u32 - LONE_BASE) as u16);
+        } else {
+            let mut b = [0u16; 2];
+            units.extend_from_slice(c.encode_utf16(&mut b));
+        }
+    }
+    char::decode_utf16(units)
+        .map(|r| r.unwrap_or_else(|e| unit_char(e.unpaired_surrogate())))
+        .collect()
+}
+
+/// 반쪽 자리 글자를 U+FFFD 로 (파일에 쓸 값)
+pub fn lone_to_fffd(s: &str) -> String {
+    if !s.chars().any(is_lone) {
+        return s.to_string();
+    }
+    s.chars()
+        .map(|c| if is_lone(c) { '\u{FFFD}' } else { c })
+        .collect()
+}
+
 pub fn parse_plain_number(t: &str) -> Option<f64> {
     let t = t.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\u{3000}'));
     if t.is_empty() {
@@ -609,6 +668,13 @@ pub fn parse_plain_number(t: &str) -> Option<f64> {
         if j == start {
             return None;
         }
+        // 지수가 ±308 을 넘으면 글로 남는다 (VALUE("1E-310")·VALUE("0E-400") = #VALUE!, 대조 실험 cmisc)
+        if e[1..]
+            .parse::<i32>()
+            .is_ok_and(|x| !(-308..=308).contains(&x))
+        {
+            return None;
+        }
         num.push_str(&e);
         i = j;
     }
@@ -621,6 +687,10 @@ pub fn parse_plain_number(t: &str) -> Option<f64> {
     }
     if neg {
         v = -v;
+    }
+    // 비정규 수는 0 (VALUE("2.2250738585072E-308") = 0, 대조 실험 cmisc)
+    if v != 0.0 && v.abs() < f64::MIN_POSITIVE {
+        v = 0.0;
     }
     v.is_finite().then_some(v)
 }

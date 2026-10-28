@@ -17,7 +17,7 @@ use crate::calc::value::{self, Area, Array, ErrorKind, MAX_COLS, MAX_ROWS, Value
 const RAV: &[Arg] = &[Arg::RA, Arg::V, Arg::V, Arg::V];
 const VRAV: &[Arg] = &[Arg::V, Arg::RA, Arg::V, Arg::V];
 const VRARA: &[Arg] = &[Arg::V, Arg::RA, Arg::RA];
-const VRARAV: &[Arg] = &[Arg::V, Arg::RA, Arg::RA, Arg::V, Arg::V, Arg::V];
+const VRARAV: &[Arg] = &[Arg::RA, Arg::RA, Arg::RA, Arg::V, Arg::V, Arg::V];
 const RVVVV: &[Arg] = &[Arg::R, Arg::V, Arg::V, Arg::V, Arg::V];
 
 pub const FNS: &[FnSpec] = &[
@@ -421,6 +421,14 @@ fn lookup(ctx: &mut Ctx, a: &[Value]) -> Value {
 }
 
 fn xlookup(ctx: &mut Ctx, a: &[Value]) -> Value {
+    // 찾을 값은 원소마다 계산하지 않는다: 배열은 첫 원소, 배열 수식 안의 여러 칸 범위는 #VALUE!
+    // ({XLOOKUP({1;5;9},…)} 의 세 칸이 모두 1 의 결과, 대조 실험 carr·cmisc)
+    if ctx.array_mode
+        && let Value::Ref(r) = &a[0]
+        && (r.len() > 1 || r.iter().any(|x| !x.is_cell()))
+    {
+        return Value::Error(ErrorKind::Value);
+    }
     let x = try_v!(scalar_key(ctx, &a[0]));
     let la = try_v!(lookup_array(ctx, &a[1]));
     let vals = try_v!(vector(&la));

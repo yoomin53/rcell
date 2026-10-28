@@ -227,7 +227,7 @@ pub fn classify_text(s: &str, date1904: bool) -> Option<Parsed> {
     if let Some(v) = crate::calc::value::parse_fraction(s) {
         return Some(Parsed::Number(v));
     }
-    if let Some(t) = parse_time(s, true) {
+    if let Some(t) = parse_time(s, true).or_else(|| parse_korean_time(s)) {
         return Some(Parsed::Time(t));
     }
     if let Some(d) = parse_date(s, date1904) {
@@ -248,6 +248,31 @@ pub fn classify_text(s: &str, date1904: bool) -> Option<Parsed> {
         }
     }
     None
+}
+
+/// 한국어 시각 `H시 M분`·`H시 M분 S초` (공백 하나씩, 분·초 < 60, 초는 소수 가능). `9시`·`9시30분`·`오전 9시` 는
+/// 시각이 아니다 (TIMEVALUE("9시 30분 15초") = 0.39600694, 대조 실험 cmisc)
+fn parse_korean_time(s: &str) -> Option<f64> {
+    let (h, rest) = s.split_once("시 ")?;
+    let (m, rest) = rest.split_once('분')?;
+    let sec = if rest.is_empty() {
+        0.0
+    } else {
+        let t = rest.strip_prefix(' ')?.strip_suffix('초')?;
+        let (i, f) = t.split_once('.').unwrap_or((t, ""));
+        if !all_digits(i) || !(f.is_empty() || all_digits(f)) {
+            return None;
+        }
+        t.parse::<f64>().ok()?
+    };
+    if !all_digits(h) || !all_digits(m) {
+        return None;
+    }
+    let (h, m): (f64, f64) = (h.parse().ok()?, m.parse().ok()?);
+    if m >= 60.0 || sec >= 60.0 {
+        return None;
+    }
+    Some((h * 3600.0 + m * 60.0 + sec) / 86400.0)
 }
 
 fn all_digits(s: &str) -> bool {

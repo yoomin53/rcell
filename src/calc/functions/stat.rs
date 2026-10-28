@@ -1755,8 +1755,9 @@ fn negbinom(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
     } else {
         false
     };
-    // 확률 1 도 받는다 (NEGBINOM.DIST(10,5,1,TRUE) = 1, 대조 실험 dist)
-    if fl < 0.0 || s < 1.0 || p <= 0.0 || p > 1.0 {
+    // 누적은 확률 1 도 받는다 (NEGBINOM.DIST(10,5,1,TRUE) = 1, 대조 실험 dist), 확률 질량은 #NUM!
+    // (NEGBINOMDIST(0,1,1)·NEGBINOM.DIST(0,3,1,FALSE), 대조 실험 cmisc)
+    if fl < 0.0 || s < 1.0 || p <= 0.0 || p > 1.0 || (p == 1.0 && !cum) {
         return Value::Error(ErrorKind::Num);
     }
     let pmf = |f: f64| sp::binom_coef(f + s - 1.0, s - 1.0) * p.mpow(s) * (1.0 - p).mpow(f);
@@ -1812,29 +1813,32 @@ fn poisson(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x < 0.0 || m < 0.0 {
         return Value::Error(ErrorKind::Num);
     }
-    // 평균이 e^-20 보다 작으면 거듭제곱 쪽만 e^-20 으로 (POISSON(1,0,FALSE) = e^-20, 누적은 1 을
-    // 조금 넘는다, 대조 실험 misc4)
+    // 확률 질량은 e^{k·ln m − m − Σ_{j=2}^{k} ln j}, 누적은 그것을 0 부터 차례로 더한 값 (ln Γ 를 쓰지 않는다 —
+    // POISSON.DIST(1000,1000,FALSE) = 0.012614611348616408 이 이 차례로 같다, 대조 실험 cmisc). 평균이 e^-20 보다
+    // 작으면 거듭제곱 쪽만 e^-20 으로 (POISSON(1,0,FALSE) = e^-20, 누적은 1 을 조금 넘는다, 대조 실험 misc4)
     let floor_l = (-20.0f64).mexp();
-    if m < floor_l {
-        let mut s = 0.0;
-        let mut term = (-m).mexp();
-        let mut k = 0.0;
-        let pmf_at = |k: f64| (k * floor_l.mln() - m - sp::ln_gamma(k + 1.0)).mexp();
-        if !cum {
-            return num(if x == 0.0 { term } else { pmf_at(x) });
-        }
-        while k <= x {
-            s += if k == 0.0 { term } else { pmf_at(k) };
+    let lm = if m < floor_l { floor_l.mln() } else { m.mln() };
+    let pmf = |k: f64, l: f64| (k * lm - m - l).mexp();
+    let mut l = 0.0;
+    let mut k = 0.0;
+    if !cum {
+        while k < x {
             k += 1.0;
+            if k >= 2.0 {
+                l += k.mln();
+            }
         }
-        term = s;
-        return num(term);
+        return num(pmf(x, l));
     }
-    if cum {
-        num(sp::gamma_q(x + 1.0, m))
-    } else {
-        num((x * m.mln() - m - sp::ln_gamma(x + 1.0)).mexp())
+    let mut s = 0.0;
+    while k <= x {
+        if k >= 2.0 {
+            l += k.mln();
+        }
+        s += pmf(k, l);
+        k += 1.0;
     }
+    num(s)
 }
 
 /// CHIDIST·CHISQ.DIST.RT: 자유도의 소수 부분을 버리지 않는다 (CHIDIST(0.5,1.5), 대조 실험 dist)

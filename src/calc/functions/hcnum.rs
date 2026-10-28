@@ -222,8 +222,9 @@ pub fn integrate_ab(f: impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
 
 /// [a, b] 적분, 칸 늘리기를 멈추는 차이 eps
 pub fn integrate_eps(f: impl Fn(f64) -> f64, a: f64, b: f64, eps: f64) -> f64 {
-    // 아주 큰 x 는 칸 수가 한없이 늘어난다 — 한셀의 끝은 아직 모른다, 여기서는 2만 칸에서 멈춘다
-    const LIMIT: usize = 20_000;
+    // 100 칸까지 멈추지 않으면 #NUM! (NaN): NORM.S.DIST(150) 은 89 칸으로 되고 (200) 은 116 칸이 필요해 #NUM!,
+    // NORMDIST(300,0,2) 94 칸 되고 (500,0,2) 150 칸 #NUM! (대조 실험 cmisc)
+    const LIMIT: usize = 100;
     let mut prev = nc8(&f, a, b, 1);
     for p in 2..=LIMIT {
         let q = nc8(&f, a, b, p);
@@ -232,7 +233,7 @@ pub fn integrate_eps(f: impl Fn(f64) -> f64, a: f64, b: f64, eps: f64) -> f64 {
         }
         prev = q;
     }
-    prev
+    f64::NAN
 }
 
 /// 정규 밀도 e^{-z²/2}/2.506628275 (√(2π) 를 10자리로, NORM.S.DIST(2,FALSE) = 0.053990966505240066, 대조 실험 dist·norm4)
@@ -255,10 +256,6 @@ pub fn norm_cdf_ms(x: f64, m: f64, s: f64) -> f64 {
     }
     if x.is_nan() || m.is_nan() || s.is_nan() {
         return f64::NAN;
-    }
-    // 칸 수가 너무 커지는 곳: 참값과 다를 바 없는 끝 값 (한셀 미확인)
-    if ((x - m) / s).abs() > 1e4 {
-        return if x > m { 1.0 } else { 0.0 };
     }
     let f = |t: f64| {
         let d = t - m;
