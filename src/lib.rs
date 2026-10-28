@@ -136,11 +136,13 @@ pub enum SaveFormat {
     Text,
     /// PRN (한셀 FileFormat 36 — 활성 시트, 코드 페이지 949, 공백)
     Prn,
+    /// Excel 97-2003 `.xls` (한셀 FileFormat 56 — BIFF8, [MS-XLS])
+    Xls,
 }
 
 impl SaveFormat {
     /// 파일 이름으로 고른다: `.xlsx` → Excel, `.xlsb`·`*.bin.cell` → 바이너리, `*.legacy.cell` → 레거시,
-    /// `.csv` → CSV, `.txt`·`.tsv` → 탭 텍스트, `.prn` → 공백 텍스트, 나머지 → XML `.cell`
+    /// `.xls` → Excel 97-2003, `.csv` → CSV, `.txt`·`.tsv` → 탭 텍스트, `.prn` → 공백 텍스트, 나머지 → XML `.cell`
     pub fn from_path(path: &Path) -> SaveFormat {
         let name = path
             .file_name()
@@ -153,6 +155,8 @@ impl SaveFormat {
             SaveFormat::Binary
         } else if name.ends_with(".legacy.cell") {
             SaveFormat::Legacy
+        } else if name.ends_with(".xls") {
+            SaveFormat::Xls
         } else if name.ends_with(".csv") {
             SaveFormat::Csv
         } else if name.ends_with(".txt") || name.ends_with(".tsv") {
@@ -183,6 +187,7 @@ pub fn save_as(wb: &Workbook, path: impl AsRef<Path>, format: SaveFormat) -> Res
         SaveFormat::Csv => csv::write(wb, csv::Delimiter::Comma)?,
         SaveFormat::Text => csv::write(wb, csv::Delimiter::Tab)?,
         SaveFormat::Prn => csv::write(wb, csv::Delimiter::Space)?,
+        SaveFormat::Xls => legacy::write_xls(wb, &legacy::WriteOptions::for_path(path.as_ref()))?.0,
     };
     std::fs::write(path, bytes)?;
     Ok(())
