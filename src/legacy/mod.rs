@@ -106,7 +106,29 @@ pub fn chart_dumps_with(bytes: &[u8], offsets: bool) -> Result<Vec<String>> {
 /// 속성과 함께 담는다 (매크로 프로젝트·피벗 캐시는 담지 않는다)
 pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)> {
     let (bytes, mut report) = write_with_options(wb, opts)?;
-    let out = xls_from_legacy_file(&bytes)?;
+    let hints: Vec<xls::SheetHints> = wb
+        .sheets
+        .iter()
+        .map(|s| xls::SheetHints {
+            summary_above: s.summary_above,
+            summary_left: s.summary_left,
+        })
+        .collect();
+    let tips: Vec<xls::LinkTips> = wb
+        .sheets
+        .iter()
+        .map(|s| {
+            s.hyperlinks
+                .iter()
+                .filter_map(|h| {
+                    let tip = h.tooltip.clone()?;
+                    let r = crate::model::CellRange::parse(&h.range)?;
+                    Some(((r.start.row, r.start.col), tip))
+                })
+                .collect()
+        })
+        .collect();
+    let out = xls_file(&bytes, &hints, &tips)?;
     fn has_chart(s: &[crate::model::Shape]) -> bool {
         s.iter()
             .any(|x| x.chart.is_some() || has_chart(&x.children))
@@ -126,8 +148,12 @@ pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)
 
 /// 레거시 `.cell` 파일 바이트 → `.xls` 파일 바이트 (`/Workbook` 을 BIFF8 로, 문서 속성은 그대로)
 pub fn xls_from_legacy_file(bytes: &[u8]) -> Result<Vec<u8>> {
+    xls_file(bytes, &[], &[])
+}
+
+fn xls_file(bytes: &[u8], hints: &[xls::SheetHints], tips: &[xls::LinkTips]) -> Result<Vec<u8>> {
     let stream = container::read_entry(bytes, "/Workbook")?;
-    let wbs = xls::to_biff8(&stream)?;
+    let wbs = xls::to_biff8_with(&stream, hints, tips)?;
     let summary = container::read_entry(bytes, "/\u{5}SummaryInformation").ok();
     let mut streams = vec![crate::cfb_write::Stream {
         name: "Workbook",

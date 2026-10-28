@@ -135,6 +135,8 @@ struct Cv<'a> {
     to8: bool,
     /// 행·열이 BIFF8 범위를 넘었다 (셀 레코드는 버린다)
     over: bool,
+    /// 수식의 참조가 BIFF8 시트 밖이라 #REF! 가 되었다
+    ref_err: bool,
 }
 
 impl<'a> Cv<'a> {
@@ -145,6 +147,7 @@ impl<'a> Cv<'a> {
             o: Vec::with_capacity(s.len()),
             to8,
             over: false,
+            ref_err: false,
         }
     }
     fn left(&self) -> usize {
@@ -308,7 +311,8 @@ impl<'a> Cv<'a> {
     fn rgce(&mut self, rel: bool) -> Option<()> {
         let cce = self.r16()? as usize;
         let t = self.take(cce)?;
-        let n = ptgs(t, self.to8, rel)?;
+        let (n, err) = ptgs_ex(t, self.to8, rel)?;
+        self.ref_err |= err;
         self.w16(n.len() as u16);
         self.o.extend_from_slice(&n);
         Some(())
@@ -395,7 +399,13 @@ fn row_value(v: u32, offset_rel: bool, to8: bool) -> (u32, bool) {
 
 /// 수식 토큰열을 다른 꼴로. `rel` 이면 3차원 참조의 상대 축도 오프셋이다 (공유 수식·조건부 서식·유효성)
 pub(crate) fn ptgs(src: &[u8], to8: bool, rel: bool) -> Option<Vec<u8>> {
+    ptgs_ex(src, to8, rel).map(|(v, _)| v)
+}
+
+/// [`ptgs`] 와 같고, 참조가 BIFF8 시트 밖이라 오류 토큰으로 바꿨는지 함께 돌려준다
+fn ptgs_ex(src: &[u8], to8: bool, rel: bool) -> Option<(Vec<u8>, bool)> {
     let h_in = to8; // 원본이 레거시인가
+    let mut invalid = false;
     let rw_in = if h_in { 4 } else { 2 };
     let mut out: Vec<u8> = Vec::with_capacity(src.len());
     // 토큰 시작 위치 대응 (원본 → 결과), 그리고 고쳐야 할 점프
@@ -512,6 +522,7 @@ pub(crate) fn ptgs(src: &[u8], to8: bool, rel: bool) -> Option<Vec<u8>> {
                 let (c, e2) = col_field(colf, offset, to8);
                 if to8 && base == 0x24 && (e1 || e2) {
                     // BIFF8 시트 밖 → PtgRefErr
+                    invalid = true;
                     out.push(ptg + 6);
                     out.extend_from_slice(&[0; 4]);
                 } else {
@@ -541,6 +552,7 @@ pub(crate) fn ptgs(src: &[u8], to8: bool, rel: bool) -> Option<Vec<u8>> {
                     }
                 }
                 if to8 && base == 0x25 && (e1 || e3) {
+                    invalid = true;
                     out.push(ptg + 6);
                     out.extend_from_slice(&[0; 8]);
                 } else {
@@ -559,6 +571,7 @@ pub(crate) fn ptgs(src: &[u8], to8: bool, rel: bool) -> Option<Vec<u8>> {
                 let (r, e1) = row_value(row, rel && colf & 0x8000 != 0, to8);
                 let (c, e2) = col_field(colf, rel, to8);
                 if to8 && base == 0x3A && (e1 || e2) {
+                    invalid = true;
                     out.push(ptg + 2);
                     out.extend_from_slice(&ixti.to_le_bytes());
                     out.extend_from_slice(&[0; 4]);
@@ -589,6 +602,7 @@ pub(crate) fn ptgs(src: &[u8], to8: bool, rel: bool) -> Option<Vec<u8>> {
                     }
                 }
                 if to8 && base == 0x3B && (e1 || e3) {
+                    invalid = true;
                     out.push(ptg + 2);
                     out.extend_from_slice(&ixti.to_le_bytes());
                     out.extend_from_slice(&[0; 8]);
@@ -639,7 +653,7 @@ pub(crate) fn ptgs(src: &[u8], to8: bool, rel: bool) -> Option<Vec<u8>> {
         };
         out[pos..pos + 2].copy_from_slice(&(nv as u16).to_le_bytes());
     }
-    Some(out)
+    Some((out, invalid))
 }
 
 // ---------------------------------------------------------------------------
@@ -729,9 +743,17 @@ fn conv(rt: u16, d: &[u8], to8: bool) -> Option<Vec<u8>> {
             cv.w16((first + n as u32 - 1) as u16);
         }
         0x0006 => {
+            // 시트 밖 참조가 있으면 값도 #REF! (한셀의 .xls 저장)
             cell_head(&mut cv)?;
+            let at = cv.o.len();
             cv.copy(14)?;
             formula_tail(&mut cv, false)?;
+            if cv.ref_err {
+                // 한셀의 .xls 저장: 값은 #REF!, 수식은 #REF! 상수 하나 (PtgErr)
+                cv.o[at..at + 8].copy_from_slice(&[0x02, 0, 0x17, 0, 0, 0, 0xFF, 0xFF]);
+                cv.o.truncate(at + 14);
+                cv.o.extend_from_slice(&[0x02, 0x00, 0x1C, 0x17]);
+            }
         }
         0x0207 => cv.str16()?,
         0x0208 => {
@@ -1338,6 +1360,41 @@ fn txo_to8(d: &[u8]) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
     Some((head, conts))
 }
 
+/// HLINK (BIFF8): Ref8U 8 + CLSID 16 + streamVersion u32 + 플래그 u32 (0x10 표시 이름) + 표시 이름 (u32 글자 수 +
+/// UTF-16, NUL 포함) … 표시 이름을 도구 설명(NUL 로 끝나는 UTF-16)으로 바꾸고 0x02 를 켠다
+fn hlink_display(b: &[u8], tip: Option<&[u8]>) -> Vec<u8> {
+    let Some(tip) = tip else {
+        return b.to_vec();
+    };
+    if b.len() < 36 {
+        return b.to_vec();
+    }
+    let flags = u32::from_le_bytes([b[28], b[29], b[30], b[31]]);
+    if flags & 0x10 == 0 {
+        return b.to_vec();
+    }
+    let n = u32::from_le_bytes([b[32], b[33], b[34], b[35]]) as usize;
+    let end = 36 + n * 2;
+    if end > b.len() {
+        return b.to_vec();
+    }
+    // 도구 설명 글 (NUL 앞까지) + NUL
+    let mut units: Vec<u8> = Vec::new();
+    for c in tip.chunks(2) {
+        if c.len() < 2 || c == [0, 0] {
+            break;
+        }
+        units.extend_from_slice(c);
+    }
+    units.extend_from_slice(&[0, 0]);
+    let mut o = b[..28].to_vec();
+    o.extend_from_slice(&(flags | 0x02).to_le_bytes());
+    o.extend_from_slice(&((units.len() / 2) as u32).to_le_bytes());
+    o.extend_from_slice(&units);
+    o.extend_from_slice(&b[end..]);
+    o
+}
+
 /// OfficeArt 레코드 머리 (verInst u16, fbt u16, len u32)
 fn art_head(b: &[u8], p: usize) -> Option<(u16, u16, usize)> {
     let vi = u16::from_le_bytes([*b.get(p)?, *b.get(p + 1)?]);
@@ -1581,7 +1638,17 @@ fn is_cell(rt: u16) -> bool {
 }
 
 /// 레거시 시트 부분의 레코드들 → BIFF8 레코드들
-fn sheet_to8(recs: &[Rec]) -> Vec<OutRec> {
+/// 레거시에 없는 시트 정보 (모델에서): 요약 행·열 위치 — 한셀의 레거시 저장은 WSBOOL 에 쓰지 않고 .xls 저장은 쓴다
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SheetHints {
+    pub summary_above: bool,
+    pub summary_left: bool,
+}
+
+/// 하이퍼링크의 도구 설명 (범위의 왼쪽 위 칸 (행, 열) → 글) — 한셀의 .xls 저장은 HLINK 의 표시 이름 자리에 쓴다
+pub type LinkTips = Vec<((u32, u32), String)>;
+
+fn sheet_to8(recs: &[Rec], hints: Option<&SheetHints>, tips: Option<&LinkTips>) -> Vec<OutRec> {
     let mut out: Vec<OutRec> = Vec::new();
     // 셀 표: ROW 와 셀 묶음을 모았다가 32 행 묶음마다 ROW, 셀 차례로 쓴다
     let mut rows: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -1686,6 +1753,36 @@ fn sheet_to8(recs: &[Rec]) -> Vec<OutRec> {
                     out.push((rt, b, Vec::new()));
                 }
             }
+            0x0081 if d.len() >= 2 => {
+                // WSBOOL: 요약 행 아래(0x40)·요약 열 오른쪽(0x80)
+                let mut v = u16::from_le_bytes([d[0], d[1]]);
+                if let Some(h) = hints {
+                    v &= !0x00C0;
+                    if !h.summary_above {
+                        v |= 0x0040;
+                    }
+                    if !h.summary_left {
+                        v |= 0x0080;
+                    }
+                }
+                out.push((rt, v.to_le_bytes().to_vec(), Vec::new()));
+            }
+            0x01B8 => {
+                // HLINK: 한셀의 .xls 저장은 표시 이름 자리에 도구 설명(뒤따르는 HLINKTOOLTIP)을 쓰고 절대 경로
+                // 비트(0x02)를 켠다
+                let at = (d.len() >= 12).then(|| {
+                    (
+                        u32::from_le_bytes([d[0], d[1], d[2], d[3]]),
+                        u16::from_le_bytes([d[8], d[9]]) as u32,
+                    )
+                });
+                let tip: Option<Vec<u8>> = tips
+                    .and_then(|t| t.iter().find(|(c, _)| Some(*c) == at))
+                    .map(|(_, s)| s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect());
+                if let Some(b) = conv(rt, d, true) {
+                    out.push((rt, hlink_display(&b, tip.as_deref()), Vec::new()));
+                }
+            }
             0x023E => {
                 if let Some(b) = conv(rt, d, true) {
                     out.push((rt, b, Vec::new()));
@@ -1759,6 +1856,11 @@ fn sheet_to8(recs: &[Rec]) -> Vec<OutRec> {
 
 /// 레거시 `/Workbook` 스트림 → BIFF8 `/Workbook` 스트림 (`.xls`)
 pub fn to_biff8(stream: &[u8]) -> Result<Vec<u8>> {
+    to_biff8_with(stream, &[], &[])
+}
+
+/// [`to_biff8`] 에 시트마다 레거시에 없는 정보를 더해서
+pub fn to_biff8_with(stream: &[u8], hints: &[SheetHints], tips: &[LinkTips]) -> Result<Vec<u8>> {
     let recs: Vec<Rec> = biff::records(stream)
         .into_iter()
         .map(|r| Rec::new(r.rtype, r.data.to_vec()))
@@ -1776,7 +1878,11 @@ pub fn to_biff8(stream: &[u8]) -> Result<Vec<u8>> {
     }
     let globals = subs.remove(0);
     let sheets: Vec<Vec<OutRec>> =
-        subs.iter().map(|s| sheet_to8(s)).collect();
+        subs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| sheet_to8(s, hints.get(i), tips.get(i)))
+        .collect();
 
     // 전역: 레코드를 바꾸고, XF 뒤에 XFCRC, SST 는 CONTINUE 로 나누고 EXTSST
     let mut g: Vec<OutRec> = Vec::new();
