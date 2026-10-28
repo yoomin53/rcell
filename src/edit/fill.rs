@@ -465,6 +465,19 @@ pub fn auto_fill(
         ));
     };
     super::guard_cells(wb, si, dst)?;
+    // 씨앗이나 채울 범위에 일부만 걸친 병합이 있으면 한셀은 아무것도 하지 않는다 (corpus 대조 — 오류도 없다)
+    let partial = |r: CellRange| {
+        wb.sheets[si].merges.iter().any(|m| {
+            let over = !(m.end.row < r.start.row
+                || m.start.row > r.end.row
+                || m.end.col < r.start.col
+                || m.start.col > r.end.col);
+            over && !(r.contains(m.start) && r.contains(m.end))
+        })
+    };
+    if partial(src) || partial(dst) {
+        return Ok(());
+    }
     let vertical = matches!(dir, Dir::Down | Dir::Up);
     let k = if vertical {
         src.end.row - src.start.row + 1
@@ -500,8 +513,10 @@ pub fn auto_fill(
         } else {
             Vec::new()
         };
-    // 2. 씨앗을 되풀이해 붙인다 (서식·수식·조건부 서식·유효성 — 채우기 규칙)
+    // 2. 씨앗을 되풀이해 붙인다 (서식·수식·유효성 — 채우기 규칙. 조건부 서식은 아래에서 따로)
     let ext = extension(src, dst, dir);
+    let cfs_before = wb.sheets[si].conditional_formats.clone();
+    let dvs_before = wb.sheets[si].data_validations.clone();
     let len = if vertical {
         ext.end.row - ext.start.row + 1
     } else {
@@ -590,6 +605,52 @@ pub fn auto_fill(
             tile(wb, shift(ext.start, rem), full)?;
         }
     }
+    // 조건부 서식: 채운 칸마다 그 씨앗 칸의 규칙 묶음 범위를 넓히고, 채운 칸은 다른 묶음에서 뺀다. 데이터 막대가 든
+    // 묶음은 건드리지 않고 그 묶음의 칸은 넓히지도 않는다 (우선순위는 그대로 — 자동 채우기 대조)
+    {
+        let seed_of = |r: CellRef| -> CellRef {
+            if vertical {
+                let p = r.row as i64 - src.start.row as i64;
+                CellRef {
+                    row: src.start.row + p.rem_euclid(k as i64) as u32,
+                    col: r.col,
+                }
+            } else {
+                let p = r.col as i64 - src.start.col as i64;
+                CellRef {
+                    row: r.row,
+                    col: src.start.col + p.rem_euclid(k as i64) as u32,
+                }
+            }
+        };
+        let sq: Vec<&str> = cfs_before.iter().map(|c| c.sqref.as_str()).collect();
+        let bars: Vec<bool> = cfs_before.iter().map(super::cfpaste::has_databar).collect();
+        let new = autofill_ranges(&sq, &bars, ext, &seed_of);
+        wb.sheets[si].conditional_formats = cfs_before
+            .iter()
+            .zip(new)
+            .filter_map(|(c, n)| {
+                n.map(|sqref| crate::model::ConditionalFormat { sqref, ..c.clone() })
+            })
+            .collect();
+        // 유효성도 같은 규칙 (범위 목록의 차례를 뒤집지 않는다)
+        let sq: Vec<&str> = dvs_before.iter().map(|d| d.sqref.as_str()).collect();
+        let new = autofill_ranges(&sq, &vec![false; sq.len()], ext, &seed_of);
+        wb.sheets[si].data_validations = dvs_before
+            .iter()
+            .zip(new)
+            .filter_map(|(d, n)| n.map(|sqref| crate::model::DataValidation { sqref, ..d.clone() }))
+            .collect();
+        // 채운 칸의 하이퍼링크는 없어진다
+        wb.sheets[si].hyperlinks.retain(|h| {
+            !CellRange::parse(&h.range).is_some_and(|r| {
+                !(r.end.row < ext.start.row
+                    || r.start.row > ext.end.row
+                    || r.end.col < ext.start.col
+                    || r.start.col > ext.end.col)
+            })
+        });
+    }
     // 3. 값 이어 가기
     let d1904 = wb.date1904;
     if kind != FillType::Copy && kind != FillType::Formats {
@@ -642,6 +703,89 @@ pub fn auto_fill(
     }
     super::structure::update_dimension(&mut wb.sheets[si]);
     Ok(())
+}
+
+/// 자동 채우기의 조건부 서식·유효성 범위 (`ext` = 채운 칸, `seed_of` = 채운 칸의 씨앗 칸): 채운 칸마다 그 씨앗
+/// 칸이 든 묶음의 범위를 넓히고, 씨앗이 들지 않은 묶음에서는 뺀다. `skip` 묶음(데이터 막대)은 건드리지 않고 그
+/// 칸들도 바꾸지 않는다. 돌려주는 값이 None 이면 그 묶음이 없어진다
+fn autofill_ranges(
+    sqrefs: &[&str],
+    skip: &[bool],
+    ext: CellRange,
+    seed_of: &dyn Fn(CellRef) -> CellRef,
+) -> Vec<Option<String>> {
+    use super::refs;
+    let areas: Vec<Vec<(u32, u32, u32, u32)>> = sqrefs
+        .iter()
+        .map(|s| refs::parse_sqref(s).iter().map(|a| a.bounds()).collect())
+        .collect();
+    let n = sqrefs.len();
+    let has = |b: usize, r: CellRef| {
+        areas[b]
+            .iter()
+            .any(|a| r.row >= a.0 && r.row <= a.2 && r.col >= a.1 && r.col <= a.3)
+    };
+    let mut add: Vec<Vec<(u32, u32, u32, u32)>> = vec![Vec::new(); n];
+    let mut cut: Vec<bool> = vec![false; n];
+    let mut keep_cells: Vec<Vec<(u32, u32, u32, u32)>> = vec![Vec::new(); n];
+    for r in ext.start.row..=ext.end.row {
+        for c in ext.start.col..=ext.end.col {
+            let at = CellRef { row: r, col: c };
+            if (0..n).any(|b| skip[b] && has(b, at)) {
+                // 건드리지 않는 칸: 다른 묶음의 그 칸도 그대로 둔다
+                for b in 0..n {
+                    if has(b, at) {
+                        keep_cells[b].push((r, c, r, c));
+                    }
+                }
+                continue;
+            }
+            let seed = seed_of(at);
+            for b in 0..n {
+                if skip[b] {
+                    continue;
+                }
+                let (want, now) = (has(b, seed), has(b, at));
+                if want && !now {
+                    add[b].push((r, c, r, c));
+                } else if !want && now {
+                    cut[b] = true;
+                } else if want && now {
+                    keep_cells[b].push((r, c, r, c));
+                }
+            }
+        }
+    }
+    let hole = (ext.start.row, ext.start.col, ext.end.row, ext.end.col);
+    (0..n)
+        .map(|b| {
+            if skip[b] || (add[b].is_empty() && !cut[b]) {
+                return Some(sqrefs[b].to_string());
+            }
+            let mut cur: Vec<(u32, u32, u32, u32)> = Vec::new();
+            let mut pieces = std::mem::take(&mut add[b]);
+            if cut[b] {
+                for &a in &areas[b] {
+                    cur.extend(super::clip::subtract_rect(a, hole));
+                }
+                pieces.extend(keep_cells[b].iter().copied());
+            } else {
+                cur = areas[b].clone();
+            }
+            pieces.sort();
+            for p in pieces {
+                super::sort::merge_into(&mut cur, p);
+            }
+            if cur.is_empty() {
+                return None;
+            }
+            let text: Vec<refs::Area> = cur
+                .iter()
+                .map(|&(a, b2, c, d)| refs::Area::rect(a, b2, c, d))
+                .collect();
+            Some(refs::sqref_text(&text))
+        })
+        .collect()
 }
 
 /// 씨앗 밖으로 넓힌 몫

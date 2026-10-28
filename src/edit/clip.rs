@@ -553,6 +553,13 @@ fn reverse_dv_areas(sheet: &mut Sheet) {
 }
 
 /// 직사각형에서 구멍을 뺀 조각들 (위, 왼쪽, 오른쪽, 아래 순)
+pub(crate) fn subtract_rect(
+    a: (u32, u32, u32, u32),
+    hole: (u32, u32, u32, u32),
+) -> Vec<(u32, u32, u32, u32)> {
+    subtract(a, hole)
+}
+
 fn subtract(a: (u32, u32, u32, u32), hole: (u32, u32, u32, u32)) -> Vec<(u32, u32, u32, u32)> {
     if !overlaps(a, hole) {
         return vec![a];

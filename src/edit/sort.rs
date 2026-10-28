@@ -638,7 +638,7 @@ fn sorted_cf(
 }
 
 /// 영역 목록에 한 조각을 더한다: 맞닿은 영역과 이어 붙여 (처음 이은 영역 자리에) 두고, 없으면 끝에
-fn merge_into(list: &mut Vec<(u32, u32, u32, u32)>, piece: (u32, u32, u32, u32)) {
+pub(crate) fn merge_into(list: &mut Vec<(u32, u32, u32, u32)>, piece: (u32, u32, u32, u32)) {
     use super::cfpaste::join;
     let mut cur = piece;
     let mut at: Option<usize> = None;
