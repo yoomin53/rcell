@@ -1159,19 +1159,7 @@ fn cf_to8(d: &[u8]) -> Option<Vec<u8>> {
     let c1 = u16::from_le_bytes([*d.get(2)?, *d.get(3)?]) as usize;
     let c2 = u16::from_le_bytes([*d.get(4)?, *d.get(5)?]) as usize;
     let fstart = d.len().checked_sub(c1 + c2)?;
-    let std = dxfn_std_len(d.get(6..)?)?;
-    let mut dxfn = d.get(6..6 + std)?.to_vec();
-    if dxfn.len() >= 6 {
-        dxfn[5] = 0;
-        let flags = u32::from_le_bytes([dxfn[0], dxfn[1], dxfn[2], dxfn[3]]);
-        // 글꼴 블록이 표시 형식 블록 뒤에 있으면 이름 플래그 (cchFont u8 다음 바이트)
-        if flags & 0x0400_0000 != 0 {
-            let at = 6 + numfmt_block_len(&dxfn, flags)?;
-            if let Some(b) = dxfn.get_mut(at + 1) {
-                *b = 0x01;
-            }
-        }
-    }
+    let dxfn = dxfn_std_to8(d.get(6..)?)?;
     let f1 = ptgs(d.get(fstart..fstart + c1)?, true, true)?;
     let f2 = ptgs(d.get(fstart + c1..)?, true, true)?;
     let mut o = Vec::with_capacity(d.len());
@@ -1181,6 +1169,206 @@ fn cf_to8(d: &[u8]) -> Option<Vec<u8>> {
     o.extend_from_slice(&dxfn);
     o.extend_from_slice(&f1);
     o.extend_from_slice(&f2);
+    Some(o)
+}
+
+/// 레거시 DXFN 의 표준 부분 → BIFF8: flags2 의 높은 바이트는 0, 글꼴 블록의 이름 플래그(cchFont 다음 바이트) 1
+fn dxfn_std_to8(d: &[u8]) -> Option<Vec<u8>> {
+    let std = dxfn_std_len(d)?;
+    let mut dxfn = d.get(..std)?.to_vec();
+    if dxfn.len() >= 6 {
+        dxfn[5] = 0;
+        let flags = u32::from_le_bytes([dxfn[0], dxfn[1], dxfn[2], dxfn[3]]);
+        if flags & 0x0400_0000 != 0 {
+            let at = 6 + numfmt_block_len(&dxfn, flags)?;
+            if let Some(b) = dxfn.get_mut(at + 1) {
+                *b = 0x01;
+            }
+        }
+    }
+    Some(dxfn)
+}
+
+/// XFExtNoFRT (예약 0, 0xFFFF, 0, cexts u16, ExtProp × cexts) 가 `d[p..]` 에서 시작해 끝까지 맞으면 그 길이.
+/// 들여쓰기(0x0F) 는 한셀이 크기 칸을 4 로 쓰고 값 2바이트를 붙인다
+fn xfext_len(d: &[u8]) -> Option<usize> {
+    if d.get(..6)? != [0, 0, 0xFF, 0xFF, 0, 0] {
+        return None;
+    }
+    let n = u16::from_le_bytes([*d.get(6)?, *d.get(7)?]) as usize;
+    let mut p = 8;
+    for _ in 0..n {
+        let ty = u16::from_le_bytes([*d.get(p)?, *d.get(p + 1)?]);
+        let cb = u16::from_le_bytes([*d.get(p + 2)?, *d.get(p + 3)?]) as usize;
+        let cb = if ty == 0x0F && cb == 4 { 6 } else { cb };
+        if cb < 4 {
+            return None;
+        }
+        p += cb;
+    }
+    (p <= d.len()).then_some(p)
+}
+
+/// XFExtNoFRT 의 ExtProp (종류, 값) 목록
+fn xfext_props(d: &[u8]) -> Vec<(u16, Vec<u8>)> {
+    let mut out = Vec::new();
+    let Some(n) = d.get(6..8).map(|b| u16::from_le_bytes([b[0], b[1]])) else {
+        return out;
+    };
+    let mut p = 8;
+    for _ in 0..n {
+        let (Some(ty), Some(cb)) = (
+            d.get(p..p + 2).map(|b| u16::from_le_bytes([b[0], b[1]])),
+            d.get(p + 2..p + 4)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize),
+        ) else {
+            break;
+        };
+        let cb = if ty == 0x0F && cb == 4 { 6 } else { cb };
+        let Some(v) = d.get(p + 4..p + cb.max(4)) else {
+            break;
+        };
+        out.push((ty, v.to_vec()));
+        p += cb.max(4);
+    }
+    out
+}
+
+/// 레거시 DXFN12 (DXFN 표준 + 한컴 확장 + 차등 서식 번호 + … + XFExtNoFRT) → BIFF8 DXFN12 (표준 + XFExtNoFRT).
+/// 한컴 확장 길이는 블록마다 달라 XFExtNoFRT 를 머리 모양과 끝까지 맞는 길이로 찾는다
+fn dxfn12_to8(d: &[u8]) -> Option<Vec<u8>> {
+    let std = dxfn_std_len(d)?;
+    let mut o = dxfn_std_to8(d)?;
+    if let Some(p) = (std..d.len()).find(|&p| xfext_len(&d[p..]) == Some(d.len() - p)) {
+        o.extend_from_slice(&d[p..]);
+    }
+    Some(o)
+}
+
+/// CFEX (0x087B): FRT 머리 12 (행 16비트), fIsCF12 u32, nID u16, [CF12 가 아니면 icf u16, cp u8, 틀 u8, 우선순위 u16,
+/// 플래그 u8, fHasDXF u8, (DXFN12: cbdxf u32 + 내용), 틀 매개 변수 (cb u8 + 16)]. BIFF8 로는 DXFN12 만 바꾼다
+/// (레거시로는 그대로 — 리더는 머리와 끝 16바이트, XFExtNoFRT 의 그라데이션만 본다)
+fn cfex_to8(d: &[u8]) -> Option<Vec<u8>> {
+    let is12 = u32::from_le_bytes(d.get(12..16)?.try_into().ok()?);
+    if is12 != 0 || d.len() < 26 || d[25] == 0 {
+        return Some(d.to_vec());
+    }
+    let cb = u32::from_le_bytes(d.get(26..30)?.try_into().ok()?) as usize;
+    let nd = if cb == 0 {
+        Vec::new()
+    } else {
+        dxfn12_to8(d.get(30..30 + cb)?)?
+    };
+    let mut o = d[..26].to_vec();
+    o.extend_from_slice(&(nd.len() as u32).to_le_bytes());
+    o.extend_from_slice(&nd);
+    o.extend_from_slice(d.get(30 + cb..)?);
+    Some(o)
+}
+
+/// CFVO: 종류 u8, cce u16, 토큰, (cce 0 이고 최소·최대가 아니면 값 f64)
+fn cfvo(src: &[u8], p: &mut usize, o: &mut Vec<u8>, to8: bool) -> Option<()> {
+    let ty = *src.get(*p)?;
+    let cce = u16::from_le_bytes([*src.get(*p + 1)?, *src.get(*p + 2)?]) as usize;
+    let t = ptgs(src.get(*p + 3..*p + 3 + cce)?, to8, true)?;
+    o.push(ty);
+    o.extend_from_slice(&(t.len() as u16).to_le_bytes());
+    o.extend_from_slice(&t);
+    *p += 3 + cce;
+    if cce == 0 && !matches!(ty, 2 | 3) {
+        o.extend_from_slice(src.get(*p..*p + 8)?);
+        *p += 8;
+    }
+    Some(())
+}
+
+/// CF12 (0x087A): FRT 머리 12, ct u8, cp u8, cce1·cce2 u16, DXFN12 (cbdxf u32 + 내용, 0 이면 예약 u16), 수식 1·2,
+/// 활성 수식 (cce u16 + 토큰), 플래그 u8, 우선순위 u16, 틀 u16, 매개 변수 (cb u8 + cb), 종류별 내용 (앞 u16 = 뒤 길이).
+/// 종류별 내용의 CFVO 수식까지 바꾼다 (색조 3, 데이터 막대 4, 위·아래 5, 아이콘 6)
+fn cf12(d: &[u8], to8: bool) -> Option<Vec<u8>> {
+    let ct = *d.get(12)?;
+    let c1 = u16::from_le_bytes([*d.get(14)?, *d.get(15)?]) as usize;
+    let c2 = u16::from_le_bytes([*d.get(16)?, *d.get(17)?]) as usize;
+    let cb = u32::from_le_bytes(d.get(18..22)?.try_into().ok()?) as usize;
+    let mut p = 22;
+    let dx = if cb == 0 {
+        p += 2;
+        None
+    } else {
+        p += cb;
+        let x = d.get(22..22 + cb)?;
+        Some(if to8 { dxfn12_to8(x)? } else { x.to_vec() })
+    };
+    let f1 = ptgs(d.get(p..p + c1)?, to8, true)?;
+    let f2 = ptgs(d.get(p + c1..p + c1 + c2)?, to8, true)?;
+    p += c1 + c2;
+    let ca = u16::from_le_bytes([*d.get(p)?, *d.get(p + 1)?]) as usize;
+    let fa = ptgs(d.get(p + 2..p + 2 + ca)?, to8, true)?;
+    p += 2 + ca;
+    // 플래그 1, 우선순위 2, 틀 2, 매개 변수
+    let cbp = *d.get(p + 5)? as usize;
+    let mid = d.get(p..p + 6 + cbp)?;
+    p += 6 + cbp;
+    let ct_old = d.get(p..)?;
+    let mut ctn: Vec<u8> = Vec::with_capacity(ct_old.len());
+    match ct {
+        3 | 4 | 6 if ct_old.len() >= 6 => {
+            ctn.extend_from_slice(&ct_old[..6]);
+            let mut q = 6;
+            match ct {
+                3 => {
+                    // 색조: 보간 점 수 [3], 색 수 [4] — 점마다 CFVO + 위치 f64, 색마다 위치 f64 + 색 16
+                    let (ni, ng) = (ct_old[3] as usize, ct_old[4] as usize);
+                    for _ in 0..ni {
+                        cfvo(ct_old, &mut q, &mut ctn, to8)?;
+                        ctn.extend_from_slice(ct_old.get(q..q + 8)?);
+                        q += 8;
+                    }
+                    ctn.extend_from_slice(ct_old.get(q..q + ng * 24)?);
+                    q += ng * 24;
+                }
+                4 => {
+                    // 데이터 막대: 색 16, CFVO 둘
+                    ctn.extend_from_slice(ct_old.get(q..q + 16)?);
+                    q += 16;
+                    cfvo(ct_old, &mut q, &mut ctn, to8)?;
+                    cfvo(ct_old, &mut q, &mut ctn, to8)?;
+                }
+                _ => {
+                    // 아이콘: 상태 수 [3] — 상태마다 CFVO + fEqual u8 + 4
+                    for _ in 0..ct_old[3] as usize {
+                        cfvo(ct_old, &mut q, &mut ctn, to8)?;
+                        ctn.extend_from_slice(ct_old.get(q..q + 5)?);
+                        q += 5;
+                    }
+                }
+            }
+            ctn.extend_from_slice(ct_old.get(q..)?);
+            // 한셀은 앞 u16 (명세의 unused) 에 뒤 길이를 쓴다
+            let old_len = u16::from_le_bytes([ct_old[0], ct_old[1]]) as usize;
+            if old_len == ct_old.len() - 2 {
+                let n = (ctn.len() - 2) as u16;
+                ctn[0..2].copy_from_slice(&n.to_le_bytes());
+            }
+        }
+        _ => ctn.extend_from_slice(ct_old),
+    }
+    let mut o = d[..14].to_vec();
+    o.extend_from_slice(&(f1.len() as u16).to_le_bytes());
+    o.extend_from_slice(&(f2.len() as u16).to_le_bytes());
+    match dx {
+        Some(x) => {
+            o.extend_from_slice(&(x.len() as u32).to_le_bytes());
+            o.extend_from_slice(&x);
+        }
+        None => o.extend_from_slice(&[0; 6]),
+    }
+    o.extend_from_slice(&f1);
+    o.extend_from_slice(&f2);
+    o.extend_from_slice(&(fa.len() as u16).to_le_bytes());
+    o.extend_from_slice(&fa);
+    o.extend_from_slice(mid);
+    o.extend_from_slice(&ctn);
     Some(o)
 }
 
@@ -1748,8 +1936,16 @@ fn sheet_to8(recs: &[Rec], hints: Option<&SheetHints>, tips: Option<&LinkTips>) 
                     out.push((rt, b, Vec::new()));
                 }
             }
-            // CF12·CFEX 는 레거시 DXFN 확장을 아직 풀지 못한다 — 쓰지 않는다
-            0x087A | 0x087B => {}
+            0x087A => {
+                if let Some(b) = cf12(d, true) {
+                    out.push((rt, b, Vec::new()));
+                }
+            }
+            0x087B => {
+                if let Some(b) = cfex_to8(d) {
+                    out.push((rt, b, Vec::new()));
+                }
+            }
             0x01BE => {
                 if let Some(b) = dv(d, true) {
                     out.push((rt, b, Vec::new()));
@@ -2314,7 +2510,7 @@ fn xf_to_hancom(
 
 /// 레거시 FONT 의 한컴 확장 (플래그 1 + 78바이트): 한셀이 .xls 를 열 때 붙이는 값 — 크기 1/100 pt, 밑줄 위치 1 (아래)
 /// 과 모양 (한 줄 실선 0, 두 줄 doubleslim 7), 취소선 1 실선, 그림자 위치 10·10, 그림자 색 C0C0C0, 음영 없음,
-/// 상대 크기·장평 100, 글자 색
+/// 상대 크기·장평 100, 글자 색, 외곽선 비트면 외곽선 실선
 fn font_ext(base: &[u8], color: u32) -> Vec<u8> {
     let mut o = base.to_vec();
     if base.len() < 14 {
@@ -2330,7 +2526,8 @@ fn font_ext(base: &[u8], color: u32) -> Vec<u8> {
     e.extend_from_slice(&u16::from(uls != 0).to_le_bytes());
     e.extend_from_slice(&0u16.to_le_bytes());
     e.extend_from_slice(&(if uls == 2 || uls == 0x22 { 7u32 } else { 0 }).to_le_bytes());
-    e.extend_from_slice(&0u32.to_le_bytes());
+    // 외곽선: FONT 의 외곽선 비트면 실선 (1)
+    e.extend_from_slice(&u32::from(grbit & 0x10 != 0).to_le_bytes());
     e.extend_from_slice(&0u32.to_le_bytes());
     e.extend_from_slice(&10i32.to_le_bytes());
     e.extend_from_slice(&10i32.to_le_bytes());
@@ -2350,8 +2547,9 @@ fn font_ext(base: &[u8], color: u32) -> Vec<u8> {
     o
 }
 
-/// BIFF8 CF → 레거시 CF: DXFN 표준 블록 뒤에 차등 서식 번호 u32 (없음 = 0xFFFFFFFF), 수식은 레거시 토큰으로
-fn cf_to_hancom(d: &[u8]) -> Option<Vec<u8>> {
+/// BIFF8 CF → 레거시 CF: DXFN 표준 블록 뒤에 차등 서식 번호 u32 (테두리 블록이 있으면 안쪽 선 확장 `00 00`),
+/// 수식은 레거시 토큰으로
+fn cf_to_hancom(d: &[u8], id: u32) -> Option<Vec<u8>> {
     let c1 = u16::from_le_bytes([*d.get(2)?, *d.get(3)?]) as usize;
     let c2 = u16::from_le_bytes([*d.get(4)?, *d.get(5)?]) as usize;
     let std = dxfn_std_len(d.get(6..)?)?;
@@ -2362,15 +2560,213 @@ fn cf_to_hancom(d: &[u8]) -> Option<Vec<u8>> {
     o.extend_from_slice(&(f1.len() as u16).to_le_bytes());
     o.extend_from_slice(&(f2.len() as u16).to_le_bytes());
     o.extend_from_slice(&d[6..fstart]);
-    o.extend_from_slice(&u32::MAX.to_le_bytes());
+    o.extend_from_slice(&id.to_le_bytes());
+    let flags = u32::from_le_bytes([d[6], d[7], d[8], d[9]]);
+    if flags & 0x1000_0000 != 0 {
+        o.extend_from_slice(&[0, 0]);
+    }
     o.extend_from_slice(&f1);
     o.extend_from_slice(&f2);
     Some(o)
 }
 
+/// XFExtNoFRT 의 ExtProp (종류, 값) 목록
+type ExtProps = Vec<(u16, Vec<u8>)>;
+
+/// .xls 의 CF 서식으로 만드는 레거시 차등 서식 표 (0x088D) — 레거시 CF 는 서식을 이 표의 번호로 가리킨다
+struct CfDxfs {
+    /// 원래 있던 차등 서식 수 (새 번호의 시작)
+    base: u32,
+    palette: Vec<u32>,
+    /// 새 0x088D 레코드 내용
+    out: Vec<Vec<u8>>,
+}
+
+/// 색 번호 → COLORREF (0x00BBGGRR). 8–63 은 팔레트, 0–7 은 기본 8색, 그 밖은 자동
+fn icv_colorref(icv: u32, palette: &[u32]) -> Option<u32> {
+    const BASE: [u32; 8] = [
+        0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0xFF00FF, 0x00FFFF,
+    ];
+    let rgb = match icv {
+        0..=7 => BASE[icv as usize],
+        8..=63 => *palette.get(icv as usize - 8)?,
+        _ => return None,
+    };
+    Some(((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF))
+}
+
+/// XFPropColor (8바이트): RGB 종류 (0x05) + RGBA, 자동은 `FF FF FF DF` (dxf::prop_color 와 같은 꼴)
+fn xfprop_color(c: Option<u32>) -> Vec<u8> {
+    match c {
+        Some(c) => vec![5, 0, 0, 0, c as u8, (c >> 8) as u8, (c >> 16) as u8, 0],
+        None => vec![5, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xDF],
+    }
+}
+
+/// BIFF8 DXFN (CF 의 서식) + CFEX 의 XFExtNoFRT 색 → 레거시 0x088D 내용 (FRT 머리 12, u32 3, cprops, XFProp).
+/// 글꼴(크기·굵게·기울임·밑줄·첨자·취소선·색), 테두리 네 변, 무늬와 두 색. 표시 형식·맞춤·보호는 CF 의 DXFN 에서
+/// 리더가 읽는다
+fn cf_dxf(dxfn: &[u8], ext: &[(u16, Vec<u8>)], palette: &[u32]) -> Vec<u8> {
+    let mut props: Vec<(u16, Vec<u8>)> = Vec::new();
+    let ext_color = |ty: u16| {
+        ext.iter()
+            .find(|(t, _)| *t == ty)
+            .and_then(|(_, v)| xfext_colorref(v, palette))
+    };
+    let u32_at = |d: &[u8], k: usize| -> u32 {
+        d.get(k..k + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .unwrap_or(u32::MAX)
+    };
+    (|| -> Option<()> {
+        let flags = u32_at(dxfn, 0);
+        let mut at = 6 + numfmt_block_len(dxfn, flags)?;
+        if flags & 0x0400_0000 != 0 {
+            // DXFFntD: 높이 i32 @64, ts @68 (0x02 기울임, 0x80 취소선), bls u16 @72, sss u16 @74, uls u8 @76,
+            // icvFore @80, tsNinch @88, fSssNinch @92, fUlsNinch @96, fBlsNinch @100
+            let f = dxfn.get(at..at + 118)?;
+            // 글꼴 이름: cchFont u8, 플래그 u8 (1 이면 UTF-16), 글자
+            let cch = f[0] as usize;
+            if cch > 0 {
+                let name: Vec<u16> = if f[1] & 1 != 0 {
+                    f.get(2..2 + cch * 2)?
+                        .chunks(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        .collect()
+                } else {
+                    f.get(2..2 + cch)?.iter().map(|&b| b as u16).collect()
+                };
+                let mut v = (name.len() as u16).to_le_bytes().to_vec();
+                for u in name {
+                    v.extend_from_slice(&u.to_le_bytes());
+                }
+                props.push((0x18, v));
+            }
+            let ts = u32_at(f, 68);
+            let ts_ninch = u32_at(f, 88);
+            let icv = u32_at(f, 80);
+            if icv != u32::MAX || ext_color(0x0D).is_some() {
+                let color = ext_color(0x0D).or_else(|| icv_colorref(icv, palette));
+                props.push((0x05, xfprop_color(color)));
+            }
+            let height = u32_at(f, 64) as i32;
+            if height > 0 {
+                props.push((0x24, ((height as u32) * 5).to_le_bytes().to_vec()));
+            }
+            if u32_at(f, 100) == 0 && u16::from_le_bytes([f[72], f[73]]) >= 700 {
+                props.push((0x19, 700u16.to_le_bytes().to_vec()));
+            }
+            if u32_at(f, 96) == 0 && f[76] != 0 {
+                props.push((0x1A, (f[76] as u16).to_le_bytes().to_vec()));
+            }
+            let sss = u16::from_le_bytes([f[74], f[75]]);
+            if u32_at(f, 92) == 0 && sss != 0 {
+                props.push((0x1B, sss.to_le_bytes().to_vec()));
+            }
+            if ts_ninch & 0x02 == 0 && ts & 0x02 != 0 {
+                props.push((0x1C, vec![1]));
+            }
+            if ts_ninch & 0x80 == 0 && ts & 0x80 != 0 {
+                props.push((0x1D, vec![1]));
+            }
+            at += 118;
+        }
+        if flags & 0x0800_0000 != 0 {
+            at += 8;
+        }
+        if flags & 0x1000_0000 != 0 {
+            // DXFBdr: 선 종류 4비트 × 4 (왼쪽, 오른쪽, 위, 아래), 색 7비트 (왼쪽, 오른쪽) / (위, 아래)
+            let a = u32_at(dxfn, at);
+            let b = u32_at(dxfn, at + 4);
+            for (k, ty, xty, icv) in [
+                (0, 0x08u16, 9u16, (a >> 16) & 0x7F),
+                (1, 0x09, 10, (a >> 23) & 0x7F),
+                (2, 0x06, 7, b & 0x7F),
+                (3, 0x07, 8, (b >> 7) & 0x7F),
+            ] {
+                if flags & (1 << (10 + k)) != 0 {
+                    continue;
+                }
+                let dg = ((a >> (4 * k)) & 0x0F) as u16;
+                let mut v = if dg == 0 {
+                    vec![5, 0xFF, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]
+                } else {
+                    let mut c = xfprop_color(ext_color(xty).or_else(|| icv_colorref(icv, palette)));
+                    c[1] = 0xFF;
+                    c
+                };
+                v.extend_from_slice(&dg.to_le_bytes());
+                props.push((ty, v));
+            }
+            at += 8;
+        }
+        if flags & 0x2000_0000 != 0 {
+            // DXFPat: 무늬 6비트 (@0 의 10–15), 앞 색 7비트·뒤 색 7비트 (@2)
+            let a = u16::from_le_bytes([*dxfn.get(at)?, *dxfn.get(at + 1)?]);
+            let b = u16::from_le_bytes([*dxfn.get(at + 2)?, *dxfn.get(at + 3)?]);
+            let fls = (a >> 10) as u8;
+            if flags & 0x0001_0000 == 0 && fls != 0 {
+                props.push((0x00, vec![fls]));
+            }
+            if flags & 0x0002_0000 == 0 {
+                let c = ext_color(4).or_else(|| icv_colorref((b & 0x7F) as u32, palette));
+                props.push((0x01, xfprop_color(c)));
+            }
+            if flags & 0x0004_0000 == 0 {
+                let c = ext_color(5).or_else(|| icv_colorref(((b >> 7) & 0x7F) as u32, palette));
+                props.push((0x02, xfprop_color(c)));
+            }
+        }
+        Some(())
+    })();
+    // 한셀의 차례: 채우기, 글꼴 (색, 크기, 그 밖), 테두리 (dxf::dxf_props)
+    let key = |t: u16| match t {
+        0x00..=0x04 => (0, t),
+        0x05 => (1, 0),
+        0x18 => (1, 1),
+        0x24 => (1, 2),
+        0x19..=0x23 => (1, t),
+        0x06..=0x0E => (2, t),
+        _ => (5, t),
+    };
+    props.sort_by_key(|p| key(p.0));
+    let mut o = vec![0x8D, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    o.extend_from_slice(&3u32.to_le_bytes());
+    o.extend_from_slice(&(props.len() as u16).to_le_bytes());
+    for (ty, v) in props {
+        o.extend_from_slice(&ty.to_le_bytes());
+        o.extend_from_slice(&((v.len() + 4) as u16).to_le_bytes());
+        o.extend_from_slice(&v);
+    }
+    o
+}
+
 /// BIFF8 시트 부분 → 레거시 레코드들
-fn sheet_to_hancom(recs: &[Rec]) -> Vec<(u16, Vec<u8>)> {
+fn sheet_to_hancom(recs: &[Rec], dxfs: &mut CfDxfs) -> Vec<(u16, Vec<u8>)> {
     let mut out: Vec<(u16, Vec<u8>)> = Vec::new();
+    // CFEX 의 DXFN12 에 든 XFExtNoFRT 색: (nID, icf) → ExtProp 들 (CFEX 는 시트의 CF 뒤에 온다)
+    let mut cf_ext: HashMap<(u16, u16), ExtProps> = HashMap::new();
+    for rec in recs.iter().filter(|r| r.rt == 0x087B) {
+        let d = rec.joined();
+        if d.len() < 30 || d[12..16] != [0, 0, 0, 0] || d[25] == 0 {
+            continue;
+        }
+        let key = (
+            u16::from_le_bytes([d[16], d[17]]),
+            u16::from_le_bytes([d[18], d[19]]),
+        );
+        let cb = u32::from_le_bytes([d[26], d[27], d[28], d[29]]) as usize;
+        let Some(x) = d.get(30..30 + cb) else {
+            continue;
+        };
+        if let Some(std) = dxfn_std_len(x)
+            && std < x.len()
+            && xfext_len(&x[std..]) == Some(x.len() - std)
+        {
+            cf_ext.insert(key, xfext_props(&x[std..]));
+        }
+    }
+    let mut cf_at: (u16, u16) = (0, 0);
     let mut art_slots = Vec::new();
     let mut art_parts = Vec::new();
     let mut depth = 0usize;
@@ -2397,8 +2793,13 @@ fn sheet_to_hancom(recs: &[Rec]) -> Vec<(u16, Vec<u8>)> {
                 }
                 out.push((rt, b));
             }
-            // 색인·페이지 레이아웃 보기·CF12·CFEX (레거시 꼴을 모른다)
-            0x020B | 0x00D7 | 0x088B | 0x087A | 0x087B => {}
+            // 색인·페이지 레이아웃 보기
+            0x020B | 0x00D7 | 0x088B => {}
+            0x087A => {
+                if let Some(b) = cf12(&d, false) {
+                    out.push((rt, b));
+                }
+            }
             0x0207 => {
                 if let Some(b) = string_to_hancom(rec) {
                     out.push((rt, b));
@@ -2415,6 +2816,9 @@ fn sheet_to_hancom(recs: &[Rec]) -> Vec<(u16, Vec<u8>)> {
                 out.push((rt, Vec::new()));
             }
             0x01B0 => {
+                if d.len() >= 4 {
+                    cf_at = (u16::from_le_bytes([d[2], d[3]]) >> 1, 0);
+                }
                 if let Some(b) = condfmt(&d, false, false) {
                     out.push((rt, b));
                 }
@@ -2425,9 +2829,14 @@ fn sheet_to_hancom(recs: &[Rec]) -> Vec<(u16, Vec<u8>)> {
                 }
             }
             0x01B1 => {
-                if let Some(b) = cf_to_hancom(&d) {
+                // 규칙마다 차등 서식을 만든다 — 블록이 없는 DXFN 도 빈 서식 (한셀이 .xls 를 열 때와 같다)
+                let id = dxfs.base + dxfs.out.len() as u32;
+                let ext = cf_ext.get(&cf_at).map(|v| v.as_slice()).unwrap_or_default();
+                if let Some(b) = cf_to_hancom(&d, id) {
+                    dxfs.out.push(cf_dxf(&d[6..], ext, &dxfs.palette));
                     out.push((rt, b));
                 }
+                cf_at.1 += 1;
             }
             0x01BE => {
                 if let Some(b) = dv(&d, false) {
@@ -2499,6 +2908,23 @@ pub fn to_hancom(stream: &[u8]) -> Result<Vec<u8>> {
         .filter(|r| r.rt == 0x0085 && r.data.len() >= 4)
         .map(|r| u32::from_le_bytes([r.data[0], r.data[1], r.data[2], r.data[3]]))
         .collect();
+    let mut palette: Vec<u32> = super::reader::DEFAULT_PALETTE.to_vec();
+    for r in globals
+        .iter()
+        .filter(|r| r.rt == 0x0092 && r.data.len() >= 2)
+    {
+        let n = u16::from_le_bytes([r.data[0], r.data[1]]) as usize;
+        for (i, c) in r.data[2..].chunks(4).take(n).enumerate() {
+            if c.len() == 4 && i < palette.len() {
+                palette[i] = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32;
+            }
+        }
+    }
+    let mut cf_dxfs = CfDxfs {
+        base: globals.iter().filter(|r| r.rt == 0x088D).count() as u32,
+        palette: palette.clone(),
+        out: Vec::new(),
+    };
     let mut sheets: Vec<Vec<(u16, Vec<u8>)>> = Vec::new();
     for off in &sheet_offs {
         let Some(start) = offsets.iter().position(|&o| o == *off as usize) else {
@@ -2523,21 +2949,12 @@ pub fn to_hancom(stream: &[u8]) -> Result<Vec<u8>> {
             }
             end = k;
         }
-        sheets.push(sheet_to_hancom(&recs[start..=end]));
+        sheets.push(sheet_to_hancom(&recs[start..=end], &mut cf_dxfs));
     }
-    // 전역: 팔레트·XFEXT 를 먼저 모은다 (XF 의 색)
-    let mut palette: Vec<u32> = super::reader::DEFAULT_PALETTE.to_vec();
+    // 전역: XFEXT 를 먼저 모은다 (XF 의 색)
     let mut xfext: HashMap<u16, Vec<(u16, Vec<u8>)>> = HashMap::new();
     for r in globals {
         match r.rt {
-            0x0092 if r.data.len() >= 2 => {
-                let n = u16::from_le_bytes([r.data[0], r.data[1]]) as usize;
-                for (i, c) in r.data[2..].chunks(4).take(n).enumerate() {
-                    if c.len() == 4 && i < palette.len() {
-                        palette[i] = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32;
-                    }
-                }
-            }
             0x087D if r.data.len() >= 20 => {
                 let d = &r.data;
                 let ixfe = u16::from_le_bytes([d[14], d[15]]);
@@ -2662,12 +3079,23 @@ pub fn to_hancom(stream: &[u8]) -> Result<Vec<u8>> {
             }
         }
     }
+    let dxf_after = globals
+        .iter()
+        .rposition(|r| r.rt == 0x088D)
+        .or_else(|| globals.iter().rposition(|r| r.rt == 0x0293));
+    let dxf_before = globals.iter().position(|r| r.rt == 0x0085);
     let mut g: Vec<(u16, Vec<u8>)> = Vec::new();
     let mut xf_i = 0u16;
     let mut font_i = 0usize;
-    for r in globals {
+    for (gi, r) in globals.iter().enumerate() {
         let rt = r.rt;
         let d = r.joined();
+        if dxf_after.is_none() && dxf_before == Some(gi) {
+            g.extend(cf_dxfs.out.drain(..).map(|x| (0x088D, x)));
+        }
+        if dxf_after.is_some_and(|k| k + 1 == gi) {
+            g.extend(cf_dxfs.out.drain(..).map(|x| (0x088D, x)));
+        }
         match rt {
             0x0809 => {
                 let mut b = d.clone();
