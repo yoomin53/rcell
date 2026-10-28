@@ -1060,6 +1060,7 @@ fn pdf(input: &Path, output: &Path, sheets: &[String], fonts: &[PathBuf]) -> rce
         path: dir,
         date,
         time,
+        quality_settings: false,
     };
     let bytes = rcell::print::workbook_pdf(&wb, &db, &opts);
     std::fs::write(output, bytes)?;

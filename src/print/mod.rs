@@ -37,6 +37,8 @@ pub struct PdfOptions {
     /// `&D`·`&T` 에 넣을 날짜·시간 글 (한셀 꼴: `2026-10-28`, `06:13 오후`)
     pub date: String,
     pub time: String,
+    /// 흑백 인쇄·간단히 인쇄 설정을 따른다 (한셀 PDF 저장은 둘 다 따르지 않는다 — 기본 거짓)
+    pub quality_settings: bool,
 }
 
 /// 장치 단위 (600 dpi) 1pt
@@ -333,8 +335,8 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
             let hpx = headings.then(|| heading_px(wb, z));
             let mut fr = frame_with(&sp, page, size, hpx);
             fr.gridlines = po.is_some_and(|o| o.grid_lines);
-            fr.black_and_white = setup.is_some_and(|s| s.black_and_white);
-            fr.draft = setup.is_some_and(|s| s.draft);
+            fr.black_and_white = opts.quality_settings && setup.is_some_and(|s| s.black_and_white);
+            fr.draft = opts.quality_settings && setup.is_some_and(|s| s.draft);
             fr.errors = match setup.and_then(|s| s.errors.as_deref()) {
                 Some("blank") => ErrorPrint::Blank,
                 Some("dash") => ErrorPrint::Dash,
