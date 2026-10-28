@@ -276,6 +276,38 @@ fn cases() -> Vec<Case> {
     rows(&mut wb, 1, 200, 15.0);
     name(&mut wb, "_xlnm.Print_Titles", "Sheet1!$1:$3");
     add("titles_rows15", wb, 5, "49,94,139,184", "", 97);
+    // 제목이 첫 페이지 뒤에 있으면 그 앞 페이지에도 붙고, 제목 행이 든 페이지에만 없다
+    let mut wb = base();
+    fill(&mut wb, "A1:B200");
+    name(&mut wb, "_xlnm.Print_Titles", "Sheet1!$100:$102");
+    add("titles_late", wb, 5, "42,83,127,168", "", 0);
+    let mut wb = base();
+    fill(&mut wb, "A1:Z20");
+    name(&mut wb, "_xlnm.Print_Titles", "Sheet1!$M:$N");
+    add("titles_late_cols", wb, 4, "", "8,17,24", 0);
+    // 맞추기 1×3 은 수동 나누기를 버리고, 1×(제한 없음) 은 남긴다
+    let mut wb = base();
+    fill(&mut wb, "A1:B200");
+    wb.sheets[0].page.row_breaks = vec![19];
+    wb.sheets[0].page.fit_to_page = Some(true);
+    setup(&mut wb).fit_to_width = Some(1);
+    setup(&mut wb).fit_to_height = Some(3);
+    add("fit_manual", wb, 3, "68,135", "", 0);
+    let mut wb = base();
+    fill(&mut wb, "A1:B200");
+    wb.sheets[0].page.row_breaks = vec![19];
+    wb.sheets[0].page.fit_to_page = Some(true);
+    setup(&mut wb).fit_to_width = Some(1);
+    setup(&mut wb).fit_to_height = Some(0);
+    add("fit_manual_wide", wb, 6, "20m,64,108,152,196", "", 0);
+    // 행·열 머리글은 나누기를 바꾸지 않는다
+    let mut wb = base();
+    fill(&mut wb, "A1:Z200");
+    wb.sheets[0].page.print_options = Some(PrintOptions {
+        headings: true,
+        ..Default::default()
+    });
+    add("headings", wb, 15, "45,89,133,177", "10,19", 0);
 
     // 인쇄 영역
     let mut wb = base();

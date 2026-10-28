@@ -357,6 +357,26 @@ fn split(
             .map(|i| px.get(i as usize).copied().unwrap_or(0.0) * f)
             .sum()
     });
+    // 반복 제목을 붙이지 않고 i 에서 시작한 띠가 제목 행·열을 담는지 (담으면 그 페이지에는 제목을 되풀이하지 않는다
+    // — 한셀: 제목이 100~102 행이면 1·2 페이지에도 제목을 붙이고, 100 행이 든 페이지만 빼다)
+    let holds_title = |start: u32| -> bool {
+        let Some((ta, tb)) = title else { return false };
+        let mut used = 0.0;
+        for i in start..=range.1 {
+            let h = px.get(i as usize).copied().unwrap_or(0.0) * f;
+            if h <= 0.0 {
+                continue;
+            }
+            if i != start && (manual.contains(&i) || used + h > avail + 1e-9) {
+                break;
+            }
+            if (ta..=tb).contains(&i) {
+                return true;
+            }
+            used += h;
+        }
+        false
+    };
     let mut bands: Vec<Vec<u32>> = Vec::new();
     let mut titled = Vec::new();
     let mut cur: Vec<u32> = Vec::new();
@@ -375,8 +395,7 @@ fn split(
             used = 0.0;
         }
         if cur.is_empty() {
-            // 반복 제목: 제목 범위를 지난 페이지부터
-            cur_titled = !bands.is_empty() && title.is_some_and(|(_, b)| i > b);
+            cur_titled = title.is_some() && !holds_title(i);
             if cur_titled {
                 used = title_px;
             }
@@ -400,12 +419,18 @@ fn split_area(
     f: f64,
     avail: (f64, f64),
 ) -> (Bands, Bands) {
+    // 페이지에 맞추기면 페이지 수를 정한 방향의 수동 나누기는 쓰지 않는다 (한셀: 1×3 맞추기의 20 행 나누기는
+    // 사라지고, 세로 제한이 없으면 남는다)
+    let (no_rows, no_cols) = match s.scaling {
+        Scaling::Fit { wide, tall } => (tall > 0, wide > 0),
+        Scaling::Zoom(_) => (false, false),
+    };
     let rows = split(
         (a.r0, a.r1),
         row_px,
         f,
         avail.1,
-        &s.row_breaks,
+        if no_rows { &[] } else { &s.row_breaks },
         s.title_rows,
     );
     let cols = split(
@@ -413,7 +438,7 @@ fn split_area(
         col_px,
         f,
         avail.0,
-        &s.col_breaks,
+        if no_cols { &[] } else { &s.col_breaks },
         s.title_cols,
     );
     (rows, cols)
