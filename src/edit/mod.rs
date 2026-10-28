@@ -282,6 +282,16 @@ pub enum Edit {
         #[serde(default)]
         left_to_right: bool,
     },
+    /// 자동 필터로 정렬 (필터 범위를 첫 행을 머리글로 두고 한 열로 정렬하고 `sortState` 를 남긴다)
+    SortFilter {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default)]
+        desc: bool,
+        #[serde(default)]
+        match_case: bool,
+    },
 }
 
 /// 정렬 열쇠 하나 (`{"by":"B","desc":true}`)
@@ -590,6 +600,16 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
                 left_to_right: *left_to_right,
             };
             sort::sort(wb, i, parse_range(range)?, &opt)?;
+            Ok(i)
+        }
+        Edit::SortFilter {
+            sheet,
+            col,
+            desc,
+            match_case,
+        } => {
+            let i = si(wb, sheet)?;
+            sort::sort_filter(wb, i, parse_col(col)?, *desc, *match_case)?;
             Ok(i)
         }
     }

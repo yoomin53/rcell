@@ -489,6 +489,7 @@ fn outline_auto_filter_and_protection_roundtrip() {
     s.protection = Some(SheetProtection::from_states(Some("CC1A".into()), states));
     s.auto_filter = Some(AutoFilter {
         range: "A1:E3".into(),
+        sort_state: None,
         columns: vec![
             FilterColumn {
                 col_id: 3,

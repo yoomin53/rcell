@@ -1506,6 +1506,9 @@ fn sheet_xml(
     s.push_str("</x:sheetData>");
     s.push_str(&protection_xml(sheet));
     s.push_str(&auto_filter_xml(sheet));
+    if let Some(st) = &sheet.sort_state {
+        s.push_str(&sort_state_xml(st));
+    }
 
     if !sheet.merges.is_empty() {
         let _ = write!(s, "<x:mergeCells count=\"{}\">", sheet.merges.len());
@@ -1632,7 +1635,7 @@ fn auto_filter_xml(sheet: &Sheet) -> String {
 /// `autoFilter` 요소 (시트와 표가 함께 쓴다)
 fn auto_filter_xml_of(af: &AutoFilter) -> String {
     let mut s = format!("<x:autoFilter ref=\"{}\"", esc(&af.range));
-    if af.columns.is_empty() {
+    if af.columns.is_empty() && af.sort_state.is_none() {
         s.push_str("/>");
         return s;
     }
@@ -1688,7 +1691,31 @@ fn auto_filter_xml_of(af: &AutoFilter) -> String {
         }
         s.push_str("</x:filterColumn>");
     }
+    if let Some(st) = &af.sort_state {
+        s.push_str(&sort_state_xml(st));
+    }
     s.push_str("</x:autoFilter>");
+    s
+}
+
+/// `sortState` (한셀이 쓰는 꼴: columnSort·caseSensitive 를 늘 쓰고 조건마다 sortBy)
+fn sort_state_xml(st: &crate::model::SortState) -> String {
+    let mut s = format!(
+        "<x:sortState columnSort=\"{}\" caseSensitive=\"{}\" ref=\"{}\">",
+        st.column_sort as u8,
+        st.case_sensitive as u8,
+        esc(&st.range)
+    );
+    for c in &st.conditions {
+        let _ = write!(
+            s,
+            "<x:sortCondition descending=\"{}\" sortBy=\"{}\" ref=\"{}\"/>",
+            c.descending as u8,
+            esc(c.sort_by.as_deref().unwrap_or("value")),
+            esc(&c.range)
+        );
+    }
+    s.push_str("</x:sortState>");
     s
 }
 

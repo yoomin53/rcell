@@ -296,6 +296,51 @@ pub fn sort(
     Ok(())
 }
 
+/// 자동 필터로 정렬한다: 필터 범위를 첫 행을 머리글로 두고 `col` 열로 정렬하고 필터에 정렬 상태를 남긴다
+/// (한셀: `sortState ref` 는 둘째 행부터, 조건의 `ref` 는 그 열의 첫 행부터)
+pub fn sort_filter(
+    wb: &mut Workbook,
+    si: usize,
+    col: u32,
+    desc: bool,
+    match_case: bool,
+) -> crate::Result<()> {
+    let af = wb
+        .sheets
+        .get(si)
+        .and_then(|s| s.auto_filter.as_ref())
+        .ok_or_else(|| err("자동 필터가 없습니다"))?;
+    let a = refs::parse_area(&af.range).ok_or_else(|| err("자동 필터 범위가 없습니다"))?;
+    let (r0, c0, r1, c1) = a.bounds();
+    if !(c0..=c1).contains(&col) {
+        return Err(err("정렬 기준이 필터 범위 밖입니다"));
+    }
+    let range = CellRange {
+        start: CellRef { row: r0, col: c0 },
+        end: CellRef { row: r1, col: c1 },
+    };
+    let opt = SortOptions {
+        keys: vec![SortKey { index: col, desc }],
+        header: true,
+        match_case,
+        left_to_right: false,
+    };
+    sort(wb, si, range, &opt)?;
+    if let Some(af) = &mut wb.sheets[si].auto_filter {
+        af.sort_state = Some(crate::model::SortState {
+            range: Area::rect((r0 + 1).min(r1), c0, r1, c1).text(),
+            column_sort: false,
+            case_sensitive: match_case,
+            conditions: vec![crate::model::SortCondition {
+                range: Area::rect(r0, col, r1, col).text(),
+                descending: desc,
+                sort_by: Some("value".into()),
+            }],
+        });
+    }
+    Ok(())
+}
+
 /// 정렬로 옮긴 셀에 그 자리에 있던 테두리를 다시 준다
 fn keep_borders(
     wb: &mut Workbook,
@@ -608,5 +653,210 @@ fn merge_into(list: &mut Vec<(u32, u32, u32, u32)>, piece: (u32, u32, u32, u32))
     match at {
         Some(i) => list.insert(i.min(list.len()), cur),
         None => list.push(cur),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Cell, CfRule, Sheet};
+
+    fn book(rows: &[(&str, f64)]) -> Workbook {
+        let mut s = Sheet {
+            name: "Sheet1".into(),
+            ..Default::default()
+        };
+        for (i, (a, b)) in rows.iter().enumerate() {
+            let r = i as u32;
+            if !a.is_empty() {
+                s.cells.push(Cell {
+                    r: CellRef { row: r, col: 0 },
+                    style: 0,
+                    value: CellValue::Text(a.to_string()),
+                    formula: None,
+                });
+            }
+            s.cells.push(Cell {
+                r: CellRef { row: r, col: 1 },
+                style: 0,
+                value: CellValue::Number(*b),
+                formula: None,
+            });
+            // C = B*2 (상대 참조)
+            s.cells.push(Cell {
+                r: CellRef { row: r, col: 2 },
+                style: 0,
+                value: CellValue::Empty,
+                formula: Some(crate::model::Formula {
+                    text: format!("B{}*2", r + 1),
+                    ..Default::default()
+                }),
+            });
+        }
+        Workbook {
+            sheets: vec![s],
+            ..Default::default()
+        }
+    }
+
+    fn col_a(wb: &Workbook) -> Vec<String> {
+        (0..wb.sheets[0].used_range().unwrap().end.row + 1)
+            .map(|r| {
+                wb.sheets[0]
+                    .cell(CellRef { row: r, col: 0 })
+                    .map(|c| c.value.display())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn values_order_like_hcell() {
+        use CellValue::*;
+        // 숫자 < 글 < FALSE < TRUE < 오류(코드 차례) < 빈 칸 — 내림차순도 빈 칸은 끝
+        let mut v = vec![
+            Empty,
+            Error("#N/A".into()),
+            Bool(true),
+            Text("b".into()),
+            Error("#DIV/0!".into()),
+            Number(2.0),
+            Bool(false),
+            Text("A".into()),
+            Number(-1.0),
+        ];
+        v.sort_by(|a, b| compare_values(a, b, false, false));
+        let s: Vec<String> = v.iter().map(|x| x.display()).collect();
+        assert_eq!(
+            s,
+            ["-1", "2", "A", "b", "FALSE", "TRUE", "#DIV/0!", "#N/A", ""]
+        );
+        v.sort_by(|a, b| compare_values(a, b, true, false));
+        let s: Vec<String> = v.iter().map(|x| x.display()).collect();
+        assert_eq!(
+            s,
+            ["#N/A", "#DIV/0!", "TRUE", "FALSE", "b", "A", "2", "-1", ""]
+        );
+    }
+
+    #[test]
+    fn sort_rows_with_header_moves_formulas_like_copy() {
+        let mut wb = book(&[
+            ("이름", 0.0),
+            ("나", 3.0),
+            ("apple", 1.0),
+            ("", 7.0),
+            ("가", 2.0),
+        ]);
+        let opt = SortOptions {
+            keys: vec![SortKey {
+                index: 0,
+                desc: false,
+            }],
+            header: true,
+            ..Default::default()
+        };
+        sort(&mut wb, 0, CellRange::parse("A1:C5").unwrap(), &opt).unwrap();
+        assert_eq!(col_a(&wb), ["이름", "apple", "가", "나", ""]);
+        // 2행의 수식은 3행에서 옮겨 왔다: B3*2 → B2*2
+        let f = |a1: &str| {
+            wb.sheets[0]
+                .cell(CellRef::parse(a1).unwrap())
+                .and_then(|c| c.formula.as_ref())
+                .map(|f| f.text.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(f("C2"), "B2*2");
+        assert_eq!(f("C5"), "B5*2");
+        assert_eq!(
+            wb.sheets[0]
+                .cell(CellRef::parse("B5").unwrap())
+                .unwrap()
+                .value,
+            CellValue::Number(7.0)
+        );
+    }
+
+    #[test]
+    fn cf_priorities_and_pieces_like_hcell() {
+        // 정렬 대조 실험 s3: 규칙 하나짜리 묶음 12개, A1:F13 을 머리글과 함께 F 열 내림차순(줄을 뒤집기)
+        let list: Vec<ConditionalFormat> = [
+            "A2:A13", "A2:A5", "A10:A13", "B1:B13", "C2:C20", "D5:D6", "A2:F13", "H2:H13", "E1",
+            "B2:C3", "A1:F1", "F14:F16",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, s)| ConditionalFormat {
+            sqref: s.to_string(),
+            rules: vec![CfRule {
+                kind: "cellIs".into(),
+                priority: i as u32 + 1,
+                formulas: vec![(i + 1).to_string()],
+                ..Default::default()
+            }],
+        })
+        .collect();
+        let lines: Vec<u32> = (1..13).collect();
+        let order: Vec<usize> = (0..12).rev().collect();
+        let out = sorted_cf(&list, &order, &lines, false, (0, 0, 12, 5));
+        let got: Vec<(String, u32)> = out
+            .iter()
+            .map(|c| (c.sqref.clone(), c.rules[0].priority))
+            .collect();
+        let want = [
+            ("A2:A13", 61),
+            ("B1:B13", 64),
+            ("C2:C20", 65),
+            ("A2:F13", 67),
+            ("H2:H13", 68),
+            ("E1", 69),
+            ("A1:F1", 71),
+            ("F14:F16", 72),
+            ("A10:A13 A2:A5", 42),
+            ("D5:D6 D9:D10", 22),
+            ("A2:A5 A10:A13", 2),
+            ("B2:C3 B12:C13", 6),
+        ];
+        let want: Vec<(String, u32)> = want.iter().map(|(s, p)| (s.to_string(), *p)).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn comment_box_moves_one_cell_back() {
+        // 정렬 대조 실험 s2: 72px 열, 22px 행 (4행만 40px)
+        let rows: Vec<(u32, u32)> = (0..20u32)
+            .scan(0, |y, i| {
+                let h = if i == 3 { 40 } else { 22 };
+                let r = (*y, h);
+                *y += h;
+                Some(r)
+            })
+            .collect();
+        let g = crate::render::Geometry {
+            cols: (0..12).map(|i| (i * 72, 72)).collect(),
+            rows,
+            ..Default::default()
+        };
+        assert_eq!(
+            sorted_box(&g, [0, 14, 0, 10, 1, 69, 3, 23]),
+            [0, 12, 0, 8, 0, 68, 3, 1]
+        );
+        assert_eq!(
+            sorted_box(&g, [2, 14, 3, 10, 3, 69, 6, 5]),
+            [1, 13, 2, 9, 2, 68, 5, 4]
+        );
+        assert_eq!(
+            sorted_box(&g, [5, 14, 0, 10, 6, 69, 3, 22]),
+            [4, 13, 0, 8, 5, 68, 3, 0]
+        );
+        assert_eq!(
+            sorted_box(&g, [3, 14, 10, 10, 4, 69, 14, 1]),
+            [2, 13, 9, 9, 3, 68, 13, 0]
+        );
+        // 두 번째 정렬: 오른쪽이 첫 열에 있으면 첫 열 너비 + 1px 만큼
+        assert_eq!(
+            sorted_box(&g, [0, 12, 0, 8, 0, 68, 3, 1]),
+            [0, 10, 0, 6, 0, 0, 2, 0]
+        );
     }
 }

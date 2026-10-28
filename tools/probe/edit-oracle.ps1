@@ -166,6 +166,20 @@ function Invoke-Edit($wb, $e) {
             $orient = if ($e.leftToRight) { 2 } else { 1 }
             $rg.Sort($keys[0], $orders[0], $keys[1], $M, $orders[1], $keys[2], $orders[2], $hdr, $M, [bool]$e.matchCase, $orient) | Out-Null
         }
+        "sortFilter" {
+            # 자동 필터의 정렬 (AutoFilter.Sort): 필터 범위의 그 열
+            $af = $ws.AutoFilter
+            $rg = $af.Range
+            $c = $ws.Range("$([string]$e.col)1").Column
+            $key = $ws.Range($ws.Cells.Item($rg.Row, $c), $ws.Cells.Item($rg.Row + $rg.Rows.Count - 1, $c))
+            $s = $af.Sort
+            $s.SortFields.Clear()
+            $order = if ($e.desc) { 2 } else { 1 }
+            $s.SortFields.Add($key, 0, $order) | Out-Null
+            $s.Header = 1
+            $s.MatchCase = [bool]$e.matchCase
+            $s.Apply()
+        }
         default { throw "모르는 편집 $($e.op)" }
     }
 }

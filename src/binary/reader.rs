@@ -1796,6 +1796,7 @@ fn filter_record(rtype: u32, r: &mut Rd, af: &mut Option<AutoFilter>) {
                     }
                     .to_string(),
                     columns: Vec::new(),
+                    sort_state: None,
                 });
             }
         }
