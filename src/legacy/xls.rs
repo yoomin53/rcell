@@ -2594,8 +2594,8 @@ pub fn to_hancom(stream: &[u8]) -> Result<Vec<u8>> {
     let mut extra_fonts: Vec<(usize, u32)> = Vec::new();
     let mut xf_font: HashMap<u16, u16> = HashMap::new();
     {
-        let mut i = 0u16;
-        for r in globals.iter().filter(|r| r.rt == 0x00E0) {
+        for (i, r) in globals.iter().filter(|r| r.rt == 0x00E0).enumerate() {
+            let i = i as u16;
             let d = &r.data;
             if d.len() >= 2 {
                 let ifnt = u16::from_le_bytes([d[0], d[1]]);
@@ -2620,7 +2620,6 @@ pub fn to_hancom(stream: &[u8]) -> Result<Vec<u8>> {
                     xf_font.insert(i, idx_of(fonts.len() + n));
                 }
             }
-            i += 1;
         }
     }
     // 문단 모양: 한셀은 .xls 를 열 때 가로 맞춤이 일반이 아닌 셀 서식에 기본 문단 모양(줄 간격 75 betweenLines,
@@ -2630,8 +2629,8 @@ pub fn to_hancom(stream: &[u8]) -> Result<Vec<u8>> {
     let mut links: Vec<u32> = Vec::new();
     let mut xf_para: HashMap<u16, u32> = HashMap::new();
     {
-        let mut i = 0u16;
-        for r in globals.iter().filter(|r| r.rt == 0x00E0) {
+        for (i, r) in globals.iter().filter(|r| r.rt == 0x00E0).enumerate() {
+            let i = i as u16;
             let d = &r.data;
             if d.len() >= 10 && u16::from_le_bytes([d[4], d[5]]) & 0x0004 == 0 {
                 let alc = d[6] & 0x07;
@@ -2661,7 +2660,6 @@ pub fn to_hancom(stream: &[u8]) -> Result<Vec<u8>> {
                     xf_para.insert(i, li);
                 }
             }
-            i += 1;
         }
     }
     let mut g: Vec<(u16, Vec<u8>)> = Vec::new();
