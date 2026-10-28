@@ -196,8 +196,16 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
     if !has("/Workbook") {
         return Err(Error::MissingPart("/Workbook".into()));
     }
-    let stream = container::read_entry(bytes, "/Workbook")?;
+    let mut stream = container::read_entry(bytes, "/Workbook")?;
+    // Excel 97-2003 `.xls` (BIFF8): 레거시 레코드로 바꿔 같은 리더로 읽는다
+    let xls = xls::is_biff8(&stream);
+    if xls {
+        stream = xls::to_hancom(&stream)?;
+    }
     let mut wb = reader::read_workbook_stream(&stream)?;
+    if xls {
+        wb.application = Some("Excel".into());
+    }
     // 피벗: 캐시 스트림(_SX_DB_CUR)과 시트의 피벗 레코드 → XML 피벗 파트
     pivot::read(bytes, &stream, &mut wb);
     // 문서 속성: 목록은 이름의 제어 문자를  로 표기한다 (container::display_path)

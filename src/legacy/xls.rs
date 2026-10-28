@@ -19,6 +19,8 @@
 //! - 한컴 전용 레코드(0xA030·0x0900·0xA001·0xA011·0xA020·0x009F·0xB00E·0x7EF0)를 빼고, 행 반복 0xB002 는 풀어 쓴다
 //! - ROW 는 32 행 묶음마다 셀 앞에, WINDOW2 뒤에 PLV
 
+use std::collections::HashMap;
+
 use super::biff;
 use crate::error::{Error, Result};
 
@@ -1877,8 +1879,7 @@ pub fn to_biff8_with(stream: &[u8], hints: &[SheetHints], tips: &[LinkTips]) -> 
         subs.last_mut().unwrap().push(r);
     }
     let globals = subs.remove(0);
-    let sheets: Vec<Vec<OutRec>> =
-        subs
+    let sheets: Vec<Vec<OutRec>> = subs
         .iter()
         .enumerate()
         .map(|(i, s)| sheet_to8(s, hints.get(i), tips.get(i)))
@@ -2077,8 +2078,700 @@ pub fn to_biff8_with(stream: &[u8], hints: &[SheetHints], tips: &[LinkTips]) -> 
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// BIFF8 → 레거시 (.xls 읽기)
+// ---------------------------------------------------------------------------
+
+/// CONTINUE 로 나뉜 데이터를 차례로 읽는다. 글자 데이터가 조각 경계를 넘으면 새 조각 첫 바이트가 플래그다
+struct Frags<'a> {
+    parts: Vec<&'a [u8]>,
+    i: usize,
+    p: usize,
+}
+
+impl<'a> Frags<'a> {
+    fn new(rec: &'a Rec) -> Frags<'a> {
+        let mut parts = vec![rec.data.as_slice()];
+        parts.extend(rec.conts.iter().map(|c| c.as_slice()));
+        Frags { parts, i: 0, p: 0 }
+    }
+    fn at_end(&mut self) -> bool {
+        while self.i < self.parts.len() && self.p >= self.parts[self.i].len() {
+            self.i += 1;
+            self.p = 0;
+        }
+        self.i >= self.parts.len()
+    }
+    fn byte(&mut self) -> Option<u8> {
+        if self.at_end() {
+            return None;
+        }
+        let b = self.parts[self.i][self.p];
+        self.p += 1;
+        Some(b)
+    }
+    fn bytes(&mut self, n: usize) -> Option<Vec<u8>> {
+        (0..n).map(|_| self.byte()).collect()
+    }
+    fn u16(&mut self) -> Option<u16> {
+        Some(u16::from_le_bytes([self.byte()?, self.byte()?]))
+    }
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes([
+            self.byte()?,
+            self.byte()?,
+            self.byte()?,
+            self.byte()?,
+        ]))
+    }
+    /// 글자 cch 개 → UTF-16LE 바이트. 조각이 바뀌면 그 첫 바이트가 새 플래그 (비트 0 = 2바이트 글자)
+    fn chars(&mut self, cch: usize, mut wide: bool) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(cch * 2);
+        for _ in 0..cch {
+            if self.p >= self.parts.get(self.i)?.len() {
+                self.i += 1;
+                self.p = 0;
+                wide = self.byte()? & 0x01 != 0;
+            }
+            if wide {
+                out.push(self.byte()?);
+                out.push(self.byte()?);
+            } else {
+                out.push(self.byte()?);
+                out.push(0);
+            }
+        }
+        Some(out)
+    }
+}
+
+/// BIFF8 SST → 레거시 SST (서식 런은 글자 뒤, 플래그 0x01, 음성 정보는 버린다)
+fn sst_to_hancom(rec: &Rec) -> Option<Vec<u8>> {
+    let mut f = Frags::new(rec);
+    let total = f.u32()?;
+    let unique = f.u32()?;
+    let mut o = Vec::new();
+    o.extend_from_slice(&total.to_le_bytes());
+    let count_at = o.len();
+    o.extend_from_slice(&unique.to_le_bytes());
+    let mut n = 0u32;
+    for _ in 0..unique {
+        let Some(cch) = f.u16() else { break };
+        let Some(flags) = f.byte() else { break };
+        let runs = if flags & 0x08 != 0 { f.u16()? } else { 0 };
+        let ext = if flags & 0x04 != 0 { f.u32()? } else { 0 };
+        let chars = f.chars(cch as usize, flags & 0x01 != 0)?;
+        let run_bytes = f.bytes(runs as usize * 4)?;
+        f.bytes(ext as usize)?;
+        o.extend_from_slice(&cch.to_le_bytes());
+        o.push(if runs > 0 { 0x01 } else { 0x00 });
+        o.extend_from_slice(&chars);
+        if runs > 0 {
+            o.extend_from_slice(&runs.to_le_bytes());
+            o.extend_from_slice(&run_bytes);
+        }
+        n += 1;
+    }
+    o[count_at..count_at + 4].copy_from_slice(&n.to_le_bytes());
+    Some(o)
+}
+
+/// BIFF8 STRING (수식의 글 결과, 긴 글은 CONTINUE) → 레거시 (cch u16, 플래그, UTF-16)
+fn string_to_hancom(rec: &Rec) -> Option<Vec<u8>> {
+    let mut f = Frags::new(rec);
+    let cch = f.u16()?;
+    let flag = f.byte()?;
+    let chars = f.chars(cch as usize, flag & 0x01 != 0)?;
+    let mut o = Vec::with_capacity(3 + chars.len());
+    o.extend_from_slice(&cch.to_le_bytes());
+    o.push(0x01);
+    o.extend_from_slice(&chars);
+    Some(o)
+}
+
+/// BIFF8 TXO (18바이트 + CONTINUE 글 + CONTINUE 런) → 레거시 TXO
+fn txo_to_hancom(rec: &Rec) -> Option<Vec<u8>> {
+    let d = &rec.data;
+    let grbit = u16::from_le_bytes([*d.first()?, *d.get(1)?]);
+    let cch = u16::from_le_bytes([*d.get(10)?, *d.get(11)?]) as usize;
+    let h = match (grbit >> 1) & 0x07 {
+        2 => 2,
+        3 => 3,
+        4 => 5,
+        7 => 7,
+        _ => 1,
+    };
+    let v = match (grbit >> 4) & 0x07 {
+        2 => 1,
+        3 => 2,
+        4 => 3,
+        7 => 4,
+        _ => 0,
+    };
+    let mut text = Vec::new();
+    let mut runs: Vec<(u16, u16)> = Vec::new();
+    if cch > 0 && !rec.conts.is_empty() {
+        // 글: 첫 CONTINUE 부터 (조각마다 첫 바이트가 플래그)
+        let mut tf = Frags {
+            parts: rec.conts.iter().map(|c| c.as_slice()).collect(),
+            i: 0,
+            p: 0,
+        };
+        let flag = tf.byte()?;
+        text = tf.chars(cch, flag & 0x01 != 0)?;
+        // 런: 글 다음 조각부터 8바이트씩, 마지막 (cch, …) 은 끝 표지
+        if tf.p > 0 {
+            tf.i += 1;
+            tf.p = 0;
+        }
+        while let (Some(ich), Some(ifnt)) = (tf.u16(), tf.u16()) {
+            tf.bytes(4);
+            if ich as usize >= cch {
+                break;
+            }
+            runs.push((ich, ifnt));
+        }
+    }
+    let paragraphs = {
+        let s = crate::text::utf16le(&text);
+        s.split('\n').count().max(1) as u16
+    };
+    let mut o = Vec::new();
+    o.extend_from_slice(&(grbit & 0x0200).to_le_bytes());
+    o.extend_from_slice(&1u16.to_le_bytes());
+    o.push(h);
+    o.push(v);
+    o.extend_from_slice(&(runs.len() as u16).to_le_bytes());
+    o.extend_from_slice(&paragraphs.to_le_bytes());
+    o.extend_from_slice(&(cch as u16).to_le_bytes());
+    o.push(0);
+    o.extend_from_slice(&text);
+    for (ich, ifnt) in runs {
+        o.extend_from_slice(&ich.to_le_bytes());
+        o.extend_from_slice(&ifnt.to_le_bytes());
+    }
+    for _ in 0..paragraphs {
+        o.extend_from_slice(&0u32.to_le_bytes());
+    }
+    Some(o)
+}
+
+/// XFEXT 의 색 (FullColorExt: 종류 u16 (1 색인, 2 RGB), 밝기 i16, 값 u32) → COLORREF. 테마 색은 모른다
+fn xfext_colorref(v: &[u8], palette: &[u32]) -> Option<u32> {
+    let ty = u16::from_le_bytes([*v.first()?, *v.get(1)?]);
+    let val = u32::from_le_bytes([*v.get(4)?, *v.get(5)?, *v.get(6)?, *v.get(7)?]);
+    match ty {
+        // RGBA 바이트 (r, g, b, a) → 0x00BBGGRR
+        2 => Some(val & 0x00FF_FFFF),
+        1 => {
+            let rgb = *palette.get((val as usize).checked_sub(8)?)?;
+            Some(((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF))
+        }
+        _ => None,
+    }
+}
+
+/// BIFF8 XF (20바이트) + 그 XF 의 XFEXT 색 → 레거시 XF (확장: 개수 2 + COLORREF 8개 — 무늬 배경, 채우기, 위,
+/// 왼쪽, 아래, 오른쪽, 대각선, 미상)
+fn xf_to_hancom(
+    d: &[u8],
+    ext: Option<&Vec<(u16, Vec<u8>)>>,
+    palette: &[u32],
+    para: Option<u32>,
+) -> Vec<u8> {
+    let mut o = d[..d.len().min(20)].to_vec();
+    let mut colors = [0xFFFF_FFFFu32; 8];
+    for (ty, v) in ext.map(|e| e.as_slice()).unwrap_or_default() {
+        let slot = match ty {
+            5 => 0,
+            4 => 1,
+            7 => 2,
+            9 => 3,
+            8 => 4,
+            10 => 5,
+            11 => 6,
+            _ => continue,
+        };
+        if let Some(c) = xfext_colorref(v, palette) {
+            colors[slot] = c;
+        }
+    }
+    if para.is_none() && colors.iter().all(|&c| c == 0xFFFF_FFFF) {
+        return o;
+    }
+    match para {
+        Some(k) => {
+            o.extend_from_slice(&3u16.to_le_bytes());
+            o.extend_from_slice(&k.to_le_bytes());
+        }
+        None => o.extend_from_slice(&2u16.to_le_bytes()),
+    }
+    for c in colors {
+        o.extend_from_slice(&c.to_le_bytes());
+    }
+    o
+}
+
+/// 레거시 FONT 의 한컴 확장 (플래그 1 + 78바이트): 한셀이 .xls 를 열 때 붙이는 값 — 크기 1/100 pt, 밑줄 위치 1 (아래)
+/// 과 모양 (한 줄 실선 0, 두 줄 doubleslim 7), 취소선 1 실선, 그림자 위치 10·10, 그림자 색 C0C0C0, 음영 없음,
+/// 상대 크기·장평 100, 글자 색
+fn font_ext(base: &[u8], color: u32) -> Vec<u8> {
+    let mut o = base.to_vec();
+    if base.len() < 14 {
+        return o;
+    }
+    let height = u16::from_le_bytes([base[0], base[1]]) as u32;
+    let grbit = u16::from_le_bytes([base[2], base[3]]);
+    let uls = base[10];
+    let mut e = Vec::with_capacity(79);
+    e.push(0x01);
+    e.extend_from_slice(&(height * 5).to_le_bytes());
+    e.extend_from_slice(&0x0008u16.to_le_bytes());
+    e.extend_from_slice(&u16::from(uls != 0).to_le_bytes());
+    e.extend_from_slice(&0u16.to_le_bytes());
+    e.extend_from_slice(&(if uls == 2 || uls == 0x22 { 7u32 } else { 0 }).to_le_bytes());
+    e.extend_from_slice(&0u32.to_le_bytes());
+    e.extend_from_slice(&0u32.to_le_bytes());
+    e.extend_from_slice(&10i32.to_le_bytes());
+    e.extend_from_slice(&10i32.to_le_bytes());
+    e.extend_from_slice(&u32::from(grbit & 0x08 != 0).to_le_bytes());
+    e.extend_from_slice(&0u32.to_le_bytes());
+    e.extend_from_slice(&0u32.to_le_bytes());
+    e.extend_from_slice(&color.to_le_bytes());
+    e.extend_from_slice(&0u32.to_le_bytes());
+    e.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    e.extend_from_slice(&0x00C0_C0C0u32.to_le_bytes());
+    e.extend_from_slice(&100i32.to_le_bytes());
+    e.extend_from_slice(&100i32.to_le_bytes());
+    e.extend_from_slice(&0i32.to_le_bytes());
+    e.extend_from_slice(&0i32.to_le_bytes());
+    e.extend_from_slice(&0u32.to_le_bytes());
+    o.extend_from_slice(&e);
+    o
+}
+
+/// BIFF8 CF → 레거시 CF: DXFN 표준 블록 뒤에 차등 서식 번호 u32 (없음 = 0xFFFFFFFF), 수식은 레거시 토큰으로
+fn cf_to_hancom(d: &[u8]) -> Option<Vec<u8>> {
+    let c1 = u16::from_le_bytes([*d.get(2)?, *d.get(3)?]) as usize;
+    let c2 = u16::from_le_bytes([*d.get(4)?, *d.get(5)?]) as usize;
+    let std = dxfn_std_len(d.get(6..)?)?;
+    let fstart = 6 + std;
+    let f1 = ptgs(d.get(fstart..fstart + c1)?, false, true)?;
+    let f2 = ptgs(d.get(fstart + c1..fstart + c1 + c2)?, false, true)?;
+    let mut o = d[..2].to_vec();
+    o.extend_from_slice(&(f1.len() as u16).to_le_bytes());
+    o.extend_from_slice(&(f2.len() as u16).to_le_bytes());
+    o.extend_from_slice(&d[6..fstart]);
+    o.extend_from_slice(&u32::MAX.to_le_bytes());
+    o.extend_from_slice(&f1);
+    o.extend_from_slice(&f2);
+    Some(o)
+}
+
+/// BIFF8 시트 부분 → 레거시 레코드들
+fn sheet_to_hancom(recs: &[Rec]) -> Vec<(u16, Vec<u8>)> {
+    let mut out: Vec<(u16, Vec<u8>)> = Vec::new();
+    let mut art_slots = Vec::new();
+    let mut art_parts = Vec::new();
+    let mut depth = 0usize;
+    let mut af12_entry: Option<u16> = None;
+    for (k, rec) in recs.iter().enumerate() {
+        let rt = rec.rt;
+        // 시트 안의 차트 부분 스트림 (BOF dt 0x20 … EOF) 은 건너뛴다
+        if rt == 0x0809 && k > 0 {
+            depth += 1;
+            continue;
+        }
+        if depth > 0 {
+            if rt == 0x000A {
+                depth -= 1;
+            }
+            continue;
+        }
+        let d = rec.joined();
+        match rt {
+            0x0809 => {
+                let mut b = d.clone();
+                if b.len() >= 2 {
+                    b[0..2].copy_from_slice(&super::reader::HANCELL_BIFF_VERSION.to_le_bytes());
+                }
+                out.push((rt, b));
+            }
+            // 색인·페이지 레이아웃 보기·CF12·CFEX (레거시 꼴을 모른다)
+            0x020B | 0x00D7 | 0x088B | 0x087A | 0x087B => {}
+            0x0207 => {
+                if let Some(b) = string_to_hancom(rec) {
+                    out.push((rt, b));
+                }
+            }
+            0x01B6 => {
+                if let Some(b) = txo_to_hancom(rec) {
+                    out.push((rt, b));
+                }
+            }
+            0x00EC => {
+                art_slots.push(out.len());
+                art_parts.push(d);
+                out.push((rt, Vec::new()));
+            }
+            0x01B0 => {
+                if let Some(b) = condfmt(&d, false, false) {
+                    out.push((rt, b));
+                }
+            }
+            0x0879 => {
+                if let Some(b) = condfmt(&d, false, true) {
+                    out.push((rt, b));
+                }
+            }
+            0x01B1 => {
+                if let Some(b) = cf_to_hancom(&d) {
+                    out.push((rt, b));
+                }
+            }
+            0x01BE => {
+                if let Some(b) = dv(&d, false) {
+                    out.push((rt, b));
+                }
+            }
+            0x087F => {
+                // ContinueFrt12 의 글 조건 (값 목록 필터의 값) → 레거시는 0x009F 로 (iEntry, 종류 0, 글)
+                if let Some(b) = conv(rt, &d, false) {
+                    if b.len() >= 25 && b[12] == 0x06 && af12_entry.is_some() {
+                        let cch = b[14] as usize;
+                        let mut v = af12_entry.unwrap_or(0).to_le_bytes().to_vec();
+                        v.push(0);
+                        v.extend_from_slice(&(cch as u16).to_le_bytes());
+                        v.push(0x01);
+                        v.extend_from_slice(b.get(23..23 + cch * 2).unwrap_or_default());
+                        out.push((0x009F, v));
+                    }
+                    out.push((rt, b));
+                }
+            }
+            0x087E => {
+                // AUTOFILTER12: 동적 필터(cft ≠ 0)가 아니면 뒤따르는 글 조건이 값 목록이다
+                af12_entry = (d.len() >= 26 && d[22..26] == [0, 0, 0, 0])
+                    .then(|| u16::from_le_bytes([d[12], d[13]]));
+                if let Some(b) = conv(rt, &d, false) {
+                    out.push((rt, b));
+                }
+            }
+            _ => {
+                if let Some(b) = conv(rt, &d, false) {
+                    out.push((if rt == 0x00D6 { 0x0204 } else { rt }, b));
+                }
+            }
+        }
+    }
+    if !art_parts.is_empty() {
+        for (slot, part) in art_slots.iter().zip(drawings(&art_parts, false)) {
+            out[*slot].1 = part;
+        }
+    }
+    out
+}
+
 /// BIFF8 `/Workbook` 스트림 → 레거시 `/Workbook` 스트림 (`.xls` 읽기)
 pub fn to_hancom(stream: &[u8]) -> Result<Vec<u8>> {
-    let _ = (split_biff8(stream), put_h as fn(&mut Vec<u8>, u16, &[u8]));
-    Err(bad("아직 읽지 못한다"))
+    if !is_biff8(stream) {
+        return Err(bad("BIFF8 BOF 가 아닙니다"));
+    }
+    let recs = split_biff8(stream);
+    // 전역과 시트 부분: BOUNDSHEET 위치로 시트 BOF 를 찾는다
+    let mut offsets = Vec::new();
+    {
+        let mut pos = 0usize;
+        let mut starts = Vec::new();
+        for r in &recs {
+            starts.push(pos);
+            pos += 4 + r.data.len() + r.conts.iter().map(|c| 4 + c.len()).sum::<usize>();
+        }
+        offsets.extend(starts);
+    }
+    let gend = recs
+        .iter()
+        .position(|r| r.rt == 0x000A)
+        .ok_or_else(|| bad("전역 EOF 가 없습니다"))?;
+    let globals = &recs[..=gend];
+    let sheet_offs: Vec<u32> = globals
+        .iter()
+        .filter(|r| r.rt == 0x0085 && r.data.len() >= 4)
+        .map(|r| u32::from_le_bytes([r.data[0], r.data[1], r.data[2], r.data[3]]))
+        .collect();
+    let mut sheets: Vec<Vec<(u16, Vec<u8>)>> = Vec::new();
+    for off in &sheet_offs {
+        let Some(start) = offsets.iter().position(|&o| o == *off as usize) else {
+            sheets.push(vec![
+                (0x0809, vec![0x01, 0x10, 0x10, 0x00]),
+                (0x000A, Vec::new()),
+            ]);
+            continue;
+        };
+        // 그 BOF 의 EOF 까지 (안쪽 차트 BOF·EOF 를 센다)
+        let mut depth = 0usize;
+        let mut end = start;
+        for (k, r) in recs.iter().enumerate().skip(start) {
+            if r.rt == 0x0809 {
+                depth += 1;
+            } else if r.rt == 0x000A {
+                depth -= 1;
+                if depth == 0 {
+                    end = k;
+                    break;
+                }
+            }
+            end = k;
+        }
+        sheets.push(sheet_to_hancom(&recs[start..=end]));
+    }
+    // 전역: 팔레트·XFEXT 를 먼저 모은다 (XF 의 색)
+    let mut palette: Vec<u32> = super::reader::DEFAULT_PALETTE.to_vec();
+    let mut xfext: HashMap<u16, Vec<(u16, Vec<u8>)>> = HashMap::new();
+    for r in globals {
+        match r.rt {
+            0x0092 if r.data.len() >= 2 => {
+                let n = u16::from_le_bytes([r.data[0], r.data[1]]) as usize;
+                for (i, c) in r.data[2..].chunks(4).take(n).enumerate() {
+                    if c.len() == 4 && i < palette.len() {
+                        palette[i] = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32;
+                    }
+                }
+            }
+            0x087D if r.data.len() >= 20 => {
+                let d = &r.data;
+                let ixfe = u16::from_le_bytes([d[14], d[15]]);
+                let n = u16::from_le_bytes([d[18], d[19]]) as usize;
+                let mut p = 20;
+                let mut props = Vec::new();
+                for _ in 0..n {
+                    let (Some(ty), Some(cb)) = (
+                        d.get(p..p + 2).map(|b| u16::from_le_bytes([b[0], b[1]])),
+                        d.get(p + 2..p + 4)
+                            .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize),
+                    ) else {
+                        break;
+                    };
+                    if cb < 4 {
+                        break;
+                    }
+                    if let Some(v) = d.get(p + 4..p + cb) {
+                        props.push((ty, v.to_vec()));
+                    }
+                    p += cb;
+                }
+                xfext.insert(ixfe, props);
+            }
+            _ => {}
+        }
+    }
+    // 글꼴: BIFF8 FONT 에 한셀이 .xls 를 열 때처럼 한컴 확장을 붙인다 (밑줄·취소선 모양, 색). XFEXT 의 글자 색
+    // (종류 0x0D) 이 글꼴의 팔레트 색과 다르면 그 색의 글꼴을 따로 만들어 XF 가 가리키게 한다
+    let fonts: Vec<Vec<u8>> = globals
+        .iter()
+        .filter(|r| r.rt == 0x0031)
+        .map(|r| r.joined())
+        .collect();
+    let font_color = |d: &[u8]| -> u32 {
+        let icv = u16::from_le_bytes([d[4], d[5]]);
+        match icv {
+            8..=63 => {
+                let rgb = palette[icv as usize - 8];
+                ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)
+            }
+            _ => 0xDFFF_FFFF,
+        }
+    };
+    // 글꼴 번호 ↔ FONT 레코드 차례 (번호 4 는 비어 있다)
+    let rec_of = |idx: u16| -> Option<usize> {
+        match idx {
+            0..=3 => Some(idx as usize),
+            4 => None,
+            n => Some(n as usize - 1),
+        }
+    };
+    let idx_of = |k: usize| -> u16 { if k < 4 { k as u16 } else { k as u16 + 1 } };
+    let mut extra_fonts: Vec<(usize, u32)> = Vec::new();
+    let mut xf_font: HashMap<u16, u16> = HashMap::new();
+    {
+        let mut i = 0u16;
+        for r in globals.iter().filter(|r| r.rt == 0x00E0) {
+            let d = &r.data;
+            if d.len() >= 2 {
+                let ifnt = u16::from_le_bytes([d[0], d[1]]);
+                let want = xfext.get(&i).and_then(|props| {
+                    props
+                        .iter()
+                        .find(|(t, _)| *t == 0x0D)
+                        .and_then(|(_, v)| xfext_colorref(v, &palette))
+                });
+                if let (Some(c), Some(k)) = (want, rec_of(ifnt))
+                    && let Some(f) = fonts.get(k)
+                    && f.len() >= 6
+                    && font_color(f) != c
+                {
+                    let n = match extra_fonts.iter().position(|e| *e == (k, c)) {
+                        Some(n) => n,
+                        None => {
+                            extra_fonts.push((k, c));
+                            extra_fonts.len() - 1
+                        }
+                    };
+                    xf_font.insert(i, idx_of(fonts.len() + n));
+                }
+            }
+            i += 1;
+        }
+    }
+    // 문단 모양: 한셀은 .xls 를 열 때 가로 맞춤이 일반이 아닌 셀 서식에 기본 문단 모양(줄 간격 75 betweenLines,
+    // 영문 keepWord·한글 breakWord, 기준선)을 붙이고 들여쓰기는 왼쪽(오른쪽 맞춤이면 오른쪽) 여백 = 단계 × 1134 로
+    // 둔다 (한셀이 .xls 61개를 연 결과). 0번은 기본 문단 모양
+    let mut paras: Vec<(i32, i32, u8)> = vec![(0, 0, 1)];
+    let mut links: Vec<u32> = Vec::new();
+    let mut xf_para: HashMap<u16, u32> = HashMap::new();
+    {
+        let mut i = 0u16;
+        for r in globals.iter().filter(|r| r.rt == 0x00E0) {
+            let d = &r.data;
+            if d.len() >= 10 && u16::from_le_bytes([d[4], d[5]]) & 0x0004 == 0 {
+                let alc = d[6] & 0x07;
+                let indent = (d[8] & 0x0F) as i32;
+                if alc != 0 && !(alc == 1 && indent == 0) {
+                    let margin = indent * 1134;
+                    let key = match alc {
+                        1 => (margin, 0, 1),
+                        3 => (0, margin, 2),
+                        2 => (0, 0, 3),
+                        _ => (0, 0, 1),
+                    };
+                    let pi = match paras.iter().position(|x| *x == key) {
+                        Some(k) => k,
+                        None => {
+                            paras.push(key);
+                            paras.len() - 1
+                        }
+                    } as u32;
+                    let li = match links.iter().position(|&x| x == pi) {
+                        Some(k) => k,
+                        None => {
+                            links.push(pi);
+                            links.len() - 1
+                        }
+                    } as u32;
+                    xf_para.insert(i, li);
+                }
+            }
+            i += 1;
+        }
+    }
+    let mut g: Vec<(u16, Vec<u8>)> = Vec::new();
+    let mut xf_i = 0u16;
+    let mut font_i = 0usize;
+    for r in globals {
+        let rt = r.rt;
+        let d = r.joined();
+        match rt {
+            0x0809 => {
+                let mut b = d.clone();
+                b[0..2].copy_from_slice(&super::reader::HANCELL_BIFF_VERSION.to_le_bytes());
+                g.push((rt, b));
+            }
+            0x0031 => {
+                if let Some(b) = conv(rt, &d, false) {
+                    let c = font_color(&d);
+                    g.push((rt, font_ext(&b, c)));
+                }
+                font_i += 1;
+                if font_i == fonts.len() {
+                    for (k, c) in &extra_fonts {
+                        if let Some(b) = conv(rt, &fonts[*k], false) {
+                            g.push((rt, font_ext(&b, *c)));
+                        }
+                    }
+                }
+            }
+            0x00E0 => {
+                if xf_i == 0 && !xf_para.is_empty() {
+                    // 0xA001 문단 모양 (37바이트) 과 0xA011 연결 (종류 1, 0xA001 번호)
+                    for (left, right, align) in &paras {
+                        let mut a = Vec::with_capacity(37);
+                        a.extend_from_slice(&left.to_le_bytes());
+                        a.extend_from_slice(&right.to_le_bytes());
+                        a.extend_from_slice(&[0; 12]);
+                        a.extend_from_slice(&75i32.to_le_bytes());
+                        a.extend_from_slice(&[2, *align, 0, 1]);
+                        a.extend_from_slice(&[0; 9]);
+                        g.push((0xA001, a));
+                    }
+                    for k in &links {
+                        let mut a = 1u32.to_le_bytes().to_vec();
+                        a.extend_from_slice(&k.to_le_bytes());
+                        g.push((0xA011, a));
+                    }
+                }
+                let mut b =
+                    xf_to_hancom(&d, xfext.get(&xf_i), &palette, xf_para.get(&xf_i).copied());
+                if let Some(f) = xf_font.get(&xf_i) {
+                    b[0..2].copy_from_slice(&f.to_le_bytes());
+                }
+                g.push((rt, b));
+                xf_i += 1;
+            }
+            0x00FC => {
+                if let Some(b) = sst_to_hancom(r) {
+                    g.push((rt, b));
+                }
+            }
+            0x00FF | 0x087C | 0x020B => {}
+            0x0894 => {
+                let mut cv = Cv::new(&d, false);
+                let ok = (|| {
+                    cv.copy(12)?;
+                    let a = cv.r16()?;
+                    let b = cv.r16()?;
+                    cv.w16(a);
+                    cv.w16(b);
+                    cv.chars(a as usize)?;
+                    cv.chars(b as usize)?;
+                    Some(())
+                })();
+                if ok.is_some() {
+                    g.push((rt, cv.done()));
+                }
+            }
+            _ => {
+                if let Some(b) = conv(rt, &d, false) {
+                    g.push((rt, b));
+                }
+            }
+        }
+    }
+    // 배치 (레거시 틀: 길이 0x8000 이상은 확장 길이) — 시트 위치를 BOUNDSHEET 에
+    let len_h = |d: &[u8]| 4 + d.len() + if d.len() >= 0x8000 { 2 } else { 0 };
+    let g_len: usize = g.iter().map(|(_, d)| len_h(d)).sum();
+    let mut sheet_pos = Vec::new();
+    let mut pos = g_len;
+    for s in &sheets {
+        sheet_pos.push(pos);
+        pos += s.iter().map(|(_, d)| len_h(d)).sum::<usize>();
+    }
+    let mut out = Vec::with_capacity(pos);
+    let mut si = 0;
+    for (rt, d) in &g {
+        if *rt == 0x0085 && d.len() >= 4 {
+            let mut b = d.clone();
+            let p = sheet_pos.get(si).copied().unwrap_or(0) as u32;
+            b[0..4].copy_from_slice(&p.to_le_bytes());
+            si += 1;
+            put_h(&mut out, *rt, &b);
+        } else {
+            put_h(&mut out, *rt, d);
+        }
+    }
+    for s in sheets {
+        for (rt, d) in s {
+            put_h(&mut out, rt, &d);
+        }
+    }
+    Ok(out)
 }
