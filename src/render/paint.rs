@@ -60,20 +60,21 @@ fn pattern_tile(kind: &str) -> Option<Tile> {
     Some(t)
 }
 
-/// SVG 를 CSS url() 로 (# 등 몇 글자만 바꾼다)
+/// SVG 를 CSS url() 로 (# 등 몇 글자만 바꾼다). 따옴표는 모두 %27 로 — 결과를 `style="…"` 속성에
+/// 그대로 넣으므로 큰따옴표가 있으면 속성이 끊긴다
 pub fn svg_url(svg: &str) -> String {
     let mut s = String::with_capacity(svg.len() + 32);
     for c in svg.chars() {
         match c {
             '#' => s.push_str("%23"),
-            '"' => s.push('\''),
+            '"' | '\'' => s.push_str("%27"),
             '<' => s.push_str("%3C"),
             '>' => s.push_str("%3E"),
             '\n' => {}
             c => s.push(c),
         }
     }
-    format!("url(\"data:image/svg+xml,{s}\")")
+    format!("url('data:image/svg+xml,{s}')")
 }
 
 /// 채우기를 그린 결과
@@ -83,6 +84,8 @@ pub struct FillPaint {
     pub css: String,
     /// 이웃 격자선 자리를 덮을 대표 색 (#RRGGBB)
     pub color: Option<String>,
+    /// 무늬·그라데이션: 칸 자신의 오른쪽·아래 격자선 자리도 같은 무늬로 (한셀 화면 — 무늬가 격자선 자리를 지나간다)
+    pub tiled: bool,
 }
 
 fn col(c: Option<&Color>, theme: &Theme) -> Option<String> {
@@ -105,6 +108,7 @@ pub fn fill_css(fill: &Fill, theme: &Theme, origin: (u32, u32)) -> Option<FillPa
         return Some(FillPaint {
             css: format!("background:{c};"),
             color: Some(c),
+            tiled: false,
         });
     }
     let fg = fg.unwrap_or_else(|| "#000000".into());
@@ -113,6 +117,7 @@ pub fn fill_css(fill: &Fill, theme: &Theme, origin: (u32, u32)) -> Option<FillPa
         return Some(FillPaint {
             css: format!("background:{fg};"),
             color: Some(fg),
+            tiled: false,
         });
     };
     let mut svg = format!(
@@ -137,6 +142,7 @@ pub fn fill_css(fill: &Fill, theme: &Theme, origin: (u32, u32)) -> Option<FillPa
             svg_url(&svg)
         ),
         color: Some(rep),
+        tiled: true,
     })
 }
 
@@ -215,6 +221,7 @@ fn gradient_css(g: &GradientFill, theme: &Theme) -> Option<FillPaint> {
             svg_url(&svg)
         ),
         color: rep,
+        tiled: true,
     })
 }
 

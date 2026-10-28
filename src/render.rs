@@ -479,12 +479,14 @@ pub fn sheet_table_grid(
             .map(|c| paint::FillPaint {
                 css: format!("background:{c};"),
                 color: Some(c),
+                tiled: false,
             })
             .or(fill)
             .or_else(|| {
                 tl.and_then(|t| t.fill.clone()).map(|c| paint::FillPaint {
                     css: format!("background:{c};"),
                     color: Some(c),
+                    tiled: false,
                 })
             });
         // 표 스타일 테두리는 칸 자체의 테두리가 없는 변에만
@@ -596,6 +598,10 @@ pub fn sheet_table_grid(
         } else {
             next_row.get(&r).map(|&n| (n, c))
         };
+        // 무늬·그라데이션 칸은 자기 격자선 자리까지 무늬를 잇는다 (테두리를 비워 배경이 보이게)
+        if me.and_then(|v| v.fill.as_ref()).is_some_and(|f| f.tiled) {
+            return Some("transparent".into());
+        }
         if let Some(nb) = n.and_then(|k| views.get(&k)).and_then(|v| v.fill.as_ref()) {
             return nb.color.clone().or(Some("transparent".into()));
         }
