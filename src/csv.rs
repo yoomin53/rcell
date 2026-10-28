@@ -408,9 +408,21 @@ pub fn shown(wb: &Workbook, cell: &Cell) -> String {
 
 /// 시트를 텍스트로 (한셀의 CSV·텍스트·PRN 저장과 같은 행·열 범위와 따옴표, 줄 끝 CRLF). 글은 유니코드 그대로
 pub fn sheet_text(wb: &Workbook, sheet: &Sheet, delim: Delimiter) -> String {
+    // 한셀이 셀로 보는 것: 값·수식이 있거나, 기본이 아닌 서식이 있거나, 병합 영역 안의 칸 (서식 0 의 빈
+    // `<c>` 는 세지 않는다 — 말뭉치 structure 의 A10)
+    let counted = |c: &&Cell| {
+        !c.value.is_empty()
+            || c.formula.is_some()
+            || c.style != 0
+            || sheet.merges.iter().any(|m| {
+                (m.start.row..=m.end.row).contains(&c.r.row)
+                    && (m.start.col..=m.end.col).contains(&c.r.col)
+            })
+    };
+    let cells: Vec<&Cell> = sheet.cells.iter().filter(counted).collect();
     let (Some(first), Some(last)) = (
-        sheet.cells.iter().map(|c| c.r.col).min(),
-        sheet.cells.iter().map(|c| c.r.col).max(),
+        cells.iter().map(|c| c.r.col).min(),
+        cells.iter().map(|c| c.r.col).max(),
     ) else {
         return String::new();
     };
@@ -418,12 +430,11 @@ pub fn sheet_text(wb: &Workbook, sheet: &Sheet, delim: Delimiter) -> String {
     let d = delim.as_char();
     let mut out = String::new();
     let mut i = 0;
-    let cells = &sheet.cells;
     while i < cells.len() {
         let row = cells[i].r.row;
         let mut fields: Vec<String> = vec![String::new(); (last - first + 1) as usize];
         while i < cells.len() && cells[i].r.row == row {
-            let c = &cells[i];
+            let c = cells[i];
             if c.r.col >= first {
                 let mut t = shown(wb, c);
                 // 숫자의 표시 형식에 든 원 기호(U+20A9)는 949 의 0x5C 로 (한셀 관찰 — 글 칸의 ₩ 는 `?`)
