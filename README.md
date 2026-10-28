@@ -201,6 +201,8 @@ rcell::save(&wb, "새문서.cell")?;
 ```bash
 rcell info    문서.cell                  # 요약 (세 형식 모두)
 rcell html    문서.cell -o 문서.html     # 한셀 화면처럼 HTML 로
+rcell pdf     문서.cell 문서.pdf         # 한셀 인쇄처럼 PDF 로 (페이지 나누기·배율·글꼴 넣기)
+rcell pages   문서.cell                  # 시트마다 인쇄 페이지 수·페이지 나누기·배율
 rcell csv     문서.cell -s 0             # 첫 시트를 CSV 로
 rcell convert 옛문서.cell 새문서.cell    # 레거시/바이너리 → 최신 XML .cell
 rcell convert 문서.cell 문서.xlsx        # Excel 형식으로

@@ -204,6 +204,8 @@ rcell::save(&wb, "new.cell")?;
 ```bash
 rcell info    book.cell                  # summary (all three formats)
 rcell html    book.cell -o book.html     # HTML, as Hancom Cell shows it
+rcell pdf     book.cell book.pdf         # PDF, as Hancom Cell prints it (page breaks, scale, embedded fonts)
+rcell pages   book.cell                  # print pages, page breaks and scale per sheet
 rcell csv     book.cell -s 0             # first sheet as CSV
 rcell convert old.cell new.cell          # legacy/binary → modern XML .cell
 rcell convert book.cell book.xlsx        # to Excel format
