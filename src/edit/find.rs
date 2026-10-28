@@ -242,3 +242,75 @@ mod tests {
         assert_eq!(matches("a?b", &opt("a?b", false, false)).len(), 1);
     }
 }
+
+/// 이동 옵션(`Go To Special`)의 칸 종류
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialKind {
+    /// 상수 (수식이 아닌 값)
+    Constants,
+    /// 수식
+    Formulas,
+    /// 쓰는 범위 안의 빈 칸
+    Blanks,
+    /// 메모가 있는 칸
+    Comments,
+    /// 오류 값 (상수·수식)
+    Errors,
+    /// 마지막 칸 (쓰는 범위의 오른쪽 아래)
+    LastCell,
+}
+
+/// 이동 옵션: 시트에서 그 종류의 칸 (행 우선)
+pub fn special_cells(wb: &Workbook, si: usize, kind: SpecialKind) -> Vec<CellRef> {
+    let Some(sheet) = wb.sheets.get(si) else {
+        return Vec::new();
+    };
+    let has_value = |c: &crate::model::Cell| !c.value.is_empty() || c.formula.is_some();
+    let mut v: Vec<CellRef> = match kind {
+        SpecialKind::Constants => sheet
+            .cells
+            .iter()
+            .filter(|c| c.formula.is_none() && !c.value.is_empty())
+            .map(|c| c.r)
+            .collect(),
+        SpecialKind::Formulas => sheet
+            .cells
+            .iter()
+            .filter(|c| c.formula.as_ref().is_some_and(|f| !f.text.is_empty()))
+            .map(|c| c.r)
+            .collect(),
+        SpecialKind::Errors => sheet
+            .cells
+            .iter()
+            .filter(|c| matches!(c.value, CellValue::Error(_)))
+            .map(|c| c.r)
+            .collect(),
+        SpecialKind::Comments => sheet.comments.iter().map(|c| c.cell).collect(),
+        SpecialKind::Blanks | SpecialKind::LastCell => {
+            let filled: Vec<&crate::model::Cell> =
+                sheet.cells.iter().filter(|c| has_value(c)).collect();
+            let Some(r1) = filled.iter().map(|c| c.r.row).max() else {
+                return Vec::new();
+            };
+            let c1 = filled.iter().map(|c| c.r.col).max().unwrap_or(0);
+            if kind == SpecialKind::LastCell {
+                return vec![CellRef { row: r1, col: c1 }];
+            }
+            let r0 = filled.iter().map(|c| c.r.row).min().unwrap_or(0);
+            let c0 = filled.iter().map(|c| c.r.col).min().unwrap_or(0);
+            let set: std::collections::HashSet<(u32, u32)> =
+                filled.iter().map(|c| (c.r.row, c.r.col)).collect();
+            let mut out = Vec::new();
+            for r in r0..=r1.min(r0 + 100_000) {
+                for c in c0..=c1 {
+                    if !set.contains(&(r, c)) {
+                        out.push(CellRef { row: r, col: c });
+                    }
+                }
+            }
+            out
+        }
+    };
+    v.sort_by_key(|r| (r.row, r.col));
+    v
+}

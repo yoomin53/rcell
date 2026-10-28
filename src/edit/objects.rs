@@ -246,12 +246,29 @@ pub fn check_name(name: &str) -> crate::Result<()> {
 /// 이름 정의 더하기 (`local` 이면 그 시트 범위). 같은 이름이 있으면 바꾼다
 pub fn add_name(
     wb: &mut Workbook,
+    si: usize,
     local: Option<usize>,
     name: &str,
     refers_to: &str,
 ) -> crate::Result<()> {
     check_name(name)?;
     let formula = super::normalize_formula(wb, refers_to.trim_start_matches('='))?;
+    // 시트 없는 참조는 그 시트를 붙인다 (한셀 — 이름은 활성 시트의 칸을 가리킨다)
+    let sheet_name = wb
+        .sheets
+        .get(si)
+        .map(|s| s.name.clone())
+        .unwrap_or_default();
+    let formula = super::refs::map_refs(&formula, |r| {
+        if r.prefix.is_some() {
+            return None;
+        }
+        Some(format!(
+            "{}{}",
+            super::refs::prefix_text(&sheet_name, None),
+            r.raw
+        ))
+    });
     let lid = local.map(|i| i as u32);
     match wb
         .defined_names

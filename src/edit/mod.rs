@@ -1099,7 +1099,7 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             local,
         } => {
             let i = si(wb, sheet)?;
-            objects::add_name(wb, local.then_some(i), name, refers_to)?;
+            objects::add_name(wb, i, local.then_some(i), name, refers_to)?;
             Ok(i)
         }
         Edit::DeleteName { sheet, name, local } => {

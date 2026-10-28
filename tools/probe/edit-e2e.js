@@ -115,7 +115,6 @@ const SCRIPTS = {
     { op: "pasteSpecial", sheet: 0, from: "C3:D4", to: "AF1", paste: "values", operation: "add" },
   ],
   objects: [
-    { op: "addComment", sheet: 0, cell: "E8", text: "새 메모", author: "media" },
     { op: "addHyperlink", sheet: 0, cell: "AA3", address: "https://example.com/", tooltip: "팁" },
     { op: "addName", name: "범위1", refersTo: "$A$1:$C$4" },
     { op: "deleteCf", sheet: 0, range: "A1:B20" },

@@ -394,7 +394,7 @@ fn inside_deleted(sh: &Shape, op: Shift) -> bool {
 }
 
 /// 도형 앵커를 옮긴다: 두 칸 앵커(기본)는 양 끝을 따로, `oneCell` 은 시작 칸만큼 함께, `absolute` 는 그대로
-fn shift_shape(sh: &mut Shape, op: Shift) {
+pub(crate) fn shift_shape(sh: &mut Shape, op: Shift) {
     use crate::model::AnchorKind;
     let a = &mut sh.anchor;
     if a.kind == AnchorKind::Absolute || a.edit_as.as_deref() == Some("absolute") {

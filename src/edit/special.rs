@@ -274,7 +274,7 @@ pub fn paste_special(
             // 값·수식은 붙이기 전으로
             let style = super::style_at(sheet, *p);
             restore(sheet, *p, old.clone());
-            super::cell_mut(sheet, *p).style = style;
+            restyle(sheet, *p, style);
             continue;
         }
         // 값·수식
@@ -292,7 +292,7 @@ pub fn paste_special(
                     // 원본 글·논리값: 대상 그대로
                     let st = super::style_at(sheet, *p);
                     restore(sheet, *p, old.clone());
-                    super::cell_mut(sheet, *p).style = st;
+                    restyle(sheet, *p, st);
                     continue;
                 }
             };
@@ -317,6 +317,13 @@ pub fn paste_special(
             match (&old_f, &old_v, s_num) {
                 (Some(f), _, _) => (CellValue::Empty, Some(format!("({f}){sym}{rhs}"))),
                 (None, CellValue::Number(a), Some(b)) => (calc(*a, b), None),
+                // 빈 대상에 빈 원본: 그대로 (한셀)
+                (None, CellValue::Empty, Some(_)) if blank => {
+                    let st = super::style_at(sheet, *p);
+                    restore(sheet, *p, old.clone());
+                    restyle(sheet, *p, st);
+                    continue;
+                }
                 (None, CellValue::Empty, Some(b)) => (calc(0.0, b), None),
                 (None, CellValue::Number(a), None) => (
                     CellValue::Empty,
@@ -327,7 +334,7 @@ pub fn paste_special(
                     // 대상이 글이면 그대로
                     let st = super::style_at(sheet, *p);
                     restore(sheet, *p, old.clone());
-                    super::cell_mut(sheet, *p).style = st;
+                    restyle(sheet, *p, st);
                     continue;
                 }
             }
@@ -396,5 +403,12 @@ fn restore(sheet: &mut crate::model::Sheet, p: CellRef, old: Option<crate::model
             .cells
             .partition_point(|x| (x.r.row, x.r.col) < (p.row, p.col));
         sheet.cells.insert(i, c);
+    }
+}
+
+/// 칸의 서식을 `st` 로 (셀 기록 없이도 그 서식으로 보이면 기록을 만들지 않는다)
+fn restyle(sheet: &mut crate::model::Sheet, p: CellRef, st: u32) {
+    if super::style_at(sheet, p) != st {
+        super::cell_mut(sheet, p).style = st;
     }
 }

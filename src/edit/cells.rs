@@ -185,6 +185,57 @@ pub fn shift_cells(
         Vec::new()
     };
     let boxes_before = super::structure::comment_geometry(wb, si, 0);
+    // 셀 기록 없이 행·열 서식으로만 보이던 띠 안의 칸: 옮긴 자리에 그 서식의 셀을 만든다 (한셀 — 열 서식이 있는 행에
+    // 셀을 오른쪽으로 밀면 옮겨진 칸이 원래 열의 서식을 지닌다)
+    let carried: Vec<(CellRef, u32)> = {
+        let sheet = &wb.sheets[si];
+        let last = if rows {
+            sheet
+                .rows
+                .iter()
+                .filter(|r| r.style.is_some())
+                .map(|r| r.index - 1)
+                .max()
+        } else {
+            sheet
+                .cols
+                .iter()
+                .filter(|c| c.style.is_some())
+                .map(|c| c.max - 1)
+                .max()
+        };
+        let mut v = Vec::new();
+        if let Some(last) = last
+            && last >= at
+            && (last - at) as u64 * (band.1 - band.0 + 1) as u64 <= 200_000
+        {
+            for m in at..=last {
+                for x in band.0..=band.1 {
+                    let r = if rows {
+                        CellRef { row: m, col: x }
+                    } else {
+                        CellRef { row: x, col: m }
+                    };
+                    if sheet.cell(r).is_some() {
+                        continue;
+                    }
+                    let Some(nm) = op.point(rows, m) else {
+                        continue;
+                    };
+                    let to = if rows {
+                        CellRef { row: nm, col: x }
+                    } else {
+                        CellRef { row: x, col: nm }
+                    };
+                    let st = sheet.effective_style(r.row, r.col);
+                    if st != sheet.effective_style(to.row, to.col) {
+                        v.push((to, st));
+                    }
+                }
+            }
+        }
+        v
+    };
     let sheet = &mut wb.sheets[si];
     let mut cells = Vec::with_capacity(sheet.cells.len());
     for mut c in std::mem::take(&mut sheet.cells) {
@@ -205,6 +256,16 @@ pub fn shift_cells(
             }
         }
         cells.push(c);
+    }
+    for (r, st) in carried {
+        if !cells.iter().any(|c| c.r == r) {
+            cells.push(crate::model::Cell {
+                r,
+                style: st,
+                value: crate::model::CellValue::Empty,
+                formula: None,
+            });
+        }
     }
     for (r, st) in inherit {
         cells.push(crate::model::Cell {
@@ -264,6 +325,17 @@ pub fn shift_cells(
         dv.sqref = fix(&dv.sqref);
     }
     sheet.data_validations.retain(|d| !d.sqref.is_empty());
+    // 도형: 시작 칸이 띠 안에서 움직이는 자리에 있으면 행·열 편집처럼 옮긴다
+    for sh in &mut sheet.shapes {
+        let f = sh.anchor.from;
+        let fr = CellRef {
+            row: f.row,
+            col: f.col,
+        };
+        if in_band(fr) && main(fr) >= at {
+            super::structure::shift_shape(sh, op);
+        }
+    }
     // 5. 하이퍼링크·메모
     sheet.hyperlinks.retain_mut(|h| {
         let Some(rg) = CellRange::parse(&h.range) else {
