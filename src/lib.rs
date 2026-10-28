@@ -41,6 +41,7 @@ pub mod ns;
 pub mod numfmt;
 pub mod package;
 pub mod parser;
+pub mod print;
 pub mod render;
 pub mod scan;
 pub mod text;

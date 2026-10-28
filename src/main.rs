@@ -222,6 +222,8 @@ enum Cmd {
     /// 암호화된 문서(OLE2 EncryptionInfo + EncryptedPackage)를 풀어 ZIP 패키지로 저장 — 리버스 엔지니어링용
     Decrypt { input: PathBuf, output: PathBuf },
     /// 컨테이너 항목 하나를 16진수로 출력 — 리버스 엔지니어링용
+    /// 인쇄 페이지: 시트마다 페이지 수, 페이지 나누기(새 페이지의 첫 행·열, m = 수동), 배율 — 한셀 COM 과 같은 꼴
+    Pages { file: PathBuf },
     Hexdump {
         file: PathBuf,
         /// ZIP 파트 이름 또는 OLE2 스트림 경로 (예: /Workbook)
@@ -254,6 +256,7 @@ fn main() -> ExitCode {
             part,
         } => records(&file, bytes, only.as_deref(), part.as_deref()),
         Cmd::Escher { file } => escher(&file),
+        Cmd::Pages { file } => pages(&file),
         Cmd::Vtdump { file, offsets } => vtdump(&file, offsets),
         Cmd::Patch {
             input,
@@ -999,6 +1002,50 @@ fn calc(file: &Path, show: bool, max: usize, output: Option<&Path>) -> rcell::Re
         rcell::save(&wb, out)?;
     }
     Ok(differ == 0)
+}
+
+fn pages(file: &Path) -> rcell::Result<()> {
+    let wb = open_doc(file)?;
+    let list = |b: &[(u32, bool)]| {
+        b.iter()
+            .map(|(i, m)| format!("{i}{}", if *m { "m" } else { "" }))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    for (i, sh) in wb.sheets.iter().enumerate() {
+        let p = rcell::print::sheet_print(&wb, i);
+        let scale = match p.settings.scaling {
+            rcell::print::Scaling::Zoom(z) => z.to_string(),
+            rcell::print::Scaling::Fit { .. } => format!("fit{}", p.page_scale),
+        };
+        println!(
+            "{}	{}	{}	{}	{}	{}	z{}{}",
+            i + 1,
+            sh.name,
+            p.pages.len(),
+            list(&p.h_breaks),
+            list(&p.v_breaks),
+            scale,
+            p.print_scale,
+            if p.tall { " tall" } else { "" }
+        );
+        if std::env::var_os("RCELL_PAGES_DEBUG").is_some() {
+            for a in &p.settings.areas {
+                let w: u32 = (a.c0..=a.c1).map(|c| p.col_px[c as usize]).sum();
+                let h: u32 = (a.r0..=a.r1).map(|r| p.row_px[r as usize]).sum();
+                eprintln!(
+                    "  area {:?} px {w}x{h} paper {:?} margins {} {} {} {}",
+                    a,
+                    p.settings.paper,
+                    p.settings.left,
+                    p.settings.right,
+                    p.settings.top,
+                    p.settings.bottom
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn html(
