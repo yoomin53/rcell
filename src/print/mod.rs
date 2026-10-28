@@ -100,6 +100,17 @@ pub fn frame(sp: &SheetPrint, page: &Page, size: PageSize) -> PageFrame {
     let z = if sp.tall { 100 } else { sp.print_scale };
     PageFrame {
         cols: bounds(x0 + dx, &cols),
+        col_x100: {
+            let mut acc = 0.0;
+            cols.iter()
+                .map(|&(c, _)| {
+                    let at = acc;
+                    acc += sp.col_px.get(c as usize).copied().unwrap_or(0) as f64;
+                    (c, at)
+                })
+                .collect()
+        },
+        origin_x: x0 + dx,
         rows: bounds(y0 + dy, &rows),
         row_dev: (0..sp.row_px.len() as u32)
             .map(|r| sp.row_print_px(r) * 6.25)

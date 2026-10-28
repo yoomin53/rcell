@@ -125,6 +125,10 @@ pub struct PageFrame {
     pub px: f64,
     /// 배율 (%) — 글꼴 크기 = round(pt × 25/3 × z/100)
     pub zoom: u32,
+    /// 그린 열의 왼쪽 자리 (화면 px, 배율 100 — 페이지 첫 열부터 쌓은 값)와 그 원점 (장치 단위). 왼쪽 맞춤 글자는
+    /// 화면 자리를 배율로 옮겨 반올림한 px 에 놓인다 (한셀 PDF 배율 50~150 실험)
+    pub col_x100: Vec<(u32, f64)>,
+    pub origin_x: f64,
     pub gridlines: bool,
     pub black_and_white: bool,
     pub draft: bool,
@@ -572,6 +576,19 @@ pub fn page_ops(
         let mut size = frame.font_size(pt);
         let px = frame.px;
         let pad_l = (px + 0.5).floor();
+        // 왼쪽 맞춤 글자 자리: round_half_even((화면 왼쪽 + 2px + 들여쓰기) × z) − 1 px (장치 단위로)
+        let x100 = |col: u32| frame.col_x100.iter().find(|c| c.0 == col).map(|c| c.1);
+        let left_at = |col: u32, extra: f64| -> Option<f64> {
+            let v = (x100(col)? + 2.0 + extra) * frame.zoom as f64 / 100.0;
+            let r = v.round();
+            // 반은 짝수 쪽 (75% 의 1.5 → 75 + 0)
+            let r = if (v - v.trunc() - 0.5).abs() < 1e-9 && r % 2.0 != 0.0 {
+                r - 1.0
+            } else {
+                r
+            };
+            Some((frame.origin_x + (r - 1.0) * 6.25).round())
+        };
         let indent = v.indent as f64 * INDENT_PX * px;
         let w = |s: &str, sz: f64| measure.width(&key, sz, s) * stretch;
         // 넘친 범위 (화면 px → 이어진 열의 인쇄 자리)
@@ -618,11 +635,15 @@ pub fn page_ops(
             vec![text.clone()]
         };
         let n = lines.len() as f64;
-        // 첫 줄 기준선
+        // 첫 줄 기준선. 행이 글보다 낮으면 위 맞춤 자리보다 올라가지 않는다 (22px 행의 아래 맞춤 숫자 — 배율 97 에서
+        // 위 맞춤과 같은 자리)
+        let top = y0 + line / 2.0 + kt * size + ct * k99;
         let first = match v.v {
-            VAlign::Top => y0 + line / 2.0 + kt * size + ct * k99,
-            VAlign::Bottom => y1 - line / 2.0 + kb * size - cb * k99 - (n - 1.0) * line,
-            VAlign::Center => (y0 + y1) / 2.0 + km * size + cm * k99 - (n - 1.0) * line / 2.0,
+            VAlign::Top => top,
+            VAlign::Bottom => (y1 - line / 2.0 + kb * size - cb * k99 - (n - 1.0) * line).max(top),
+            VAlign::Center => {
+                ((y0 + y1) / 2.0 + km * size + cm * k99 - (n - 1.0) * line / 2.0).max(top)
+            }
         };
         let need_clip = !(v.wrap || ol > 0 || or > 0);
         if need_clip {
@@ -642,7 +663,12 @@ pub fn page_ops(
                 HAlign::Right => bx1 - 4.2 * px - indent - tw,
                 HAlign::Center => (bx0 + bx1) / 2.0 - 1.3 * px - tw / 2.0,
                 HAlign::CenterContinuous => (x0 + bx1) / 2.0 - 1.3 * px - tw / 2.0,
-                _ => bx0 + pad_l + indent,
+                _ => {
+                    let start = if ol > 0 { None } else { Some(c) };
+                    start
+                        .and_then(|col| left_at(col, v.indent as f64 * INDENT_PX))
+                        .unwrap_or(bx0 + pad_l + indent)
+                }
             };
             ops.push(Op::Text {
                 x,
