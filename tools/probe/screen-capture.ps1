@@ -109,6 +109,13 @@ try {
         } finally {
             if ($wb) { try { $wb.Close($false) } catch {} }
         }
+        # 문서 하나가 한셀을 끝내 버리면 (RPC 서버 없음) 새 인스턴스로 다음 문서를 연다
+        $alive = try { $null -ne $app.Workbooks } catch { $false }
+        if (-not $alive) {
+            try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null } catch {}
+            $app = New-Object -ComObject HCell.Application
+            try { $app.DisplayAlerts = $false } catch {}
+        }
     }
 } finally {
     try { $app.Visible = $false } catch {}
