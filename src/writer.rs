@@ -2486,7 +2486,13 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
     if let Some(v) = &vbs_part {
         put("xl/vbsProject.bin", v)?;
     }
-    Ok(z.finish()?.into_inner())
+    let bytes = z.finish()?.into_inner();
+    // 구조 잠금 문서의 .xlsx 는 한셀처럼 기본 암호로 감싼다 (xlsx 대조 실험: 한셀의 .xlsx 저장은 바이너리처럼
+    // EncryptionInfo·EncryptedPackage 복합 문서 — docs/format/other-formats.md)
+    if flavor == Flavor::Xlsx && wb.protection.as_ref().is_some_and(|p| p.lock_structure) {
+        return Ok(crate::binary::encrypt::wrap(&bytes));
+    }
+    Ok(bytes)
 }
 
 /// 표 파트 (`x:table`) — 모델로 쓸 때 (바이너리·레거시 원본, XML 원본은 파트를 그대로 옮긴다)
