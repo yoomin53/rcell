@@ -308,11 +308,12 @@ pub fn parse(text: &str, code: &str, date1904: bool) -> Input {
     if text.contains('￦') {
         return text_value();
     }
-    // 부호 뒤의 원 기호(`-\123`)는 수가 아니다 (`-$123` 은 수 — CSV 열기 대조 실험)
+    // 부호 뒤의 원 기호는 자릿점이 있어야 수 (`-\123` 은 글, `-\1,500.00` 은 -1500, `-$123` 은 수 — CSV 열기
+    // 대조 실험)
     let t = text.trim();
-    let won_after_sign = t
-        .strip_prefix(['-', '+'])
-        .is_some_and(|r| r.starts_with(['\\', '₩']));
+    let won_after_sign = !t.contains(',')
+        && t.strip_prefix(['-', '+'])
+            .is_some_and(|r| r.starts_with(['\\', '₩']));
     // 통화 기호 뒤의 괄호 음수 `$(123)` 는 `($123)` 처럼
     let swapped = t
         .strip_prefix(['$', '\\', '₩'])
