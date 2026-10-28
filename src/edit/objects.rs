@@ -489,3 +489,18 @@ pub fn autofit_rows(wb: &mut Workbook, si: usize, r0: u32, r1: u32) -> crate::Re
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_rules() {
+        assert!(check_name("범위1").is_ok());
+        assert!(check_name("_tax").is_ok());
+        assert!(check_name("A1").is_err());
+        assert!(check_name("1abc").is_err());
+        assert!(check_name("a b").is_err());
+        assert!(check_name("R").is_err());
+    }
+}

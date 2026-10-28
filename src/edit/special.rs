@@ -412,3 +412,20 @@ fn restyle(sheet: &mut crate::model::Sheet, p: CellRef, st: u32) {
         super::cell_mut(sheet, p).style = st;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transpose_refs_like_hcell() {
+        let c = |s: &str| CellRef::parse(s).unwrap();
+        // A2 의 =A1*2 를 바꿔 붙이면 F1 에서 =E1*2, B2 의 SUM(A1:B1) 은 F2 에서 SUM(E1:E2), 절대 참조도 바뀐다
+        assert_eq!(transpose_formula("A1*2", c("A2"), c("F1")), "E1*2");
+        assert_eq!(
+            transpose_formula("SUM(A1:B1)", c("B2"), c("F2")),
+            "SUM(E1:E2)"
+        );
+        assert_eq!(transpose_formula("$A$1+1", c("C2"), c("F3")), "$E$1+1");
+    }
+}

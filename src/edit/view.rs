@@ -12,7 +12,7 @@
 //! - 그룹은 행·열의 개요 수준을 1 올린다 (7까지), 그룹 해제는 1 내린다.
 
 use super::err;
-use crate::model::{ColInfo, Pane, RowInfo, Workbook};
+use crate::model::{CellRef, ColInfo, Pane, RowInfo, Workbook};
 
 fn row_info(sheet: &mut crate::model::Sheet, r: u32) -> &mut RowInfo {
     let i = match sheet.rows.binary_search_by_key(&(r + 1), |x| x.index) {
@@ -176,7 +176,7 @@ pub fn hide_sheet(wb: &mut Workbook, si: usize, hidden: bool) -> crate::Result<(
 }
 
 /// 틀 고정: `cell` 의 왼쪽·위를 고정한다 (A1 이면 풀기)
-pub fn freeze(wb: &mut Workbook, si: usize, cell: crate::model::CellRef) -> crate::Result<()> {
+pub fn freeze(wb: &mut Workbook, si: usize, cell: CellRef) -> crate::Result<()> {
     let sheet = wb
         .sheets
         .get_mut(si)
@@ -284,4 +284,35 @@ pub fn group_cols(
         };
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freeze_like_hcell() {
+        let mut wb = Workbook {
+            sheets: vec![crate::model::Sheet::default()],
+            ..Default::default()
+        };
+        freeze(&mut wb, 0, CellRef::parse("B3").unwrap()).unwrap();
+        let p = wb.sheets[0].view.pane.clone().unwrap();
+        assert_eq!((p.x_split, p.y_split), (1.0, 2.0));
+        assert_eq!(p.top_left_cell.as_deref(), Some("B3"));
+        assert_eq!(p.active_pane.as_deref(), Some("bottomRight"));
+        freeze(&mut wb, 0, CellRef::parse("A4").unwrap()).unwrap();
+        assert_eq!(
+            wb.sheets[0]
+                .view
+                .pane
+                .as_ref()
+                .unwrap()
+                .active_pane
+                .as_deref(),
+            Some("bottomLeft")
+        );
+        unfreeze(&mut wb, 0).unwrap();
+        assert!(wb.sheets[0].view.pane.is_none());
+    }
 }

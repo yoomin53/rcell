@@ -472,3 +472,46 @@ fn band_sqref(sq: &str, op: Shift, band: (u32, u32), insert: bool, area: CellRan
     }
     out.into_iter().map(|x| x.1).collect::<Vec<_>>().join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rg(s: &str) -> CellRange {
+        CellRange::parse(s).unwrap()
+    }
+
+    #[test]
+    fn band_refs_like_hcell() {
+        // 셀 삽입·삭제 대조 실험: B3:C4 아래로 삽입
+        let (op, band) = op_of(rg("B3:C4"), ShiftDir::Down);
+        let f = |t: &str| refs::shift_formula_band(t, "Sheet1", "Sheet1", op, band);
+        assert_eq!(f("B5"), "B7");
+        assert_eq!(f("SUM(B1:B10)"), "SUM(B1:B12)");
+        assert_eq!(f("SUM(B3:C6)"), "SUM(B5:C8)");
+        assert_eq!(f("SUM(A3:D6)"), "SUM(A3:D6)");
+        assert_eq!(f("SUM(5:5)"), "SUM(5:5)");
+        // 위로 당기기: 지운 칸만 가리키면 #REF!
+        let (op, band) = op_of(rg("B3:C4"), ShiftDir::Up);
+        let f = |t: &str| refs::shift_formula_band(t, "Sheet1", "Sheet1", op, band);
+        assert_eq!(f("SUM(B3:C4)"), "SUM(#REF!)");
+        assert_eq!(f("SUM(B2:B4)"), "SUM(B2:B2)");
+        assert_eq!(f("B5"), "B3");
+    }
+
+    #[test]
+    fn band_sqref_like_hcell() {
+        // 삽입은 모서리를 따로 (오른쪽으로 밀면 C3:D8 → E3:D8), 삭제는 띠 안의 몫만
+        let a = rg("B3:C4");
+        let (op, band) = op_of(a, ShiftDir::Down);
+        assert_eq!(band_sqref("C3:D8", op, band, true, a), "C5:D8");
+        assert_eq!(band_sqref("B1:B10", op, band, true, a), "B1:B12");
+        let (op, band) = op_of(a, ShiftDir::Right);
+        assert_eq!(band_sqref("C3:D8", op, band, true, a), "E3:D8");
+        let (op, band) = op_of(a, ShiftDir::Up);
+        assert_eq!(band_sqref("C3:D8", op, band, false, a), "D3:D8 C3:C6");
+        let (op, band) = op_of(a, ShiftDir::Left);
+        assert_eq!(band_sqref("B1:B10", op, band, false, a), "B1:B2 B5:B10");
+        assert_eq!(band_sqref("C3:D8", op, band, false, a), "B3:B4 C5:D8");
+    }
+}
