@@ -146,6 +146,15 @@ fn h_align(a: Option<&Alignment>, v: &CellValue) -> HAlign {
         "distributed" => HAlign::Distributed,
         "fill" => HAlign::Fill,
         "centerContinuous" => HAlign::CenterContinuous,
+        // 일반 + 돌린 글자 (한셀 화면, 회전 실험): 반시계 1–89 는 왼쪽, 90 은 오른쪽, 시계(91–179)는 오른쪽,
+        // 시계 90(180)은 왼쪽, 세로 쓰기는 가운데 — 글·숫자 모두
+        _ if a.and_then(|a| a.text_rotation).is_some_and(|r| r != 0) => {
+            match a.and_then(|a| a.text_rotation).unwrap_or(0) {
+                1..=89 | 180 => HAlign::Left,
+                255 => HAlign::Center,
+                _ => HAlign::Right,
+            }
+        }
         // 일반: 숫자는 오른쪽, 논리값·오류는 가운데, 글은 왼쪽
         _ => match v {
             CellValue::Number(_) | CellValue::Date(_) => HAlign::Right,
@@ -874,7 +883,8 @@ table.rc-sheet tbody th{position:sticky;left:0;text-align:center}\
 .rc-w>span,.rc-flex>span{position:static}\
 .rc-ov{z-index:2}\
 .rc-rot{position:absolute;white-space:pre}\
-.rc-vert{writing-mode:vertical-lr;text-orientation:upright;white-space:pre}\
+.rc-vert{position:absolute;display:flex;flex-direction:column;align-items:center;white-space:pre}\
+.rc-vert>span{display:block}\
 .rc-bd{position:absolute;left:-2px;top:-2px;pointer-events:none;overflow:visible;z-index:3}\
 .rc-spark{position:absolute;left:0;top:0;pointer-events:none}\
 .rc-bar{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}\

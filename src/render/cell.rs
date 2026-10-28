@@ -470,55 +470,97 @@ pub(super) fn cell_content(
     out
 }
 
-/// 돌린 글자 (1–90: 반시계, 91–180: 시계 방향 rot−90), 세로 쓰기 (255)
+/// 돌린 글자의 여백 (px): 왼쪽, 오른쪽, 위, 아래 (회전 실험 — 10 각도 × 맞춤 12가지)
+const ROT_PAD: (f64, f64, f64, f64) = (2.0, 2.0, 2.0, 2.0);
+/// 세로 쓰기 여백 (px): 왼쪽, 오른쪽, 위, 아래
+const VERT_PAD: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, -1.5);
+
+/// 돌린 글자 (1–90: 반시계, 91–180: 시계 방향 rot−90), 세로 쓰기 (255).
+/// 한셀 화면 (회전 실험): 글 한 줄 상자(글 폭 × 줄 높이)를 돌린 경계 상자를 칸 맞춤대로 놓는다. 세로 쓰기는 글자마다
+/// 줄 높이 한 칸(폭도 줄 높이)을 위에서 아래로 쌓고, 칸을 넘치면 잘린다
 fn rotated(v: &CellView, fcss: &str, body: &str, bw: f64, bh: f64, line: f64) -> String {
-    let ai = match v.h {
-        HAlign::Left => "flex-start",
-        HAlign::Center | HAlign::CenterContinuous => "center",
-        HAlign::Right => "flex-end",
-        _ => "center",
-    };
-    let jc = match v.v {
-        VAlign::Top => "flex-start",
-        VAlign::Center => "center",
-        VAlign::Bottom => "flex-end",
-    };
     let frame = format!("width:{bw:.0}px;height:{bh:.0}px;{fcss}");
     if v.rotation == 255 {
-        // 세로 쓰기: 글자를 위에서 아래로 쌓는다
+        let (pl, pr, pt, pb) = VERT_PAD;
+        let chars: Vec<char> = match v.rich {
+            Some(rt) if rt.text == v.text => rt.text.chars().collect(),
+            _ => v.text.chars().collect(),
+        };
+        let n = chars.len().max(1) as f64;
+        let col_w = line;
+        let x = match v.h {
+            HAlign::Right => bw - pr - col_w,
+            HAlign::Center | HAlign::CenterContinuous | HAlign::Distributed | HAlign::Justify => {
+                (bw - col_w) / 2.0
+            }
+            _ => pl,
+        };
+        let y = match v.v {
+            VAlign::Top => pt,
+            VAlign::Center => (bh - n * line) / 2.0 + 3.0,
+            VAlign::Bottom => bh - pb - n * line,
+        };
+        let mut s = String::new();
+        for ch in chars {
+            let _ = write!(s, "<span>{}</span>", esc(&ch.to_string()));
+        }
         return format!(
-            "<div class=\"rc-t rc-flex\" style=\"{frame}justify-content:{jc};align-items:{ai}\"><span class=\"rc-vert\" style=\"line-height:{line:.2}px\">{body}</span></div>"
+            "<div class=\"rc-t\" style=\"{frame}\"><span class=\"rc-vert\" style=\"left:{x:.1}px;top:{y:.1}px;width:{col_w:.1}px;line-height:{line:.2}px\">{s}</span></div>"
         );
     }
     let deg = if v.rotation > 90 {
         -(v.rotation - 90)
     } else {
         v.rotation
+    } as f64;
+    let (pl, pr, pt, pb) = ROT_PAD;
+    let w = v.text_px();
+    let th = deg.to_radians();
+    let (c, s) = (th.cos().abs(), th.sin().abs());
+    let (bbw, bbh) = (w * c + line * s, w * s + line * c);
+    // 상자가 칸보다 크면 글의 시작이 보이게 붙인다: 가로는 왼쪽, 세로는 반시계면 아래·시계면 위
+    let x0 = match v.h {
+        _ if bbw > bw - pl - pr => pl,
+        HAlign::Right => bw - pr - bbw,
+        HAlign::Center | HAlign::CenterContinuous | HAlign::Distributed | HAlign::Justify => {
+            (bw - bbw) / 2.0
+        }
+        _ => pl,
     };
-    if deg.abs() == 90 {
-        // 90도: 아래에서 위로(반시계) 또는 위에서 아래로(시계)
-        let wm = if deg > 0 {
-            "writing-mode:vertical-rl;transform:rotate(180deg)"
+    let va = if bbh > bh - pt - pb {
+        if deg > 0.0 {
+            VAlign::Bottom
         } else {
-            "writing-mode:vertical-rl"
-        };
-        let jc90 = match (v.v, deg > 0) {
-            (VAlign::Top, _) => "flex-start",
-            (VAlign::Center, _) => "center",
-            (VAlign::Bottom, _) => "flex-end",
-        };
-        return format!(
-            "<div class=\"rc-t rc-flex\" style=\"{frame}justify-content:{jc90};align-items:{ai};padding:{PAD}px 0\"><span style=\"{wm};line-height:{line:.2}px;white-space:pre\">{body}</span></div>"
-        );
-    }
-    // 그 밖의 각도: 글자 기준선의 시작점을 축으로 돌린다. 반시계면 왼쪽 아래, 시계면 왼쪽 위에서 시작
-    let (x, y, origin, ty) = if deg > 0 {
-        (PAD, bh - PAD, "left bottom", "-100%")
+            VAlign::Top
+        }
     } else {
-        (PAD, PAD, "left top", "0")
+        v.v
     };
+    // 한셀 글자 자리와의 차이 (회전 실험의 잉크 상자 — 맑은 고딕 9·11pt, 바탕·Arial 11pt): 90도가 아닌 각도는
+    // 경계 상자보다 위쪽, 시계 방향은 더 위
+    let dy = match (deg as i32, va) {
+        (90, VAlign::Top) => 0.0,
+        (90, VAlign::Center) => -1.5,
+        (90, VAlign::Bottom) => -3.0,
+        (-90, VAlign::Top) => 2.0,
+        (-90, VAlign::Center) => 1.5,
+        (-90, VAlign::Bottom) => -2.5,
+        (d, VAlign::Top) if d > 0 => -3.5,
+        (d, VAlign::Center) if d > 0 => -1.0,
+        (d, VAlign::Bottom) if d > 0 => 2.0,
+        (_, VAlign::Top) => -5.0,
+        (_, VAlign::Center) => -2.0,
+        (_, VAlign::Bottom) => -1.5,
+    };
+    let y0 = dy
+        + match va {
+            VAlign::Top => pt,
+            VAlign::Center => (bh - bbh) / 2.0,
+            VAlign::Bottom => bh - pb - bbh,
+        };
+    let (cx, cy) = (x0 + bbw / 2.0, y0 + bbh / 2.0);
     format!(
-        "<div class=\"rc-t\" style=\"{frame}\"><span class=\"rc-rot\" style=\"left:{x:.1}px;top:{y:.1}px;transform-origin:{origin};transform:translateY({ty}) rotate({}deg)\">{body}</span></div>",
+        "<div class=\"rc-t\" style=\"{frame}\"><span class=\"rc-rot\" style=\"left:{cx:.2}px;top:{cy:.2}px;line-height:{line:.2}px;transform:translate(-50%,-50%) rotate({}deg)\">{body}</span></div>",
         -deg
     )
 }
