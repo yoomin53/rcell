@@ -1465,7 +1465,7 @@ fn norm_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
     }
     let z = (x - m) / s;
     num(if cum {
-        hc::norm_cdf(z)
+        hc::norm_cdf_ms(x, m, s)
     } else {
         hc::norm_pdf(z) / s
     })
@@ -1504,7 +1504,7 @@ fn lognorm_dist(ctx: &mut Ctx, a: &[Value], has_cum: bool) -> Value {
     let z = (x.mln() - m) / s;
     // LOGNORM.DIST 는 한셀 근사 정규 누적, 오래된 LOGNORMDIST 는 정확하다 (대조 실험 dist)
     num(if cum && has_cum {
-        hc::norm_cdf(z)
+        hc::norm_cdf_ms(x.mln(), m, s)
     } else if cum {
         sp::norm_s_cdf(z)
     } else {

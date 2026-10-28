@@ -189,19 +189,22 @@ pub fn erfcc(x: f64) -> f64 {
 const NC8: [f64; 4] = [0.043_460_648, 0.207_002_315, 0.076_562_5, 0.172_974_537];
 
 /// [a, b] 를 p 칸으로 나눈 8점 뉴턴-코츠 적분. 칸의 첫 점은 a + k·hh, 칸 안의 점은 거기서 h 씩
-/// (a 가 음수면 점을 음수 쪽 끝에서부터 잰다 — 끝자리가 달라진다)
+/// (a 가 음수면 점을 음수 쪽 끝에서부터 잰다). 무게에 칸 폭 hh 를 먼저 곱해 두고, 칸마다 무게 × 값을 점 차례로
+/// 더한 합을 전체 합에 더한다 — 정규 왼쪽 꼬리(0.5 − 적분/c)의 끝자리가 이 순서와 C 런타임 exp 로 모두 같다
+/// (대조 실험 norm4·norm5 의 z < −3 381 경우)
 fn nc8(f: &impl Fn(f64) -> f64, a: f64, b: f64, p: usize) -> f64 {
     let hh = (b - a) / p as f64;
     let h = hh / 7.0;
+    let w = NC8.map(|c| c * hh);
+    let wf = [w[0], w[1], w[2], w[3], w[3], w[2], w[1], w[0]];
     let mut s = 0.0;
     for k in 0..p {
         let x0 = a + k as f64 * hh;
-        let v = |i: f64| f(x0 + i * h);
-        s += (NC8[0] * (v(0.0) + v(7.0))
-            + NC8[1] * (v(1.0) + v(6.0))
-            + NC8[2] * (v(2.0) + v(5.0))
-            + NC8[3] * (v(3.0) + v(4.0)))
-            * hh;
+        let mut t = 0.0;
+        for (i, wi) in wf.iter().enumerate() {
+            t += wi * f(x0 + i as f64 * h);
+        }
+        s += t;
     }
     s
 }
@@ -214,12 +217,17 @@ pub fn integrate(f: impl Fn(f64) -> f64, x: f64) -> f64 {
 
 /// [a, b] 적분 (칸 늘리기는 [`integrate`] 와 같다)
 pub fn integrate_ab(f: impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
+    integrate_eps(f, a, b, EPS)
+}
+
+/// [a, b] 적분, 칸 늘리기를 멈추는 차이 eps
+pub fn integrate_eps(f: impl Fn(f64) -> f64, a: f64, b: f64, eps: f64) -> f64 {
     // 아주 큰 x 는 칸 수가 한없이 늘어난다 — 한셀의 끝은 아직 모른다, 여기서는 2만 칸에서 멈춘다
     const LIMIT: usize = 20_000;
     let mut prev = nc8(&f, a, b, 1);
     for p in 2..=LIMIT {
         let q = nc8(&f, a, b, p);
-        if (q - prev).abs() < EPS {
+        if (q - prev).abs() < eps {
             return q;
         }
         prev = q;
@@ -234,22 +242,32 @@ pub fn norm_pdf(z: f64) -> f64 {
 
 /// 정규 누적 Φ(z) (한셀 근사)
 pub fn norm_cdf(z: f64) -> f64 {
-    if z == 0.0 {
+    norm_cdf_ms(z, 0.0, 1.0)
+}
+
+/// 정규 누적 (평균 m, 표준편차 s): z 로 바꾸지 않고 x 공간에서 [x, m] (또는 [m, x]) 를 x 쪽 끝에서부터 잰 점으로
+/// e^{−d·d/2/s/s} (d = t − m) 를 적분하고 칸 늘리기도 x 공간의 적분으로 멈춘 뒤 0.5 ∓ 적분/s/2.506628275.
+/// 그래서 s ≠ 1 이면 같은 z 라도 NORM.S.DIST 와 다르다 (NORMDIST(−18,0,2,TRUE) = 1.94E-10, NORM.S.DIST(−9) = 4.73E-9,
+/// 대조 실험 n6)
+pub fn norm_cdf_ms(x: f64, m: f64, s: f64) -> f64 {
+    if x == m {
         return 0.5;
     }
-    if z.is_nan() {
-        return z;
+    if x.is_nan() || m.is_nan() || s.is_nan() {
+        return f64::NAN;
     }
     // 칸 수가 너무 커지는 곳: 참값과 다를 바 없는 끝 값 (한셀 미확인)
-    if z.abs() > 1e4 {
-        return if z > 0.0 { 1.0 } else { 0.0 };
+    if ((x - m) / s).abs() > 1e4 {
+        return if x > m { 1.0 } else { 0.0 };
     }
-    // 음수 z 는 [z, 0] 을 z 쪽에서부터 잰 점으로 적분한다 (왼쪽 꼬리의 끝자리, 대조 실험 norm4)
-    let f = |t: f64| (-t * t / 2.0).mexp();
-    if z > 0.0 {
-        0.5 + integrate(f, z) / 2.506_628_275
+    let f = |t: f64| {
+        let d = t - m;
+        (-d * d / 2.0 / s / s).mexp()
+    };
+    if x > m {
+        0.5 + integrate_eps(f, m, x, EPS) / s / 2.506_628_275
     } else {
-        0.5 - integrate_ab(f, z, 0.0) / 2.506_628_275
+        0.5 - integrate_eps(f, x, m, EPS) / s / 2.506_628_275
     }
 }
 
@@ -277,7 +295,9 @@ fn gamma_half(a: f64) -> f64 {
     }
 }
 
-/// t 분포 상수 Γ((ν+1)/2)/(√(ν·3.141593)·Γ(ν/2)) 와 0..|x| 의 밀도 적분의 곱 (ν 는 정수)
+/// t 분포 상수 Γ((ν+1)/2)/(√(ν·3.141593)·Γ(ν/2)) 와 0..|x| 의 밀도 적분의 곱 (ν 는 정수). 밀도는
+/// e^{−(ν+1)/2·ln(1+u²/ν)} 꼴이다 (pow 가 아니다 — ν = 1–3 에서 끝자리까지 같다, 대조 실험 t6). ν ≥ 5 의 상수는
+/// 한셀 값과 ν 에 비례하는 상대 오차(ν = 100 에서 1E-14 쯤)로 다르다 — 어떻게 구하는지 아직 모른다
 pub fn t_central(x: f64, df: f64) -> f64 {
     let k = if df < 339.0 {
         gamma_half((df + 1.0) / 2.0) / ((df * 3.141_593).sqrt() * gamma_half(df / 2.0))
@@ -289,7 +309,7 @@ pub fn t_central(x: f64, df: f64) -> f64 {
         return 0.0;
     }
     let e = -(df + 1.0) / 2.0;
-    k * integrate(|u| (1.0 + u * u / df).mpow(e), x.abs())
+    k * integrate(|u| (e * (1.0 + u * u / df).mln()).mexp(), x.abs())
 }
 
 /// CONFIDENCE.NORM 의 z: [0, 8] 이분법, |Φ(z) − p| < 3E-7 에서 멈춘다 (결과가 k/2ⁿ, 대조 실험 norm4·tdist5)
