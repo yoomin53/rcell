@@ -494,13 +494,14 @@ pub fn page_ops(
         xs.push(rr);
         let mut ys: Vec<f64> = frame.rows.iter().map(|r| r.1).collect();
         ys.push(bb);
+        // 한셀 PDF 의 인쇄 격자선은 장치 1 굵기 (0.12pt)
         for x in xs {
             ops.push(Op::Line {
                 x0: x - SHIFT,
                 y0: t - SHIFT,
                 x1: x - SHIFT,
                 y1: bb - SHIFT,
-                width: 6.0,
+                width: 1.0,
                 color: BLACK,
                 dash: Vec::new(),
             });
@@ -511,7 +512,7 @@ pub fn page_ops(
                 y0: y - SHIFT,
                 x1: rr - SHIFT,
                 y1: y - SHIFT,
-                width: 6.0,
+                width: 1.0,
                 color: BLACK,
                 dash: Vec::new(),
             });

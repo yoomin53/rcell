@@ -71,9 +71,28 @@ fn bounds(start: f64, sizes: &[(u32, f64)]) -> Vec<(u32, f64, f64)> {
 
 /// 페이지 한 장의 자리 (장치 단위)
 pub fn frame(sp: &SheetPrint, page: &Page, size: PageSize) -> PageFrame {
+    frame_with(sp, page, size, None)
+}
+
+/// 행·열 머리글 크기 (인쇄 px): 너비 = 글꼴 0 숫자 폭 8 글자, 높이 = 기본 행 높이, 둘 다 배율 (한셀 PDF 머리글 실험)
+fn heading_px(wb: &Workbook, z: u32) -> (f64, f64) {
+    let m = crate::render::book_metrics(wb);
+    let w = (8.0 * m.k * z as f64 / 100.0).round();
+    let h = (crate::render::row_px(m.row_pt) as f64 * z as f64 / 100.0).round();
+    (w, h)
+}
+
+/// [`frame`] + 행·열 머리글 (인쇄 px 너비, 높이)
+pub fn frame_with(
+    sp: &SheetPrint,
+    page: &Page,
+    size: PageSize,
+    heading: Option<(f64, f64)>,
+) -> PageFrame {
     let s = &sp.settings;
     let x0 = (s.left * DEV_PT).round();
     let y0 = (s.top * DEV_PT).round();
+    let (hw, hh) = heading.unwrap_or((0.0, 0.0));
     let cols: Vec<(u32, f64)> = page
         .title_cols
         .iter()
@@ -86,8 +105,8 @@ pub fn frame(sp: &SheetPrint, page: &Page, size: PageSize) -> PageFrame {
         .chain(&page.rows)
         .map(|&r| (r, sp.row_print_px(r)))
         .collect();
-    let w: f64 = cols.iter().map(|c| c.1).sum::<f64>() * 6.25;
-    let h: f64 = rows.iter().map(|r| r.1).sum::<f64>() * 6.25;
+    let w: f64 = (cols.iter().map(|c| c.1).sum::<f64>() + hw) * 6.25;
+    let h: f64 = (rows.iter().map(|r| r.1).sum::<f64>() + hh) * 6.25;
     let avail_w = size.dev_w - x0 - (s.right * DEV_PT).round();
     let avail_h = size.dev_h - y0 - (s.bottom * DEV_PT).round();
     // 가운데 맞춤: 화면 px 로 (쓸 자리 px 를 내림, 남는 px 의 반을 내림) 옮긴다 — Holiday_Budget·center 실험
@@ -99,7 +118,7 @@ pub fn frame(sp: &SheetPrint, page: &Page, size: PageSize) -> PageFrame {
     let dy = if s.center_v { center(avail_h, h) } else { 0.0 };
     let z = if sp.tall { 100 } else { sp.print_scale };
     PageFrame {
-        cols: bounds(x0 + dx, &cols),
+        cols: bounds(x0 + dx + (hw * 6.25).round(), &cols),
         col_x100: {
             let mut acc = 0.0;
             cols.iter()
@@ -110,8 +129,8 @@ pub fn frame(sp: &SheetPrint, page: &Page, size: PageSize) -> PageFrame {
                 })
                 .collect()
         },
-        origin_x: x0 + dx,
-        rows: bounds(y0 + dy, &rows),
+        origin_x: x0 + dx + (hw * 6.25).round(),
+        rows: bounds(y0 + dy + (hh * 6.25).round(), &rows),
         row_dev: (0..sp.row_px.len() as u32)
             .map(|r| sp.row_print_px(r) * 6.25)
             .collect(),
@@ -124,6 +143,77 @@ pub fn frame(sp: &SheetPrint, page: &Page, size: PageSize) -> PageFrame {
         black_and_white: false,
         draft: false,
         errors: ErrorPrint::Displayed,
+    }
+}
+
+/// 행·열 머리글 (가는 선 상자, 가운데 글자: 열 이름·행 번호)
+fn heading_ops(
+    fr: &PageFrame,
+    hw: f64,
+    hh: f64,
+    font: &(String, f64),
+    fonts: &FontSet,
+    ops: &mut Vec<Op>,
+) {
+    let (Some(c0), Some(r0)) = (fr.cols.first(), fr.rows.first()) else {
+        return;
+    };
+    let (x_left, y_top) = (c0.1 - hw, r0.1 - hh);
+    let (x_right, y_bottom) = (
+        fr.cols.last().map_or(c0.2, |c| c.2),
+        fr.rows.last().map_or(r0.2, |r| r.2),
+    );
+    let key = FontKey {
+        name: font.0.clone(),
+        bold: false,
+        italic: false,
+    };
+    let size = fr.font_size(font.1);
+    let line = |ops: &mut Vec<Op>, x0: f64, y0: f64, x1: f64, y1: f64| {
+        ops.push(Op::Line {
+            x0: x0 - 6.0,
+            y0: y0 - 6.0,
+            x1: x1 - 6.0,
+            y1: y1 - 6.0,
+            width: 6.0,
+            color: [0, 0, 0],
+            dash: Vec::new(),
+        })
+    };
+    let text = |ops: &mut Vec<Op>, s: String, x0: f64, x1: f64, y0: f64, y1: f64| {
+        let w = fonts.width(&key, size, &s);
+        ops.push(Op::Text {
+            x: (x0 + x1) / 2.0 - w / 2.0 - 8.0 * fr.px / 6.25,
+            y: (y0 + y1) / 2.0 + 0.386 * size - 11.5 * fr.zoom as f64 / 99.0,
+            size,
+            font: key.clone(),
+            color: [0, 0, 0],
+            text: s,
+            underline: false,
+            strike: false,
+            stretch: 1.0,
+            angle: 0.0,
+        })
+    };
+    // 바깥·안 선
+    line(ops, x_left, y_top, x_right, y_top);
+    line(ops, x_left, y_top, x_left, y_bottom);
+    line(ops, x_left, r0.1, x_right, r0.1);
+    line(ops, c0.1, y_top, c0.1, y_bottom);
+    for c in &fr.cols {
+        line(ops, c.2, y_top, c.2, r0.1);
+        text(
+            ops,
+            crate::model::CellRef::col_name(c.0),
+            c.1,
+            c.2,
+            y_top,
+            r0.1,
+        );
+    }
+    for r in &fr.rows {
+        line(ops, x_left, r.2, c0.1, r.2);
+        text(ops, (r.0 + 1).to_string(), x_left, c0.1, r.1, r.2);
     }
 }
 
@@ -238,7 +328,10 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
         let total = sp.pages.len() as u32;
         let first_no = sp.settings.first_page_number.unwrap_or(1);
         for (pi, page) in sp.pages.iter().enumerate() {
-            let mut fr = frame(&sp, page, size);
+            let headings = po.is_some_and(|o| o.headings);
+            let z = if sp.tall { 100 } else { sp.print_scale };
+            let hpx = headings.then(|| heading_px(wb, z));
+            let mut fr = frame_with(&sp, page, size, hpx);
             fr.gridlines = po.is_some_and(|o| o.grid_lines);
             fr.black_and_white = setup.is_some_and(|s| s.black_and_white);
             fr.draft = setup.is_some_and(|s| s.draft);
@@ -250,6 +343,9 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
             };
             let mut ops = page_ops(wb, sheet, &fr, &fonts);
             ops.extend(objects_ops(wb, sheet, &fr, &fonts));
+            if let Some((hw, hh)) = hpx {
+                heading_ops(&fr, hw * 6.25, hh * 6.25, &default_font, &fonts, &mut ops);
+            }
             // 머리글·바닥글
             if let Some(h) = hfd {
                 let no = first_no + pi as u32;
