@@ -1909,7 +1909,7 @@ pub fn to_biff8(stream: &[u8]) -> Result<Vec<u8>> {
         g_len += match rt {
             0x00FC => {
                 let (parts, buckets, _) = sst_parts.as_ref().unwrap();
-                parts.iter().map(|p| 4 + p.len()).sum::<usize>() + 4 + 2 + buckets.len() * 8
+                parts.iter().map(|p| 4 + p.len()).sum::<usize>() + 4 + 2 + buckets.len().min(1) * 8
             }
             _ => rec_len(d, conts),
         };
