@@ -738,19 +738,46 @@ pub fn sheet_table_grid(
         .filter(|&z| z != 100 && (10..=400).contains(&z))
         .map(|z| format!("zoom:{z}%"))
         .unwrap_or_default();
+    // 확대율 (한셀 화면 — 테두리 확대 실험의 50·75·125·150·200%): 열·행마다 100% 의 px 에 확대율을 곱해 반올림한 폭
+    // (54px → 75% 41, 125% 68; 행 22px → 75% 17), 격자선은 늘 1px. CSS zoom 아래에서 그렇게 보이도록 폭·높이는
+    // 반올림한 px ÷ 확대율, 격자선 굵기는 1 ÷ 확대율로 쓴다
+    let zf = zoom_pct as f64 / 100.0;
+    let zpx = |v: u32| -> String {
+        if zoom_pct == 100 {
+            format!("{v}")
+        } else {
+            format!("{:.4}", (v as f64 * zf).round() / zf)
+        }
+    };
     // 표와 그리기 개체를 같은 좌표계(왼쪽 위 = 머리글 모서리)에 둔다
     let _ = write!(s, "<div class=\"rc-canvas\" style=\"{zoom}\">");
+    if zoom_pct != 100 {
+        let _ = write!(
+            s,
+            "<style>table.rc-sheet.rc-z{zoom_pct} td{{border-right-width:{w:.4}px;border-bottom-width:{w:.4}px}}</style>",
+            w = 1.0 / zf
+        );
+    }
     let _ = write!(
         s,
-        "<table class=\"rc-sheet{}\">",
-        if grid { " rc-grid" } else { "" }
+        "<table class=\"rc-sheet{}{}\">",
+        if grid { " rc-grid" } else { "" },
+        if zoom_pct != 100 {
+            format!(" rc-z{zoom_pct}")
+        } else {
+            String::new()
+        }
     );
     s.push_str("<colgroup>");
     if headers {
         let _ = write!(s, "<col style=\"width:{header_w}px\">");
     }
     for &c in &cols {
-        let _ = write!(s, "<col data-c=\"{c}\" style=\"width:{}px\">", lay.col_w(c));
+        let _ = write!(
+            s,
+            "<col data-c=\"{c}\" style=\"width:{}px\">",
+            zpx(lay.col_w(c))
+        );
     }
     s.push_str("</colgroup>");
     if headers {
