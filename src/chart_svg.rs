@@ -1847,10 +1847,37 @@ fn draw_axis_chart(
             }
         }
     }
+    // 직각 축 3차원 막대: 눈금선은 뒷벽에 (앞면에서 깊이만큼 오른쪽 위), 옆벽에 앞 → 뒤 사선, 바닥 오른쪽 사선
+    // (한셀 화면, 차트 종류 실험의 3차원 누적 세로 막대: 깊이 (11, −8.5)px = 막대 깊이 × (1 + 깊이 간격))
+    let wall = (first.three_d && first.kind == "bar" && !legacy)
+        .then(|| wall_depth(first, &plot, horizontal, n_cat, oblique(ch)))
+        .filter(|d| d.0 > 0.5 || d.1 > 0.5);
     if let Some(gs) = grid(val_ax, true) {
         for v in scale.ticks() {
             let p = vpos(&scale, v);
-            grid_line(out, horizontal, p, &plot, &gs, legacy);
+            match wall {
+                Some((dx, dy)) if !horizontal => {
+                    let y = p + 0.5;
+                    out.line(plot.x, y, plot.x + dx, y - dy, &gs);
+                    out.line(plot.x + dx, y - dy, plot.x + plot.w + dx, y - dy, &gs);
+                }
+                Some((dx, dy)) => {
+                    let x = p + 0.5;
+                    out.line(x, plot.y + plot.h, x + dx, plot.y + plot.h - dy, &gs);
+                    out.line(x + dx, plot.y + plot.h - dy, x + dx, plot.y - dy, &gs);
+                }
+                None => grid_line(out, horizontal, p, &plot, &gs, legacy),
+            }
+        }
+        if let Some((dx, dy)) = wall {
+            // 바닥의 먼 쪽 사선 (세로 막대: 오른쪽 끝, 가로 막대: 위 끝)
+            let base = vpos(&scale, 0.0f64.clamp(scale.min, scale.max));
+            if horizontal {
+                out.line(base + 0.5, plot.y, base + 0.5 + dx, plot.y - dy, &gs);
+            } else {
+                let (x, y) = (plot.x + plot.w, base + 0.5);
+                out.line(x, y, x + dx, y - dy, &gs);
+            }
         }
     }
     if let Some(gs) = grid(cat_ax, true) {
@@ -2294,6 +2321,32 @@ fn draw_bars(
             }
         }
     }
+}
+
+/// 직각 축 3차원 막대 차트의 벽 깊이 (가로, 세로 px): 막대 깊이(막대 폭 × (0.267, 0.233) × 회전 비율) × (1 + 깊이 간격)
+fn wall_depth(
+    g: &Group,
+    plot: &Rect,
+    horizontal: bool,
+    n_cat: usize,
+    depth: (f64, f64),
+) -> (f64, f64) {
+    let stacked = matches!(g.grouping, "stacked" | "percentStacked");
+    let ns = g.series.len().max(1) as f64;
+    let gap = g.props.gap_width.unwrap_or(150) as f64 / 100.0;
+    let overlap = g
+        .props
+        .overlap
+        .map_or(if stacked { 1.0 } else { 0.0 }, |o| o as f64 / 100.0);
+    let slots = if stacked {
+        1.0
+    } else {
+        ns - (ns - 1.0) * overlap
+    };
+    let band = (if horizontal { plot.h } else { plot.w }) / n_cat.max(1) as f64;
+    let bw = band / (slots + gap);
+    let gd = 1.0 + g.props.gap_depth.unwrap_or(150) as f64 / 100.0;
+    (bw * 0.267 * depth.0 * gd, bw * 0.233 * depth.1 * gd)
 }
 
 /// 3차원 막대의 윗면·옆면. 한셀 화면에서 윗면은 앞면 색 × 0.72, 옆면은 × 0.485 (chart_col3d: #6182D6 → #465E9A·#2F3F68)
