@@ -133,22 +133,86 @@ struct NumLook {
     exp: bool,
     grouped: bool,
     decimals: bool,
+    /// 통화 기호: Some(true) 달러, Some(false) 원(`\` 또는 ₩)
+    currency: Option<bool>,
+    /// 통화 기호가 숫자 앞에 있다
+    currency_lead: bool,
 }
 
 fn look(t: &str) -> NumLook {
     let t = t.trim();
     let mantissa = t.split(['e', 'E']).next().unwrap_or("");
-    let currency = t.contains(['$', '₩', '\\', '￦']);
+    let currency = if t.contains('$') {
+        Some(true)
+    } else if t.contains(['₩', '\\']) {
+        Some(false)
+    } else {
+        None
+    };
+    let body = t.trim_start_matches(['-', '+', '(']);
     NumLook {
-        percent: t.ends_with('%'),
+        percent: t.trim_end_matches(')').ends_with('%'),
         exp: t.bytes().any(|b| b == b'e' || b == b'E'),
-        grouped: t.contains(',') || currency,
+        grouped: t.contains(','),
         decimals: mantissa.contains('.')
             && mantissa
                 .split('.')
                 .nth(1)
                 .is_some_and(|d| d.bytes().any(|b| b.is_ascii_digit())),
+        currency,
+        currency_lead: body.starts_with(['$', '₩', '\\']),
     }
+}
+
+/// 숫자 꼴 입력에 붙는 표시 형식 (일반 칸 — 입력·CSV 대조 실험): 백분율 9/10, 지수 11, 통화 기호가 앞에
+/// 있고 자릿점이 있으면 3/4, 그 밖의 통화(자릿점 없이, 또는 기호가 뒤)는 달러 24/26·원 6/8 — 소수점이 있으면
+/// (숫자가 뒤에 없어도, `$5.`) 소수 형식. 통화 없이 자릿점만 있으면 3/4
+fn implied_format(text: &str, l: &NumLook) -> Option<u32> {
+    let dot = text.split(['e', 'E']).next().unwrap_or("").contains('.');
+    if l.percent {
+        Some(if l.decimals { 10 } else { 9 })
+    } else if l.exp {
+        Some(11)
+    } else if let Some(dollar) = l.currency
+        && !(l.currency_lead && l.grouped)
+    {
+        Some(match (dollar, dot) {
+            (true, false) => 24,
+            (true, true) => 26,
+            (false, false) => 6,
+            (false, true) => 8,
+        })
+    } else if l.grouped || l.currency.is_some() {
+        Some(if l.decimals { 4 } else { 3 })
+    } else {
+        None
+    }
+}
+
+/// 지수가 -309 보다 작게 쓰인 수 (한셀: `1E-310`·`100E-310`·`4.9E-324`·`1E-400` 은 글). 지수가 그 안이고
+/// f64 로 비정규 수가 되면 0 (`1E-309`·`1.5E-308` → 0, `9.9E-308` 은 그대로)
+fn exponent_too_small(text: &str) -> bool {
+    let t = text.trim();
+    let Some(i) = t.find(['e', 'E']) else {
+        return false;
+    };
+    let e = t[i + 1..].trim_end_matches(['%', ')']);
+    e.parse::<i32>().is_ok_and(|e| e < -309)
+}
+
+/// `분:초.소수` (분 두 자리까지, 초 61 미만, 소수 한 자리 이상) → 일련 시각 (한셀은 `mm:ss.0` 47 을 붙이고
+/// 초의 소수는 셋째 자리까지만 — `1:2.123456` = 62.123 초)
+fn minute_seconds(text: &str) -> Option<f64> {
+    let (m, s) = text.trim().split_once(':')?;
+    let (si, sf) = s.split_once('.')?;
+    let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+    if !digits(m) || !digits(si) || !digits(sf) || m.len() > 2 || si.len() > 2 {
+        return None;
+    }
+    let ms: f64 = format!("{:0<3}", &sf[..sf.len().min(3)]).parse().ok()?;
+    let sec: f64 = si.parse::<f64>().ok()? + ms / 1000.0;
+    let min: f64 = m.parse().ok()?;
+    (sec < 61.0).then_some((min * 60.0 + sec) / 86_400.0)
 }
 
 /// `a/b` (부호·공백 없이) → 값, 분모 자릿수가 한 자리인가
@@ -240,18 +304,32 @@ pub fn parse(text: &str, code: &str, date1904: bool) -> Input {
     if let Some(e) = ERRORS.iter().find(|e| e.eq_ignore_ascii_case(text)) {
         return value(CellValue::Error(e.to_string()), None);
     }
-    // 숫자 꼴
-    if let Some(v) = parse_plain_number(text) {
-        let l = look(text);
-        let implied = if l.percent {
-            Some(if l.decimals { 10 } else { 9 })
-        } else if l.exp {
-            Some(11)
-        } else if l.grouped {
-            Some(if l.decimals { 4 } else { 3 })
+    // 숫자 꼴 (전각 원 기호 ￦ 는 통화가 아니라 글)
+    if text.contains('￦') {
+        return text_value();
+    }
+    // 부호 뒤의 원 기호(`-\123`)는 수가 아니다 (`-$123` 은 수 — CSV 열기 대조 실험)
+    let t = text.trim();
+    let won_after_sign = t
+        .strip_prefix(['-', '+'])
+        .is_some_and(|r| r.starts_with(['\\', '₩']));
+    // 통화 기호 뒤의 괄호 음수 `$(123)` 는 `($123)` 처럼
+    let swapped = t
+        .strip_prefix(['$', '\\', '₩'])
+        .filter(|r| r.len() > 2 && r.starts_with('(') && r.ends_with(')'))
+        .map(|r| format!("({}{})", &t[..t.len() - r.len()], &r[1..r.len() - 1]));
+    let num_text = swapped.as_deref().unwrap_or(text);
+    if let Some(v) = parse_plain_number(num_text).filter(|_| !won_after_sign) {
+        if exponent_too_small(num_text) {
+            return text_value();
+        }
+        let v = if v != 0.0 && v.abs() < f64::MIN_POSITIVE {
+            0.0
         } else {
-            None
+            v
         };
+        let l = look(num_text);
+        let implied = implied_format(num_text, &l);
         return match cat {
             Cat::General => value(num(v), implied),
             Cat::Number | Cat::Currency | Cat::Scientific | Cat::Time => value(num(v), None),
@@ -287,6 +365,9 @@ pub fn parse(text: &str, code: &str, date1904: bool) -> Input {
         Cat::General | Cat::Fraction | Cat::Percent => Some(implied),
         _ => None,
     };
+    if let Some(t) = minute_seconds(text) {
+        return value(num(t), keep_or(47));
+    }
     if let Some(t) = date::parse_time(text, true) {
         return value(num(t), keep_or(time_fmt(text, t)));
     }
@@ -362,6 +443,24 @@ mod tests {
         assert_eq!(g("50,000원"), (s("50,000원"), None));
         assert_eq!(g("-0"), (n(0.0), None));
         assert_eq!(g("="), (s("="), None));
+        // 입력·CSV 대조 실험 (formats v2·v3·v4): 자릿점 없는 통화는 통화 형식, 전각 ￦ 는 글, 분:초.소수,
+        // 지수가 -308 보다 작으면 글
+        assert_eq!(g("$123"), (n(123.0), Some(24)));
+        assert_eq!(g("$1234.5"), (n(1234.5), Some(26)));
+        assert_eq!(g("123$"), (n(123.0), Some(24)));
+        assert_eq!(g("1,234$"), (n(1234.0), Some(24)));
+        assert_eq!(g("\\123"), (n(123.0), Some(6)));
+        assert_eq!(g("₩123"), (n(123.0), Some(6)));
+        assert_eq!(g("\\0.5"), (n(0.5), Some(8)));
+        assert_eq!(g("$1,234.56"), (n(1234.56), Some(4)));
+        assert_eq!(g("$1e3"), (n(1000.0), Some(11)));
+        assert_eq!(g("￦123"), (s("￦123"), None));
+        assert_eq!(g("12:34.5").1, Some(47));
+        assert_eq!(g("100:00.0"), (s("100:00.0"), None));
+        assert_eq!(g("1E-400"), (s("1E-400"), None));
+        assert_eq!(g("4.9E-324"), (s("4.9E-324"), None));
+        assert_eq!(g("1.5E-308"), (n(0.0), Some(11)));
+        assert_eq!(g("9.9E-308"), (n(9.9e-308), Some(11)));
         assert_eq!(
             parse("=sum(a1)", "General", false),
             Input::Formula("sum(a1)".into())

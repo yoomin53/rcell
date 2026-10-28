@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use rcell::model::{CellRef, Sheet};
+use rcell::model::Sheet;
 use rcell::scan::{ScanReport, scan_package};
 
 #[derive(Parser)]
@@ -54,7 +54,7 @@ enum Cmd {
         #[arg(long)]
         no_cells: bool,
     },
-    /// 시트를 CSV 로 출력
+    /// 시트를 CSV 로 출력 (한셀의 CSV 저장과 같은 행·열 범위·표시 글·따옴표, UTF-8)
     Csv {
         file: PathBuf,
         /// 시트 이름 또는 0부터 시작하는 번호 (기본: 첫 시트)
@@ -88,11 +88,12 @@ enum Cmd {
         fill: Option<String>,
     },
     /// 형식 변환: XML/바이너리/레거시 .cell → XML .cell. 출력 이름이 .xlsx 면 Excel, .bin.cell·.xlsb 면
-    /// 바이너리 .cell (한셀 xlCellb), .legacy.cell 이면 레거시 .cell (한셀 xlCell8)
+    /// 바이너리 .cell (한셀 xlCellb), .legacy.cell 이면 레거시 .cell (한셀 xlCell8), .csv·.txt·.prn 이면 활성 시트를
+    /// 텍스트로 (한셀처럼 코드 페이지 949). 입력이 .csv·.txt·.tsv·.prn 이면 한셀처럼 텍스트 파일을 연다
     Convert {
         input: PathBuf,
         output: PathBuf,
-        /// 저장 형식 (cell, xlsx, bin, legacy) — 생략하면 출력 이름으로 정한다
+        /// 저장 형식 (cell, xlsx, bin, legacy, csv, txt, prn) — 생략하면 출력 이름으로 정한다
         #[arg(long)]
         format: Option<String>,
         /// 바이너리 저장의 BrtAbsPath15 에 쓸 폴더 (한셀은 저장한 폴더를 쓴다; 생략하면 빈 문자열)
@@ -455,31 +456,12 @@ fn pick_sheet<'a>(wb: &'a rcell::Workbook, sel: Option<&str>) -> rcell::Result<&
     })
 }
 
-fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
-
 fn csv(file: &Path, sel: Option<&str>) -> rcell::Result<()> {
+    use std::io::Write as _;
     let wb = open_doc(file)?;
     let sheet = pick_sheet(&wb, sel)?;
-    let Some(range) = sheet.used_range() else {
-        return Ok(());
-    };
-    for row in range.start.row..=range.end.row {
-        let line: Vec<String> = (range.start.col..=range.end.col)
-            .map(|col| {
-                sheet
-                    .cell(CellRef { row, col })
-                    .map(|c| csv_field(&c.value.display()))
-                    .unwrap_or_default()
-            })
-            .collect();
-        println!("{}", line.join(","));
-    }
+    let text = rcell::csv::sheet_text(&wb, sheet, rcell::csv::Delimiter::Comma);
+    std::io::stdout().write_all(text.as_bytes())?;
     Ok(())
 }
 
@@ -791,9 +773,12 @@ fn convert(
         Some("xlsx") => rcell::SaveFormat::Xlsx,
         Some("bin" | "binary" | "xlsb") => rcell::SaveFormat::Binary,
         Some("legacy") => rcell::SaveFormat::Legacy,
+        Some("csv") => rcell::SaveFormat::Csv,
+        Some("txt" | "tsv" | "text") => rcell::SaveFormat::Text,
+        Some("prn") => rcell::SaveFormat::Prn,
         Some(other) => {
             return Err(rcell::Error::InvalidValue {
-                context: "--format (cell, xlsx, bin, legacy)".into(),
+                context: "--format (cell, xlsx, bin, legacy, csv, txt, prn)".into(),
                 value: other.into(),
             });
         }

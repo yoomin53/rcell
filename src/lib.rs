@@ -31,6 +31,7 @@ pub mod chart_xml;
 pub mod compare;
 pub mod container;
 pub mod crypto;
+pub mod csv;
 pub mod edit;
 pub mod error;
 pub mod formula_text;
@@ -129,11 +130,17 @@ pub enum SaveFormat {
     Binary,
     /// 레거시 `.cell` (한셀 xlCell8, -2005 — OLE2 + BIFF8 계열 레코드)
     Legacy,
+    /// CSV (한셀 FileFormat 6 — 활성 시트, 코드 페이지 949, 쉼표)
+    Csv,
+    /// 텍스트 (한셀 FileFormat -4158 — 활성 시트, 코드 페이지 949, 탭)
+    Text,
+    /// PRN (한셀 FileFormat 36 — 활성 시트, 코드 페이지 949, 공백)
+    Prn,
 }
 
 impl SaveFormat {
     /// 파일 이름으로 고른다: `.xlsx` → Excel, `.xlsb`·`*.bin.cell` → 바이너리, `*.legacy.cell` → 레거시,
-    /// 나머지 → XML `.cell`
+    /// `.csv` → CSV, `.txt`·`.tsv` → 탭 텍스트, `.prn` → 공백 텍스트, 나머지 → XML `.cell`
     pub fn from_path(path: &Path) -> SaveFormat {
         let name = path
             .file_name()
@@ -146,6 +153,12 @@ impl SaveFormat {
             SaveFormat::Binary
         } else if name.ends_with(".legacy.cell") {
             SaveFormat::Legacy
+        } else if name.ends_with(".csv") {
+            SaveFormat::Csv
+        } else if name.ends_with(".txt") || name.ends_with(".tsv") {
+            SaveFormat::Text
+        } else if name.ends_with(".prn") {
+            SaveFormat::Prn
         } else {
             SaveFormat::Cell
         }
@@ -167,6 +180,9 @@ pub fn save_as(wb: &Workbook, path: impl AsRef<Path>, format: SaveFormat) -> Res
         SaveFormat::Legacy => {
             legacy::write_with_options(wb, &legacy::WriteOptions::for_path(path.as_ref()))?.0
         }
+        SaveFormat::Csv => csv::write(wb, csv::Delimiter::Comma)?,
+        SaveFormat::Text => csv::write(wb, csv::Delimiter::Tab)?,
+        SaveFormat::Prn => csv::write(wb, csv::Delimiter::Space)?,
     };
     std::fs::write(path, bytes)?;
     Ok(())
@@ -182,9 +198,20 @@ pub fn save_legacy(wb: &Workbook, path: impl AsRef<Path>) -> Result<()> {
     save_as(wb, path, SaveFormat::Legacy)
 }
 
-/// 파일에서 통합 문서를 읽는다.
+/// 파일에서 통합 문서를 읽는다. ZIP·OLE2 가 아니고 확장자가 `.csv`·`.txt`·`.tsv`·`.out`·`.prn` 이면
+/// 텍스트 파일로 연다 (시트 이름은 파일 이름 — [`csv::read`]).
 pub fn open(path: impl AsRef<Path>) -> Result<Workbook> {
-    from_bytes(std::fs::read(path)?)
+    open_path(path.as_ref(), None)
+}
+
+fn open_path(path: &Path, password: Option<&str>) -> Result<Workbook> {
+    let bytes = std::fs::read(path)?;
+    if detect(&bytes) == FileKind::Unknown
+        && let Some(d) = csv::Delimiter::from_path(path)
+    {
+        return csv::read(&bytes, d, &csv::sheet_name_for(path));
+    }
+    from_bytes_with_password(bytes, password)
 }
 
 /// 암호화된 OLE2 컨테이너면 풀어서 안의 ZIP 패키지를, 아니면 그대로 돌려준다 (분석 도구용).
@@ -208,5 +235,5 @@ pub fn decrypt_if_needed(bytes: Vec<u8>, password: Option<&str>) -> Result<Vec<u
 
 /// 암호가 걸린 파일을 연다.
 pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> Result<Workbook> {
-    from_bytes_with_password(std::fs::read(path)?, Some(password))
+    open_path(path.as_ref(), Some(password))
 }

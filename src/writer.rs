@@ -49,7 +49,9 @@ pub fn esc(s: &str) -> String {
             '<' => o.push_str("&lt;"),
             '>' => o.push_str("&gt;"),
             '"' => o.push_str("&quot;"),
-            '\t' | '\n' | '\r' => o.push(c),
+            // CR 은 문자 참조로 (그대로 쓰면 XML 줄 끝 정규화로 LF 가 된다 — CSV 의 CRLF 가 든 칸)
+            '\r' => o.push_str("&#13;"),
+            '\t' | '\n' => o.push(c),
             c if (c as u32) < 0x20 => {}
             c => o.push(c),
         }
