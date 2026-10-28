@@ -191,11 +191,15 @@ fn ref_parts(s: &str) -> Option<(Option<u32>, Option<u32>)> {
     Some((Some(c.row), Some(c.col)))
 }
 
-/// 서식이 종이에 보이는지 (테두리나 채우기)
+/// 빈 칸의 서식이 인쇄 범위에 드는지: 테두리, 채우기, 선택 영역의 가운데로(`centerContinuous` — 서식 파일
+/// Retirement_Budget 의 제목 줄 G2:H2 까지 인쇄 범위다)
 fn visible_style(wb: &Workbook, style: u32) -> bool {
     let Some(x) = wb.styles.xf(style) else {
         return false;
     };
+    if x.alignment.as_ref().and_then(|a| a.horizontal.as_deref()) == Some("centerContinuous") {
+        return true;
+    }
     let fill = wb.styles.fills.get(x.fill_id as usize).is_some_and(|f| {
         f.gradient.is_some()
             || f.pattern_type

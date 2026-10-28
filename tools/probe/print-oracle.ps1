@@ -67,10 +67,12 @@ try {
                 if ($zoom -is [bool]) { $zoom = "fit" }
                 $vis = [int]$ws.Visible
                 $lines.Add(("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}`t{8}" -f $f.Name, $k, $ws.Name, $pages, ($h -join ','), ($v -join ','), $zoom, $ps.PrintArea, $vis))
-                if ($PdfDir -and $vis -eq -1) {
-                    $pdf = Join-Path $PdfDir ("{0}.{1}.pdf" -f $f.Name, $k)
-                    try { Retry { $ws.ExportAsFixedFormat(0, $pdf) } } catch { Write-Host "PDF FAIL $($f.Name) $k : $($_.Exception.Message)" }
-                }
+            }
+            # 시트의 ExportAsFixedFormat 은 통합 문서의 보이는 시트를 모두 PDF 로 쓴다 (한 번만)
+            if ($PdfDir) {
+                $pdf = Join-Path $PdfDir ("{0}.pdf" -f $f.Name)
+                $first = @($wb.Worksheets)[0]
+                try { Retry { $first.ExportAsFixedFormat(0, $pdf) } } catch { Write-Host "PDF FAIL $($f.Name): $($_.Exception.Message)" }
             }
             Write-Host "OK   $($f.Name)"
         } catch {

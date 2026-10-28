@@ -24,6 +24,7 @@ mod layout;
 mod metrics;
 mod note;
 mod numfit;
+pub mod page;
 mod paint;
 mod shape;
 mod sparkline;
@@ -293,120 +294,66 @@ fn overflow_spans(
     out
 }
 
-/// 시트 하나를 `<table>` 로 (원본에서 다시 읽은 스파크라인 포함)
-pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Extras) -> String {
-    sheet_table_grid(wb, sheet, opts, extras).0
+/// 칸마다 그릴 내용([`CellView`])을 만드는 데 쓰는 시트 상태 — 화면 표와 인쇄 페이지([`page`])가 함께 쓴다
+struct Views<'a> {
+    wb: &'a Workbook,
+    sheet: &'a Sheet,
+    theme: Theme,
+    lay: layout::Layout,
+    cells: HashMap<(u32, u32), &'a crate::model::Cell>,
+    /// 조건부 서식 결과 (칸 → 덧입힐 서식)
+    cfx: HashMap<(u32, u32), crate::cf_eval::CfStyle>,
+    /// 표 스타일 (칸 → 덧입힐 서식, 칸 자체의 서식과 조건부 서식이 이긴다)
+    tlooks: HashMap<(u32, u32), table::TableLook>,
+    /// 서식 있는 글: 공유 문자열 중 조각이 둘 이상인 것
+    rich: HashMap<&'a str, &'a RichText>,
 }
 
-/// 그린 표의 칸 배치 (웹 편집기가 마우스 자리 → 칸, 선택 상자 자리를 정하는 데 쓴다). 좌표는 표 왼쪽 위
-/// (머리글 모서리) 기준 px, 확대율 적용 전
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct GridInfo {
-    pub header_w: u32,
-    pub header_h: u32,
-    /// 그린 열: (열 번호, 왼쪽, 너비) — 숨긴 열은 없다
-    pub cols: Vec<(u32, u32, u32)>,
-    /// 그린 행: (행 번호, 위, 높이)
-    pub rows: Vec<(u32, u32, u32)>,
-    /// 확대율 (%)
-    pub zoom: u32,
-    /// 틀 고정 칸 (이 칸의 위·왼쪽이 고정된다)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub frozen: Option<(u32, u32)>,
-}
+impl<'a> Views<'a> {
+    /// 행 0..lay_r, 열 0..lay_c 의 배치와 칸 상태
+    fn new(wb: &'a Workbook, sheet: &'a Sheet, lay_r: u32, lay_c: u32) -> Views<'a> {
+        let theme = wb.theme.clone().unwrap_or_default();
+        let st = &wb.styles;
+        let lay = layout::layout(wb, sheet, lay_r, lay_c);
+        let cells = sheet
+            .cells
+            .iter()
+            .map(|c| ((c.r.row, c.r.col), c))
+            .collect();
+        let cfx = crate::cf_eval::evaluate(sheet, st, &theme);
+        let tlooks = table::sheet_looks(sheet, st, &theme);
+        let rich = wb
+            .shared_strings
+            .iter()
+            .filter(|s| s.runs.len() > 1)
+            .map(|s| (s.text.as_str(), s))
+            .collect();
+        Views {
+            wb,
+            sheet,
+            theme,
+            lay,
+            cells,
+            cfx,
+            tlooks,
+            rich,
+        }
+    }
 
-/// [`sheet_table_with`] + 칸 배치
-pub fn sheet_table_grid(
-    wb: &Workbook,
-    sheet: &Sheet,
-    opts: Options,
-    extras: &Extras,
-) -> (String, GridInfo) {
-    let theme = wb.theme.clone().unwrap_or_default();
-    let st = &wb.styles;
-    // 배치: 쓰는 범위 + 넘침·채우기 여유
-    let (used_r, used_c) = layout::used_extent(sheet);
-    let (used_r, used_c) = (used_r.max(opts.min_cells.0), used_c.max(opts.min_cells.1));
-    let slack_c = 64.max(opts.fill.0 / 8);
-    let slack_r = 64.max(opts.fill.1 / 12);
-    let lay_r = (used_r + slack_r).min(opts.max_rows);
-    let lay_c = (used_c + slack_c).min(opts.max_cols);
-    let lay = layout::layout(wb, sheet, lay_r, lay_c);
-    let cells: HashMap<(u32, u32), &crate::model::Cell> = sheet
-        .cells
-        .iter()
-        .map(|c| ((c.r.row, c.r.col), c))
-        .collect();
-    let grid = sheet.show_grid_lines;
-    let view = &sheet.view;
-    let headers = opts.headers && view.show_row_col_headers;
-    // 조건부 서식 결과 (칸 → 덧입힐 서식)
-    let cfx = crate::cf_eval::evaluate(sheet, st, &theme);
-    // 표 스타일 (칸 → 덧입힐 서식, 칸 자체의 서식과 조건부 서식이 이긴다)
-    let tlooks = table::sheet_looks(sheet, st, &theme);
-    // 메모: 셀 오른쪽 위 빨간 삼각형. 숨긴 메모는 마우스를 올리면 작성자·내용, 보이는 메모는 상자 (note.rs)
-    let notes: HashMap<(u32, u32), (String, bool)> = sheet
-        .comments
-        .iter()
-        .map(|c| {
-            let who = if c.author.is_empty() {
-                String::new()
-            } else {
-                format!("{}:\n", c.author)
-            };
-            (
-                (c.cell.row, c.cell.col),
-                (format!("{who}{}", c.text.text), c.visible),
-            )
-        })
-        .collect();
-    // 서식 있는 글: 공유 문자열 중 조각이 둘 이상인 것
-    let rich: HashMap<&str, &RichText> = wb
-        .shared_strings
-        .iter()
-        .filter(|s| s.runs.len() > 1)
-        .map(|s| (s.text.as_str(), s))
-        .collect();
-    // 스파크라인
-    let sheet_index = wb
-        .sheets
-        .iter()
-        .position(|s| std::ptr::eq(s, sheet))
-        .unwrap_or(0);
-    let spark_groups = extras
-        .sparklines
-        .get(&sheet.part)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let sparks = sparkline::sheet_items(wb, sheet_index, spark_groups);
-
-    // ---- 1. 칸마다 그릴 내용: 셀 레코드가 있는 칸 (행·열 서식만 있는 칸은 그릴 범위를 정한 뒤에)
-    let mut views: HashMap<(u32, u32), CellView> = HashMap::new();
-    let mut want: Vec<(u32, u32)> = sheet
-        .cells
-        .iter()
-        .filter(|c| c.r.row < lay_r && c.r.col < lay_c)
-        .map(|c| (c.r.row, c.r.col))
-        .collect();
-    want.extend(cfx.keys().copied());
-    want.extend(
-        tlooks
-            .keys()
-            .copied()
-            .filter(|&(r, c)| r < lay_r && c < lay_c),
-    );
-    want.sort_unstable();
-    want.dedup();
-    let make_view = |r: u32, c: u32| -> Option<CellView> {
+    /// 칸 (r, c) 를 그릴 내용. 병합에 덮였거나 숨겼거나 그릴 것이 없으면 None
+    fn view(&self, r: u32, c: u32) -> Option<CellView<'a>> {
+        let (wb, sheet, lay, theme) = (self.wb, self.sheet, &self.lay, &self.theme);
+        let st = &wb.styles;
+        let view = &sheet.view;
         if lay.covered.contains(&(r, c)) || lay.row_h(r) == 0 || lay.col_w(c) == 0 {
             return None;
         }
-        let cell = cells.get(&(r, c));
+        let cell = self.cells.get(&(r, c));
         let style = cell
             .map(|x| x.style)
             .unwrap_or_else(|| sheet.effective_style(r, c));
-        let cf = cfx.get(&(r, c));
-        let tl = tlooks.get(&(r, c));
+        let cf = self.cfx.get(&(r, c));
+        let tl = self.tlooks.get(&(r, c));
         if cell.is_none() && style == 0 && cf.is_none() && tl.is_none() {
             return None;
         }
@@ -429,7 +376,7 @@ pub fn sheet_table_grid(
         let origin = (lay.col_x(c), lay.row_y(r));
         let fill = xf
             .and_then(|x| st.fills.get(x.fill_id as usize))
-            .and_then(|f| paint::fill_css(f, &theme, origin));
+            .and_then(|f| paint::fill_css(f, theme, origin));
         let code = xf
             .map(|x| crate::numfmt::code_for(st, x.num_fmt_id))
             .unwrap_or_else(|| "General".into());
@@ -466,7 +413,7 @@ pub fn sheet_table_grid(
             && text.bytes().all(|b| b == b'#')
             && !matches!(value, CellValue::Text(_));
         let rich = match &value {
-            CellValue::Text(t) => rich.get(t.as_str()).copied(),
+            CellValue::Text(t) => self.rich.get(t.as_str()).copied(),
             _ => None,
         };
         // 조건부 서식 채우기는 칸 채우기를 대신한다
@@ -474,7 +421,7 @@ pub fn sheet_table_grid(
             .and_then(|cf| {
                 cf.scale
                     .clone()
-                    .or_else(|| cf.fill.as_ref().and_then(|c| theme::resolve(c, &theme)))
+                    .or_else(|| cf.fill.as_ref().and_then(|c| theme::resolve(c, theme)))
             })
             .map(|c| paint::FillPaint {
                 css: format!("background:{c};"),
@@ -488,7 +435,7 @@ pub fn sheet_table_grid(
                 })
             });
         // 표 스타일 테두리는 칸 자체의 테두리가 없는 변에만
-        let mut borders = borders_of(xf, wb, &theme);
+        let mut borders = borders_of(xf, wb, theme);
         if let Some(t) = tl {
             let fill_in = |slot: &mut Option<paint::Edge>, v: &Option<paint::Edge>| {
                 if slot.is_none() {
@@ -517,7 +464,99 @@ pub fn sheet_table_grid(
             fill,
             borders,
         })
-    };
+    }
+}
+
+/// 시트 하나를 `<table>` 로 (원본에서 다시 읽은 스파크라인 포함)
+pub fn sheet_table_with(wb: &Workbook, sheet: &Sheet, opts: Options, extras: &Extras) -> String {
+    sheet_table_grid(wb, sheet, opts, extras).0
+}
+
+/// 그린 표의 칸 배치 (웹 편집기가 마우스 자리 → 칸, 선택 상자 자리를 정하는 데 쓴다). 좌표는 표 왼쪽 위
+/// (머리글 모서리) 기준 px, 확대율 적용 전
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct GridInfo {
+    pub header_w: u32,
+    pub header_h: u32,
+    /// 그린 열: (열 번호, 왼쪽, 너비) — 숨긴 열은 없다
+    pub cols: Vec<(u32, u32, u32)>,
+    /// 그린 행: (행 번호, 위, 높이)
+    pub rows: Vec<(u32, u32, u32)>,
+    /// 확대율 (%)
+    pub zoom: u32,
+    /// 틀 고정 칸 (이 칸의 위·왼쪽이 고정된다)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frozen: Option<(u32, u32)>,
+}
+
+/// [`sheet_table_with`] + 칸 배치
+pub fn sheet_table_grid(
+    wb: &Workbook,
+    sheet: &Sheet,
+    opts: Options,
+    extras: &Extras,
+) -> (String, GridInfo) {
+    let st = &wb.styles;
+    // 배치: 쓰는 범위 + 넘침·채우기 여유
+    let (used_r, used_c) = layout::used_extent(sheet);
+    let (used_r, used_c) = (used_r.max(opts.min_cells.0), used_c.max(opts.min_cells.1));
+    let slack_c = 64.max(opts.fill.0 / 8);
+    let slack_r = 64.max(opts.fill.1 / 12);
+    let lay_r = (used_r + slack_r).min(opts.max_rows);
+    let lay_c = (used_c + slack_c).min(opts.max_cols);
+    let ctx = Views::new(wb, sheet, lay_r, lay_c);
+    let (lay, cells, cfx, tlooks, theme) =
+        (&ctx.lay, &ctx.cells, &ctx.cfx, &ctx.tlooks, &ctx.theme);
+    let grid = sheet.show_grid_lines;
+    let view = &sheet.view;
+    let headers = opts.headers && view.show_row_col_headers;
+    // 메모: 셀 오른쪽 위 빨간 삼각형. 숨긴 메모는 마우스를 올리면 작성자·내용, 보이는 메모는 상자 (note.rs)
+    let notes: HashMap<(u32, u32), (String, bool)> = sheet
+        .comments
+        .iter()
+        .map(|c| {
+            let who = if c.author.is_empty() {
+                String::new()
+            } else {
+                format!("{}:\n", c.author)
+            };
+            (
+                (c.cell.row, c.cell.col),
+                (format!("{who}{}", c.text.text), c.visible),
+            )
+        })
+        .collect();
+    // 스파크라인
+    let sheet_index = wb
+        .sheets
+        .iter()
+        .position(|s| std::ptr::eq(s, sheet))
+        .unwrap_or(0);
+    let spark_groups = extras
+        .sparklines
+        .get(&sheet.part)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let sparks = sparkline::sheet_items(wb, sheet_index, spark_groups);
+
+    // ---- 1. 칸마다 그릴 내용: 셀 레코드가 있는 칸 (행·열 서식만 있는 칸은 그릴 범위를 정한 뒤에)
+    let mut views: HashMap<(u32, u32), CellView> = HashMap::new();
+    let mut want: Vec<(u32, u32)> = sheet
+        .cells
+        .iter()
+        .filter(|c| c.r.row < lay_r && c.r.col < lay_c)
+        .map(|c| (c.r.row, c.r.col))
+        .collect();
+    want.extend(cfx.keys().copied());
+    want.extend(
+        tlooks
+            .keys()
+            .copied()
+            .filter(|&(r, c)| r < lay_r && c < lay_c),
+    );
+    want.sort_unstable();
+    want.dedup();
+    let make_view = |r: u32, c: u32| ctx.view(r, c);
     for (r, c) in want {
         if let Some(v) = make_view(r, c) {
             views.insert((r, c), v);
@@ -532,7 +571,7 @@ pub fn sheet_table_grid(
             || cells.get(&(r, c)).is_some_and(|x| x.formula.is_some())
             || sparks.contains_key(&(r, c))
     };
-    let ov = overflow_spans(&lay, &views, &blocked, lay_c);
+    let ov = overflow_spans(lay, &views, &blocked, lay_c);
 
     // ---- 3. 그릴 범위: 쓰는 범위 + 넘친 글자 + 최소 크기
     let mut ncols = used_c.max(ov.max_col + 1).min(lay_c);
@@ -776,7 +815,7 @@ pub fn sheet_table_grid(
                         m
                     });
                 let span = ov.span.get(&(r, c)).copied().unwrap_or((0, 0));
-                inner = cell::cell_content(v, merged.as_ref().or(cf), &theme, w, h, span);
+                inner = cell::cell_content(v, merged.as_ref().or(cf), theme, w, h, span);
             }
             if tlooks.get(&(r, c)).is_some_and(|t| t.button) {
                 inner.push_str(&table::button_svg(w, h));
@@ -791,7 +830,7 @@ pub fn sheet_table_grid(
             };
             let mut b = match lay.merge_end.get(&(r, c)) {
                 Some(&(r1, c1)) => {
-                    let at = |rr, cc| borders_of(st.xf(style_at(rr, cc)), wb, &theme);
+                    let at = |rr, cc| borders_of(st.xf(style_at(rr, cc)), wb, theme);
                     let (tl, tr, bl) = (at(r, c), at(r, c1), at(r1, c));
                     paint::CellBorders {
                         left: tl.left,
@@ -829,7 +868,7 @@ pub fn sheet_table_grid(
                     lohi,
                     w.saturating_sub(1) as f64,
                     h.saturating_sub(1) as f64,
-                    &theme,
+                    theme,
                 ));
             }
             if css.is_empty() {
@@ -842,9 +881,9 @@ pub fn sheet_table_grid(
     }
     s.push_str("</tbody></table>");
     s.push_str(&draw::shapes_html(
-        wb, sheet, &lay, header_w, header_h, &theme,
+        wb, sheet, lay, header_w, header_h, theme,
     ));
-    s.push_str(&note::notes_html(sheet, &lay, header_w, header_h, &theme));
+    s.push_str(&note::notes_html(sheet, lay, header_w, header_h, theme));
     s.push_str("</div>");
     (s, info)
 }
