@@ -242,6 +242,12 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
             fr.gridlines = po.is_some_and(|o| o.grid_lines);
             fr.black_and_white = setup.is_some_and(|s| s.black_and_white);
             fr.draft = setup.is_some_and(|s| s.draft);
+            fr.errors = match setup.and_then(|s| s.errors.as_deref()) {
+                Some("blank") => ErrorPrint::Blank,
+                Some("dash") => ErrorPrint::Dash,
+                Some("NA") => ErrorPrint::Na,
+                _ => ErrorPrint::Displayed,
+            };
             let mut ops = page_ops(wb, sheet, &fr, &fonts);
             ops.extend(objects_ops(wb, sheet, &fr, &fonts));
             // 머리글·바닥글

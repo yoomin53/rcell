@@ -542,6 +542,14 @@ fn parse_page_layout(root: &Element, page: &mut PageLayout) {
             black_and_white: p.attr_bool("blackAndWhite").unwrap_or(false),
             draft: p.attr_bool("draft").unwrap_or(false),
             use_first_page_number: p.attr_bool("useFirstPageNumber").unwrap_or(false),
+            cell_comments: p
+                .attr("cellComments")
+                .filter(|v| *v != "none")
+                .map(str::to_string),
+            errors: p
+                .attr("errors")
+                .filter(|v| *v != "displayed")
+                .map(str::to_string),
             horizontal_dpi: p.attr_u32("horizontalDpi"),
             vertical_dpi: p.attr_u32("verticalDpi"),
             copies: p.attr_u32("copies"),
