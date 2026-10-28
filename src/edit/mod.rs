@@ -33,6 +33,7 @@ pub mod refs;
 pub mod sort;
 pub mod structure;
 pub mod style;
+pub mod view;
 
 use std::str::FromStr;
 
@@ -335,6 +336,96 @@ pub enum Edit {
         all: bool,
         #[serde(default)]
         range: Option<String>,
+    },
+    /// 행 숨기기
+    HideRows {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        row: u32,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 행 숨기기 취소
+    UnhideRows {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        row: u32,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 행 그룹 (개요 수준 +1)
+    GroupRows {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        row: u32,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 행 그룹 해제
+    UngroupRows {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        row: u32,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 열 숨기기
+    HideCols {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 열 숨기기 취소
+    UnhideCols {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 열 그룹
+    GroupCols {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 열 그룹 해제
+    UngroupCols {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 시트 숨기기
+    HideSheet {
+        sheet: SheetSel,
+    },
+    /// 시트 숨기기 취소
+    UnhideSheet {
+        sheet: SheetSel,
+    },
+    /// 틀 고정 (`cell` 의 왼쪽·위)
+    Freeze {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        cell: String,
+    },
+    /// 틀 고정 풀기
+    Unfreeze {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+    },
+    /// 시트 탭 색 (`RRGGBB`, 빈 글이면 없앤다)
+    TabColor {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        #[serde(default)]
+        color: String,
     },
     /// 자동 필터로 정렬 (필터 범위를 첫 행을 머리글로 두고 한 열로 정렬하고 `sortState` 를 남긴다)
     SortFilter {
@@ -709,6 +800,79 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
                 range: range.as_deref().map(parse_range).transpose()?,
             };
             find::replace_all(wb, i, &o, replace)?;
+            Ok(i)
+        }
+        Edit::HideRows { sheet, row, count } => {
+            let i = si(wb, sheet)?;
+            let r = row.saturating_sub(1);
+            view::hide_rows(wb, i, r, r + count.max(&1) - 1, true)?;
+            Ok(i)
+        }
+        Edit::UnhideRows { sheet, row, count } => {
+            let i = si(wb, sheet)?;
+            let r = row.saturating_sub(1);
+            view::hide_rows(wb, i, r, r + count.max(&1) - 1, false)?;
+            Ok(i)
+        }
+        Edit::GroupRows { sheet, row, count } => {
+            let i = si(wb, sheet)?;
+            let r = row.saturating_sub(1);
+            view::group_rows(wb, i, r, r + count.max(&1) - 1, true)?;
+            Ok(i)
+        }
+        Edit::UngroupRows { sheet, row, count } => {
+            let i = si(wb, sheet)?;
+            let r = row.saturating_sub(1);
+            view::group_rows(wb, i, r, r + count.max(&1) - 1, false)?;
+            Ok(i)
+        }
+        Edit::HideCols { sheet, col, count } => {
+            let i = si(wb, sheet)?;
+            let c = parse_col(col)?;
+            view::hide_cols(wb, i, c, c + count.max(&1) - 1, true)?;
+            Ok(i)
+        }
+        Edit::UnhideCols { sheet, col, count } => {
+            let i = si(wb, sheet)?;
+            let c = parse_col(col)?;
+            view::hide_cols(wb, i, c, c + count.max(&1) - 1, false)?;
+            Ok(i)
+        }
+        Edit::GroupCols { sheet, col, count } => {
+            let i = si(wb, sheet)?;
+            let c = parse_col(col)?;
+            view::group_cols(wb, i, c, c + count.max(&1) - 1, true)?;
+            Ok(i)
+        }
+        Edit::UngroupCols { sheet, col, count } => {
+            let i = si(wb, sheet)?;
+            let c = parse_col(col)?;
+            view::group_cols(wb, i, c, c + count.max(&1) - 1, false)?;
+            Ok(i)
+        }
+        Edit::HideSheet { sheet } => {
+            let i = sheet_index(wb, Some(sheet))?;
+            view::hide_sheet(wb, i, true)?;
+            Ok(i)
+        }
+        Edit::UnhideSheet { sheet } => {
+            let i = sheet_index(wb, Some(sheet))?;
+            view::hide_sheet(wb, i, false)?;
+            Ok(i)
+        }
+        Edit::Freeze { sheet, cell } => {
+            let i = si(wb, sheet)?;
+            view::freeze(wb, i, cell.parse()?)?;
+            Ok(i)
+        }
+        Edit::Unfreeze { sheet } => {
+            let i = si(wb, sheet)?;
+            view::unfreeze(wb, i)?;
+            Ok(i)
+        }
+        Edit::TabColor { sheet, color } => {
+            let i = si(wb, sheet)?;
+            view::tab_color(wb, i, color)?;
             Ok(i)
         }
         Edit::SortFilter {

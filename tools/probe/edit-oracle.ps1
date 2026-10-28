@@ -52,6 +52,9 @@ function Get-ColRange([string]$col, [int]$count) {
     return "$($col.ToUpper())1:$($name)1"
 }
 
+# 편집의 count (없으면 1)
+function Get-Count($e) { if ($null -ne $e.count) { return [int]$e.count } else { return 1 } }
+
 $hAlign = @{ "left" = -4131; "center" = -4108; "right" = -4152; "general" = 1; "justify" = -4130; "distributed" = -4117; "centerContinuous" = 7; "fill" = 5 }
 $vAlign = @{ "top" = -4160; "center" = -4108; "bottom" = -4107; "justify" = -4130; "distributed" = -4117 }
 $lineStyles = @{ "thin" = @(1, 2); "medium" = @(1, -4138); "thick" = @(1, 4); "dashed" = @(-4115, 2); "dotted" = @(-4118, 2); "double" = @(-4119, 4); "hair" = @(1, 1) }
@@ -195,6 +198,35 @@ function Invoke-Edit($wb, $e) {
                 [void]$rg.Replace([string]$e.find, [string]$e.replace, $look, 1, [bool]$e.matchCase)
             }
         }
+        "hideRows" { $ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.Hidden = $true }
+        "unhideRows" { $ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.Hidden = $false }
+        "hideCols" { $ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.Hidden = $true }
+        "unhideCols" { $ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.Hidden = $false }
+        "hideSheet" { $ws.Visible = 0 }
+        "unhideSheet" { $ws.Visible = -1 }
+        "groupRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.Group() }
+        "ungroupRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.Ungroup() }
+        "groupCols" { [void]$ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.Group() }
+        "ungroupCols" { [void]$ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.Ungroup() }
+        "freeze" {
+            # 틀 고정은 창이 보여야 적용된다 (관측) — 이 인스턴스의 창을 잠깐 보인다
+            $a = $wb.Application
+            $a.Visible = $true
+            $ws.Activate()
+            $w = $a.ActiveWindow
+            if ($w.FreezePanes) { $w.FreezePanes = $false }
+            [void]$ws.Range([string]$e.cell).Select()
+            $w.FreezePanes = $true
+            $a.Visible = $false
+        }
+        "unfreeze" {
+            $a = $wb.Application
+            $a.Visible = $true
+            $ws.Activate()
+            $a.ActiveWindow.FreezePanes = $false
+            $a.Visible = $false
+        }
+        "tabColor" { if ($e.color) { $ws.Tab.Color = (Get-Bgr $e.color) } else { $ws.Tab.ColorIndex = -4142 } }
         "sortFilter" {
             # 자동 필터의 정렬 (AutoFilter.Sort): 필터 범위의 그 열
             $af = $ws.AutoFilter
