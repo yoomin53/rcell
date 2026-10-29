@@ -751,6 +751,17 @@ pub fn sheet_table_grid(
     };
     // 표와 그리기 개체를 같은 좌표계(왼쪽 위 = 머리글 모서리)에 둔다
     let _ = write!(s, "<div class=\"rc-canvas\" style=\"{zoom}\">");
+    // 눈금선 색 (보기의 colorId — 색 목록 번호, 보기 실험: 10 → FF0000)
+    let grid_color = view
+        .grid_color
+        .and_then(|i| crate::theme::INDEXED.get(i as usize))
+        .map(|v| format!("#{:06X}", v & 0xFF_FFFF));
+    if let Some(c) = &grid_color {
+        let _ = write!(
+            s,
+            "<style>table.rc-grid.rc-gc td{{border-right-color:{c};border-bottom-color:{c}}}</style>"
+        );
+    }
     if zoom_pct != 100 {
         let _ = write!(
             s,
@@ -760,8 +771,9 @@ pub fn sheet_table_grid(
     }
     let _ = write!(
         s,
-        "<table class=\"rc-sheet{}{}\">",
+        "<table class=\"rc-sheet{}{}{}\">",
         if grid { " rc-grid" } else { "" },
+        if grid_color.is_some() { " rc-gc" } else { "" },
         if zoom_pct != 100 {
             format!(" rc-z{zoom_pct}")
         } else {

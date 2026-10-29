@@ -2099,7 +2099,12 @@ fn read_sheet(
                 if let (Some(row), Some(col)) = (r.u32(), r.u32()) {
                     v.top_left_cell = Some(CellRef { row, col }.to_string());
                 }
-                r.take(4);
+                // icvHdr: 0x200 (기본 머리글 색)이 꺼져 있으면 눈금선 색
+                let icv = r.u8();
+                if flags & 0x0200 == 0 {
+                    v.grid_color = icv.map(u32::from);
+                }
+                r.take(3);
                 let z = |x: Option<u16>| x.filter(|&z| z != 0).map(u32::from);
                 v.zoom_scale = z(r.u16());
                 v.zoom_scale_sheet_layout_view = z(r.u16());

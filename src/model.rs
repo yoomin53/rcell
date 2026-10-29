@@ -1986,6 +1986,9 @@ pub struct SheetView {
     /// 선택 영역 (공백으로 구분한 범위 목록)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sqref: Option<String>,
+    /// 눈금선 색 (색 목록 번호 — `defaultGridColor="0"` 의 `colorId`, 바이너리·레거시의 icvHdr). 없으면 기본 색
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grid_color: Option<u32>,
 }
 
 impl Default for SheetView {
@@ -2003,6 +2006,7 @@ impl Default for SheetView {
             pane: None,
             active_cell: None,
             sqref: None,
+            grid_color: None,
         }
     }
 }
