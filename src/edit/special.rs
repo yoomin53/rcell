@@ -9,7 +9,7 @@
 //! - 서식: 서식(조건부 서식·병합 포함 — 붙이기 규칙)만, 대상 값은 그대로.
 //! - 수식: 수식(상대 참조는 복사처럼)과 값, 서식은 그대로. 값·숫자 서식 / 수식·숫자 서식은 표시 형식도.
 //! - 테두리만 빼고: 붙이기와 같고 대상의 테두리를 남긴다.
-//! - 행/열 바꿈: 칸을 뒤집고 수식의 참조도 행·열 차이를 바꾼다 (`A2` 의 `=A1*2` 를 F1 에 붙이면 `=E1*2`, 절대
+//! - 행/열 바꿈: 칸을 뒤집고(조건부 서식은 원본 칸마다 따로, 유효성은 범위를 뒤집어) 수식의 참조도 행·열 차이를 바꾼다 (`A2` 의 `=A1*2` 를 F1 에 붙이면 `=E1*2`, 절대
 //!   참조도 — `C2` 의 `=$A$1+1` 을 F3 에 붙이면 `=$E$1+1`).
 //! - 빈 셀 무시: 원본의 빈 칸은 대상을 바꾸지 않는다.
 //! - 연산(더하기·빼기·곱하기·나누기): 대상 값 ∘ 원본 값. 원본 빈 칸은 0, 원본 글·논리값은 건너뛴다. 대상 논리값은 1·0. 대상이나 원본이
@@ -144,7 +144,65 @@ fn transpose_clip(c: &Clip, at: CellRef) -> Clip {
             comment: m.comment.clone(),
         })
         .collect();
+    // 유효성: 조각을 뒤집고 수식은 뒤집힌 첫 조각의 왼쪽 위 칸에 맞춘다 (한셀: A1 의 유효성을 AP1 에 바꿔 붙이면
+    // 같은 개체에 AP1 이 더해진다)
+    t.dvs = c
+        .dvs
+        .iter()
+        .map(|(cut, dv)| {
+            let mut m = dv.clone();
+            if let Some(f) = cut.first() {
+                let dr = (at.row + f.1) as i64 - (c.origin.row + f.0) as i64;
+                let dc = (at.col + f.0) as i64 - (c.origin.col + f.1) as i64;
+                for x in [&mut m.formula1, &mut m.formula2].into_iter().flatten() {
+                    *x = crate::formula_text::shift_references(x, dr, dc);
+                }
+            }
+            let cut = cut.iter().map(|&(a, b, cc, d)| (b, a, d, cc)).collect();
+            (cut, m)
+        })
+        .collect();
+    t.dv_src = c.dv_src.clone();
     t
+}
+
+/// 행/열 바꿈의 조건부 서식: 한셀은 원본 칸마다(행 차례) 그 칸이 든 묶음들을 바꾼 자리 한 칸에 따로 붙인다 — 칸마다
+/// 맨 위 우선순위를 받으므로 마지막 칸의 것이 가장 위다 (데이터 막대 묶음은 붙이기처럼 한 번 더)
+fn transposed_cf(c: &Clip, at: CellRef) -> Vec<Vec<crate::model::ConditionalFormat>> {
+    let mut out = Vec::new();
+    for dr in 0..c.rows {
+        for dc in 0..c.cols {
+            let mut blocks = Vec::new();
+            for (cut, cf) in &c.cfs {
+                let Some(first) = cut.first() else { continue };
+                if !cut
+                    .iter()
+                    .any(|&(a, b, cc, d)| dr >= a && dr <= cc && dc >= b && dc <= d)
+                {
+                    continue;
+                }
+                // 수식은 첫 조각 왼쪽 위(원본) 기준 → 바꾼 자리 칸 기준
+                let to = CellRef {
+                    row: at.row + dc,
+                    col: at.col + dr,
+                };
+                let d_row = to.row as i64 - (c.origin.row + first.0) as i64;
+                let d_col = to.col as i64 - (c.origin.col + first.1) as i64;
+                let mut m = cf.clone();
+                for r in &mut m.rules {
+                    for f in &mut r.formulas {
+                        *f = crate::formula_text::shift_references(f, d_row, d_col);
+                    }
+                }
+                m.sqref = Area::rect(to.row, to.col, to.row, to.col).text();
+                blocks.push(m);
+            }
+            if !blocks.is_empty() {
+                out.push(blocks);
+            }
+        }
+    }
+    out
 }
 
 /// 숫자 글 (수식에 넣을 상수)
@@ -166,12 +224,16 @@ pub fn paste_special(
     }
     crate::calc::recalculate(wb);
     let mut c = clip::copy(wb, si, src)?;
+    let mut cf_cells = Vec::new();
     if o.transpose {
+        cf_cells = transposed_cf(&c, to.start);
         c = transpose_clip(&c, to.start);
     }
-    // 서식만 붙이면 메모는 가지 않는다
+    // 서식만 붙이면 메모·유효성은 가지 않는다 (한셀)
     if o.what == PasteWhat::Formats {
         c.comments.clear();
+        c.dvs.clear();
+        c.dv_src.clear();
     }
     // 붙일 크기 (채울 범위가 배수면 되풀이)
     let (h, w) = (to.end.row - to.start.row + 1, to.end.col - to.start.col + 1);
@@ -231,6 +293,13 @@ pub fn paste_special(
     );
     if formats {
         clip::paste_with(wb, dsi, at, &c, Some(area), false)?;
+        // 붙이기는 유효성마다 범위 차례를 뒤집지만 서식만·행/열 바꿈 붙이기는 뒤집지 않는다 (한셀 — 바꿔 붙인 범위는 끝에)
+        if o.transpose || o.what == PasteWhat::Formats {
+            clip::reverse_dv_areas(&mut wb.sheets[dsi]);
+        }
+        for blocks in cf_cells {
+            super::cfpaste::place_pasted(&mut wb.sheets[dsi], blocks);
+        }
     }
     let with_formulas = matches!(
         o.what,

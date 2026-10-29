@@ -614,7 +614,7 @@ pub fn fill(wb: &mut Workbook, si: usize, range: CellRange, down: bool) -> crate
 
 /// 붙이기·채우기·옮기기를 하면 한셀은 시트의 유효성마다 범위 목록의 차례를 뒤집는다 (유효성 대조 실험: `M1:M5 O2`
 /// 는 복사 한 번에 `O2 M1:M5`, 두 번이면 그대로. 붙인 범위는 목록 끝에 더한 뒤 뒤집으므로 맨 앞에 온다)
-fn reverse_dv_areas(sheet: &mut Sheet) {
+pub(crate) fn reverse_dv_areas(sheet: &mut Sheet) {
     for dv in &mut sheet.data_validations {
         let mut areas = refs::parse_sqref(&dv.sqref);
         if areas.len() > 1 {
