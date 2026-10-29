@@ -1654,6 +1654,8 @@ fn nexcel_chart(d: &[u8]) -> Option<Vec<u8>> {
 
 /// 레거시 한컴 차트 0x7EF0 → 넥셀 꼴 ([`nexcel_chart`] 의 거꾸로: 앵커·수식의 행 u32 → u16, 예약 끝 바이트 1)
 fn chart_to_nexcel(d: &[u8]) -> Option<Vec<u8>> {
+    let patched = nexcel_markers(d);
+    let d = patched.as_deref().unwrap_or(d);
     let u16_at =
         |k: usize| -> Option<u16> { Some(u16::from_le_bytes([*d.get(k)?, *d.get(k + 1)?])) };
     let u32_at =
@@ -1698,6 +1700,70 @@ fn chart_to_nexcel(d: &[u8]) -> Option<Vec<u8>> {
         formula(&mut p, &mut o)?;
     }
     Some(o)
+}
+
+/// 한셀의 넥셀 저장은 자동 표식 계열(VtSeries markerStyle 2, u16_d 1 — 꺾은선)을 원 표식 (markerStyle 4, 크기 140,
+/// u16_d 0, 표식·pen5 색의 플래그 0x20) 으로 쓴다 (레거시와 넥셀을 맞댄 chart_line). 바꿀 것이 없으면 None
+fn nexcel_markers(d: &[u8]) -> Option<Vec<u8>> {
+    use super::vtchart::Value;
+    let rec = super::vtchart::parse(d, &[]).ok()?;
+    // 꺾은선만: chartType 3 이고 X 축이 값 축(xy 1 — 분산형)이 아니다
+    let has = |name: &str, v: Value| {
+        rec.archive.objects().any(|o| {
+            o.own_fields()
+                .iter()
+                .any(|f| f.name == name && f.value == v)
+        })
+    };
+    if !has("chartType", Value::U16(3)) || has("xy", Value::U16(1)) {
+        return None;
+    }
+    let mut patches: Vec<(usize, Vec<u8>)> = Vec::new();
+    // 실제 계열만 (계열 목록 뒤쪽의 기본 자리 계열은 그대로)
+    for o in rec
+        .archive
+        .objects()
+        .filter(|o| o.is_a("VtSeries"))
+        .take(rec.series.len())
+    {
+        let mut fields = Vec::new();
+        let mut cur = Some(o);
+        while let Some(c) = cur {
+            fields.extend(c.own_fields().iter());
+            cur = c.base();
+        }
+        let get = |n: &str| fields.iter().find(|f| f.name == n);
+        let (Some(style), Some(flag)) = (get("markerStyle"), get("u16_d")) else {
+            continue;
+        };
+        if style.value != Value::U16(2) || flag.value != Value::U16(1) {
+            continue;
+        }
+        patches.push((style.at, 4u16.to_le_bytes().to_vec()));
+        patches.push((flag.at, 0u16.to_le_bytes().to_vec()));
+        if let Some(size) = get("markerSize") {
+            patches.push((size.at, 140f32.to_le_bytes().to_vec()));
+        }
+        if let Some(c) = get("markerColor") {
+            patches.push((c.at + 5, vec![0x20]));
+        }
+        if let Some(pen) = get("pen5")
+            && let Value::Group(g) = &pen.value
+            && let Some(c) = g.iter().find(|f| f.name == "color")
+        {
+            patches.push((c.at + 5, vec![0x20]));
+        }
+    }
+    if patches.is_empty() {
+        return None;
+    }
+    let mut out = d.to_vec();
+    for (at, bytes) in patches {
+        if let Some(dst) = out.get_mut(at..at + bytes.len()) {
+            dst.copy_from_slice(&bytes);
+        }
+    }
+    Some(out)
 }
 
 /// BIFF8 HLINK → 넥셀 꼴 ([`nexcel_hlink`] 의 거꾸로): URL 모니커는 종류 1 (`mailto:` 는 3), 파일 모니커는 5 (경로), 문서 안

@@ -1243,3 +1243,107 @@ pub(crate) fn apply_cell_formats(wb: &mut Workbook) {
         }
     }
 }
+
+/// 캐시가 없는 차트 계열 참조(이름·항목·값)에 시트 칸의 값으로 캐시를 채운 사본 — 한셀은 캐시가 없는 차트를 저장할 때
+/// 칸 값을 쓴다 (레거시 차트의 데이터 표·계열 이름, .xls 의 값 캐시). 채울 것이 없으면 None
+pub(crate) fn fill_caches(wb: &Workbook) -> Option<Workbook> {
+    fn missing(d: Option<&ChartData>) -> bool {
+        d.is_some_and(|d| d.cache.is_none() && d.formula.is_some())
+    }
+    fn needs(s: &crate::model::Shape) -> bool {
+        s.chart.as_ref().is_some_and(|c| {
+            c.series.iter().any(|x| {
+                missing(x.cat.as_ref())
+                    || missing(x.val.as_ref())
+                    || matches!(&x.tx, Some(ChartTx::Ref(r)) if r.cache.is_none() && r.formula.is_some())
+            })
+        }) || s.children.iter().any(needs)
+    }
+    if !wb.sheets.iter().any(|s| s.shapes.iter().any(needs)) {
+        return None;
+    }
+    let mut out = wb.clone();
+    for si in 0..out.sheets.len() {
+        let mut shapes = std::mem::take(&mut out.sheets[si].shapes);
+        fn fill(shapes: &mut [crate::model::Shape], wb: &Workbook, si: usize) {
+            for sh in shapes {
+                fill(&mut sh.children, wb, si);
+                let Some(ch) = sh.chart.as_mut() else {
+                    continue;
+                };
+                for s in &mut ch.series {
+                    if let Some(ChartTx::Ref(r)) = &mut s.tx
+                        && r.cache.is_none()
+                        && let Some(cells) =
+                            r.formula.as_deref().and_then(|f| range_cells(wb, si, f))
+                    {
+                        r.cache = Some(cache_of(wb, &cells, false));
+                    }
+                    for d in [s.cat.as_mut(), s.val.as_mut()].into_iter().flatten() {
+                        if d.cache.is_none()
+                            && let Some(cells) =
+                                d.formula.as_deref().and_then(|f| range_cells(wb, si, f))
+                        {
+                            d.cache = Some(cache_of(wb, &cells, d.kind.starts_with("num")));
+                        }
+                    }
+                    // 요약 칸 (레거시 차트의 데이터 표가 쓴다): 이름, 항목 글, 값
+                    if s.name.is_none()
+                        && let Some(ChartTx::Ref(r)) = &s.tx
+                    {
+                        s.name = r
+                            .cache
+                            .as_ref()
+                            .and_then(|c| c.points.first())
+                            .map(|p| p.value.clone());
+                    }
+                    if s.categories.is_empty()
+                        && let Some(d) = &s.cat
+                    {
+                        s.categories = d
+                            .dense()
+                            .into_iter()
+                            .map(Option::unwrap_or_default)
+                            .collect();
+                    }
+                    if s.values.is_empty()
+                        && let Some(d) = &s.val
+                    {
+                        s.values = d
+                            .dense()
+                            .into_iter()
+                            .map(|v| v.and_then(|t| t.trim().parse().ok()))
+                            .collect();
+                    }
+                }
+            }
+        }
+        fill(&mut shapes, wb, si);
+        out.sheets[si].shapes = shapes;
+    }
+    Some(out)
+}
+
+/// 칸들 → 차트 캐시 (수 캐시는 칸 서식의 표시 형식, 점마다도)
+fn cache_of(wb: &Workbook, cells: &[Option<&Cell>], numeric: bool) -> crate::model::ChartCache {
+    let mut points = Vec::new();
+    for (i, c) in cells.iter().enumerate() {
+        let Some(c) = c.filter(|c| !c.value.is_empty()) else {
+            continue;
+        };
+        let value = match &c.value {
+            CellValue::Number(x) if numeric => format!("{x}"),
+            _ => crate::csv::shown(wb, c),
+        };
+        points.push(crate::model::ChartPoint {
+            idx: i as u32,
+            format_code: numeric.then(|| cell_format_code(wb, Some(c))),
+            value,
+        });
+    }
+    crate::model::ChartCache {
+        format_code: numeric.then(|| cell_format_code(wb, cells.iter().flatten().next().copied())),
+        pt_count: Some(cells.len() as u32),
+        points,
+    }
+}
