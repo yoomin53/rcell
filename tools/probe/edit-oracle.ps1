@@ -48,7 +48,7 @@ function Get-ColRange([string]$col, [int]$count) {
     $last = $n + $count - 1
     $name = ""
     $k = $last
-    while ($k -gt 0) { $m = ($k - 1) % 26; $name = [char](65 + $m) + $name; $k = [math]::Floor(($k - 1) / 26) }
+    while ($k -gt 0) { $m = [int](($k - 1) % 26); $name = [string][char][int](65 + $m) + $name; $k = [int][math]::Floor(($k - 1) / 26) }
     return "$($col.ToUpper())1:$($name)1"
 }
 

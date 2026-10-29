@@ -438,6 +438,14 @@ pub fn delete_cf(wb: &mut Workbook, si: usize, range: CellRange) -> crate::Resul
     Ok(())
 }
 
+/// 맑은 고딕 11pt 의 글자 폭 (px, 공백 0x20 – 0x7E). 한셀 열 너비 자동 맞춤 대조 실험 (같은 글자 20개 칸을 맞춘 너비)
+const MALGUN_ASCII: [u8; 95] = [
+    5, 4, 6, 9, 8, 13, 12, 3, 5, 5, 6, 11, 3, 6, 3, 6, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 3, 3, 11, 11,
+    11, 7, 15, 10, 9, 10, 11, 8, 7, 11, 11, 4, 5, 9, 7, 14, 11, 12, 9, 12, 9, 8, 8, 11, 10, 14, 9,
+    8, 9, 5, 11, 5, 11, 6, 4, 8, 9, 7, 9, 8, 5, 9, 9, 4, 4, 8, 4, 13, 9, 9, 9, 9, 5, 6, 5, 9, 7,
+    11, 7, 7, 7, 5, 4, 5, 11,
+];
+
 /// 열 너비 자동 맞춤: 열의 칸마다 표시된 글의 폭 + 여백 8px 의 가장 큰 값 (글이 없는 열은 그대로)
 pub fn autofit_cols(wb: &mut Workbook, si: usize, c0: u32, c1: u32) -> crate::Result<()> {
     if si >= wb.sheets.len() {
@@ -463,7 +471,23 @@ pub fn autofit_cols(wb: &mut Workbook, si: usize, c0: u32, c1: u32) -> crate::Re
                 font.and_then(|f| f.size),
                 font.is_some_and(|f| f.bold),
             );
-            best = best.max(m.text_width(&text) + 8.0);
+            // 한셀: 글자마다 정수 px 폭의 합 × (K + 0.1)/K + K + 0.085 (맑은 고딕 11pt, K = 8 — 열 너비 자동 맞춤
+            // 대조 실험 30가지: 숫자 8, 한글 15, 공백 5, W 14, i 4, 마침표 3 px 의 합 × 1.0125 + 8.085)
+            let malgun = font
+                .and_then(|f| f.name.as_deref())
+                .is_none_or(|n| n == "맑은 고딕" || n.eq_ignore_ascii_case("Malgun Gothic"));
+            let scale = font.and_then(|f| f.size).unwrap_or(11.0) / 11.0;
+            let sum: f64 = text
+                .chars()
+                .map(|ch| match (malgun, ch as u32) {
+                    (true, 0x20..=0x7E) => {
+                        (MALGUN_ASCII[ch as usize - 0x20] as f64 * scale).round()
+                    }
+                    (true, _) if crate::render::is_wide(ch) => (15.0 * scale).round(),
+                    _ => m.char_width(ch).round(),
+                })
+                .sum();
+            best = best.max(sum * (k + 0.1) / k + k + 0.085);
         }
         if best <= 0.0 {
             continue;
