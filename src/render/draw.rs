@@ -696,7 +696,7 @@ fn stroke_attrs(line: &Line, defs: &mut String, id: &str) -> String {
 }
 
 /// 개체 하나의 style 나머지와 내용 (style="… 다음부터 </div> 앞까지)
-fn shape_body(
+pub(super) fn shape_body(
     wb: &Workbook,
     sh: &Shape,
     obj: Option<&Element>,
@@ -895,7 +895,7 @@ fn shape_body(
 /// 테마 글꼴 참조(+mn-lt, +mn-ea, +mj-lt, +mj-ea …)를 글꼴 이름으로. 동아시아(`-ea`)는 테마의 `a:ea` 글꼴, 그 이름이
 /// 비어 있으면 한셀 기본 글꼴 함초롬돋움 (서식 파일 소개 글상자: 10pt 한 줄이 맑은 고딕 403px 이 아니라 함초롬돋움의
 /// 387~391px — 글꼴 폭 실험)
-fn theme_font<'a>(name: &'a str, theme: &'a Theme) -> Option<&'a str> {
+pub(super) fn theme_font<'a>(name: &'a str, theme: &'a Theme) -> Option<&'a str> {
     let ea = |f: &'a Option<String>| {
         f.as_deref()
             .filter(|n| !n.is_empty())

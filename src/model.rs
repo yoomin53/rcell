@@ -1998,12 +1998,47 @@ pub struct PageSetup {
     pub black_and_white: bool,
     pub draft: bool,
     pub use_first_page_number: bool,
+    /// 메모 인쇄 `cellComments`: `atEnd`(시트 끝에) / `asDisplayed`(화면대로). 없으면 인쇄 안 함
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_comments: Option<String>,
+    /// 오류 값 인쇄 `errors`: `blank` / `dash` / `NA`. 없으면 표시된 대로
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub horizontal_dpi: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vertical_dpi: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copies: Option<u32>,
+}
+
+/// 메모 인쇄 플래그 (fNotes, fEndNotes) → `cellComments`
+pub fn comments_flag(notes: bool, at_end: bool) -> Option<String> {
+    match (notes, at_end) {
+        (true, true) => Some("atEnd".into()),
+        (true, false) => Some("asDisplayed".into()),
+        _ => None,
+    }
+}
+
+/// 오류 인쇄 번호 (0 표시대로, 1 빈칸, 2 --, 3 #N/A) → `errors`
+pub fn errors_flag(v: u16) -> Option<String> {
+    match v {
+        1 => Some("blank".into()),
+        2 => Some("dash".into()),
+        3 => Some("NA".into()),
+        _ => None,
+    }
+}
+
+/// `errors` → 오류 인쇄 번호
+pub fn errors_code(e: Option<&str>) -> u16 {
+    match e {
+        Some("blank") => 1,
+        Some("dash") => 2,
+        Some("NA") => 3,
+        _ => 0,
+    }
 }
 
 /// 머리글·바닥글. 내용은 `&C`, `&P` 같은 코드가 섞인 원문 (한셀은 `&[SHEET]`, `&[PAGE NUMBER]` 도 쓴다).

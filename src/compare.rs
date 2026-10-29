@@ -1995,7 +1995,7 @@ fn page_key(sh: &Sheet, hf: Option<(f64, f64)>) -> String {
     );
     let su = p.setup.as_ref().map_or("-".into(), |s| {
         format!(
-            "paper={} scale={} first={} fit={}x{} {} {} prn={} bw={} draft={} usefirst={} dpi={}x{} copies={}",
+            "paper={} scale={} first={} fit={}x{} {} {} prn={} bw={} draft={} usefirst={} dpi={}x{} copies={} notes={} errors={}",
             s.paper_size.unwrap_or(1),
             s.scale.unwrap_or(100),
             s.first_page_number.unwrap_or(1),
@@ -2009,7 +2009,9 @@ fn page_key(sh: &Sheet, hf: Option<(f64, f64)>) -> String {
             s.use_first_page_number,
             s.horizontal_dpi.unwrap_or(600),
             s.vertical_dpi.unwrap_or(600),
-            s.copies.unwrap_or(1)
+            s.copies.unwrap_or(1),
+            s.cell_comments.as_deref().unwrap_or("none"),
+            s.errors.as_deref().unwrap_or("displayed")
         )
     });
     // headerFooter 가 없으면 기본값 (scaleWithDoc·alignWithMargins 참)

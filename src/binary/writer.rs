@@ -2789,6 +2789,13 @@ fn page_setup(o: &mut Out, s: &crate::model::PageSetup, exact: bool, printer: Op
     if s.use_first_page_number {
         flags |= 0x0080;
     }
+    // 메모 인쇄 fNotes·fEndNotes, 오류 인쇄 iErrors (한셀 바이너리 저장 대조)
+    match s.cell_comments.as_deref() {
+        Some("atEnd") => flags |= 0x0020 | 0x0100,
+        Some("asDisplayed") => flags |= 0x0020,
+        _ => {}
+    }
+    flags |= crate::model::errors_code(s.errors.as_deref()) << 9;
     o.p(
         478,
         P::new()

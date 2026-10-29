@@ -222,6 +222,19 @@ enum Cmd {
     },
     /// 암호화된 문서(OLE2 EncryptionInfo + EncryptedPackage)를 풀어 ZIP 패키지로 저장 — 리버스 엔지니어링용
     Decrypt { input: PathBuf, output: PathBuf },
+    /// 인쇄 페이지: 시트마다 페이지 수, 페이지 나누기(새 페이지의 첫 행·열, m = 수동), 배율 — 한셀 COM 과 같은 꼴
+    Pages { file: PathBuf },
+    /// PDF 로 인쇄 (한셀 PDF 저장처럼 보이는 시트 모두, 시스템 글꼴을 부분 집합으로 넣는다)
+    Pdf {
+        input: PathBuf,
+        output: PathBuf,
+        /// 이 시트만 (이름 또는 0부터 시작하는 번호, 여러 번 줄 수 있다)
+        #[arg(long)]
+        sheet: Vec<String>,
+        /// 글꼴 파일·폴더를 더한다 (시스템 글꼴보다 먼저 찾는다)
+        #[arg(long)]
+        font: Vec<PathBuf>,
+    },
     /// 레거시 .cell 의 /Workbook 레코드를 BIFF8(.xls) 로 바꿔 쓴다 (--reverse: .xls → 레거시 레코드) — 리버스
     /// 엔지니어링용 (한셀이 같은 문서를 두 형식으로 저장한 것을 맞대 볼 때)
     Biff8 {
@@ -263,6 +276,13 @@ fn main() -> ExitCode {
             part,
         } => records(&file, bytes, only.as_deref(), part.as_deref()),
         Cmd::Escher { file } => escher(&file),
+        Cmd::Pages { file } => pages(&file),
+        Cmd::Pdf {
+            input,
+            output,
+            sheet,
+            font,
+        } => pdf(&input, &output, &sheet, &font),
         Cmd::Vtdump { file, offsets } => vtdump(&file, offsets),
         Cmd::Patch {
             input,
@@ -1009,6 +1029,102 @@ fn calc(file: &Path, show: bool, max: usize, output: Option<&Path>) -> rcell::Re
         rcell::save(&wb, out)?;
     }
     Ok(differ == 0)
+}
+
+fn pdf(input: &Path, output: &Path, sheets: &[String], fonts: &[PathBuf]) -> rcell::Result<()> {
+    let wb = open_doc(input)?;
+    let mut db = rcell::print::FontDb::new();
+    for f in fonts {
+        if f.is_dir() {
+            db.add_dir(f);
+        } else {
+            db.add_data(std::fs::read(f)?);
+        }
+    }
+    db.extend(rcell::print::FontDb::system());
+    let sel: Vec<usize> = sheets
+        .iter()
+        .filter_map(|s| {
+            s.parse::<usize>()
+                .ok()
+                .or_else(|| wb.sheets.iter().position(|x| x.name == *s))
+        })
+        .collect();
+    let abs = std::fs::canonicalize(input).unwrap_or_else(|_| input.to_path_buf());
+    let mut dir = abs
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    // canonicalize 의 \\?\ 접두는 빼고, 끝에 구분자 (한셀 &Z)
+    if let Some(d) = dir.strip_prefix(r"\\?\") {
+        dir = d.to_string();
+    }
+    dir.push(std::path::MAIN_SEPARATOR);
+    let (date, time) = rcell::print::now_strings();
+    let opts = rcell::print::PdfOptions {
+        sheets: (!sel.is_empty()).then_some(sel),
+        file_name: input
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        path: dir,
+        date,
+        time,
+        max_pages: None,
+        quality_settings: false,
+    };
+    let bytes = rcell::print::workbook_pdf(&wb, &db, &opts);
+    std::fs::write(output, bytes)?;
+    Ok(())
+}
+
+fn pages(file: &Path) -> rcell::Result<()> {
+    let wb = open_doc(file)?;
+    let list = |b: &[(u32, bool)]| {
+        b.iter()
+            .map(|(i, m)| format!("{i}{}", if *m { "m" } else { "" }))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    for (i, sh) in wb.sheets.iter().enumerate() {
+        let p = rcell::print::sheet_print(&wb, i);
+        let scale = match p.settings.scaling {
+            rcell::print::Scaling::Zoom(z) => z.to_string(),
+            rcell::print::Scaling::Fit { .. } => format!("fit{}", p.page_scale),
+        };
+        println!(
+            "{}	{}	{}	{}	{}	{}	z{}{}",
+            i + 1,
+            sh.name,
+            p.pages.len(),
+            list(&p.h_breaks),
+            list(&p.v_breaks),
+            scale,
+            p.print_scale,
+            if p.tall { " tall" } else { "" }
+        );
+        if std::env::var_os("RCELL_PAGES_DEBUG").is_some() {
+            for a in &p.settings.areas {
+                let w: u32 = (a.c0..=a.c1).map(|c| p.col_px[c as usize]).sum();
+                let h: u32 = (a.r0..=a.r1).map(|r| p.row_px[r as usize]).sum();
+                eprintln!(
+                    "  area {:?} px {w}x{h} paper {:?} margins {} {} {} {}",
+                    a,
+                    p.settings.paper,
+                    p.settings.left,
+                    p.settings.right,
+                    p.settings.top,
+                    p.settings.bottom
+                );
+            }
+            eprintln!(
+                "  rows {:?}\n  cols {:?}",
+                &p.row_px[..p.row_px.len().min(60)],
+                &p.col_px[..p.col_px.len().min(30)]
+            );
+        }
+    }
+    Ok(())
 }
 
 fn html(

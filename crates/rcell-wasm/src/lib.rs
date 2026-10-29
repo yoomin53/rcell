@@ -661,3 +661,40 @@ pub extern "C" fn rcell_doc_save(id: u32, format: u32) -> u64 {
         _ => Err(err("저장 형식")),
     }))
 }
+
+thread_local! {
+    /// PDF 에 넣을 글꼴 (브라우저에는 시스템 글꼴이 없어 JS 가 `rcell_font_add` 로 넣는다)
+    static FONTS: RefCell<rcell::print::FontDb> = RefCell::new(rcell::print::FontDb::new());
+}
+
+/// PDF 에 쓸 글꼴 파일(TrueType·OpenType·모음)을 더한다. 글꼴이 하나도 없으면 PDF 는 글꼴 이름만 적는다
+///
+/// # Safety
+/// `ptr`/`len` 은 `rcell_alloc` 으로 받은 유효한 범위여야 한다.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rcell_font_add(ptr: *const u8, len: usize) {
+    let bytes = input(ptr, len);
+    FONTS.with(|f| f.borrow_mut().add_data(bytes));
+}
+
+fn pdf_of(wb: &Workbook) -> Vec<u8> {
+    FONTS.with(|f| {
+        let opts = rcell::print::PdfOptions::default();
+        rcell::print::workbook_pdf(wb, &f.borrow(), &opts)
+    })
+}
+
+/// 파일 바이트 → PDF (한셀 PDF 저장처럼 보이는 시트 모두)
+///
+/// # Safety
+/// `ptr`/`len` 은 `rcell_alloc` 으로 받은 유효한 범위여야 한다.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rcell_pdf(ptr: *const u8, len: usize) -> u64 {
+    run(rcell::from_bytes(input(ptr, len)).map(|wb| pdf_of(&wb)))
+}
+
+/// 편집 중인 문서 → PDF
+#[unsafe(no_mangle)]
+pub extern "C" fn rcell_doc_pdf(id: u32) -> u64 {
+    run(with_doc(id, |d| Ok(pdf_of(&d.wb))))
+}

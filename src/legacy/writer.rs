@@ -3363,6 +3363,13 @@ fn write_sheet(out: &mut Out, ctx: &SheetCtx, sst: &mut Sst) -> Result<()> {
         if s.use_first_page_number {
             g |= 0x80;
         }
+        // 메모 인쇄 fNotes·fEndNotes, 오류 인쇄 iErrors (한셀 레거시 저장 대조)
+        match s.cell_comments.as_deref() {
+            Some("atEnd") => g |= 0x20 | 0x200,
+            Some("asDisplayed") => g |= 0x20,
+            _ => {}
+        }
+        g |= crate::model::errors_code(s.errors.as_deref()) << 10;
         let mut b = Buf::new();
         b.u16(s.paper_size.unwrap_or(9) as u16)
             .u16(s.scale.unwrap_or(100) as u16)

@@ -1877,12 +1877,18 @@ fn page_xml(p: &PageLayout, printer: Option<&str>) -> String {
         }
         let _ = write!(
             s,
-            " usePrinterDefaults=\"{}\" blackAndWhite=\"{}\" draft=\"{}\" useFirstPageNumber=\"{}\"",
+            " usePrinterDefaults=\"{}\" blackAndWhite=\"{}\" draft=\"{}\"",
             b(u.use_printer_defaults),
             b(u.black_and_white),
             b(u.draft),
-            b(u.use_first_page_number)
         );
+        if let Some(c) = &u.cell_comments {
+            let _ = write!(s, " cellComments=\"{}\"", esc(c));
+        }
+        let _ = write!(s, " useFirstPageNumber=\"{}\"", b(u.use_first_page_number));
+        if let Some(e) = &u.errors {
+            let _ = write!(s, " errors=\"{}\"", esc(e));
+        }
         for (name, val) in [
             ("horizontalDpi", u.horizontal_dpi),
             ("verticalDpi", u.vertical_dpi),
