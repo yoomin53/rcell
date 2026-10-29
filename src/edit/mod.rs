@@ -2446,31 +2446,25 @@ pub fn border(
             let rr = (r0..=r1)
                 .find(|&r| (c0..=c1).all(|c| !skip(cr(r, c))))
                 .unwrap_or(r0);
-            // 안쪽 세로: 그 행의 칸 사이 선이 모두 같은 색이면 그 색, 아니면 끝 칸 왼쪽 변의 색
+            // 안쪽 세로: 첫 칸 사이에 선이 있고 그 행의 칸 사이에 있는 선이 모두 같은 색이면 그 색 (선 없는 칸 사이는 보지
+            // 않는다 — H10 오른쪽만 빨강이면 빨강), 아니면 끝 칸 왼쪽 변의 색
             let lines: Vec<Option<crate::model::BorderEdge>> = (c0..c1)
                 .map(|c| line_between(sheet, styles, cr(rr, c), Right))
                 .collect();
             let inside_v = match lines.first() {
                 Some(Some(first))
-                    if lines.iter().all(|l| {
-                        l.as_ref()
-                            .is_some_and(|l| same_color(&edge_color(l), &edge_color(first)))
-                    }) =>
+                    if lines
+                        .iter()
+                        .flatten()
+                        .all(|l| same_color(&edge_color(l), &edge_color(first))) =>
                 {
                     edge_color(first)
                 }
                 _ => record_color(sheet, styles, cr(rr, c1), Left),
             };
-            // 안쪽 가로: 그 행 칸들의 서식에 남은 아래 변 색이 모두 같으면 그 색, 아니면 자동 (아래 칸의 위 선은 보지
-            // 않는다)
-            let below: Vec<crate::model::Color> = (c0..=c1)
-                .map(|c| record_color(sheet, styles, cr(rr, c), Bottom))
-                .collect();
-            let inside_h = if below.iter().all(|x| same_color(x, &below[0])) {
-                below[0].clone()
-            } else {
-                auto_color()
-            };
+            // 안쪽 가로: 그 행 끝 칸의 서식에 남은 아래 변 색 (첫 행 아래 선이 빨강·파랑·초록이면 초록, 끝 칸에 선이 없으면
+            // 기본 검정 — 테두리 대조 실험. 아래 칸의 위 선은 보지 않는다)
+            let inside_h = record_color(sheet, styles, cr(rr, c1), Bottom);
             [
                 side_color(sheet, styles, cr(r0, c0), Left),
                 side_color(sheet, styles, cr(r0, c0), Top),

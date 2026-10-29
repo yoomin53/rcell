@@ -106,6 +106,7 @@ function Invoke-Edit($wb, $e) {
             switch ([string]$e.preset) {
                 "all" { foreach ($k in 7, 8, 9, 10, 11, 12) { try { Set-Edge $r $k $style $color } catch {} } }
                 "outline" { foreach ($k in 7, 8, 9, 10) { Set-Edge $r $k $style $color } }
+                "inside" { foreach ($k in 11, 12) { try { Set-Edge $r $k $style $color } catch {} } }
                 "none" { foreach ($k in 5, 6, 7, 8, 9, 10, 11, 12) { try { Set-Edge $r $k $null $null } catch {} } }
                 "left" { Set-Edge $r 7 $style $color }
                 "top" { Set-Edge $r 8 $style $color }
