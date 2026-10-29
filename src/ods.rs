@@ -176,19 +176,63 @@ fn range_address(a: &str) -> String {
     format!("{sheet}{}", parts.join(":"))
 }
 
-/// 셀 수식 글 → ODF (한셀 꼴: `of:=` + A1 참조 그대로, 인수 구분 `;`)
+/// 셀 수식 글 → ODF (한셀 꼴: `of:=` + A1 참조 그대로, 인수 구분 `;`). 다른 시트 참조 `시트!A1:B2` 는 ODF 표준
+/// `[시트.A1:.B2]` 로 (한셀은 `#REF.` 로 잃는다)
 pub fn formula_to_odf(f: &str) -> String {
     let mut out = String::from("of:=");
-    let mut in_str = false;
-    for c in f.chars() {
+    let chars: Vec<char> = f.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
         match c {
             '"' => {
-                in_str = !in_str;
                 out.push(c);
+                i += 1;
+                while i < chars.len() {
+                    out.push(chars[i]);
+                    i += 1;
+                    if chars[i - 1] == '"' {
+                        break;
+                    }
+                }
+                continue;
             }
-            ',' if !in_str => out.push(';'),
+            ',' => out.push(';'),
+            '!' => {
+                // 앞의 시트 이름 (따옴표 이름 또는 낱말) 을 out 에서 떼어 [이름.참조] 로
+                let sheet_start = if out.ends_with('\'') {
+                    out[..out.len() - 1].rfind('\'')
+                } else {
+                    let word_len: usize = out
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+                        .map(char::len_utf8)
+                        .sum();
+                    (word_len > 0).then(|| out.len() - word_len)
+                };
+                let mut j = i + 1;
+                while j < chars.len()
+                    && (chars[j].is_ascii_alphanumeric() || chars[j] == '$' || chars[j] == ':')
+                {
+                    j += 1;
+                }
+                match sheet_start {
+                    Some(s) if j > i + 1 => {
+                        let sheet = out[s..].to_string();
+                        out.truncate(s);
+                        let r: String = chars[i + 1..j].iter().collect();
+                        let r = r.replace(':', ":.");
+                        out.push_str(&format!("[{sheet}.{r}]"));
+                        i = j;
+                        continue;
+                    }
+                    _ => out.push(c),
+                }
+            }
             _ => out.push(c),
         }
+        i += 1;
     }
     out
 }
@@ -757,6 +801,10 @@ mod tests {
             "CONCATENATE(#REF!,1)"
         );
         assert_eq!(range_address("$Variables.$B$1"), "Variables!$B$1");
+        let f = "Sheet2!A1*2+SUM('My Sheet'!A1:B2,1)";
+        let odf = formula_to_odf(f);
+        assert_eq!(odf, "of:=[Sheet2.A1]*2+SUM(['My Sheet'.A1:.B2];1)");
+        assert_eq!(formula_from_odf(&odf), f);
     }
 
     #[test]
