@@ -526,18 +526,10 @@ pub fn preset_paths(
         "heptagon" => one(star(w, h, 7, None)),
         "decagon" => one(star(w, h, 10, None)),
         "dodecagon" => one(star(w, h, 12, None)),
-        "plus" | "mathPlus" => {
-            let x = ss * a("adj", if prst == "plus" { 25000.0 } else { 23520.0 });
-            let (x0, y0) = if prst == "plus" {
-                (x, x)
-            } else {
-                (hc - x / 2.0, vc - x / 2.0)
-            };
-            let (x1, y1) = if prst == "plus" {
-                (w - x, h - x)
-            } else {
-                (hc + x / 2.0, vc + x / 2.0)
-            };
+        "plus" => {
+            let x = ss * a("adj", 25000.0);
+            let (x0, y0) = (x, x);
+            let (x1, y1) = (w - x, h - x);
             one(poly(&[
                 (x0, 0.0),
                 (x1, 0.0),
@@ -553,50 +545,137 @@ pub fn preset_paths(
                 (x0, y0),
             ]))
         }
-        "mathMinus" => {
-            let t = h * a("adj1", 23520.0);
+        // 수식 모양: 가로 폭 w × 73490/100000, 세로 폭 h × 73490/100000 안 (도형 모양 실험 5번 시트)
+        "mathPlus" => {
+            let (dx1, dy1) = (w * 0.36745, h * 0.36745);
+            let dx2 = ss * a("adj1", 23520.0).clamp(0.0, 0.7349) / 2.0;
+            let (x1, x2, x3, x4) = (hc - dx1, hc - dx2, hc + dx2, hc + dx1);
+            let (y1, y2, y3, y4) = (vc - dy1, vc - dx2, vc + dx2, vc + dy1);
             one(poly(&[
-                (0.0, vc - t / 2.0),
-                (w, vc - t / 2.0),
-                (w, vc + t / 2.0),
-                (0.0, vc + t / 2.0),
+                (x1, y2),
+                (x2, y2),
+                (x2, y1),
+                (x3, y1),
+                (x3, y2),
+                (x4, y2),
+                (x4, y3),
+                (x3, y3),
+                (x3, y4),
+                (x2, y4),
+                (x2, y3),
+                (x1, y3),
+            ]))
+        }
+        "mathMinus" => {
+            let dy1 = h * a("adj1", 23520.0) / 2.0;
+            let dx1 = w * 0.36745;
+            one(poly(&[
+                (hc - dx1, vc - dy1),
+                (hc + dx1, vc - dy1),
+                (hc + dx1, vc + dy1),
+                (hc - dx1, vc + dy1),
             ]))
         }
         "mathEqual" => {
-            let t = h * a("adj1", 23520.0);
-            let g = h * a("adj2", 11760.0);
+            let a1 = a("adj1", 23520.0).clamp(0.0, 0.36745);
+            let a2 = a("adj2", 11760.0).clamp(0.0, 1.0 - a1 * 2.0);
+            let (dy1, dy2, dx1) = (h * a1, h * a2 / 2.0, w * 0.36745);
+            let (y2, y3) = (vc - dy2, vc + dy2);
+            let (x1, x2) = (hc - dx1, hc + dx1);
             Some(vec![
+                PathSpec::new(poly(&[(x1, y2 - dy1), (x2, y2 - dy1), (x2, y2), (x1, y2)])),
+                PathSpec::new(poly(&[(x1, y3), (x2, y3), (x2, y3 + dy1), (x1, y3 + dy1)])),
+            ])
+        }
+        "mathDivide" => {
+            let a1 = a("adj1", 23520.0).clamp(0.01, 0.36745);
+            let a3 = a("adj3", 11760.0).clamp(0.01, ((0.7349 - a1) / 4.0).min(0.36745 * w / h));
+            let a2 = a("adj2", 5880.0).clamp(0.0, 0.7349 - 4.0 * a3 - a1);
+            let (dy1, yg, rad, dx1) = (h * a1 / 2.0, h * a2 / 2.0, h * a3, w * 0.36745);
+            let (y3, y4) = (vc - dy1, vc + dy1);
+            let (c1, c2) = (y3 - yg - rad, y4 + yg + rad);
+            Some(vec![
+                PathSpec::new(ellipse(hc, c1, rad, rad)),
+                PathSpec::new(ellipse(hc, c2, rad, rad)),
                 PathSpec::new(poly(&[
-                    (0.0, vc - g / 2.0 - t),
-                    (w, vc - g / 2.0 - t),
-                    (w, vc - g / 2.0),
-                    (0.0, vc - g / 2.0),
-                ])),
-                PathSpec::new(poly(&[
-                    (0.0, vc + g / 2.0),
-                    (w, vc + g / 2.0),
-                    (w, vc + g / 2.0 + t),
-                    (0.0, vc + g / 2.0 + t),
+                    (hc - dx1, y3),
+                    (hc + dx1, y3),
+                    (hc + dx1, y4),
+                    (hc - dx1, y4),
                 ])),
             ])
         }
         "mathMultiply" => {
-            let t = ss * a("adj1", 23520.0) / 2.0;
-            let (dx, dy) = (t, t);
+            let th = ss * a("adj1", 23520.0).clamp(0.0, 0.51965);
+            let ang = h.atan2(w);
+            let (sa, ca, ta) = (ang.sin(), ang.cos(), ang.tan());
+            let dl = (w * w + h * h).sqrt();
+            let lm = dl - dl * 0.51965;
+            let (xm, ym) = (ca * lm / 2.0, sa * lm / 2.0);
+            let (dxam, dyam) = (sa * th / 2.0, ca * th / 2.0);
+            let (xa, ya, xb, yb) = (xm - dxam, ym + dyam, xm + dxam, ym - dyam);
+            let yc = (hc - xb) * ta + yb;
+            let (xd, xe) = (w - xb, w - xa);
+            let xfe = (vc - ya) / ta;
+            let (xf, xl) = (xe - xfe, xa + xfe);
+            let (yg, yh, yi) = (h - ya, h - yb, h - yc);
             one(poly(&[
-                (dx, 0.0),
-                (hc, vc - dy),
-                (w - dx, 0.0),
-                (w, dy),
-                (hc + dx, vc),
-                (w, h - dy),
-                (w - dx, h),
-                (hc, vc + dy),
-                (dx, h),
-                (0.0, h - dy),
-                (hc - dx, vc),
-                (0.0, dy),
+                (xa, ya),
+                (xb, yb),
+                (hc, yc),
+                (xd, yb),
+                (xe, ya),
+                (xf, vc),
+                (xe, yg),
+                (xd, yh),
+                (hc, yi),
+                (xb, yh),
+                (xa, yg),
+                (xl, vc),
             ]))
+        }
+        "corner" => {
+            let x1 = ss * a("adj2", 50000.0).clamp(0.0, w / ss);
+            let y1 = h - ss * a("adj1", 50000.0).clamp(0.0, h / ss);
+            one(poly(&[
+                (0.0, 0.0),
+                (x1, 0.0),
+                (x1, y1),
+                (w, y1),
+                (w, h),
+                (0.0, h),
+            ]))
+        }
+        "pieWedge" => one(format!(
+            "M0,{h}A{w},{h} 0 0 1 {w},0V{h}Z",
+            w = f(w),
+            h = f(h)
+        )),
+        "lineInv" => Some(vec![PathSpec::with(
+            format!("M0,{}L{},0", f(h), f(w)),
+            PathFill::None,
+            true,
+        )]),
+        // 차트 모양: 테두리 없는 채운 상자 + 선
+        "chartX" | "chartStar" | "chartPlus" => {
+            let mut d = String::new();
+            if prst != "chartPlus" {
+                let _ = write!(d, "M0,0L{w},{h}M0,{h}L{w},0", w = f(w), h = f(h));
+            }
+            if prst == "chartStar" {
+                let _ = write!(d, "M{},0V{}", f(hc), f(h));
+            }
+            if prst == "chartPlus" {
+                let _ = write!(d, "M{},0V{}M0,{}H{}", f(hc), f(h), f(vc), f(w));
+            }
+            Some(vec![
+                PathSpec::with(
+                    poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]),
+                    PathFill::Norm,
+                    false,
+                ),
+                PathSpec::with(d, PathFill::None, true),
+            ])
         }
         "star4" | "star5" | "star6" | "star7" | "star8" | "star10" | "star12" | "star16"
         | "star24" | "star32" => {
