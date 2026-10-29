@@ -1599,6 +1599,58 @@ fn hlink_display(b: &[u8], tip: Option<&[u8]>) -> Vec<u8> {
     o
 }
 
+/// 넥셀(.nxl) 의 HLINK: Ref8U + CLSID + 2 + 플래그 1 뒤에 종류 u32 (3 = URL), 주소 (u32 글자 수 + 플래그 u8 + 글자),
+/// 표시 이름 (같은 꼴) — 한셀 -2003 저장에서 본 꼴. URL 이면 BIFF8 HLINK (표시 이름 + URL 모니커) 로 바꾼다
+fn nexcel_hlink(d: &[u8]) -> Option<Vec<u8>> {
+    let u32_at =
+        |k: usize| -> Option<u32> { Some(u32::from_le_bytes(d.get(k..k + 4)?.try_into().ok()?)) };
+    if u32_at(28)? != 1 || u32_at(32)? != 3 {
+        return None;
+    }
+    let text = |at: usize| -> Option<(Vec<u16>, usize)> {
+        let n = u32_at(at)? as usize;
+        let wide = *d.get(at + 4)? & 1 != 0;
+        let p = at + 5;
+        if wide {
+            let b = d.get(p..p + n * 2)?;
+            Some((
+                b.chunks(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect(),
+                p + n * 2,
+            ))
+        } else {
+            Some((d.get(p..p + n)?.iter().map(|&c| c as u16).collect(), p + n))
+        }
+    };
+    let (url, end) = text(36)?;
+    let display = text(end).map(|(t, _)| t).unwrap_or_default();
+    let mut o = d[..28].to_vec();
+    let mut flags = 0x03u32;
+    if !display.is_empty() {
+        flags |= 0x14;
+    }
+    o.extend_from_slice(&flags.to_le_bytes());
+    if !display.is_empty() {
+        o.extend_from_slice(&(display.len() as u32 + 1).to_le_bytes());
+        for u in &display {
+            o.extend_from_slice(&u.to_le_bytes());
+        }
+        o.extend_from_slice(&[0, 0]);
+    }
+    // URL 모니커 CLSID 79EAC9E0-BAF9-11CE-8C82-00AA004BA90B, 길이 (바이트, NUL 포함), UTF-16
+    o.extend_from_slice(&[
+        0xE0, 0xC9, 0xEA, 0x79, 0xF9, 0xBA, 0xCE, 0x11, 0x8C, 0x82, 0x00, 0xAA, 0x00, 0x4B, 0xA9,
+        0x0B,
+    ]);
+    o.extend_from_slice(&((url.len() as u32 + 1) * 2).to_le_bytes());
+    for u in &url {
+        o.extend_from_slice(&u.to_le_bytes());
+    }
+    o.extend_from_slice(&[0, 0]);
+    Some(o)
+}
+
 /// OfficeArt 레코드 머리 (verInst u16, fbt u16, len u32)
 fn art_head(b: &[u8], p: usize) -> Option<(u16, u16, usize)> {
     let vi = u16::from_le_bytes([*b.get(p)?, *b.get(p + 1)?]);
@@ -2855,6 +2907,39 @@ fn sheet_to_hancom(recs: &[Rec], dxfs: &mut CfDxfs) -> Vec<(u16, Vec<u8>)> {
             0x01BE => {
                 if let Some(b) = dv(&d, false) {
                     out.push((rt, b));
+                }
+            }
+            0x01B8 => {
+                let d = nexcel_hlink(&d).unwrap_or(d);
+                if let Some(b) = conv(rt, &d, false) {
+                    out.push((rt, b));
+                }
+                // 표시 이름 (플래그 0x10): 한셀은 .xls 를 열 때 이것을 도구 설명으로 읽는다 (한셀의 .xls 저장은 도구
+                // 설명을 이 자리에 쓴다) — 뒤에 HLINKTOOLTIP 이 없으면 레거시 리더가 읽는 0x0800 으로 붙인다
+                let flags = d
+                    .get(28..32)
+                    .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+                let next = recs.get(k + 1).map(|r| r.rt);
+                if let Some(f) = flags
+                    && f & 0x10 != 0
+                    && next != Some(0x0800)
+                    && let Some(n) = d
+                        .get(32..36)
+                        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    && let Some(text) = d.get(36..36 + n as usize * 2)
+                {
+                    let mut t = vec![0x00, 0x08];
+                    t.extend_from_slice(&d[..8]);
+                    for c in text.chunks(2) {
+                        if c == [0, 0] {
+                            break;
+                        }
+                        t.extend_from_slice(c);
+                    }
+                    t.extend_from_slice(&[0, 0]);
+                    if t.len() > 12 {
+                        out.push((0x0800, t));
+                    }
                 }
             }
             0x087F => {
