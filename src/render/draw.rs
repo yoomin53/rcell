@@ -415,6 +415,32 @@ struct Line {
     compound: Option<String>,
 }
 
+/// 스타일 참조(`xdr:style/a:lnRef idx`)의 선 굵기: 테마 `a:lnStyleLst` 의 idx 번째 `a:ln/@w`. 테마 파트가 없으면 한셀
+/// 테마의 12700·19050·38100 (도형 모양 실험: 한셀이 넣은 도형은 lnRef 2 — 19050, 화면 2px)
+fn style_line_width(obj: Option<&Element>, theme: &Theme) -> Option<i64> {
+    let idx = obj
+        .and_then(|o| o.child_ns(shape::XDR, "style"))
+        .and_then(|s| s.child_ns(shape::A, "lnRef"))
+        .and_then(|r| r.attr_u32("idx"))
+        .filter(|&i| i > 0)? as usize;
+    let from_theme = theme.source.as_deref().and_then(|src| {
+        let root = crate::xml::parse(std::str::from_utf8(src).ok()?, "theme").ok()?;
+        let mut list = None;
+        root.walk(&mut |e| {
+            if list.is_none() && e.name == "lnStyleLst" {
+                list = Some(
+                    e.elements()
+                        .filter(|l| l.name == "ln")
+                        .map(|l| l.attr("w").and_then(|w| w.parse::<i64>().ok()))
+                        .collect::<Vec<_>>(),
+                );
+            }
+        });
+        list?.get(idx - 1).copied().flatten()
+    });
+    from_theme.or_else(|| [12700, 19050, 38100].get(idx - 1).copied())
+}
+
 /// 선 (원본 a:ln → 모델 → 스타일 참조). 선이 없으면 None
 fn shape_line(sh: &Shape, obj: Option<&Element>, theme: &Theme) -> Option<Line> {
     let ln = obj
@@ -457,7 +483,8 @@ fn shape_line(sh: &Shape, obj: Option<&Element>, theme: &Theme) -> Option<Line> 
     let width = ln
         .and_then(|l| l.attr("w"))
         .and_then(|v| v.parse::<i64>().ok())
-        .or(sh.line.as_ref().and_then(|l| l.width));
+        .or(sh.line.as_ref().and_then(|l| l.width))
+        .or_else(|| style_line_width(obj, theme));
     // 굵기 0 은 가장 가는 선 (1px)
     let px = (width.unwrap_or(9525) as f64 / EMU).max(1.0);
     let dash = ln
@@ -1288,7 +1315,24 @@ pub(crate) fn draw_rgb(c: &DrawColor, theme: &Theme) -> Option<(u8, u8, u8)> {
     for (m, v) in &c.mods {
         let f = *v as f64 / 100_000.0;
         match m.as_str() {
-            "shade" => rgb = (rgb.0 * f, rgb.1 * f, rgb.2 * f),
+            // 어둡게는 선형 밝기에서 (도형 모양 실험: 6182D6 의 shade 20000 이 2E3E67 — sRGB 곱이면 131A2B)
+            "shade" => {
+                let s = |v: f64| {
+                    let x = v / 255.0;
+                    let lin = if x <= 0.04045 {
+                        x / 12.92
+                    } else {
+                        ((x + 0.055) / 1.055).powf(2.4)
+                    } * f;
+                    let y = if lin <= 0.003_130_8 {
+                        lin * 12.92
+                    } else {
+                        1.055 * lin.powf(1.0 / 2.4) - 0.055
+                    };
+                    y * 255.0
+                };
+                rgb = (s(rgb.0), s(rgb.1), s(rgb.2));
+            }
             "tint" => {
                 rgb = (
                     255.0 - (255.0 - rgb.0) * f,
