@@ -1099,7 +1099,17 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             local,
         } => {
             let i = si(wb, sheet)?;
-            objects::add_name(wb, i, local.then_some(i), name, refers_to)?;
+            // 시트 없는 참조: 시트를 고르지 않았으면 활성 시트 (한셀 Names.Add 관측)
+            let target = match sheet {
+                Some(_) => i,
+                None => wb
+                    .view
+                    .as_ref()
+                    .map(|v| v.active_tab as usize)
+                    .filter(|&a| a < wb.sheets.len())
+                    .unwrap_or(i),
+            };
+            objects::add_name(wb, target, local.then_some(i), name, refers_to)?;
             Ok(i)
         }
         Edit::DeleteName { sheet, name, local } => {
