@@ -432,7 +432,7 @@ fn build(cases: &[Case], date1904: bool) -> Workbook {
 }
 
 /// 사용: `<출력 폴더> [--only 분류] [--chunk N] [--list 파일]` — `--chunk` 는 한 문서에 경우 N개씩 나눠 쓴다
-/// (한셀을 죽이는 경우를 좁힐 때).
+/// (한셀을 죽이는 경우를 좁힐 때). `--list` 파일은 한 줄에 수식 하나 (`@행x열 수식` 은 배열 수식, `#1904` 줄은 1904 날짜 체계).
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(out) = args.first().map(PathBuf::from) else {
@@ -457,17 +457,28 @@ fn main() {
         Some(path) => {
             let path = PathBuf::from(path);
             let text = std::fs::read_to_string(&path).expect("수식 목록 파일");
-            let cases: Vec<Case> = text
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(|l| Case {
-                    f: l.trim_start_matches('=').to_string(),
-                    array: None,
-                })
-                .collect();
+            // 줄마다 수식 하나. `@3x2 수식` 은 3행 2열 배열 수식, `#1904` 줄은 1904 날짜 체계
+            let mut date1904 = false;
+            let mut cases = Vec::new();
+            for l in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                if l == "#1904" {
+                    date1904 = true;
+                    continue;
+                }
+                let (array, f) = match l.strip_prefix('@').and_then(|r| r.split_once(' ')) {
+                    Some((dim, f)) => {
+                        let (h, w) = dim.split_once('x').expect("@행x열");
+                        (Some((h.parse().expect("행"), w.parse().expect("열"))), f)
+                    }
+                    None => (None, l),
+                };
+                cases.push(Case {
+                    f: f.trim_start_matches('=').to_string(),
+                    array,
+                });
+            }
             let name = path.file_stem().unwrap().to_string_lossy().into_owned();
-            vec![(&*Box::leak(name.into_boxed_str()), cases, false)]
+            vec![(&*Box::leak(name.into_boxed_str()), cases, date1904)]
         }
         None => cases::catalog(),
     };

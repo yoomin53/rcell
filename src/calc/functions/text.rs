@@ -20,13 +20,14 @@ use crate::model::CellValue;
 const VR: &[Arg] = &[Arg::R, Arg::V, Arg::R];
 
 pub const FNS: &[FnSpec] = &[
+    // 글 길이는 UTF-16 단위 (LEN("😀a") = 3, 대조 실험 ctext)
     f("LEN", 1, 1, V, |c, a| {
-        Value::Number(try_v!(text_arg(c, a, 0)).chars().count() as f64)
+        Value::Number(value::utf16_chars(&try_v!(text_arg(c, a, 0))).len() as f64)
     }),
     f("LENB", 1, 1, V, |c, a| {
         Value::Number(
-            try_v!(text_arg(c, a, 0))
-                .chars()
+            value::utf16_chars(&try_v!(text_arg(c, a, 0)))
+                .into_iter()
                 .map(byte_len)
                 .sum::<usize>() as f64,
         )
@@ -147,15 +148,21 @@ pub const FNS: &[FnSpec] = &[
         if n < 1.0 || n > 0x10FFFF as f64 {
             return Value::Error(ErrorKind::Value);
         }
-        // 대리 쌍 반쪽은 U+FFFD (UNICHAR(55296), 대조 실험 text)
+        // 대리 쌍 반쪽은 반쪽 그대로 (UNICODE(UNICHAR(55357)) = 55357, 파일에는 U+FFFD, 대조 실험 text·cmisc)
         match char::from_u32(n as u32) {
             Some(ch) => Value::from(ch.to_string()),
-            None => Value::from("\u{FFFD}"),
+            None => Value::from(value::from_utf16_chars(&[char::from_u32(
+                value::LONE_BASE + (n as u32 - 0xD800),
+            )
+            .unwrap_or('\u{FFFD}')])),
         }
     }),
     f("UNICODE", 1, 1, V, |c, a| {
         let t = try_v!(text_arg(c, a, 0));
         match t.chars().next() {
+            Some(ch) if value::is_lone(ch) => {
+                Value::Number((ch as u32 - value::LONE_BASE + 0xD800) as f64)
+            }
             Some(ch) => Value::Number(ch as u32 as f64),
             None => Value::Error(ErrorKind::Value),
         }
@@ -188,14 +195,18 @@ pub const FNS: &[FnSpec] = &[
     f("BAHTTEXT", 1, 1, V, bahttext),
 ];
 
-/// 코드 페이지 949 의 바이트 수
+/// 코드 페이지 949 의 바이트 수 (UTF-16 대리 반쪽은 2: LENB("😀a") = 5, 대조 실험 ctext)
 pub fn byte_len(ch: char) -> usize {
-    crate::calc::cp949::byte_len(ch)
+    if value::is_lone(ch) {
+        2
+    } else {
+        crate::calc::cp949::byte_len(ch)
+    }
 }
 
 /// 바이트 자리 [from, to) (0부터)의 글. 걸친 글자 반쪽은 공백 하나 (LEFTB("한글나라",3) = "한 ")
 fn byte_slice(chars: &[char], from: usize, to: usize) -> String {
-    let mut out = String::new();
+    let mut out = Vec::new();
     let mut pos = 0usize;
     for &ch in chars {
         let (s, e) = (pos, pos + byte_len(ch));
@@ -205,7 +216,7 @@ fn byte_slice(chars: &[char], from: usize, to: usize) -> String {
         }
         out.push(if s >= from && e <= to { ch } else { ' ' });
     }
-    out
+    value::from_utf16_chars(&out)
 }
 
 /// 글자마다 대·소문자 (한 글자로 바뀔 때만)
@@ -231,7 +242,7 @@ fn left_right(ctx: &mut Ctx, a: &[Value], left: bool, bytes: bool) -> Value {
     if n < 0.0 {
         return Value::Error(ErrorKind::Value);
     }
-    let chars: Vec<char> = t.chars().collect();
+    let chars: Vec<char> = value::utf16_chars(&t);
     if bytes {
         let total: usize = chars.iter().map(|c| byte_len(*c)).sum();
         let n = (n as usize).min(total);
@@ -243,9 +254,9 @@ fn left_right(ctx: &mut Ctx, a: &[Value], left: bool, bytes: bool) -> Value {
     }
     let take = (n as usize).min(chars.len());
     let s: String = if left {
-        chars[..take].iter().collect()
+        value::from_utf16_chars(&chars[..take])
     } else {
-        chars[chars.len() - take..].iter().collect()
+        value::from_utf16_chars(&chars[chars.len() - take..])
     };
     Value::from(s)
 }
@@ -257,7 +268,7 @@ fn mid(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
     if start < 1.0 || n < 0.0 {
         return Value::Error(ErrorKind::Value);
     }
-    let chars: Vec<char> = t.chars().collect();
+    let chars: Vec<char> = value::utf16_chars(&t);
     if bytes {
         let from = start as usize - 1;
         return Value::from(byte_slice(&chars, from, from.saturating_add(n as usize)));
@@ -267,7 +278,7 @@ fn mid(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
         return Value::from("");
     }
     let e = (s + n as usize).min(chars.len());
-    Value::from(chars[s..e].iter().collect::<String>())
+    Value::from(value::from_utf16_chars(&chars[s..e]))
 }
 
 /// PROPER: U+0080–U+00FF 의 글자(À, ñ, é …)는 글자로 세지만 대·소문자는 그대로 둔다
@@ -383,7 +394,7 @@ fn replace(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
     if start < 1.0 || n < 0.0 {
         return Value::Error(ErrorKind::Value);
     }
-    let chars: Vec<char> = t.chars().collect();
+    let chars: Vec<char> = value::utf16_chars(&t);
     if bytes {
         // 앞쪽·뒤쪽 바이트 조각 사이에 새 글 (걸친 반쪽은 공백: REPLACEB("한글나라",2,2,"X") = " X 나라")
         let total: usize = chars.iter().map(|c| byte_len(*c)).sum();
@@ -401,17 +412,17 @@ fn replace(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
         let s = (start as usize - 1).min(chars.len());
         (s, (s + n as usize).min(chars.len()))
     };
-    let mut out: String = chars[..s].iter().collect();
-    out.push_str(&new);
-    out.extend(chars[e..].iter());
-    Value::from(out)
+    let mut out: Vec<char> = chars[..s].to_vec();
+    out.extend(value::utf16_chars(&new));
+    out.extend_from_slice(&chars[e..]);
+    Value::from(value::from_utf16_chars(&out))
 }
 
 fn find(ctx: &mut Ctx, a: &[Value], search: bool, bytes: bool) -> Value {
     let needle = try_v!(text_arg(ctx, a, 0));
     let hay = try_v!(text_arg(ctx, a, 1));
     let start = try_v!(num_or(ctx, a, 2, 1.0)).trunc();
-    let hc: Vec<char> = hay.chars().collect();
+    let hc: Vec<char> = value::utf16_chars(&hay);
     // 바이트 위치를 글자 위치로
     let to_char_pos = |b: usize| -> Option<usize> {
         let mut pos = 1usize;
@@ -470,7 +481,7 @@ fn find(ctx: &mut Ctx, a: &[Value], search: bool, bytes: bool) -> Value {
         }
         hit
     } else {
-        let nc: Vec<char> = needle.chars().collect();
+        let nc: Vec<char> = value::utf16_chars(&needle);
         (s..=hc.len().saturating_sub(nc.len()).max(s))
             .find(|&i| i + nc.len() <= hc.len() && hc[i..i + nc.len()] == nc[..])
     };
@@ -558,6 +569,10 @@ fn text(ctx: &mut Ctx, a: &[Value]) -> Value {
         _ => 0,
     };
     let out = crate::numfmt::format_padded(&v, &code, ctx.date1904());
+    // 날짜 서식인데 범위 밖이면 (셀 표시는 #####) #VALUE! (TEXT(-1,"d")·TEXT(2958466,"d"), 대조 실험 cdate)
+    if out.overflow {
+        return Value::Error(ErrorKind::Value);
+    }
     let marks = out
         .text
         .chars()
@@ -788,24 +803,117 @@ fn currency(ctx: &mut Ctx, a: &[Value], sym: &str) -> Value {
     }
 }
 
-/// 전각 → 반각 (ASC)
+/// 전각 → 반각 (ASC): 한셀이 바꾸는 글자 (U+FF01–FF5E·U+3000 밖, 대조 실험 casc)
+const HALFWIDTH: [(u16, u16); 78] = [
+    (0x2190, 0xFFE9),
+    (0x2191, 0xFFEA),
+    (0x2192, 0xFFEB),
+    (0x2193, 0xFFEC),
+    (0x25A0, 0xFFED),
+    (0x25CB, 0xFFEE),
+    (0x3001, 0xFF64),
+    (0x3002, 0xFF61),
+    (0x300C, 0xFF62),
+    (0x300D, 0xFF63),
+    (0x300E, 0xA854),
+    (0x300F, 0xA855),
+    (0x309B, 0xFF9E),
+    (0x309C, 0xFF9F),
+    (0x30A1, 0xFF67),
+    (0x30A2, 0xFF71),
+    (0x30A3, 0xFF68),
+    (0x30A4, 0xFF72),
+    (0x30A5, 0xFF69),
+    (0x30A6, 0xFF73),
+    (0x30A7, 0xFF6A),
+    (0x30A8, 0xFF74),
+    (0x30A9, 0xFF6B),
+    (0x30AA, 0xFF75),
+    (0x30AB, 0xFF76),
+    (0x30AD, 0xFF77),
+    (0x30AF, 0xFF78),
+    (0x30B1, 0xFF79),
+    (0x30B3, 0xFF7A),
+    (0x30B5, 0xFF7B),
+    (0x30B7, 0xFF7C),
+    (0x30B9, 0xFF7D),
+    (0x30BB, 0xFF7E),
+    (0x30BD, 0xFF7F),
+    (0x30BF, 0xFF80),
+    (0x30C1, 0xFF81),
+    (0x30C3, 0xFF6F),
+    (0x30C4, 0xFF82),
+    (0x30C6, 0xFF83),
+    (0x30C8, 0xFF84),
+    (0x30CA, 0xFF85),
+    (0x30CB, 0xFF86),
+    (0x30CC, 0xFF87),
+    (0x30CD, 0xFF88),
+    (0x30CE, 0xFF89),
+    (0x30CF, 0xFF8A),
+    (0x30D2, 0xFF8B),
+    (0x30D5, 0xFF8C),
+    (0x30D8, 0xFF8D),
+    (0x30DB, 0xFF8E),
+    (0x30DE, 0xFF8F),
+    (0x30DF, 0xFF90),
+    (0x30E0, 0xFF91),
+    (0x30E1, 0xFF92),
+    (0x30E2, 0xFF93),
+    (0x30E3, 0xFF6C),
+    (0x30E4, 0xFF94),
+    (0x30E5, 0xFF6D),
+    (0x30E6, 0xFF95),
+    (0x30E7, 0xFF6E),
+    (0x30E8, 0xFF96),
+    (0x30E9, 0xFF97),
+    (0x30EA, 0xFF98),
+    (0x30EB, 0xFF99),
+    (0x30EC, 0xFF9A),
+    (0x30ED, 0xFF9B),
+    (0x30EF, 0xFF9C),
+    (0x30F2, 0xFF66),
+    (0x30F3, 0xFF9D),
+    (0x30FB, 0xFF65),
+    (0x30FC, 0xFF70),
+    (0xFFE0, 0xA2),
+    (0xFFE1, 0xA3),
+    (0xFFE2, 0xAC),
+    (0xFFE3, 0xAF),
+    (0xFFE4, 0xA6),
+    (0xFFE5, 0xA5),
+    (0xFFE6, 0x20A9),
+];
+
+/// 전각 → 반각 (ASC). 한셀은 전각 영숫자·기호(U+FF01–FF5E)와 전각 공백 말고도 가타카나·일본 문장 부호·
+/// 전각 통화 기호(￦ → ₩)·화살표 따위를 반각으로 바꾸고, 탁음 가타카나(ガ)와 한글 자모는 그대로 둔다
+/// (대조 실험 casc — 「『」 는 U+A854 로 바뀐다)
 pub fn to_halfwidth(s: &str) -> String {
     s.chars()
         .map(|c| match c as u32 {
             0xFF01..=0xFF5E => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
             0x3000 => ' ',
+            u if u <= 0xFFFF => HALFWIDTH
+                .binary_search_by_key(&(u as u16), |p| p.0)
+                .ok()
+                .and_then(|i| char::from_u32(HALFWIDTH[i].1 as u32))
+                .unwrap_or(c),
             _ => c,
         })
         .collect()
 }
 
-/// 반각 → 전각 (DBCS, 한셀 JUNJA)
+/// 반각 → 전각 (DBCS, 한셀 JUNJA): ASCII·공백과 ASC 표를 거꾸로 (반각 가타카나 ｶﾞ 는 カ゛ 두 글자, 대조 실험 cdbcs)
 pub fn to_fullwidth(s: &str) -> String {
     s.chars()
         .map(|c| match c as u32 {
             0x21..=0x7E => char::from_u32(c as u32 + 0xFEE0).unwrap_or(c),
             0x20 => '\u{3000}',
-            _ => c,
+            u => HALFWIDTH
+                .iter()
+                .find(|p| p.1 as u32 == u && !(0xA854..=0xA855).contains(&p.1))
+                .and_then(|p| char::from_u32(p.0 as u32))
+                .unwrap_or(c),
         })
         .collect()
 }
