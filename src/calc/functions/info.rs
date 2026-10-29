@@ -103,6 +103,9 @@ pub const FNS: &[FnSpec] = &[
             "system" => Value::from("pcdos"),
             "osversion" => Value::from("Windows (32-bit) NT 6.2"),
             "origin" => Value::from("$A:$A$1"),
+            // release 는 "13.0", memavail 은 #N/A (대조 실험 cvol)
+            "release" => Value::from("13.0"),
+            "memavail" => Value::Error(ErrorKind::NA),
             _ => Value::Error(ErrorKind::Value),
         }
     }),
@@ -191,12 +194,22 @@ fn cell(ctx: &mut Ctx, a: &[Value]) -> Value {
     let (sheet, row, col) = (area.sheet, area.r0, area.c0);
     match what.as_str() {
         "address" => {
-            // 다른 시트면 "[파일 이름]시트!$B$3" (대조 실험 info)
+            // 다른 시트면 "[파일 이름]시트!$B$3" (대조 실험 info). 파일 이름이나 시트 이름에 따옴표가 필요한
+            // 글자가 있으면 "[파일]시트" 전체를 따옴표로 감싼다 ("'[cvol-002.cell]Data'!$B$2", 대조 실험 cvol)
             let addr = format!("${}${}", crate::model::CellRef::col_name(col), row + 1);
             if sheet != ctx.sheet && area.book == 0 {
                 let name = ctx.engine().sheet_names[sheet as usize].clone();
                 let file = ctx.engine().file_name.clone().unwrap_or_default();
-                Value::from(format!("[{file}]{name}!{addr}"))
+                let plain_file = file
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+                let plain_sheet = !super::lookup::quote_sheet(&name).starts_with('\'');
+                if plain_file && plain_sheet {
+                    Value::from(format!("[{file}]{name}!{addr}"))
+                } else {
+                    let inner = format!("[{file}]{name}").replace('\'', "''");
+                    Value::from(format!("'{inner}'!{addr}"))
+                }
             } else {
                 Value::from(addr)
             }

@@ -27,7 +27,7 @@ pub struct Workbook {
     pub file_version: Option<FileVersion>,
     pub date1904: bool,
     /// `calcPr` 의 표준 속성 (iterate·iterateCount·iterateDelta·calcMode …) — XML 에서 읽은 그대로 쓴다.
-    /// 반복 계산은 하지 않는다 (순환 참조 칸은 파일 값을 쓴다)
+    /// iterate·iterateCount 는 계산 엔진이 반복 계산에 쓴다 (`calc::engine`)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub calc_attrs: Vec<(String, String)>,
     /// 통합 문서 창 (`bookViews/workbookView`, 레거시 WINDOW1, XLSB BrtBookView). 없으면 기본값
