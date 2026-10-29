@@ -436,6 +436,67 @@ pub fn code(c: char) -> u32 {
     }
 }
 
+/// 949 바이트를 글로 (윈도의 949 → 유니코드 변환과 같게): 첫 바이트 81–FE 는 둘째 바이트와 함께 두 바이트
+/// 글자 하나 — 표에 없는 짝은 `?` 하나. 80·FF 와 끝에 홀로 남은 첫 바이트도 `?`.
+pub fn decode(bytes: &[u8]) -> String {
+    let rev = reverse();
+    let mut s = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b < 0x80 {
+            s.push(b as char);
+            i += 1;
+        } else if (0x81..=0xFE).contains(&b) && i + 1 < bytes.len() {
+            let k = ((b as u16) << 8) | bytes[i + 1] as u16;
+            s.push(rev.get(&k).copied().unwrap_or('?'));
+            i += 2;
+        } else {
+            s.push('?');
+            i += 1;
+        }
+    }
+    s
+}
+
+/// 글을 949 바이트로 (윈도의 유니코드 → 949 변환, 한셀의 텍스트 저장 관찰): 949 에 없는 글자는 `?`,
+/// 기본 평면 밖 글자는 UTF-16 단위마다 `?` (둘), U+0E0A 는 FE ED (한셀 CSV 저장 관찰 — 949 에 없는 BMP 글자
+/// 54946 자 중 `?` 가 아닌 유일한 것).
+pub fn encode_lossy(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        let u = c as u32;
+        if u < 0x80 {
+            out.push(u as u8);
+        } else if let Some(k) = encode(c) {
+            out.extend_from_slice(&k.to_be_bytes());
+        } else if u == 0x0E0A {
+            out.extend_from_slice(&[0xFE, 0xED]);
+        } else if u > 0xFFFF {
+            out.extend_from_slice(b"??");
+        } else {
+            out.push(b'?');
+        }
+    }
+    out
+}
+
+/// 두 바이트 코드 → 글자 (KS X 1001 표, 확장 한글, 사용자 정의 영역)
+fn reverse() -> &'static HashMap<u16, char> {
+    static R: OnceLock<HashMap<u16, char>> = OnceLock::new();
+    R.get_or_init(|| {
+        let mut m: HashMap<u16, char> = table().0.iter().map(|(&c, &k)| (k, c)).collect();
+        for u in (0xAC00..=0xD7A3).chain(0xE000..=0xE0BB) {
+            if let Some(c) = char::from_u32(u)
+                && let Some(k) = encode(c)
+            {
+                m.entry(k).or_insert(c);
+            }
+        }
+        m
+    })
+}
+
 /// (글자 → 코드, KS X 1001 한글 음절의 정렬된 목록)
 fn table() -> &'static (HashMap<char, u16>, Vec<u32>) {
     static T: OnceLock<(HashMap<char, u16>, Vec<u32>)> = OnceLock::new();
@@ -484,5 +545,14 @@ mod tests {
         for row in ROWS {
             assert_eq!(row.1.chars().count(), 94, "{:X}", row.0);
         }
+    }
+
+    #[test]
+    fn decode_round_trip() {
+        let s = "이름,값 갂힣漢€ⓐ①カタカナ";
+        assert_eq!(decode(&encode_lossy(s)), s);
+        assert_eq!(encode_lossy("é😀₩"), b"????".to_vec());
+        assert_eq!(decode(&[0x74, 0xC7, 0x84, 0xB9]), "t??");
+        assert_eq!(decode(&[0xB0]), "?");
     }
 }

@@ -3923,7 +3923,7 @@ fn art_color(v: u32) -> DrawColor {
 
 /// 머리글·바닥글의 글꼴 코드를 한셀이 XML 에 쓰는 꼴로: `&"이름, REGULAR "` → `&"이름,Regular"`.
 /// 레거시에는 글꼴 모양이 대문자 + 공백으로 기록된다 (관측).
-fn canonical_hf_fonts(s: &str) -> String {
+pub(crate) fn canonical_hf_fonts(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find("&\"") {
