@@ -81,7 +81,7 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 - **Legacy `.cell`** — Hancom Cell 2010 and earlier (OLE2 compound file + a BIFF8 variant: 32-bit row numbers, UTF-16 strings, Hancom-specific records)
 - **Encrypted documents** — ECMA-376 standard encryption (AES-128); the default password Hancom Cell uses for protected documents is handled automatically, user passwords via `--password`
 - `.xlsx` / `.xlsb` are read too
-- Excel 97-2003 `.xls`, Nexcel `.nxl`, CSV and text (`.csv` `.txt` `.prn` — opened with Hancom Cell's rules) — [other formats](docs/format/other-formats.md)
+- Excel 97-2003 `.xls`, Nexcel `.nxl`, ODF `.ods` (values, formulas, structure), CSV and text (`.csv` `.txt` `.prn` — opened with Hancom Cell's rules) — [other formats](docs/format/other-formats.md)
 
 ### Document model
 
@@ -105,7 +105,9 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 - XML `.cell` / `.xlsx` — converts legacy and binary documents to modern `.cell`
 - Binary `.cell` (`xlCellb`) — written the way Hancom Cell saves it (98.9% of records byte-identical)
 - Legacy `.cell` (`xlCell8`) — written the way Hancom Cell saves it with -2005 (97.7% of records identical to Hancom Cell opening the XML and saving legacy, ignoring per-save values such as the SST order; charts and tables not yet)
-- Excel 97-2003 `.xls` — legacy records transcoded to BIFF8 (Hancom Cell opens all 61 test files, 42 identical to its own `.xls`; charts not yet)
+- Excel 97-2003 `.xls` — legacy records transcoded to BIFF8, charts as BIFF8 chart substreams (Hancom Cell opens all 61 test files, 59 identical to its own `.xls`)
+- ODF `.ods` — values, formulas and structure
+- Nexcel `.nxl` — Hancom Cell's -2003 layout (BIFF8 frame + Hancom extensions; 57 of 61 identical to its own `.nxl`)
 - CSV, text and PRN — byte-identical to Hancom Cell's save (code page 949, 216/216), document-model JSON
 
 ### Editing
