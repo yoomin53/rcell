@@ -1203,6 +1203,25 @@ fn accrint(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let d1904 = ctx.date1904();
+    // 계산 방법(여덟째 인수)을 주면 기준과 관계없이 30/360(US) 일수: 참이면 발행일부터, 거짓이면 발행일과
+    // (첫 이자일 − 이자 기간) 가운데 늦은 날부터 결산일까지 (결산일이 앞이면 음수). 주지 않으면 기준대로
+    // (ACCRINT(39508,39691,39569,0.1,1000,4,1) = 16.576, …,4,1,TRUE) = 16.667, …,4,1,FALSE) = −8.056, 대조 실험 c3)
+    if a.len() >= 8 {
+        let by_issue = try_v!(super::bool_or(ctx, a, 7, true));
+        let start = if by_issue {
+            iss
+        } else {
+            let (y, m, d) = ymd_from_serial(first, d1904).unwrap_or((1900, 1, 1));
+            let total = y * 12 + m as i64 - 1 - (12.0 / fr) as i64;
+            let (ny, nm) = (total.div_euclid(12), (total.rem_euclid(12) + 1) as u32);
+            let nd = d.min(days_in_month(ny, nm));
+            serial_from_ymd(ny, nm as i64, nd as i64, d1904)
+                .unwrap_or(iss)
+                .max(iss)
+        };
+        let days = try_v!(days_30_360(start, set, true, d1904).ok_or(ErrorKind::Num));
+        return num(par * rate * days / 360.0);
+    }
     if b == 1 {
         return num(par * rate / fr * accrint_periods(iss, first, set, fr, d1904));
     }

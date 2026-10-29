@@ -73,8 +73,18 @@ pub const FNS: &[FnSpec] = &[
     f("DAYS360", 2, 3, V, days360),
     f("DATEDIF", 3, 3, V, datedif),
     f("YEARFRAC", 2, 3, V, |c, a| {
-        let s = try_v!(serial_arg_trunc(c, a, 0));
-        let e = try_v!(serial_arg_trunc(c, a, 1));
+        // 0 쪽으로 버린다 (−0.5 는 0), 1904 체계의 음수는 절댓값 (YEARFRAC(-1,10) = 0.025, DATEDIF 와 다르다,
+        // 대조 실험 cmisc·c3_1904)
+        let mut se = [0.0; 2];
+        for (i, x) in se.iter_mut().enumerate() {
+            let v = try_v!(num_arg(c, a, i));
+            let v = if c.date1904() && v < 0.0 { -v } else { v }.trunc();
+            if v < 0.0 || v >= dt::max_serial(c.date1904()) + 1.0 {
+                return Value::Error(ErrorKind::Num);
+            }
+            *x = v;
+        }
+        let [s, e] = se;
         let b = try_v!(num_or(c, a, 2, 0.0)).trunc();
         if !(0.0..=4.0).contains(&b) {
             return Value::Error(ErrorKind::Num);
@@ -107,7 +117,8 @@ pub fn serial_arg(ctx: &mut Ctx, a: &[Value], i: usize) -> Result<f64, ErrorKind
 /// 0 쪽으로 버린 뒤 범위를 보는 일련 번호 (DATEDIF·YEARFRAC: −0.5 는 0, 대조 실험 cmisc)
 fn serial_arg_trunc(ctx: &mut Ctx, a: &[Value], i: usize) -> Result<f64, ErrorKind> {
     let v = num_arg(ctx, a, i)?.trunc();
-    if v < 0.0 || v >= dt::max_serial(ctx.date1904()) + 1.0 {
+    // 1904 체계는 1900-01-00 까지의 음수도 그대로 (DATEDIF(-1,5,"D") = 6, 대조 실험 c3_1904)
+    if v < dt::min_serial(ctx.date1904()) || v >= dt::max_serial(ctx.date1904()) + 1.0 {
         return Err(ErrorKind::Num);
     }
     Ok(v)
@@ -570,7 +581,9 @@ fn workday(ctx: &mut Ctx, a: &[Value], intl: bool) -> Value {
         if d < 0.0 || d > dt::max_serial(d1904) {
             return Value::Error(ErrorKind::Num);
         }
-        let w = dt::weekday(d, d1904) as usize;
+        // WORKDAY.INTL 은 1904 체계에서도 1900 체계의 요일로 센다 (1904 의 WORKDAY.INTL(1,10) = 13,
+        // WORKDAY(1,10) = 14, 대조 실험 c3_1904)
+        let w = dt::weekday(d, d1904 && !intl) as usize;
         if !mask[w] && !hol.contains(&d) {
             left -= 1.0;
         }

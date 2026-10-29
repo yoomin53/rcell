@@ -403,7 +403,11 @@ pub const FNS: &[FnSpec] = &[
         if p <= 0.0 || p >= 1.0 || df < 1.0 {
             return Value::Error(ErrorKind::Num);
         }
-        // 한셀 근사 반복 (hcnum::t_inv), 소수 9자리 반올림 (대조 실험 x1·x3)
+        // 확률이 1E-6 보다 작으면 자유도와 관계없이 −1 (T.INV(9E-7,2) = −1, 대조 실험 cmisc·c3).
+        // 그 밖은 한셀 근사 반복 (hcnum::t_inv), 소수 9자리 반올림 (대조 실험 x1·x3)
+        if p < 1e-6 {
+            return Value::Number(-1.0);
+        }
         num(round9(hc::t_inv(p, df)))
     }),
     f("T.INV.2T", 2, 2, V, t_inv_2t),
@@ -1693,6 +1697,13 @@ fn binom_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
         }
         num(s.min(1.0))
     } else {
+        // 조합 수가 넘치면 #NUM! (BINOM.DIST(1000,2000,0.5,FALSE), 대조 실험 dist·c3)
+        let kk = k.min(n - k);
+        if sp::ln_gamma(n + 1.0) - sp::ln_gamma(kk + 1.0) - sp::ln_gamma(n - kk + 1.0)
+            > 709.782712893384
+        {
+            return Value::Error(ErrorKind::Num);
+        }
         num(sp::binom_pmf(k, n, p))
     }
 }

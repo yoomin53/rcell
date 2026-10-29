@@ -222,9 +222,9 @@ pub fn integrate_ab(f: impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
 
 /// [a, b] 적분, 칸 늘리기를 멈추는 차이 eps
 pub fn integrate_eps(f: impl Fn(f64) -> f64, a: f64, b: f64, eps: f64) -> f64 {
-    // 100 칸까지 멈추지 않으면 #NUM! (NaN): NORM.S.DIST(150) 은 89 칸으로 되고 (200) 은 116 칸이 필요해 #NUM!,
-    // NORMDIST(300,0,2) 94 칸 되고 (500,0,2) 150 칸 #NUM! (대조 실험 cmisc)
-    const LIMIT: usize = 100;
+    // 99 칸까지 멈추지 않으면 #NUM! (NaN): NORM.S.DIST(160) 은 95 칸으로 되고 (170) 은 100 칸이 필요해 #NUM!,
+    // NORMDIST(300,0,2) 94 칸 되고 (500,0,2) 150 칸 #NUM! (대조 실험 cmisc·c3)
+    const LIMIT: usize = 99;
     let mut prev = nc8(&f, a, b, 1);
     for p in 2..=LIMIT {
         let q = nc8(&f, a, b, p);

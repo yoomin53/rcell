@@ -668,11 +668,9 @@ pub fn parse_plain_number(t: &str) -> Option<f64> {
         if j == start {
             return None;
         }
-        // 지수가 ±308 을 넘으면 글로 남는다 (VALUE("1E-310")·VALUE("0E-400") = #VALUE!, 대조 실험 cmisc)
-        if e[1..]
-            .parse::<i32>()
-            .is_ok_and(|x| !(-308..=308).contains(&x))
-        {
+        // 쓴 지수가 −309 보다 작으면 글로 남는다 (VALUE("1E-310")·VALUE("100E-310")·VALUE("0E-400") = #VALUE!,
+        // "10E-309" 는 0, "0.1E+309" 는 1E+308 — 큰 쪽은 넘칠 때만, 대조 실험 cmisc·c3)
+        if e[1..].parse::<i32>().is_ok_and(|x| x < -309) {
             return None;
         }
         num.push_str(&e);
@@ -682,15 +680,15 @@ pub fn parse_plain_number(t: &str) -> Option<f64> {
         return None;
     }
     let mut v: f64 = parse_decimal15(&num)?;
+    // 비정규 수는 0 (VALUE("2.2250738585072E-308") = 0, % 는 그다음이라 VALUE("1E-306%") = 1E-308, 대조 실험 cmisc·c3)
+    if v != 0.0 && v.abs() < f64::MIN_POSITIVE {
+        v = 0.0;
+    }
     if percent {
         v /= 100.0;
     }
     if neg {
         v = -v;
-    }
-    // 비정규 수는 0 (VALUE("2.2250738585072E-308") = 0, 대조 실험 cmisc)
-    if v != 0.0 && v.abs() < f64::MIN_POSITIVE {
-        v = 0.0;
     }
     v.is_finite().then_some(v)
 }
