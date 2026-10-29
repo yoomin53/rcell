@@ -222,7 +222,6 @@ enum Cmd {
     },
     /// 암호화된 문서(OLE2 EncryptionInfo + EncryptedPackage)를 풀어 ZIP 패키지로 저장 — 리버스 엔지니어링용
     Decrypt { input: PathBuf, output: PathBuf },
-    /// 컨테이너 항목 하나를 16진수로 출력 — 리버스 엔지니어링용
     /// 레거시 .cell 의 /Workbook 레코드를 BIFF8(.xls) 로 바꿔 쓴다 (--reverse: .xls → 레거시 레코드) — 리버스
     /// 엔지니어링용 (한셀이 같은 문서를 두 형식으로 저장한 것을 맞대 볼 때)
     Biff8 {
@@ -231,6 +230,7 @@ enum Cmd {
         #[arg(long)]
         reverse: bool,
     },
+    /// 컨테이너 항목 하나를 16진수로 출력 — 리버스 엔지니어링용
     Hexdump {
         file: PathBuf,
         /// ZIP 파트 이름 또는 OLE2 스트림 경로 (예: /Workbook)

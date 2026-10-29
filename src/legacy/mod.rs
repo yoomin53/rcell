@@ -205,6 +205,14 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
     let mut wb = reader::read_workbook_stream(&stream)?;
     if xls {
         wb.application = Some("Excel".into());
+        // 표 스타일 표(TABLESTYLES)가 없는 파일 (넥셀 .nxl 등): 한셀은 새 문서의 기본 표·피벗 스타일을 쓴다
+        if wb.styles.table_styles.is_none() {
+            wb.styles.table_styles = Some(crate::model::TableStyles {
+                default_table_style: Some("TableStyleMedium2".into()),
+                default_pivot_style: Some("PivotStyleLight16".into()),
+                styles: Vec::new(),
+            });
+        }
     }
     // 피벗: 캐시 스트림(_SX_DB_CUR)과 시트의 피벗 레코드 → XML 피벗 파트
     pivot::read(bytes, &stream, &mut wb);

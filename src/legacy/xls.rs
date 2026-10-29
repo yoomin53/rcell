@@ -1090,9 +1090,23 @@ fn conv(rt: u16, d: &[u8], to8: bool) -> Option<Vec<u8>> {
             cv.rest();
         }
         0x0862 => {
-            // SHEETEXT: FRT 12 + cb + icvPlain = 20바이트. 한컴은 뒤에 COLORREF 를 붙이고, BIFF8 은 선택 부분을
-            // 붙일 수 있다 — 둘 다 뗀다
+            // SHEETEXT: FRT 12 + cb + icvPlain = 20바이트. 한컴은 뒤에 탭 색 COLORREF 를 붙이고 (넥셀 .nxl 도),
+            // BIFF8 은 선택 부분(cb 0x28: 비트 u32 + CFColor)을 붙일 수 있다. .xls 로는 둘 다 뗀다 (한셀과 같다),
+            // 레거시로는 COLORREF 를 두고 BIFF8 의 RGB CFColor (종류 2) 는 COLORREF 로
             cv.copy(20.min(d.len()))?;
+            if !to8 {
+                let cb = d
+                    .get(12..16)
+                    .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+                if cb == Some(0x14) && d.len() == 24 {
+                    cv.copy(4)?;
+                } else if cb == Some(0x28) && d.len() >= 32 && d[24..28] == [2, 0, 0, 0] {
+                    if let Some(c) = cv.o.get_mut(12..16) {
+                        c.copy_from_slice(&0x14u32.to_le_bytes());
+                    }
+                    cv.o.extend_from_slice(&[d[28], d[29], d[30], 0]);
+                }
+            }
         }
         0x088D..=0x0890 => {
             // DXF·TABLESTYLES·TABLESTYLE·TABLESTYLEELEMENT: FRT 머리의 예약 칸은 0 (한셀은 쓰레기 값을 쓴다)
@@ -3045,7 +3059,9 @@ pub fn to_hancom(stream: &[u8]) -> Result<Vec<u8>> {
     let mut paras: Vec<(i32, i32, u8)> = vec![(0, 0, 1)];
     let mut links: Vec<u32> = Vec::new();
     let mut xf_para: HashMap<u16, u32> = HashMap::new();
-    {
+    // 넥셀 .nxl (한셀 -2003): BIFF8 틀에 한컴 XF 확장(54바이트 이상)과 문단 모양 레코드를 그대로 담는다 — XF 는 그대로 둔다
+    let hancom_xf = globals.iter().any(|r| r.rt == 0x00E0 && r.data.len() >= 54);
+    if !hancom_xf {
         for (i, r) in globals.iter().filter(|r| r.rt == 0x00E0).enumerate() {
             let i = i as u16;
             let d = &r.data;
@@ -3135,8 +3151,11 @@ pub fn to_hancom(stream: &[u8]) -> Result<Vec<u8>> {
                         g.push((0xA011, a));
                     }
                 }
-                let mut b =
-                    xf_to_hancom(&d, xfext.get(&xf_i), &palette, xf_para.get(&xf_i).copied());
+                let mut b = if hancom_xf {
+                    d.clone()
+                } else {
+                    xf_to_hancom(&d, xfext.get(&xf_i), &palette, xf_para.get(&xf_i).copied())
+                };
                 if let Some(f) = xf_font.get(&xf_i) {
                     b[0..2].copy_from_slice(&f.to_le_bytes());
                 }
@@ -3200,4 +3219,41 @@ pub fn to_hancom(stream: &[u8]) -> Result<Vec<u8>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sheetext_tab_color() {
+        // 한컴·넥셀: 20바이트 + COLORREF (00b050)
+        let mut h = vec![0x62, 0x08];
+        h.extend_from_slice(&[0; 10]);
+        h.extend_from_slice(&[0x14, 0, 0, 0, 0x39, 0, 0, 0, 0x00, 0xB0, 0x50, 0x00]);
+        assert_eq!(conv(0x0862, &h, true).unwrap(), h[..20].to_vec());
+        assert_eq!(conv(0x0862, &h, false).unwrap(), h);
+        // BIFF8 선택 부분 (cb 0x28, CFColor 종류 2 RGBA) → COLORREF
+        let mut b = h[..12].to_vec();
+        b.extend_from_slice(&[0x28, 0, 0, 0, 0x39, 0, 0, 0]);
+        b.extend_from_slice(&[0x39, 0, 0, 0, 2, 0, 0, 0, 0x00, 0xB0, 0x50, 0xFF]);
+        b.extend_from_slice(&[0; 8]);
+        assert_eq!(conv(0x0862, &b, false).unwrap(), h);
+    }
+
+    #[test]
+    fn xfext_search() {
+        // DXFN 표준 6바이트(블록 없음) + 한컴 확장 4바이트 + XFExtNoFRT (글자 색 0x0D)
+        let mut d = vec![0xFF, 0xFF, 0x1F, 0x80, 0x00, 0x03];
+        d.extend_from_slice(&[1, 2, 3, 4]);
+        let x = [
+            0, 0, 0xFF, 0xFF, 0, 0, 1, 0, 0x0D, 0, 20, 0, 2, 0, 0, 0, 0x11, 0x22, 0x33, 0xFF, 0, 0,
+            0, 0, 0, 0, 0, 0,
+        ];
+        d.extend_from_slice(&x);
+        let o = dxfn12_to8(&d).unwrap();
+        assert_eq!(&o[..6], &[0xFF, 0xFF, 0x1F, 0x80, 0x00, 0x00]);
+        assert_eq!(&o[6..], &x);
+        assert_eq!(xfext_props(&x), vec![(0x0D, x[12..28].to_vec())]);
+    }
 }
