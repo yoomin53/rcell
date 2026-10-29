@@ -163,7 +163,7 @@ impl Svg {
     fn new(w: f64, h: f64) -> Svg {
         Svg {
             s: format!(
-                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.1} {h:.1}\" font-family=\"'맑은 고딕','Malgun Gothic',sans-serif\">"
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.1} {h:.1}\" style=\"will-change:transform\" font-family=\"'맑은 고딕','Malgun Gothic',sans-serif\">"
             ),
             defs: String::new(),
             clip: 0,
