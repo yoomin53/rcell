@@ -12,7 +12,7 @@
 //   5. 차이가 나면 한셀 결과도 다시 저장해(X.S.hcell.as.cell) 한셀이 다시 연 결과끼리 한 번 더 비교한다
 //      (한셀은 문서를 열면서 기록 없는 행을 자동 높이로 맞추는 등 고치는 것이 있다)
 //
-// 사용: node tools/probe/edit-e2e.js <corpus 폴더> <작업 폴더> [--skip-hcell] [--diff-only] [--reuse-hcell] [--only 이름]
+// 사용: node tools/probe/edit-e2e.js <corpus 폴더> <작업 폴더> [--skip-hcell] [--diff-only] [--reuse-hcell] [--only 이름] [--scripts 대본,…]
 //   --reuse-hcell : 한셀 편집 결과(X.S.hcell.cell)는 그대로 두고 rcell 쪽과 한셀 다시 저장만 새로 한다
 // (rcell 은 target/release/rcell(.exe), 한셀은 COM 자동화 — 한셀이 설치된 Windows 에서)
 "use strict";
@@ -84,7 +84,51 @@ const SCRIPTS = {
     { op: "renameSheet", sheet: 0, name: "편집됨" },
     { op: "moveSheet", sheet: 1, to: 0 },
   ],
+  fill: [
+    { op: "autoFill", sheet: 0, range: "A3:B4", to: "A3:B12" },
+    { op: "autoFill", sheet: 0, range: "C2", to: "C2:H2" },
+    { op: "autoFill", sheet: 0, range: "D6:D7", to: "D1:D7" },
+    { op: "series", sheet: 0, range: "AA1:AA8", step: 3 },
+    { op: "set", sheet: 0, cell: "AB1", input: "월" },
+    { op: "autoFill", sheet: 0, range: "AB1", to: "AB1:AB9" },
+  ],
+  replace: [
+    { op: "replace", sheet: 0, find: "1", replace: "7", range: "A1:Z200" },
+    { op: "replace", sheet: 0, find: "SUM", replace: "sum", matchCase: true, range: "A1:Z200" },
+    { op: "replace", find: "합계", replace: "총계", all: true, range: "A1:Z200" },
+    { op: "replace", sheet: 0, find: "a", replace: "Ä", wholeCell: true, range: "A1:Z200" },
+  ],
+  shift: [
+    { op: "insertCells", sheet: 0, range: "B3:C4", shift: "down" },
+    { op: "deleteCells", sheet: 0, range: "D6:E6", shift: "left" },
+    { op: "insertCells", sheet: 0, range: "A10:B10", shift: "right" },
+    { op: "deleteCells", sheet: 0, range: "C2", shift: "up" },
+    { op: "hideRows", sheet: 0, row: 7, count: 2 },
+    { op: "hideCols", sheet: 0, col: "F" },
+    { op: "tabColor", sheet: 0, color: "00B050" },
+  ],
+  paste: [
+    { op: "pasteSpecial", sheet: 0, from: "A1:D6", to: "AF1", paste: "values" },
+    { op: "pasteSpecial", sheet: 0, from: "A1:D6", to: "AK1", paste: "formats" },
+    { op: "pasteSpecial", sheet: 0, from: "A1:D6", to: "AP1", paste: "all", transpose: true },
+    { op: "pasteSpecial", sheet: 0, from: "B2:C5", to: "AF10", paste: "formulas", skipBlanks: true },
+    { op: "pasteSpecial", sheet: 0, from: "C3:D4", to: "AF1", paste: "values", operation: "add" },
+  ],
+  objects: [
+    { op: "addHyperlink", sheet: 0, cell: "AA3", address: "https://example.com/", tooltip: "팁" },
+    { op: "addName", name: "범위1", refersTo: "$A$1:$C$4" },
+    { op: "deleteCf", sheet: 0, range: "A1:B20" },
+    { op: "deleteValidation", sheet: 0, range: "A1:B20" },
+    { op: "deleteComment", sheet: 0, range: "A1:D20" },
+  ],
+  sort: [
+    { op: "sort", sheet: 0, range: "A1:H40", keys: [{ by: "B" }], header: true },
+    { op: "sort", sheet: 0, range: "B3:F30", keys: [{ by: "C", desc: true }, { by: "B" }] },
+  ],
 };
+// --scripts 이름,이름 : 그 대본만
+const pick = process.argv.includes("--scripts") ? process.argv[process.argv.indexOf("--scripts") + 1].split(",") : null;
+if (pick) for (const k of Object.keys(SCRIPTS)) if (!pick.includes(k)) delete SCRIPTS[k];
 
 fs.mkdirSync(work, { recursive: true });
 const jobs = [];
@@ -153,7 +197,14 @@ for (const j of jobs) {
     bySCRIPT[sname].same++;
     continue;
   }
-  const diffs = out ? out.split(/\n(?=\S)/).filter((d) => !d.startsWith("… 외")) : [];
+  // 편집 시간(app.xml TotalTime)은 한셀 자동화가 편집에 쓴 분 수라 편집 결과가 아니다 — 그것만 다르면 같다고 본다
+  const diffs = out ? out.split(/\n(?=\S)/).filter((d) => !d.startsWith("… 외") && !d.startsWith("차이 ") && !d.startsWith("편집 시간")) : [];
+  if (!diffs.length) {
+    same++;
+    bySCRIPT[sname].same++;
+    lines.push(`${key}: 편집 시간만 다름 (같다고 봄)`);
+    continue;
+  }
   differ.push({ key, sname, a, b });
   items += diffs.length;
   lines.push(`${key}: 차이 ${diffs.length}`);

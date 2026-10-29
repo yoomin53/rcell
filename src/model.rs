@@ -26,6 +26,10 @@ pub struct Workbook {
     pub properties: DocProperties,
     pub file_version: Option<FileVersion>,
     pub date1904: bool,
+    /// `calcPr` 의 표준 속성 (iterate·iterateCount·iterateDelta·calcMode …) — XML 에서 읽은 그대로 쓴다.
+    /// 반복 계산은 하지 않는다 (순환 참조 칸은 파일 값을 쓴다)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub calc_attrs: Vec<(String, String)>,
     /// 통합 문서 창 (`bookViews/workbookView`, 레거시 WINDOW1, XLSB BrtBookView). 없으면 기본값
     #[serde(skip_serializing_if = "Option::is_none")]
     pub view: Option<WorkbookView>,
@@ -274,6 +278,9 @@ pub struct Sheet {
     pub data_validations: Vec<DataValidation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<AutoFilter>,
+    /// 시트의 정렬 상태 (`worksheet/sortState` — 정렬 개체로 정렬한 기록)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_state: Option<SortState>,
     /// 필터가 걸려 있음 (`sheetPr/@filterMode`)
     pub filter_mode: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2241,6 +2248,29 @@ pub struct RowInfo {
 pub struct AutoFilter {
     pub range: String,
     pub columns: Vec<FilterColumn>,
+    /// 자동 필터로 정렬한 기록 (`autoFilter/sortState`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_state: Option<SortState>,
+}
+
+/// 정렬 상태 (`sortState`). 한셀은 `ref` 를 범위의 둘째 행부터, 조건의 `ref` 를 범위 첫 행부터 쓴다
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct SortState {
+    pub range: String,
+    /// 왼쪽에서 오른쪽 (`columnSort`)
+    pub column_sort: bool,
+    pub case_sensitive: bool,
+    pub conditions: Vec<SortCondition>,
+}
+
+/// 정렬 조건 (`sortCondition`)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct SortCondition {
+    pub range: String,
+    pub descending: bool,
+    /// `sortBy` (`value` …, 없으면 값)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<String>,
 }
 
 /// 자동 필터의 열 하나 (`filterColumn`)

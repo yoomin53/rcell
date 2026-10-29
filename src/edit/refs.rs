@@ -742,6 +742,33 @@ pub fn shift_formula(f: &str, here: &str, target: &str, op: Shift) -> String {
     })
 }
 
+/// 셀 삽입·삭제(한 띠만 미는 것)의 참조: 미는 축과 엇갈린 축의 범위가 띠(`band`) 안에 모두 든 참조만 행·열 편집처럼
+/// 바꾼다 (띠에 일부만 걸친 참조는 그대로 — 셀 삽입·삭제 대조 실험)
+pub fn shift_formula_band(
+    f: &str,
+    here: &str,
+    target: &str,
+    op: Shift,
+    band: (u32, u32),
+) -> String {
+    map_refs(f, |r| {
+        if !on_sheet(r, here, target) {
+            return None;
+        }
+        let Body::Area(a) = r.body else { return None };
+        let (r0, c0, r1, c1) = a.bounds();
+        let cross = if op.on_rows() { (c0, c1) } else { (r0, r1) };
+        if cross.0 < band.0 || cross.1 > band.1 {
+            return None;
+        }
+        Some(match op.area(a, false) {
+            Some(b) if b == a => return None,
+            Some(b) => format!("{}{}", r.prefix_raw, b.text()),
+            None => format!("{}#REF!", r.prefix_raw),
+        })
+    })
+}
+
 /// 조건부 서식·유효성처럼 범위의 왼쪽 위 칸에 걸린 수식: 상대 참조를 옛 기준 칸(`old_anchor`)에서 새 범위의
 /// 왼쪽 위 칸이 편집 앞에 있던 자리(`from`)로 옮긴 뒤 행·열 편집을 맞춘다 (한셀 대조 실험 — 1–3행 삭제로
 /// `B1:B10` 이 `B1:B7` 이 되면 `C1>$A$5` 는 `C1>$A$2`).

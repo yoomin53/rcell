@@ -45,6 +45,9 @@ pub fn parse_table(root: &Element) -> Table {
                 .sml_children("filterColumn")
                 .map(parse_filter_column)
                 .collect(),
+            sort_state: af
+                .sml_child("sortState")
+                .map(crate::parser::sheet::parse_sort_state),
         }),
         columns: root
             .sml_child("tableColumns")

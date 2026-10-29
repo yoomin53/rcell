@@ -21,13 +21,22 @@
 //! # Ok::<(), rcell::Error>(())
 //! ```
 
+pub mod cells;
 mod cfpaste;
 pub mod clip;
+pub mod collate;
+mod collate_data;
+pub mod fill;
 mod filter;
+pub mod find;
 pub mod input;
+pub mod objects;
 pub mod refs;
+pub mod sort;
+pub mod special;
 pub mod structure;
 pub mod style;
+pub mod view;
 
 use std::str::FromStr;
 
@@ -93,10 +102,22 @@ fn one() -> u32 {
     1
 }
 
+fn shift_down() -> cells::ShiftDir {
+    cells::ShiftDir::Down
+}
+
+fn shift_up() -> cells::ShiftDir {
+    cells::ShiftDir::Up
+}
+
+fn one_f() -> f64 {
+    1.0
+}
+
 /// 편집 명령 하나. 행은 1부터(한셀 화면과 같다), 열은 이름(`C`), 셀·범위는 A1 표기.
 /// `sheet` 를 빼면 첫 시트
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(tag = "op", rename_all = "camelCase")]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Edit {
     /// 셀에 입력 (한셀 입력 규칙 — 숫자·날짜·백분율·`'글`·논리값·오류·`=수식`)
     Set {
@@ -236,7 +257,7 @@ pub enum Edit {
         sheet: Option<SheetSel>,
         from: String,
         to: String,
-        #[serde(default)]
+        #[serde(default, alias = "to_sheet")]
         to_sheet: Option<SheetSel>,
     },
     /// 잘라 붙이기 (셀 옮기기)
@@ -245,7 +266,7 @@ pub enum Edit {
         sheet: Option<SheetSel>,
         from: String,
         to: String,
-        #[serde(default)]
+        #[serde(default, alias = "to_sheet")]
         to_sheet: Option<SheetSel>,
     },
     FillDown {
@@ -265,6 +286,372 @@ pub enum Edit {
         cell: String,
         text: String,
     },
+    /// 정렬 (12절). 열쇠는 열 이름 (왼쪽에서 오른쪽이면 행 번호)
+    Sort {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        keys: Vec<SortBy>,
+        /// 첫 행(열)은 머리글
+        #[serde(default)]
+        header: bool,
+        #[serde(default)]
+        match_case: bool,
+        #[serde(default)]
+        left_to_right: bool,
+    },
+    /// 자동 채우기 (채우기 핸들 — 13절): `range` 씨앗으로 `to` 를 채운다
+    AutoFill {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        to: String,
+        /// `default` `copy` `series` `formats` `values` `days` `weekdays` `months` `years`
+        #[serde(default, rename = "type")]
+        kind: fill::FillType,
+    },
+    /// 연속 데이터 채우기 (연속 데이터 대화상자)
+    Series {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        /// 행 방향(오른쪽으로). 빼면 범위 모양으로 (열이 행보다 많으면 행 방향)
+        #[serde(default)]
+        rows: Option<bool>,
+        /// `linear` `growth` `date` `autoFill`
+        #[serde(default, rename = "type")]
+        kind: fill::SeriesType,
+        /// `day` `weekday` `month` `year`
+        #[serde(default)]
+        date: fill::DateUnit,
+        #[serde(default = "one_f")]
+        step: f64,
+        #[serde(default)]
+        stop: Option<f64>,
+        #[serde(default)]
+        trend: bool,
+    },
+    /// 바꾸기 (14절). `all` 이면 모든 시트, `range` 가 있으면 그 안에서만
+    Replace {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        find: String,
+        #[serde(default)]
+        replace: String,
+        #[serde(default)]
+        match_case: bool,
+        /// 셀 전체 (한셀: 공백으로 나뉜 낱말 전체)
+        #[serde(default)]
+        whole_cell: bool,
+        #[serde(default)]
+        all: bool,
+        #[serde(default)]
+        range: Option<String>,
+    },
+    /// 선택하여 붙이기 (16절): `paste` = `all` `values` `formats` `formulas` `allExceptBorders`
+    /// `formulasAndNumberFormats` `valuesAndNumberFormats`, `operation` = `none` `add` `subtract` `multiply` `divide`
+    PasteSpecial {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        from: String,
+        to: String,
+        #[serde(default, alias = "to_sheet")]
+        to_sheet: Option<SheetSel>,
+        #[serde(default)]
+        paste: special::PasteWhat,
+        #[serde(default)]
+        operation: special::PasteOp,
+        #[serde(default)]
+        skip_blanks: bool,
+        #[serde(default)]
+        transpose: bool,
+    },
+    /// 메모 더하기 (`author` 가 있으면 글 앞에 `작성자:` 줄)
+    AddComment {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        cell: String,
+        text: String,
+        #[serde(default)]
+        author: String,
+    },
+    /// 메모 고치기 (글 전체)
+    EditComment {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        cell: String,
+        text: String,
+    },
+    /// 범위의 메모 지우기
+    DeleteComment {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+    },
+    /// 하이퍼링크 더하기 (`address` 바깥 주소 또는 `location` 문서 안 자리)
+    AddHyperlink {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        cell: String,
+        #[serde(default)]
+        address: Option<String>,
+        #[serde(default)]
+        location: Option<String>,
+        #[serde(default)]
+        tooltip: Option<String>,
+        #[serde(default)]
+        display: Option<String>,
+    },
+    /// 범위의 하이퍼링크 지우기
+    RemoveHyperlink {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+    },
+    /// 이름 정의 (`local` 이면 `sheet` 의 시트 범위)
+    AddName {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        name: String,
+        refers_to: String,
+        #[serde(default)]
+        local: bool,
+    },
+    /// 이름 지우기
+    DeleteName {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        name: String,
+        #[serde(default)]
+        local: bool,
+    },
+    /// 데이터 유효성 더하기 (`type`: `whole` `decimal` `list` `date` `time` `textLength` `custom`)
+    AddValidation {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        operator: Option<String>,
+        #[serde(default)]
+        formula1: String,
+        #[serde(default)]
+        formula2: Option<String>,
+        /// `stop`(기본) `warning` `information`
+        #[serde(default)]
+        error_style: Option<String>,
+        #[serde(default)]
+        prompt: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    /// 범위의 데이터 유효성 지우기
+    DeleteValidation {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+    },
+    /// 조건부 서식 규칙 더하기 (`type`: `cellIs` `expression` …, 서식은 `fill` `fontColor` `bold`)
+    AddCf {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        operator: Option<String>,
+        #[serde(default)]
+        formula1: Option<String>,
+        #[serde(default)]
+        formula2: Option<String>,
+        #[serde(default)]
+        fill: Option<String>,
+        #[serde(default)]
+        font_color: Option<String>,
+        #[serde(default)]
+        bold: bool,
+    },
+    /// 범위의 조건부 서식 지우기
+    DeleteCf {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+    },
+    /// 열 너비 자동 맞춤
+    AutoFitCols {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 행 높이 자동 맞춤
+    AutoFitRows {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        row: u32,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 셀 삽입 (`shift`: `down` 아래로 밀기, `right` 오른쪽으로 밀기)
+    InsertCells {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(default = "shift_down")]
+        shift: cells::ShiftDir,
+    },
+    /// 셀 삭제 (`shift`: `up` 위로 당기기, `left` 왼쪽으로 당기기)
+    DeleteCells {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(default = "shift_up")]
+        shift: cells::ShiftDir,
+    },
+    /// 행 숨기기
+    HideRows {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        row: u32,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 행 숨기기 취소
+    UnhideRows {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        row: u32,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 행 그룹 (개요 수준 +1)
+    GroupRows {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        row: u32,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 행 그룹 해제
+    UngroupRows {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        row: u32,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 열 숨기기
+    HideCols {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 열 숨기기 취소
+    UnhideCols {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 열 그룹
+    GroupCols {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 열 그룹 해제
+    UngroupCols {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// 시트 숨기기
+    HideSheet {
+        sheet: SheetSel,
+    },
+    /// 시트 숨기기 취소
+    UnhideSheet {
+        sheet: SheetSel,
+    },
+    /// 틀 고정 (`cell` 의 왼쪽·위)
+    Freeze {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        cell: String,
+    },
+    /// 틀 고정 풀기
+    Unfreeze {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+    },
+    /// 시트 탭 색 (`RRGGBB`, 빈 글이면 없앤다)
+    TabColor {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        #[serde(default)]
+        color: String,
+    },
+    /// 자동 필터로 정렬 (필터 범위를 첫 행을 머리글로 두고 한 열로 정렬하고 `sortState` 를 남긴다)
+    SortFilter {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        col: String,
+        #[serde(default)]
+        desc: bool,
+        #[serde(default)]
+        match_case: bool,
+    },
+}
+
+/// 정렬 열쇠 하나 (`{"by":"B","desc":true}`)
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct SortBy {
+    pub by: ColOrRow,
+    #[serde(default)]
+    pub desc: bool,
+}
+
+/// 열 이름 또는 행 번호 (1부터)
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ColOrRow {
+    Num(u32),
+    Name(String),
+}
+
+impl ColOrRow {
+    /// 열 번호 (0부터)
+    pub fn col(&self) -> crate::Result<u32> {
+        match self {
+            ColOrRow::Num(n) if *n >= 1 => Ok(n - 1),
+            ColOrRow::Num(_) => Err(err("열 번호는 1부터입니다")),
+            ColOrRow::Name(s) => match s.trim().parse::<u32>() {
+                Ok(n) if n >= 1 => Ok(n - 1),
+                _ => parse_col(s),
+            },
+        }
+    }
+
+    /// 행 번호 (0부터)
+    pub fn row(&self) -> crate::Result<u32> {
+        let n = match self {
+            ColOrRow::Num(n) => *n,
+            ColOrRow::Name(s) => s
+                .trim()
+                .parse()
+                .map_err(|_| err(format!("행 번호가 아닙니다: {s}")))?,
+        };
+        n.checked_sub(1).ok_or_else(|| err("행 번호는 1부터입니다"))
+    }
 }
 
 /// 편집 대본 (`{"edits": [...]}`)
@@ -499,6 +886,377 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
         Edit::PasteText { sheet, cell, text } => {
             let i = si(wb, sheet)?;
             paste_text(wb, i, cell.parse()?, text)?;
+            Ok(i)
+        }
+        Edit::Sort {
+            sheet,
+            range,
+            keys,
+            header,
+            match_case,
+            left_to_right,
+        } => {
+            let i = si(wb, sheet)?;
+            let keys = keys
+                .iter()
+                .map(|k| {
+                    let index = if *left_to_right {
+                        k.by.row()?
+                    } else {
+                        k.by.col()?
+                    };
+                    Ok(sort::SortKey {
+                        index,
+                        desc: k.desc,
+                    })
+                })
+                .collect::<crate::Result<Vec<_>>>()?;
+            let opt = sort::SortOptions {
+                keys,
+                header: *header,
+                match_case: *match_case,
+                left_to_right: *left_to_right,
+            };
+            sort::sort(wb, i, parse_range(range)?, &opt)?;
+            Ok(i)
+        }
+        Edit::AutoFill {
+            sheet,
+            range,
+            to,
+            kind,
+        } => {
+            let i = si(wb, sheet)?;
+            fill::auto_fill(wb, i, parse_range(range)?, parse_range(to)?, *kind)?;
+            Ok(i)
+        }
+        Edit::Series {
+            sheet,
+            range,
+            rows,
+            kind,
+            date,
+            step,
+            stop,
+            trend,
+        } => {
+            let i = si(wb, sheet)?;
+            let rg = parse_range(range)?;
+            let by_rows = rows.unwrap_or(rg.end.col - rg.start.col > rg.end.row - rg.start.row);
+            let o = fill::SeriesOptions {
+                rows: by_rows,
+                kind: *kind,
+                date: *date,
+                step: *step,
+                stop: *stop,
+                trend: *trend,
+            };
+            fill::data_series(wb, i, rg, &o)?;
+            Ok(i)
+        }
+        Edit::Replace {
+            sheet,
+            find,
+            replace,
+            match_case,
+            whole_cell,
+            all,
+            range,
+        } => {
+            let i = si(wb, sheet)?;
+            let o = find::FindOptions {
+                what: find.clone(),
+                match_case: *match_case,
+                whole: *whole_cell,
+                in_values: false,
+                all_sheets: *all,
+                range: range.as_deref().map(parse_range).transpose()?,
+            };
+            find::replace_all(wb, i, &o, replace)?;
+            Ok(i)
+        }
+        Edit::HideRows { sheet, row, count } => {
+            let i = si(wb, sheet)?;
+            let r = row.saturating_sub(1);
+            view::hide_rows(wb, i, r, r + count.max(&1) - 1, true)?;
+            Ok(i)
+        }
+        Edit::UnhideRows { sheet, row, count } => {
+            let i = si(wb, sheet)?;
+            let r = row.saturating_sub(1);
+            view::hide_rows(wb, i, r, r + count.max(&1) - 1, false)?;
+            Ok(i)
+        }
+        Edit::GroupRows { sheet, row, count } => {
+            let i = si(wb, sheet)?;
+            let r = row.saturating_sub(1);
+            view::group_rows(wb, i, r, r + count.max(&1) - 1, true)?;
+            Ok(i)
+        }
+        Edit::UngroupRows { sheet, row, count } => {
+            let i = si(wb, sheet)?;
+            let r = row.saturating_sub(1);
+            view::group_rows(wb, i, r, r + count.max(&1) - 1, false)?;
+            Ok(i)
+        }
+        Edit::HideCols { sheet, col, count } => {
+            let i = si(wb, sheet)?;
+            let c = parse_col(col)?;
+            view::hide_cols(wb, i, c, c + count.max(&1) - 1, true)?;
+            Ok(i)
+        }
+        Edit::UnhideCols { sheet, col, count } => {
+            let i = si(wb, sheet)?;
+            let c = parse_col(col)?;
+            view::hide_cols(wb, i, c, c + count.max(&1) - 1, false)?;
+            Ok(i)
+        }
+        Edit::GroupCols { sheet, col, count } => {
+            let i = si(wb, sheet)?;
+            let c = parse_col(col)?;
+            view::group_cols(wb, i, c, c + count.max(&1) - 1, true)?;
+            Ok(i)
+        }
+        Edit::UngroupCols { sheet, col, count } => {
+            let i = si(wb, sheet)?;
+            let c = parse_col(col)?;
+            view::group_cols(wb, i, c, c + count.max(&1) - 1, false)?;
+            Ok(i)
+        }
+        Edit::PasteSpecial {
+            sheet,
+            from,
+            to,
+            to_sheet,
+            paste,
+            operation,
+            skip_blanks,
+            transpose,
+        } => {
+            let i = si(wb, sheet)?;
+            let d = match to_sheet {
+                Some(s) => sheet_index(wb, Some(s))?,
+                None => i,
+            };
+            let o = special::PasteOptions {
+                what: *paste,
+                op: *operation,
+                skip_blanks: *skip_blanks,
+                transpose: *transpose,
+            };
+            special::paste_special(wb, i, parse_range(from)?, d, parse_range(to)?, &o)?;
+            Ok(d)
+        }
+        Edit::AddComment {
+            sheet,
+            cell,
+            text,
+            author,
+        } => {
+            let i = si(wb, sheet)?;
+            objects::add_comment(wb, i, cell.parse()?, author, text)?;
+            Ok(i)
+        }
+        Edit::EditComment { sheet, cell, text } => {
+            let i = si(wb, sheet)?;
+            objects::edit_comment(wb, i, cell.parse()?, text)?;
+            Ok(i)
+        }
+        Edit::DeleteComment { sheet, range } => {
+            let i = si(wb, sheet)?;
+            objects::delete_comments(wb, i, parse_range(range)?)?;
+            Ok(i)
+        }
+        Edit::AddHyperlink {
+            sheet,
+            cell,
+            address,
+            location,
+            tooltip,
+            display,
+        } => {
+            let i = si(wb, sheet)?;
+            objects::add_hyperlink(
+                wb,
+                i,
+                cell.parse()?,
+                address.as_deref(),
+                location.as_deref(),
+                tooltip.as_deref(),
+                display.as_deref(),
+            )?;
+            Ok(i)
+        }
+        Edit::RemoveHyperlink { sheet, range } => {
+            let i = si(wb, sheet)?;
+            objects::remove_hyperlinks(wb, i, parse_range(range)?)?;
+            Ok(i)
+        }
+        Edit::AddName {
+            sheet,
+            name,
+            refers_to,
+            local,
+        } => {
+            let i = si(wb, sheet)?;
+            // 시트 없는 참조: 시트를 고르지 않았으면 활성 시트 (한셀 Names.Add 관측)
+            let target = match sheet {
+                Some(_) => i,
+                None => wb
+                    .view
+                    .as_ref()
+                    .map(|v| v.active_tab as usize)
+                    .filter(|&a| a < wb.sheets.len())
+                    .unwrap_or(i),
+            };
+            objects::add_name(wb, target, local.then_some(i), name, refers_to)?;
+            Ok(i)
+        }
+        Edit::DeleteName { sheet, name, local } => {
+            let i = si(wb, sheet)?;
+            objects::delete_name(wb, local.then_some(i), name)?;
+            Ok(i)
+        }
+        Edit::AddValidation {
+            sheet,
+            range,
+            kind,
+            operator,
+            formula1,
+            formula2,
+            error_style,
+            prompt,
+            error,
+        } => {
+            let i = si(wb, sheet)?;
+            let f1 = if kind == "list" && !formula1.starts_with('=') {
+                format!("\"{formula1}\"")
+            } else {
+                formula1.trim_start_matches('=').to_string()
+            };
+            let dv = crate::model::DataValidation {
+                kind: kind.clone(),
+                operator: operator.clone(),
+                formula1: Some(f1),
+                formula2: formula2
+                    .as_ref()
+                    .map(|f| f.trim_start_matches('=').to_string()),
+                allow_blank: true,
+                show_input: true,
+                show_error: true,
+                error_style: error_style.clone(),
+                prompt: prompt.clone(),
+                error: error.clone(),
+                ..Default::default()
+            };
+            objects::add_validation(wb, i, parse_range(range)?, dv)?;
+            Ok(i)
+        }
+        Edit::DeleteValidation { sheet, range } => {
+            let i = si(wb, sheet)?;
+            objects::delete_validation(wb, i, parse_range(range)?)?;
+            Ok(i)
+        }
+        Edit::AddCf {
+            sheet,
+            range,
+            kind,
+            operator,
+            formula1,
+            formula2,
+            fill,
+            font_color,
+            bold,
+        } => {
+            let i = si(wb, sheet)?;
+            let formulas = formula1.iter().chain(formula2.iter()).cloned().collect();
+            objects::add_cf(
+                wb,
+                i,
+                parse_range(range)?,
+                kind,
+                operator.as_deref(),
+                formulas,
+                fill.as_deref(),
+                font_color.as_deref(),
+                *bold,
+            )?;
+            Ok(i)
+        }
+        Edit::DeleteCf { sheet, range } => {
+            let i = si(wb, sheet)?;
+            objects::delete_cf(wb, i, parse_range(range)?)?;
+            Ok(i)
+        }
+        Edit::AutoFitCols { sheet, col, count } => {
+            let i = si(wb, sheet)?;
+            let c = parse_col(col)?;
+            objects::autofit_cols(wb, i, c, c + count.max(&1) - 1)?;
+            Ok(i)
+        }
+        Edit::AutoFitRows { sheet, row, count } => {
+            let i = si(wb, sheet)?;
+            let r = row.saturating_sub(1);
+            objects::autofit_rows(wb, i, r, r + count.max(&1) - 1)?;
+            Ok(i)
+        }
+        Edit::InsertCells {
+            sheet,
+            range,
+            shift,
+        } => {
+            let i = si(wb, sheet)?;
+            if !matches!(shift, cells::ShiftDir::Down | cells::ShiftDir::Right) {
+                return Err(err("셀 삽입은 아래(down)·오른쪽(right)으로 밉니다"));
+            }
+            cells::shift_cells(wb, i, parse_range(range)?, *shift)?;
+            Ok(i)
+        }
+        Edit::DeleteCells {
+            sheet,
+            range,
+            shift,
+        } => {
+            let i = si(wb, sheet)?;
+            if !matches!(shift, cells::ShiftDir::Up | cells::ShiftDir::Left) {
+                return Err(err("셀 삭제는 위(up)·왼쪽(left)으로 당깁니다"));
+            }
+            cells::shift_cells(wb, i, parse_range(range)?, *shift)?;
+            Ok(i)
+        }
+        Edit::HideSheet { sheet } => {
+            let i = sheet_index(wb, Some(sheet))?;
+            view::hide_sheet(wb, i, true)?;
+            Ok(i)
+        }
+        Edit::UnhideSheet { sheet } => {
+            let i = sheet_index(wb, Some(sheet))?;
+            view::hide_sheet(wb, i, false)?;
+            Ok(i)
+        }
+        Edit::Freeze { sheet, cell } => {
+            let i = si(wb, sheet)?;
+            view::freeze(wb, i, cell.parse()?)?;
+            Ok(i)
+        }
+        Edit::Unfreeze { sheet } => {
+            let i = si(wb, sheet)?;
+            view::unfreeze(wb, i)?;
+            Ok(i)
+        }
+        Edit::TabColor { sheet, color } => {
+            let i = si(wb, sheet)?;
+            view::tab_color(wb, i, color)?;
+            Ok(i)
+        }
+        Edit::SortFilter {
+            sheet,
+            col,
+            desc,
+            match_case,
+        } => {
+            let i = si(wb, sheet)?;
+            sort::sort_filter(wb, i, parse_col(col)?, *desc, *match_case)?;
             Ok(i)
         }
     }
@@ -1272,13 +2030,13 @@ pub fn set_col_width(
 }
 
 /// 열 너비·행 높이를 바꾸기 전의 배치: 크기를 지키는 그림(`editAs="oneCell"`)의 크기, 메모 상자를 둘 화면 자리
-struct Before {
+pub(crate) struct Before {
     sizes: Vec<Option<(i64, i64)>>,
     old: Option<crate::render::Geometry>,
     ext: (u32, u32),
 }
 
-fn one_cell_before(wb: &Workbook, si: usize) -> Before {
+pub(crate) fn one_cell_before(wb: &Workbook, si: usize) -> Before {
     let sheet = &wb.sheets[si];
     let pictures = sheet
         .shapes
@@ -1301,6 +2059,17 @@ fn one_cell_before(wb: &Workbook, si: usize) -> Before {
         old: Some(g),
         ext,
     }
+}
+
+/// 행·열을 숨기거나 보인 뒤: 크기를 지키는 그림의 끝 표지만 다시 정한다 (한셀 — 7·8행을 숨기면 그 행에 걸친 그림
+/// 끝이 8행에서 10행으로)
+pub(crate) fn one_cell_pictures_after(wb: &mut Workbook, si: usize, before: &Before) {
+    if before.old.is_none() {
+        return;
+    }
+    let g = crate::render::sheet_geometry(wb, &wb.sheets[si], before.ext.0, before.ext.1);
+    structure::keep_one_cell_sizes(&mut wb.sheets[si], &before.sizes, &g);
+    structure::snap_from_hidden(&mut wb.sheets[si], &before.sizes, &g);
 }
 
 fn one_cell_after(wb: &mut Workbook, si: usize, before: &Before) {

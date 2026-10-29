@@ -124,6 +124,12 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook> {
         });
     }
     if let Some(calc) = root.sml_child("calcPr") {
+        wb.calc_attrs = calc
+            .attrs
+            .iter()
+            .filter(|a| a.ns.is_none() && !a.name.starts_with("xmlns"))
+            .map(|a| (a.name.clone(), a.value.clone()))
+            .collect();
         for a in calc
             .attrs
             .iter()

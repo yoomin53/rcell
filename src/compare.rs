@@ -1453,8 +1453,44 @@ fn af_key(f: &AutoFilter) -> String {
                 )
             })
             .collect();
-        format!("{} [{}]", norm_ranges(Some(&f.range)), cols.join("; "))
+        let sort = f
+            .sort_state
+            .as_ref()
+            .map(sort_state_key)
+            .unwrap_or_default();
+        format!(
+            "{} [{}]{sort}",
+            norm_ranges(Some(&f.range)),
+            cols.join("; ")
+        )
     }
+}
+
+/// 정렬 상태 (범위, 왼쪽에서 오른쪽, 대소문자, 조건들)
+fn sort_state_key(st: &crate::model::SortState) -> String {
+    let conds: Vec<String> = st
+        .conditions
+        .iter()
+        .map(|c| {
+            format!(
+                "{}{}{}",
+                norm_ranges(Some(&c.range)),
+                if c.descending { " desc" } else { "" },
+                c.sort_by
+                    .as_deref()
+                    .filter(|b| *b != "value")
+                    .map(|b| format!(" by={b}"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect();
+    format!(
+        " sort[{}{}{}: {}]",
+        norm_ranges(Some(&st.range)),
+        if st.column_sort { " cols" } else { "" },
+        if st.case_sensitive { " case" } else { "" },
+        conds.join(", ")
+    )
 }
 
 /// 표: 이름·번호·범위·머리글/요약 행·종류·열(요약 함수·글·수식, 계산 열)·자동 필터·스타일. 차등 서식은 번호가

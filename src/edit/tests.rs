@@ -1226,6 +1226,7 @@ fn filter_book() -> Workbook {
     }
     wb.sheets[0].auto_filter = Some(crate::model::AutoFilter {
         range: "A1:E12".into(),
+        sort_state: None,
         columns: vec![
             crate::model::FilterColumn {
                 col_id: 0,

@@ -51,6 +51,7 @@ footer a{color:var(--accent)}
 .ed-clip{position:absolute;pointer-events:none;border:2px dashed #1565c0;z-index:9;box-sizing:border-box}
 .ed-ref{position:absolute;pointer-events:none;border:2px dashed #c2185b;z-index:9;box-sizing:border-box}
 .ed-guide{position:absolute;pointer-events:none;background:var(--sel);z-index:10}
+.ed-handle{position:absolute;width:7px;height:7px;background:var(--sel);border:1px solid #fff;z-index:10;cursor:crosshair}
 #editor{position:absolute;z-index:11;margin:0;padding:1px 3px;border:2px solid var(--sel);resize:none;overflow:hidden;font:11pt '맑은 고딕','Malgun Gothic',sans-serif;background:#fff;color:#000;outline:none;box-shadow:0 2px 6px rgba(0,0,0,.25);white-space:pre-wrap}
 table.rc-sheet thead th.ed-hdr,table.rc-sheet tbody th.ed-hdr{background:#d7e9df;color:#000}
 #menu{position:fixed;z-index:50;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:4px 0;min-width:180px}
@@ -139,6 +140,10 @@ table.rc-sheet thead th.ed-hdr,table.rc-sheet tbody th.ed-hdr{background:#d7e9df
   <button id="del-row" title="행 삭제">행−</button>
   <button id="ins-col" title="열 삽입">열+</button>
   <button id="del-col" title="열 삭제">열−</button>
+  <span class="sep"></span>
+  <button id="sort-asc" title="오름차순 정렬 (활성 칸의 열)">↑정렬</button>
+  <button id="sort-desc" title="내림차순 정렬 (활성 칸의 열)">↓정렬</button>
+  <button id="find" title="찾기 (Ctrl+F)">찾기</button>
 </div>
 <div id="fbar" hidden>
   <input id="namebox" aria-label="셀 주소" spellcheck="false">
