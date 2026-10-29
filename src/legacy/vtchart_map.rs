@@ -102,7 +102,7 @@ fn ref_size(r: &ChartRef) -> (u64, u64) {
 /// 셀 서식 코드 → 한셀이 차트 캐시·연결된 축 형식에 쓰는 꼴: `General` → `G/표준`, 글자 따옴표와 `\` 를
 /// 벗기고 `[Red]` → `[빨강]` (관측: 서식 번호 0, 6 `"₩"#,##0;[Red]\-"₩"#,##0` → `₩#,##0;[빨강]-₩#,##0`,
 /// 10 `0.00%`). 다른 색 이름은 표본에 없어 그대로 둔다
-fn chart_format_code(code: &str) -> String {
+pub(crate) fn chart_format_code(code: &str) -> String {
     if code.eq_ignore_ascii_case("General") {
         return GENERAL_KO.into();
     }

@@ -237,9 +237,14 @@ struct Blip {
 
 /// 시트 하나의 그리기 개체
 enum Obj<'a> {
-    Button { col: u32, row: u32 },
+    Button {
+        col: u32,
+        row: u32,
+    },
     Shape(&'a Shape),
     Note(&'a Comment),
+    /// .xls 의 차트 도형 (레거시는 0x7EF0 에 차트를 담고 그리기에 넣지 않는다)
+    Chart(&'a Shape),
 }
 
 pub(crate) struct Art {
@@ -254,6 +259,8 @@ pub(crate) struct Art {
     pub text_para: Option<u32>,
     /// 메모 글의 가로 맞춤(한글 문단 정렬 번호, [`note_hangul_align`]) → 그 맞춤의 문단 모양 번호
     pub note_para: HashMap<u8, u32>,
+    /// .xls 로 쓴다: 차트 도형도 그리기에 넣는다 (시트의 처음에 — 한셀의 .xls 저장)
+    xls: bool,
 }
 
 /// 메모의 가로 맞춤 → 한글 문단 정렬 번호 (2 오른쪽, 3 가운데, 0 양쪽, 4 배분). 왼쪽(기본)은 None — 메모 대조
@@ -283,8 +290,17 @@ pub(crate) fn has_text_shapes(wb: &Workbook) -> bool {
     wb.sheets.iter().any(|s| any(&s.shapes))
 }
 
-fn sheet_objects(sheet: &crate::model::Sheet) -> Vec<Obj<'_>> {
+fn sheet_objects(sheet: &crate::model::Sheet, xls: bool) -> Vec<Obj<'_>> {
     let mut v = Vec::new();
+    if xls {
+        for s in sheet
+            .shapes
+            .iter()
+            .filter(|s| s.kind == ShapeKind::Chart && s.chart.is_some())
+        {
+            v.push(Obj::Chart(s));
+        }
+    }
     if let Some(af) = &sheet.auto_filter
         && let Some(r) = crate::model::CellRange::parse(&af.range)
     {
@@ -347,8 +363,10 @@ fn count_shapes(s: &Shape) -> u32 {
 }
 
 impl Art {
-    pub fn new(wb: &Workbook) -> Art {
+    /// `xls` 면 차트 도형도 그리기에 넣는다 (.xls 쓰기)
+    pub fn new_with(wb: &Workbook, xls: bool) -> Art {
         let mut art = Art {
+            xls,
             blips: Vec::new(),
             pib: HashMap::new(),
             dgid: Vec::new(),
@@ -401,7 +419,7 @@ impl Art {
                 });
                 art.pib.insert(t.to_string(), art.blips.len() as u32);
             }
-            let objs = sheet_objects(sheet);
+            let objs = sheet_objects(sheet, xls);
             if objs.is_empty() {
                 art.dgid.push(None);
                 art.csp.push(0);
@@ -516,7 +534,7 @@ impl Art {
         let Some(dgid) = self.dgid.get(ctx.si).copied().flatten() else {
             return Ok(());
         };
-        let objs = sheet_objects(ctx.sheet);
+        let objs = sheet_objects(ctx.sheet, self.xls);
         // 도형마다 (SpContainer 의 앞부분, OBJ, 글 상자 여부, TXO)
         struct Part {
             sp: Vec<u8>,
@@ -564,6 +582,43 @@ impl Art {
                     obj.u16(0x13)
                         .u16(0x10)
                         .bytes(&[0, 0, 0, 0, 0, 0, 1, 3, 0, 0, 0x0A, 0, 0, 0, 0, 0]);
+                    obj.u32(0);
+                    parts.push(Part {
+                        sp,
+                        obj: obj.take(),
+                        txo: None,
+                    });
+                }
+                Obj::Chart(s) => {
+                    // 한셀의 .xls 차트 도형: 종류 0, 잠금 0x007F 031E031E, 0x0304 0, 0x033F 00080008, 이름, 앵커, OBJ
+                    // (ot 5, 플래그 0x0011). 차트 부분 스트림은 OBJ 뒤에 (xls::to_biff8_with)
+                    spid += 1;
+                    obj_id += 1;
+                    let mut fsp = Buf::new();
+                    fsp.u32(spid).u32(0x0A00);
+                    let mut sp = rec(2, 0, 0xF00A, &fsp.0);
+                    let mut p = Props(Vec::new());
+                    p.set(0x007F, 0x031E_031E);
+                    p.set(0x0304, 0);
+                    p.set(0x033F, 0x0008_0008);
+                    if !s.name.is_empty() {
+                        p.string(0x0380, &s.name);
+                    }
+                    sp.extend(p.record());
+                    let flag = match s.anchor.edit_as.as_deref() {
+                        Some("oneCell") => 2,
+                        Some("absolute") => 3,
+                        _ => 0,
+                    };
+                    sp.extend(client_anchor(flag, legacy_anchor(&s.anchor, ctx)));
+                    sp.extend(rec(0, 0, 0xF011, &[]));
+                    let mut obj = Buf::new();
+                    obj.u16(0x15)
+                        .u16(0x12)
+                        .u16(0x05)
+                        .u16(obj_id)
+                        .u16(0x0011)
+                        .bytes(&[0; 12]);
                     obj.u32(0);
                     parts.push(Part {
                         sp,
@@ -956,7 +1011,7 @@ impl Art {
 
     /// NOTE 레코드 (그리기 뒤, 메모마다)
     pub fn notes(&self, out: &mut Out, ctx: &SheetCtx) {
-        let objs = sheet_objects(ctx.sheet);
+        let objs = sheet_objects(ctx.sheet, self.xls);
         let mut id = 0u16;
         for o in &objs {
             id += match o {

@@ -24,12 +24,14 @@ pub mod props;
 pub mod reader;
 pub mod recdiff;
 mod sheetx;
+mod vbs;
 pub(crate) mod vtbuild;
 pub(crate) mod vtchart;
 pub(crate) mod vtchart_map;
 pub(crate) mod vtwrite;
 pub mod writer;
 pub mod xls;
+mod xls_chart;
 
 pub use writer::{Report, WriteOptions, write_with_options, write_with_report};
 
@@ -105,13 +107,35 @@ pub fn chart_dumps_with(bytes: &[u8], offsets: bool) -> Result<Vec<String>> {
 /// 통합 문서를 Excel 97-2003 `.xls` (BIFF8) 로 쓴다: 레거시로 쓴 `/Workbook` 을 [`xls::to_biff8`] 로 바꾸고 문서
 /// 속성과 함께 담는다 (매크로 프로젝트·피벗 캐시는 담지 않는다)
 pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)> {
-    let (bytes, mut report) = write_with_options(wb, opts)?;
+    let mut o = opts.clone();
+    o.xls = true;
+    let (bytes, mut report) = write_with_options(wb, &o)?;
+    // 차트: 레거시가 만든 XTI 로 계열 참조를 쓴다
+    let stream = container::read_entry(&bytes, "/Workbook")?;
+    let xti = xls::sheet_xti(&stream);
     let hints: Vec<xls::SheetHints> = wb
         .sheets
         .iter()
-        .map(|s| xls::SheetHints {
+        .enumerate()
+        .map(|(si, s)| xls::SheetHints {
             summary_above: s.summary_above,
             summary_left: s.summary_left,
+            charts: s
+                .shapes
+                .iter()
+                .filter(|x| x.kind == crate::model::ShapeKind::Chart)
+                .filter_map(|x| x.chart.as_ref())
+                .map(|ch| {
+                    let of = |name: Option<&str>| -> Option<u16> {
+                        let i = match name {
+                            Some(n) => wb.sheets.iter().position(|x| x.name == n)?,
+                            None => si,
+                        };
+                        xti.get(&(i as u16)).copied()
+                    };
+                    xls_chart::write(ch, wb, si, &of)
+                })
+                .collect(),
         })
         .collect();
     let tips: Vec<xls::LinkTips> = wb
@@ -133,10 +157,16 @@ pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)
         s.iter()
             .any(|x| x.chart.is_some() || has_chart(&x.children))
     }
-    if wb.sheets.iter().any(|s| has_chart(&s.shapes)) {
+    if wb.sheets.iter().any(|s| {
+        s.shapes.iter().any(|x| {
+            x.children
+                .iter()
+                .any(|c| has_chart(std::slice::from_ref(c)))
+        })
+    }) {
         report
             .warnings
-            .push(".xls: 차트는 아직 쓰지 않는다 (BIFF8 차트 레코드)".into());
+            .push(".xls: 묶음 안의 차트는 쓰지 않는다".into());
     }
     if wb.raw_parts.iter().any(|p| p.name.contains("pivotTable")) {
         report
@@ -144,6 +174,56 @@ pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)
             .push(".xls: 피벗 표는 아직 쓰지 않는다".into());
     }
     Ok((out, report))
+}
+
+/// 통합 문서를 넥셀 `.nxl` (한셀 -2003) 로 쓴다: 레거시로 쓴 `/Workbook` 을 [`xls::to_nxl`] 로 바꾼다 (차트는 레거시와 같은
+/// 한컴 차트 레코드, 매크로 프로젝트는 담지 않는다)
+pub fn write_nxl(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)> {
+    let (bytes, report) = write_with_options(wb, opts)?;
+    let tips = link_tips(wb);
+    let stream = container::read_entry(&bytes, "/Workbook")?;
+    let wbs = xls::to_nxl(&stream, &tips)?;
+    let macros = wb.hancom.vbs_project.as_deref().and_then(vbs::to_nexcel);
+    Ok((with_summary(&bytes, &wbs, macros.as_deref()), report))
+}
+
+/// 시트마다 하이퍼링크 도구 설명 (`.xls`·`.nxl` 의 HLINK 표시 이름 자리)
+fn link_tips(wb: &Workbook) -> Vec<xls::LinkTips> {
+    wb.sheets
+        .iter()
+        .map(|s| {
+            s.hyperlinks
+                .iter()
+                .filter_map(|h| {
+                    let tip = h.tooltip.clone()?;
+                    let r = crate::model::CellRange::parse(&h.range)?;
+                    Some(((r.start.row, r.start.col), tip))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// `/Workbook` 스트림 + 레거시 파일의 문서 속성 → OLE2 파일
+fn with_summary(legacy: &[u8], wbs: &[u8], macros: Option<&[u8]>) -> Vec<u8> {
+    let summary = container::read_entry(legacy, "/SummaryInformation").ok();
+    let mut streams = vec![crate::cfb_write::Stream {
+        name: "Workbook",
+        data: wbs,
+    }];
+    if let Some(s) = &summary {
+        streams.push(crate::cfb_write::Stream {
+            name: "SummaryInformation",
+            data: s,
+        });
+    }
+    if let Some(m) = macros {
+        streams.push(crate::cfb_write::Stream {
+            name: "_VBS_PROJECT",
+            data: m,
+        });
+    }
+    crate::cfb_write::write_with_storages(&streams, &[], 0)
 }
 
 /// 레거시 `.cell` 파일 바이트 → `.xls` 파일 바이트 (`/Workbook` 을 BIFF8 로, 문서 속성은 그대로)
@@ -197,12 +277,34 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
         return Err(Error::MissingPart("/Workbook".into()));
     }
     let mut stream = container::read_entry(bytes, "/Workbook")?;
-    // Excel 97-2003 `.xls` (BIFF8): 레거시 레코드로 바꿔 같은 리더로 읽는다
+    // Excel 97-2003 `.xls` (BIFF8): 레거시 레코드로 바꿔 같은 리더로 읽는다 (차트는 따로 — 차트 부분 스트림)
     let xls = xls::is_biff8(&stream);
+    let xls_charts = xls.then(|| xls::charts(&stream));
     if xls {
         stream = xls::to_hancom(&stream)?;
     }
     let mut wb = reader::read_workbook_stream(&stream)?;
+    if let Some(xc) = &xls_charts {
+        let ctx = xls_chart::ReadCtx {
+            xti_names: &xc.xti_names,
+            font: xc.font.clone(),
+            palette: &xc.palette,
+        };
+        for (sheet, charts) in wb.sheets.iter_mut().zip(&xc.sheets) {
+            let shapes = sheet
+                .shapes
+                .iter_mut()
+                .filter(|s| s.kind == crate::model::ShapeKind::Chart);
+            for (shape, recs) in shapes.zip(charts) {
+                // 한셀은 .xls 의 차트 도형 잠금을 읽지 않는다
+                shape.locks.clear();
+                shape.chart = xls_chart::read(recs, &ctx);
+            }
+        }
+    }
+    if xls_charts.is_some() {
+        xls_chart::apply_cell_formats(&mut wb);
+    }
     if xls {
         wb.application = Some("Excel".into());
         // 표 스타일 표(TABLESTYLES)가 없는 파일 (넥셀 .nxl 등): 한셀은 새 문서의 기본 표·피벗 스타일을 쓴다
@@ -224,6 +326,9 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
     // 한컴 매크로 프로젝트: XML 의 `xl/vbsProject.bin` 안 스트림과 바이트가 같다 (패키지 파트 실험)
     if has(crate::ns::VBS_PROJECT_STREAM) {
         wb.hancom.vbs_project = Some(container::read_entry(bytes, crate::ns::VBS_PROJECT_STREAM)?);
+    } else if has("/_VBS_PROJECT") {
+        // 넥셀: 코드 페이지 949 글 → 한셀의 _W 꼴
+        wb.hancom.vbs_project = vbs::from_nexcel(&container::read_entry(bytes, "/_VBS_PROJECT")?);
     }
     Ok(wb)
 }
