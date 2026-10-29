@@ -113,9 +113,10 @@ foreach ($line in $tsv) {
     $t = $t.Replace("</body>", "<script>(function(){var w=document.querySelector('.rc-wrap:not(.rc-hidden)');var td=w&&w.querySelector('tbody td');if(!td)return;var c=w.querySelector('.rc-canvas');c.style.position='relative';var z=parseFloat(getComputedStyle(c).zoom)||1;var r=td.getBoundingClientRect();var dx=-r.left/z,dy=-r.top/z;c.style.left=dx+'px';c.style.top=dy+'px';var q=td.getBoundingClientRect();var kx=dx?(q.left-r.left)/dx:1,ky=dy?(q.top-r.top)/dy:1;if(kx&&ky){c.style.left=(dx-q.left/kx)+'px';c.style.top=(dy-q.top/ky)+'px';}})();</script></body>")
     [IO.File]::WriteAllText($html, $t, (New-Object Text.UTF8Encoding $false))
     $shot = Join-Path $OutDir "$stem.rcell.png"
-    # Edge 는 진행 메시지를 표준 오류로 쓴다 — 오류로 보지 않게
+    # Edge 는 진행 메시지를 표준 오류로 쓴다 — 오류로 보지 않게. 네트워크 서비스를 따로 띄우면 그것이 죽었다 다시 뜨기를
+    # 기다리느라 한 장에 2~11분 걸릴 때가 있다 — 같은 프로세스에서, 배경 네트워크·구성 요소 갱신 없이
     $ErrorActionPreference = "Continue"
-    & $Edge --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1 "--user-data-dir=$profile" "--window-size=$gw,$gh" "--screenshot=$shot" ("file:///" + $html.Replace("\", "/")) 2>&1 | Out-Null
+    & $Edge --headless=new --disable-gpu --hide-scrollbars --no-first-run --disable-background-networking --disable-component-update --disable-sync --disable-extensions --enable-features=NetworkServiceInProcess2,NetworkServiceInProcess --force-device-scale-factor=1 "--user-data-dir=$profile" "--window-size=$gw,$gh" "--screenshot=$shot" ("file:///" + $html.Replace("\", "/")) 2>&1 | Out-Null
     $ErrorActionPreference = "Stop"
     for ($i = 0; $i -lt 50 -and -not (Test-Path $shot); $i++) { Start-Sleep -Milliseconds 200 }
     if (-not (Test-Path $shot)) { Write-Host "FAIL edge $stem"; continue }
