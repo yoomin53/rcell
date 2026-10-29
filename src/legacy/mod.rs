@@ -175,6 +175,49 @@ pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)
     Ok((out, report))
 }
 
+/// 통합 문서를 넥셀 `.nxl` (한셀 -2003) 로 쓴다: 레거시로 쓴 `/Workbook` 을 [`xls::to_nxl`] 로 바꾼다 (차트는 레거시와 같은
+/// 한컴 차트 레코드, 매크로 프로젝트는 담지 않는다)
+pub fn write_nxl(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)> {
+    let (bytes, report) = write_with_options(wb, opts)?;
+    let tips = link_tips(wb);
+    let stream = container::read_entry(&bytes, "/Workbook")?;
+    let wbs = xls::to_nxl(&stream, &tips)?;
+    Ok((with_summary(&bytes, &wbs), report))
+}
+
+/// 시트마다 하이퍼링크 도구 설명 (`.xls`·`.nxl` 의 HLINK 표시 이름 자리)
+fn link_tips(wb: &Workbook) -> Vec<xls::LinkTips> {
+    wb.sheets
+        .iter()
+        .map(|s| {
+            s.hyperlinks
+                .iter()
+                .filter_map(|h| {
+                    let tip = h.tooltip.clone()?;
+                    let r = crate::model::CellRange::parse(&h.range)?;
+                    Some(((r.start.row, r.start.col), tip))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// `/Workbook` 스트림 + 레거시 파일의 문서 속성 → OLE2 파일
+fn with_summary(legacy: &[u8], wbs: &[u8]) -> Vec<u8> {
+    let summary = container::read_entry(legacy, "/SummaryInformation").ok();
+    let mut streams = vec![crate::cfb_write::Stream {
+        name: "Workbook",
+        data: wbs,
+    }];
+    if let Some(s) = &summary {
+        streams.push(crate::cfb_write::Stream {
+            name: "SummaryInformation",
+            data: s,
+        });
+    }
+    crate::cfb_write::write_with_storages(&streams, &[], 0)
+}
+
 /// 레거시 `.cell` 파일 바이트 → `.xls` 파일 바이트 (`/Workbook` 을 BIFF8 로, 문서 속성은 그대로)
 pub fn xls_from_legacy_file(bytes: &[u8]) -> Result<Vec<u8>> {
     xls_file(bytes, &[], &[])

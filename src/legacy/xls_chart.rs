@@ -901,7 +901,11 @@ pub(crate) fn read_xml(recs: &[(u16, Vec<u8>)], ctx: &ReadCtx) -> Option<String>
         return None;
     }
     let (face, axis_sz) = (&ctx.font.0, ctx.font.1);
-    let kind = if p.kind == "barh" { "bar" } else { p.kind.as_str() };
+    let kind = if p.kind == "barh" {
+        "bar"
+    } else {
+        p.kind.as_str()
+    };
     let scatter = kind == "scatter";
     let mut x = String::new();
     x.push_str(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><c:chartSpace xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:date1904 val="0"/><c:roundedCorners val="0"/><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice xmlns:c14="http://schemas.microsoft.com/office/drawing/2007/8/2/chart" Requires="c14"><c14:style val="102"/></mc:Choice><mc:Fallback><c:style val="2"/></mc:Fallback></mc:AlternateContent><c:chart>"#);
@@ -945,10 +949,7 @@ pub(crate) fn read_xml(recs: &[(u16, Vec<u8>)], ctx: &ReadCtx) -> Option<String>
         "scatter" => x.push_str(r#"<c:scatterStyle val="marker"/>"#),
         _ => {}
     }
-    x.push_str(&format!(
-        r#"<c:varyColors val="{}"/>"#,
-        u8::from(p.vary)
-    ));
+    x.push_str(&format!(r#"<c:varyColors val="{}"/>"#, u8::from(p.vary)));
     let n_rows = p
         .labels
         .keys()
@@ -964,19 +965,14 @@ pub(crate) fn read_xml(recs: &[(u16, Vec<u8>)], ctx: &ReadCtx) -> Option<String>
         .filter(|(_, s)| s.val.as_ref().is_some_and(|v| v.0.is_some()))
         .collect();
     for (i, (orig, s)) in series.iter().enumerate() {
-        x.push_str(&format!(
-            r#"<c:ser><c:idx val="{i}"/><c:order val="{i}"/>"#
-        ));
+        x.push_str(&format!(r#"<c:ser><c:idx val="{i}"/><c:order val="{i}"/>"#));
         if let Some(f) = &s.name_ref {
             x.push_str(&format!(
                 r#"<c:tx><c:strRef><c:f>{}</c:f><c:strCache><c:ptCount val="1"/>"#,
                 esc(f)
             ));
             if let Some(t) = &s.name_text {
-                x.push_str(&format!(
-                    r#"<c:pt idx="0"><c:v>{}</c:v></c:pt>"#,
-                    esc(t)
-                ));
+                x.push_str(&format!(r#"<c:pt idx="0"><c:v>{}</c:v></c:pt>"#, esc(t)));
             }
             x.push_str("</c:strCache></c:strRef></c:tx>");
         } else if let Some(t) = s.name_lit.as_ref().or(s.name_text.as_ref()) {
@@ -1033,10 +1029,7 @@ pub(crate) fn read_xml(recs: &[(u16, Vec<u8>)], ctx: &ReadCtx) -> Option<String>
                     r#"<c:strRef><c:f>{f}</c:f><c:strCache><c:ptCount val="{n_rows}"/>"#
                 ));
                 for (r, v) in &pts {
-                    x.push_str(&format!(
-                        r#"<c:pt idx="{r}"><c:v>{}</c:v></c:pt>"#,
-                        esc(v)
-                    ));
+                    x.push_str(&format!(r#"<c:pt idx="{r}"><c:v>{}</c:v></c:pt>"#, esc(v)));
                 }
                 x.push_str("</c:strCache></c:strRef>");
             } else {
@@ -1044,10 +1037,7 @@ pub(crate) fn read_xml(recs: &[(u16, Vec<u8>)], ctx: &ReadCtx) -> Option<String>
                     r#"<c:numRef><c:f>{f}</c:f><c:numCache><c:formatCode>G/표준</c:formatCode><c:ptCount val="{n_rows}"/>"#
                 ));
                 for (r, v) in &pts {
-                    x.push_str(&format!(
-                        r#"<c:pt idx="{r}"><c:v>{}</c:v></c:pt>"#,
-                        esc(v)
-                    ));
+                    x.push_str(&format!(r#"<c:pt idx="{r}"><c:v>{}</c:v></c:pt>"#, esc(v)));
                 }
                 x.push_str("</c:numCache></c:numRef>");
             }
@@ -1088,10 +1078,7 @@ pub(crate) fn read_xml(recs: &[(u16, Vec<u8>)], ctx: &ReadCtx) -> Option<String>
             if p.three_d {
                 x.push_str(r#"<c:gapDepth val="150"/><c:shape val="box"/>"#);
             } else {
-                x.push_str(&format!(
-                    r#"<c:overlap val="{}"/>"#,
-                    -(p.bar.0 as i32)
-                ));
+                x.push_str(&format!(r#"<c:overlap val="{}"/>"#, -(p.bar.0 as i32)));
             }
         }
         "line" => x.push_str(r#"<c:marker val="1"/><c:smooth val="0"/>"#),
@@ -1118,7 +1105,11 @@ pub(crate) fn read_xml(recs: &[(u16, Vec<u8>)], ctx: &ReadCtx) -> Option<String>
                 _ => "nextTo",
             };
             let del = u8::from(!a.shown);
-            let grid = if a.gridlines { "<c:majorGridlines/>" } else { "" };
+            let grid = if a.gridlines {
+                "<c:majorGridlines/>"
+            } else {
+                ""
+            };
             // 누적 막대(fStacked)면 한셀은 축마다 0% 표시 형식을 붙인다 (원본에 연결 안 함)
             let stacked = kind == "bar" && p.bar.1 & 2 != 0;
             let pct = if stacked {

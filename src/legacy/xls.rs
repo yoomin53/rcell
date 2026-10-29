@@ -1602,13 +1602,26 @@ fn hlink_display(b: &[u8], tip: Option<&[u8]>) -> Vec<u8> {
 /// 넥셀(.nxl) 의 한컴 차트 0x7EF0 → 레거시 꼴: 앵커의 행 u16 → u32 (18 → 22바이트), 예약 11바이트는 0 (넥셀은 끝
 /// 바이트 1), 원본 범위·항목·계열 수식의 행 u16 → u32. Vt 아카이브는 그대로 (docs/format/cell-legacy-chart.md 1·5절)
 fn nexcel_chart(d: &[u8]) -> Option<Vec<u8>> {
-    let u16_at = |k: usize| -> Option<u16> { Some(u16::from_le_bytes([*d.get(k)?, *d.get(k + 1)?])) };
+    let u16_at =
+        |k: usize| -> Option<u16> { Some(u16::from_le_bytes([*d.get(k)?, *d.get(k + 1)?])) };
     let mut o = d.get(..8)?.to_vec();
-    // 앵커: flags, col1, dx1, row1, dy1, col2, dx2, row2, dy2
-    for (k, wide) in [(8, false), (10, false), (12, false), (14, true), (16, false), (18, false), (20, false), (22, true), (24, false)] {
+    // 앵커: flags, col1, dx1, row1, dy1, col2, dx2, row2, dy2 (dx·dy 는 32 배 — 레거시 단위)
+    for (k, wide) in [
+        (8, false),
+        (10, false),
+        (12, false),
+        (14, true),
+        (16, false),
+        (18, false),
+        (20, false),
+        (22, true),
+        (24, false),
+    ] {
         let v = u16_at(k)?;
         if wide {
             o.extend_from_slice(&(v as u32).to_le_bytes());
+        } else if matches!(k, 12 | 16 | 20 | 24) {
+            o.extend_from_slice(&(v.saturating_mul(32)).to_le_bytes());
         } else {
             o.extend_from_slice(&v.to_le_bytes());
         }
@@ -1635,6 +1648,97 @@ fn nexcel_chart(d: &[u8]) -> Option<Vec<u8>> {
     for _ in 0..n {
         formula(&mut p, &mut o)?;
         formula(&mut p, &mut o)?;
+    }
+    Some(o)
+}
+
+/// 레거시 한컴 차트 0x7EF0 → 넥셀 꼴 ([`nexcel_chart`] 의 거꾸로: 앵커·수식의 행 u32 → u16, 예약 끝 바이트 1)
+fn chart_to_nexcel(d: &[u8]) -> Option<Vec<u8>> {
+    let u16_at =
+        |k: usize| -> Option<u16> { Some(u16::from_le_bytes([*d.get(k)?, *d.get(k + 1)?])) };
+    let u32_at =
+        |k: usize| -> Option<u32> { Some(u32::from_le_bytes(d.get(k..k + 4)?.try_into().ok()?)) };
+    let mut o = d.get(..8)?.to_vec();
+    // 앵커 22바이트: flags, col1, dx1, row1 u32, dy1, col2, dx2, row2 u32, dy2
+    // dx·dy 는 1/32 로 (그리기 앵커처럼 — 한셀 -2003)
+    for v in [
+        u16_at(8)?,
+        u16_at(10)?,
+        u16_at(12)? / 32,
+        u32_at(14)?.min(0xFFFF) as u16,
+        u16_at(18)? / 32,
+        u16_at(20)?,
+        u16_at(22)? / 32,
+        u32_at(24)?.min(0xFFFF) as u16,
+        u16_at(28)? / 32,
+    ] {
+        o.extend_from_slice(&v.to_le_bytes());
+    }
+    o.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    o.extend_from_slice(d.get(41..43)?);
+    let mut p = 43;
+    let formula = |p: &mut usize, o: &mut Vec<u8>| -> Option<()> {
+        let cce = u16_at(*p)? as usize;
+        let t = ptgs(d.get(*p + 2..*p + 2 + cce)?, true, false)?;
+        o.extend_from_slice(&(t.len() as u16).to_le_bytes());
+        o.extend_from_slice(&t);
+        *p += 2 + cce;
+        Some(())
+    };
+    formula(&mut p, &mut o)?;
+    let alen = u32_at(p)? as usize;
+    o.extend_from_slice(d.get(p..p + 4 + alen)?);
+    p += 4 + alen;
+    formula(&mut p, &mut o)?;
+    let n = u16_at(p)?;
+    o.extend_from_slice(&n.to_le_bytes());
+    p += 2;
+    for _ in 0..n {
+        formula(&mut p, &mut o)?;
+        formula(&mut p, &mut o)?;
+    }
+    Some(o)
+}
+
+/// BIFF8 HLINK (URL 모니커) → 넥셀 꼴 ([`nexcel_hlink`] 의 거꾸로). URL 이 아니면 None
+fn hlink_to_nexcel(b: &[u8]) -> Option<Vec<u8>> {
+    let flags = u32::from_le_bytes(b.get(28..32)?.try_into().ok()?);
+    let mut p = 32;
+    let mut display: Vec<u16> = Vec::new();
+    if flags & 0x14 != 0 {
+        let n = u32::from_le_bytes(b.get(p..p + 4)?.try_into().ok()?) as usize;
+        display = b
+            .get(p + 4..p + 4 + n * 2)?
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&u| u != 0)
+            .collect();
+        p += 4 + n * 2;
+    }
+    if b.get(p..p + 16)?
+        != [
+            0xE0, 0xC9, 0xEA, 0x79, 0xF9, 0xBA, 0xCE, 0x11, 0x8C, 0x82, 0x00, 0xAA, 0x00, 0x4B,
+            0xA9, 0x0B,
+        ]
+    {
+        return None;
+    }
+    let len = u32::from_le_bytes(b.get(p + 16..p + 20)?.try_into().ok()?) as usize;
+    let url: Vec<u16> = b
+        .get(p + 20..p + 20 + len)?
+        .chunks(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&u| u != 0)
+        .collect();
+    let mut o = b[..28].to_vec();
+    o.extend_from_slice(&1u32.to_le_bytes());
+    o.extend_from_slice(&3u32.to_le_bytes());
+    for t in [&url, &display] {
+        o.extend_from_slice(&(t.len() as u32).to_le_bytes());
+        o.push(1);
+        for u in t.iter() {
+            o.extend_from_slice(&u.to_le_bytes());
+        }
     }
     Some(o)
 }
@@ -2098,7 +2202,12 @@ fn string_at(d: &[u8], cch: usize) -> String {
 /// 하이퍼링크의 도구 설명 (범위의 왼쪽 위 칸 (행, 열) → 글) — 한셀의 .xls 저장은 HLINK 의 표시 이름 자리에 쓴다
 pub type LinkTips = Vec<((u32, u32), String)>;
 
-fn sheet_to8(recs: &[Rec], hints: Option<&SheetHints>, tips: Option<&LinkTips>) -> Vec<OutRec> {
+fn sheet_to8(
+    recs: &[Rec],
+    hints: Option<&SheetHints>,
+    tips: Option<&LinkTips>,
+    nxl: bool,
+) -> Vec<OutRec> {
     let mut out: Vec<OutRec> = Vec::new();
     // 셀 표: ROW 와 셀 묶음을 모았다가 32 행 묶음마다 ROW, 셀 차례로 쓴다
     let mut rows: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -2112,6 +2221,50 @@ fn sheet_to8(recs: &[Rec], hints: Option<&SheetHints>, tips: Option<&LinkTips>) 
     for rec in recs {
         let rt = rec.rt;
         let d = &rec.data;
+        // 넥셀: 한컴 차트(0x7EF0, 행 16비트 + CONTINUE)와 끝 표시는 남기고, 표준과 다른 몇 레코드는 레거시 그대로
+        if nxl {
+            match rt {
+                0x7EF0 => {
+                    if let Some(b) = chart_to_nexcel(d) {
+                        let (head, rest) = b.split_at(b.len().min(MAX_DATA));
+                        let conts = rest.chunks(MAX_DATA).map(<[u8]>::to_vec).collect();
+                        out.push((rt, head.to_vec(), conts));
+                    }
+                    continue;
+                }
+                0x7EF8 | 0x00A1 => {
+                    out.push((rt, d.clone(), Vec::new()));
+                    continue;
+                }
+                0x0809 => {
+                    let mut b = d.clone();
+                    b[0..2].copy_from_slice(&BIFF8_VERSION.to_le_bytes());
+                    b[4..12].copy_from_slice(&[0x01, 0x01, 0xD8, 0x07, 0, 0, 0, 0]);
+                    out.push((rt, b, Vec::new()));
+                    continue;
+                }
+                0x0862 => {
+                    let mut b = d.clone();
+                    b.truncate(24);
+                    out.push((rt, b, Vec::new()));
+                    continue;
+                }
+                0x087A | 0x087B => continue,
+                0x023E => {
+                    // WINDOW2: .xls 꼴에서 머리글 색은 0, 끝 4바이트는 레거시 그대로 (0x80000000)
+                    if let Some(mut b) = conv(rt, d, true) {
+                        if b.len() >= 18 && d.len() >= 4 {
+                            b[6] = 0;
+                            b[7] = 0;
+                            b[14..18].copy_from_slice(&d[d.len() - 4..]);
+                        }
+                        out.push((rt, b, Vec::new()));
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
         if hancom_only(rt) && rt != 0xB002 {
             continue;
         }
@@ -2251,7 +2404,13 @@ fn sheet_to8(recs: &[Rec], hints: Option<&SheetHints>, tips: Option<&LinkTips>) 
                     .and_then(|t| t.iter().find(|(c, _)| Some(*c) == at))
                     .map(|(_, s)| s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect());
                 if let Some(b) = conv(rt, d, true) {
-                    out.push((rt, hlink_display(&b, tip.as_deref()), Vec::new()));
+                    let b = hlink_display(&b, tip.as_deref());
+                    let b = if nxl {
+                        hlink_to_nexcel(&b).unwrap_or(b)
+                    } else {
+                        b
+                    };
+                    out.push((rt, b, Vec::new()));
                 }
             }
             0x023E => {
@@ -2332,6 +2491,17 @@ pub fn to_biff8(stream: &[u8]) -> Result<Vec<u8>> {
 
 /// [`to_biff8`] 에 시트마다 레거시에 없는 정보를 더해서
 pub fn to_biff8_with(stream: &[u8], hints: &[SheetHints], tips: &[LinkTips]) -> Result<Vec<u8>> {
+    transcode(stream, hints, tips, false)
+}
+
+/// 레거시 `/Workbook` → 넥셀(.nxl, 한셀 -2003) 꼴: BIFF8 틀(16비트 행, 플래그가 있는 문자열, CONTINUE)에 한컴
+/// 글꼴·셀 서식 확장, 문단 모양, 한컴 차트(0x7EF0)를 그대로 두고 표 스타일·차등 서식 표·XFCRC·PLV·CF12·CFEX 는
+/// 쓰지 않는다 (한셀이 문서 61개를 .nxl 로 저장한 것 — docs/format/other-formats.md 6절)
+pub fn to_nxl(stream: &[u8], tips: &[LinkTips]) -> Result<Vec<u8>> {
+    transcode(stream, &[], tips, true)
+}
+
+fn transcode(stream: &[u8], hints: &[SheetHints], tips: &[LinkTips], nxl: bool) -> Result<Vec<u8>> {
     let recs: Vec<Rec> = biff::records(stream)
         .into_iter()
         .map(|r| Rec::new(r.rtype, r.data.to_vec()))
@@ -2351,7 +2521,7 @@ pub fn to_biff8_with(stream: &[u8], hints: &[SheetHints], tips: &[LinkTips]) -> 
     let sheets: Vec<Vec<OutRec>> = subs
         .iter()
         .enumerate()
-        .map(|(i, s)| sheet_to8(s, hints.get(i), tips.get(i)))
+        .map(|(i, s)| sheet_to8(s, hints.get(i), tips.get(i), nxl))
         .collect();
 
     // 전역: 레코드를 바꾸고, XF 뒤에 XFCRC, SST 는 CONTINUE 로 나누고 EXTSST
@@ -2372,6 +2542,48 @@ pub fn to_biff8_with(stream: &[u8], hints: &[SheetHints], tips: &[LinkTips]) -> 
             0xA001 => parashapes.push((i32_at(d, 0).unwrap_or(0), i32_at(d, 4).unwrap_or(0))),
             0xA011 => para_links.push(i32_at(d, 4).unwrap_or(0) as u32),
             _ => {}
+        }
+        if nxl {
+            match rt {
+                // 한컴 레코드는 그대로 (0xA030 은 없다), 표 스타일·차등 서식 표는 없다
+                0x0900 | 0xA001 | 0xA011 | 0xA020 => {
+                    g.push((rt, d.clone(), Vec::new()));
+                    continue;
+                }
+                0xA030 | 0x088D..=0x0890 => continue,
+                // FONT·XF 는 한컴 확장째 (FONT 의 이름 플래그만 1), 머리글·바닥글은 글 플래그만 1
+                0x0031 => {
+                    let mut b = d.clone();
+                    if b.len() > 15 && b[14] > 0 {
+                        b[15] = 1;
+                    }
+                    g.push((rt, b, Vec::new()));
+                    continue;
+                }
+                0x00E0 => {
+                    g.push((rt, d.clone(), Vec::new()));
+                    continue;
+                }
+                0x0014 | 0x0015 => {
+                    let mut b = d.clone();
+                    if b.len() > 2 {
+                        b[2] = 1;
+                    }
+                    g.push((rt, b, Vec::new()));
+                    continue;
+                }
+                0x0809 => {
+                    let mut b = d.clone();
+                    b[0..2].copy_from_slice(&BIFF8_VERSION.to_le_bytes());
+                    b[4..12].copy_from_slice(&[0x01, 0x01, 0xD8, 0x07, 0, 0, 0, 0]);
+                    if b.len() >= 16 {
+                        b[12..16].copy_from_slice(&[0x06, 0, 0, 0]);
+                    }
+                    g.push((rt, b, Vec::new()));
+                    continue;
+                }
+                _ => {}
+            }
         }
         if hancom_only(rt) || pivot_record(rt) {
             continue;
@@ -2447,6 +2659,10 @@ pub fn to_biff8_with(stream: &[u8], hints: &[SheetHints], tips: &[LinkTips]) -> 
         }
     }
 
+    if nxl && let Some(at) = g.iter().rposition(|r| r.0 == 0x0085) {
+        // COUNTRY (한국 82, 82)
+        g.insert(at + 1, (0x008C, vec![0x52, 0, 0x52, 0], Vec::new()));
+    }
     // 한셀의 .xls 차례: XF, XFCRC, XFEXT, DXF, STYLE … (레거시는 XF, XFEXT, STYLE, DXF)
     if let Some(crc_at) = g.iter().position(|r| r.0 == 0x087C) {
         let moved: Vec<_> = g
