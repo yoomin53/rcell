@@ -105,7 +105,8 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 - XML `.cell` / `.xlsx` — converts legacy and binary documents to modern `.cell`
 - Binary `.cell` (`xlCellb`) — written the way Hancom Cell saves it (98.9% of records byte-identical)
 - Legacy `.cell` (`xlCell8`) — written the way Hancom Cell saves it with -2005 (97.7% of records identical to Hancom Cell opening the XML and saving legacy, ignoring per-save values such as the SST order; charts and tables not yet)
-- Excel 97-2003 `.xls` — legacy records transcoded to BIFF8 (Hancom Cell opens all 61 test files, 42 identical to its own `.xls`; charts not yet)
+- Excel 97-2003 `.xls` — legacy records transcoded to BIFF8, charts as BIFF8 chart substreams (Hancom Cell opens all 61 test files, 59 identical to its own `.xls`)
+- Nexcel `.nxl` — Hancom Cell's -2003 layout (BIFF8 frame + Hancom extensions; 57 of 61 identical to its own `.nxl`)
 - CSV, text and PRN — byte-identical to Hancom Cell's save (code page 949, 216/216), document-model JSON
 
 ### Editing
