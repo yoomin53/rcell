@@ -708,14 +708,21 @@ fn page_body(
             vec![text.clone()]
         };
         let n = lines.len() as f64;
-        // 첫 줄 기준선. 행이 글보다 낮으면 위 맞춤 자리보다 올라가지 않는다 (22px 행의 아래 맞춤 숫자 — 배율 97 에서
-        // 위 맞춤과 같은 자리)
+        // 첫 줄 기준선
         let top = y0 + line / 2.0 + kt * size + ct * k99;
+        // 화면에서 글이 행에 들어가면 (행 px ≥ 줄 수 × 줄 높이 px) 아래·가운데 맞춤도 위 맞춤 자리보다 올라가지 않는다
+        // (22px 행의 숫자, 배율 97). 들어가지 않으면 아래에 붙인 채 위로 넘친다 (행 6–16px 의 숫자 — 행 4.5–12pt 실험)
+        let er = lay.merge_end.get(&(r, c)).map_or(r, |m| m.0);
+        let screen_h: u32 = (r..=er).map(|k| lay.row_h(k)).sum();
+        let fits = screen_h as f64 + 0.5 >= n * l_pt * 4.0 / 3.0;
+        let floor = if fits { top } else { f64::MIN };
         let first = match v.v {
             VAlign::Top => top,
-            VAlign::Bottom => (y1 - line / 2.0 + kb * size - cb * k99 - (n - 1.0) * line).max(top),
+            VAlign::Bottom => {
+                (y1 - line / 2.0 + kb * size - cb * k99 - (n - 1.0) * line).max(floor)
+            }
             VAlign::Center => {
-                ((y0 + y1) / 2.0 + km * size + cm * k99 - (n - 1.0) * line / 2.0).max(top)
+                ((y0 + y1) / 2.0 + km * size + cm * k99 - (n - 1.0) * line / 2.0).max(floor)
             }
         };
         let need_clip = !(v.wrap || ol > 0 || or > 0);
