@@ -804,12 +804,22 @@ pub(crate) fn map(rec: &VtRecord, book: &Book<'_>) -> Chart {
     let grid = Grid::read(root.ptr("dataGrid"));
     let pie = k.family == Family::Pie;
 
-    // 누적: 쓰는 계열의 u16s2[6] (묶음) ≠ 순서 또는 [7] (묶음 안 순서) ≠ 0. 100%: 값 축 u16_r = 2
+    // 누적: 쓰는 계열의 u16s2[7] (묶음 안 순서) ≠ 0, 또는 계열이 둘 이상인데 [6] (묶음) 이 모두 같다.
+    // 묶은 가로 막대는 [6] 이 3·2·1·0 으로 거꾸로다 (차트 종류 실험). 100%: 값 축 u16_r = 2
     let used = rec.series.len().clamp(1, pool.len().max(1));
-    let stacked = pool.iter().take(used).enumerate().any(|(i, e)| {
-        let v = e.and_then(|e| e.u16s("u16s2")).unwrap_or_default();
-        v.get(6).is_some_and(|&x| usize::from(x) != i) || v.get(7).is_some_and(|&x| x != 0)
-    });
+    let stack_keys: Vec<(u16, u16)> = pool
+        .iter()
+        .take(used)
+        .map(|e| {
+            let v = e.and_then(|e| e.u16s("u16s2")).unwrap_or_default();
+            (
+                v.get(6).copied().unwrap_or(0),
+                v.get(7).copied().unwrap_or(0),
+            )
+        })
+        .collect();
+    let stacked = stack_keys.iter().any(|k| k.1 != 0)
+        || (stack_keys.len() > 1 && stack_keys.iter().all(|k| k.0 == stack_keys[0].0));
     let axis_x = plot.and_then(|p| p.ptr("axisX"));
     let axis_y = plot
         .and_then(|p| p.ptr("axesY"))
@@ -1075,6 +1085,16 @@ pub(crate) fn map(rec: &VtRecord, book: &Book<'_>) -> Chart {
                 .iter()
                 .map(|e| e.and_then(|e| e.u16("u16_d")).unwrap_or(1) != 0)
                 .collect(),
+            // 3차원 막대·꺾은선·영역: 모델은 standard 지만 한셀 화면은 누적·100% 로 그린다 (차트 종류 실험)
+            screen_grouping: (k.three_d && !pie && chart_type != 12 && (stacked || percent)).then(
+                || {
+                    if percent {
+                        "percentStacked".to_string()
+                    } else {
+                        "stacked".to_string()
+                    }
+                },
+            ),
             rotation: plot.and_then(|p| p.f32("rotation")).map_or(0.0, f64::from),
             elevation: plot.and_then(|p| p.f32("elevation")).map_or(0.0, f64::from),
         }),

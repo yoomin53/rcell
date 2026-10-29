@@ -303,9 +303,9 @@ VtTextBlock{backdrop → VtBackdrop | 없음, font → VtFont{name → VtString}
 |---|---|---|
 | `VtChart.chartType` | 0 `bar3DChart` col, 1 `barChart` col, 2 `line3DChart`, 3 `lineChart`, 4 `area3DChart`, 5 `areaChart`, 11 `barChart` bar, 13 `pie3DChart`, 14 `pieChart`, 15 `doughnutChart`, 18 `radarChart`. 분산형·거품형(3)은 `lineChart`, 주식형(1)은 `barChart` 로 읽힌다 | 관측 |
 | 표본에 없는 번호 | MSChart VtChChartType 이름에 가장 가까운 관측 종류: 단계형 6/7 → 꺾은선, 조합 8/9 → 막대, 10 → 3차원 가로 막대, 12 → 3차원 막대 (`clustered`), 16·19 → 꺾은선, 17 → 방사형, 20 → 막대, 21/22 → 가로 막대, 23/24 → 영역, 25/26 → 3차원 꺾은선, 그 밖 → 막대 | 추정 |
-| 누적 | 쓰는 계열(꼬리의 계열 수, 적어도 1) 중 하나라도 `VtSeries.u16s2[6]` ≠ 계열 순서 또는 `u16s2[7]` ≠ 0 | 관측 |
+| 누적 | 쓰는 계열(꼬리의 계열 수, 적어도 1) 중 하나라도 `VtSeries.u16s2[7]` (묶음 안 순서) ≠ 0, 또는 계열이 둘 이상이고 `u16s2[6]` (묶음) 이 모두 같다. 묶은 가로 막대(11)는 `[6]` 이 3·2·1·0 으로 거꾸로 저장된다 — 한셀 화면은 묶은 막대 | 관측 (차트 종류 실험) |
 | 100% | 값 축(`axesY[0]`)의 `u16_r` = 2 | 관측 |
-| `c:grouping` | 2차원 막대 `percentStacked`/`stacked`/`clustered`, 2차원 꺾은선·영역 `percentStacked`/`stacked`/`standard`, 3차원 막대·꺾은선·영역은 누적이 저장되어 있어도 `standard` (서식 파일 8개는 원본이 `stacked`) | 관측 |
+| `c:grouping` | 2차원 막대 `percentStacked`/`stacked`/`clustered`, 2차원 꺾은선·영역 `percentStacked`/`stacked`/`standard`, 3차원 막대·꺾은선·영역은 누적이 저장되어 있어도 `standard` (서식 파일 8개는 원본이 `stacked`). 한셀 화면은 3차원도 누적·100% 로 그린다 (차트 종류 실험의 3차원 누적·100% 세로 막대 — 렌더러만 따른다) | 관측 |
 | `c:varyColors` | 원형·도넛만 1 (저장된 표시 없음 — 서식 파일 원본의 1 도 0 으로 읽힌다) | 관측 |
 | `c:gapWidth` | 막대: `round(VtChartPlot.gap × 100)` (1.5 → 150, 주식형 실험 0.5 → 50) | 관측 |
 | `c:overlap` | 2차원 막대만: `round(−overlap × 100)` (누적 −1 → 100) | 관측 |

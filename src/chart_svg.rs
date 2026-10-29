@@ -637,7 +637,12 @@ fn groups_of(ch: &Chart) -> Vec<Group<'_>> {
             kind: ch.kind.as_str(),
             three_d: ch.three_d,
             bar_dir: ch.bar_dir.as_deref(),
-            grouping: ch.grouping.as_deref().unwrap_or("clustered"),
+            grouping: ch
+                .legacy
+                .as_ref()
+                .and_then(|l| l.screen_grouping.as_deref())
+                .or(ch.grouping.as_deref())
+                .unwrap_or("clustered"),
             vary_colors: ch.vary_colors,
             props: &ch.group,
             series: &ch.series,
@@ -1236,6 +1241,9 @@ enum TickRule {
     /// 레거시(VtChart) 차트: 간격 수 ≤ clamp(⌊축 길이 / 15.5px⌋, 2, 10) 인 가장 작은 단위. 끝값은 데이터 끝과
     /// 5.5px 넘게 떨어진 배수 (`room` 이 거짓이면 데이터 끝을 덮는 배수)
     Legacy { room: bool },
+    /// 레거시 가로 막대의 값 축: 간격 수 ≤ clamp(⌊축 길이 / 30px⌋, 2, 10) (레이블 "/표준" 폭), 끝값은 데이터 끝과
+    /// 20px 넘게 떨어진 배수 (차트 종류 실험: 233px 에 47 → 0~60 단위 10, 누적 124 → 0~140 단위 20)
+    LegacyH { room: bool },
 }
 
 impl TickRule {
@@ -1244,6 +1252,7 @@ impl TickRule {
         match self {
             TickRule::Xml { .. } => (len_px / 25.0).floor().clamp(3.0, 10.0),
             TickRule::Legacy { .. } => (len_px / 15.5).floor().clamp(2.0, 10.0),
+            TickRule::LegacyH { .. } => (len_px / 30.0).floor().clamp(2.0, 10.0),
             TickRule::Horizontal { .. } => (len_px / 40.0).clamp(2.0, 10.0),
         }
     }
@@ -1315,10 +1324,15 @@ fn make_scale(
             match rule {
                 TickRule::Xml { room: true } => up(hi, u / 4.0),
                 TickRule::Horizontal { room: true } => up(hi, span * 0.05),
-                TickRule::Legacy { room: true } => {
-                    // 데이터 끝이 축 끝에서 5.5px 넘게 아래
+                TickRule::Legacy { room: true } | TickRule::LegacyH { room: true } => {
+                    // 데이터 끝이 축 끝에서 5.5px (가로 20px) 넘게 아래
+                    let gap = if matches!(rule, TickRule::LegacyH { .. }) {
+                        20.0
+                    } else {
+                        5.5
+                    };
                     let mut m = up(hi, 0.0);
-                    while (m - hi) / (m - min).max(f64::MIN_POSITIVE) * len_px < 5.5 {
+                    while (m - hi) / (m - min).max(f64::MIN_POSITIVE) * len_px < gap {
                         m += u;
                     }
                     m
@@ -1565,7 +1579,9 @@ fn draw_axis_chart(
     let room = !first.three_d && !percent;
     let legacy = ch.legacy.is_some();
     // 가로 막대의 값 축도 세로 값 축과 같은 25px 규칙 (차트 종류 실험: 길이 255px 에 0~50, 단위 5)
-    let vrule = if legacy {
+    let vrule = if legacy && horizontal {
+        TickRule::LegacyH { room }
+    } else if legacy {
         TickRule::Legacy { room }
     } else {
         TickRule::Xml { room }
@@ -1826,6 +1842,7 @@ fn draw_axis_chart(
         let room = !first.three_d && !sp;
         let rule = match vrule {
             TickRule::Legacy { .. } => TickRule::Legacy { room },
+            TickRule::LegacyH { .. } => TickRule::LegacyH { room },
             TickRule::Horizontal { .. } => TickRule::Horizontal { room },
             TickRule::Xml { .. } => TickRule::Xml { room },
         };

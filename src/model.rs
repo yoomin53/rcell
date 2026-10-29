@@ -946,6 +946,8 @@ pub struct LegacyChartView {
     pub fills: Vec<String>,
     /// 계열 목록마다 표식이 자동인가 (`VtSeries.u16_d` 1 — 모델에는 `none` 으로 옮기지만 한셀 화면은 자동 표식을 그린다)
     pub auto_markers: Vec<bool>,
+    /// 화면의 묶음 방식 (모델의 `grouping` 과 다를 때 — 3차원 누적은 XML 로 옮기면 standard)
+    pub screen_grouping: Option<String>,
     /// 3차원 회전·높이 (도, `VtChartPlot.rotation`·`elevation`)
     pub rotation: f64,
     pub elevation: f64,
