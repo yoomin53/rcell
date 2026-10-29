@@ -1700,40 +1700,70 @@ fn chart_to_nexcel(d: &[u8]) -> Option<Vec<u8>> {
     Some(o)
 }
 
-/// BIFF8 HLINK (URL 모니커) → 넥셀 꼴 ([`nexcel_hlink`] 의 거꾸로). URL 이 아니면 None
+/// BIFF8 HLINK → 넥셀 꼴 ([`nexcel_hlink`] 의 거꾸로): URL 모니커는 종류 1 (`mailto:` 는 3), 파일 모니커는 5 (경로), 문서 안
+/// 위치만 있으면 2 (주소 없음). 표시 이름 자리의 도구 설명은 둘째 글
 fn hlink_to_nexcel(b: &[u8]) -> Option<Vec<u8>> {
-    let flags = u32::from_le_bytes(b.get(28..32)?.try_into().ok()?);
+    let u32_at =
+        |k: usize| -> Option<u32> { Some(u32::from_le_bytes(b.get(k..k + 4)?.try_into().ok()?)) };
+    let utf16 = |p: usize, n: usize| -> Option<Vec<u16>> {
+        Some(
+            b.get(p..p + n * 2)?
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|&u| u != 0)
+                .collect(),
+        )
+    };
+    let flags = u32_at(28)?;
     let mut p = 32;
     let mut display: Vec<u16> = Vec::new();
     if flags & 0x14 != 0 {
-        let n = u32::from_le_bytes(b.get(p..p + 4)?.try_into().ok()?) as usize;
-        display = b
-            .get(p + 4..p + 4 + n * 2)?
-            .chunks(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .take_while(|&u| u != 0)
-            .collect();
+        let n = u32_at(p)? as usize;
+        display = utf16(p + 4, n)?;
         p += 4 + n * 2;
     }
-    if b.get(p..p + 16)?
-        != [
-            0xE0, 0xC9, 0xEA, 0x79, 0xF9, 0xBA, 0xCE, 0x11, 0x8C, 0x82, 0x00, 0xAA, 0x00, 0x4B,
-            0xA9, 0x0B,
-        ]
-    {
-        return None;
+    if flags & 0x80 != 0 {
+        let n = u32_at(p)? as usize;
+        p += 4 + n * 2;
     }
-    let len = u32::from_le_bytes(b.get(p + 16..p + 20)?.try_into().ok()?) as usize;
-    let url: Vec<u16> = b
-        .get(p + 20..p + 20 + len)?
-        .chunks(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .take_while(|&u| u != 0)
-        .collect();
+    let (kind, addr) = if flags & 0x01 != 0 {
+        let clsid = b.get(p..p + 16)?;
+        if clsid == URL_MONIKER {
+            let len = u32_at(p + 16)? as usize;
+            let url = utf16(p + 20, len / 2)?;
+            let mail = String::from_utf16_lossy(&url).starts_with("mailto:");
+            (if mail { 3 } else { 1 }, url)
+        } else if clsid == FILE_MONIKER {
+            // FileMoniker: cAnti u16, ansiLength u32, ansiPath, endServer u16, 0xDEAD, 예약 20, cbUnicodePathSize u32,
+            // [cbUnicodePathBytes u32, usKeyValue u16, unicodePath]
+            let q = p + 16;
+            let alen = u32_at(q + 2)? as usize;
+            let ansi = b.get(q + 6..q + 6 + alen)?;
+            let r = q + 6 + alen + 24;
+            let path = match u32_at(r) {
+                Some(sz) if sz > 0 => {
+                    let n = u32_at(r + 4)? as usize;
+                    utf16(r + 10, n / 2)?
+                }
+                _ => ansi
+                    .iter()
+                    .take_while(|&&c| c != 0)
+                    .map(|&c| c as u16)
+                    .collect(),
+            };
+            (5, path)
+        } else {
+            return None;
+        }
+    } else if flags & 0x08 != 0 {
+        (2, Vec::new())
+    } else {
+        return None;
+    };
     let mut o = b[..28].to_vec();
-    o.extend_from_slice(&1u32.to_le_bytes());
+    o.extend_from_slice(&(kind as u32).to_le_bytes());
     o.extend_from_slice(&3u32.to_le_bytes());
-    for t in [&url, &display] {
+    for t in [&addr, &display] {
         o.extend_from_slice(&(t.len() as u32).to_le_bytes());
         o.push(1);
         for u in t.iter() {
@@ -1743,12 +1773,14 @@ fn hlink_to_nexcel(b: &[u8]) -> Option<Vec<u8>> {
     Some(o)
 }
 
-/// 넥셀(.nxl) 의 HLINK: Ref8U + CLSID + 2 + 플래그 1 뒤에 종류 u32 (3 = URL), 주소 (u32 글자 수 + 플래그 u8 + 글자),
-/// 표시 이름 (같은 꼴) — 한셀 -2003 저장에서 본 꼴. URL 이면 BIFF8 HLINK (표시 이름 + URL 모니커) 로 바꾼다
+/// 넥셀(.nxl) 의 HLINK: Ref8U + CLSID + 2 뒤에 종류 u32 (1 URL, 2 문서 안 위치, 3 메일, 5 파일), u32 3, 주소, 도구 설명
+/// (둘 다 u32 글자 수 + 플래그 u8 + 글자) — 한셀 -2003 저장에서 본 꼴 (문서 안 위치는 주소가 비어 있다). BIFF8 HLINK
+/// (URL 모니커, 도구 설명은 표시 이름 자리 — 읽을 때 도구 설명이 된다) 로 바꾼다
 fn nexcel_hlink(d: &[u8]) -> Option<Vec<u8>> {
     let u32_at =
         |k: usize| -> Option<u32> { Some(u32::from_le_bytes(d.get(k..k + 4)?.try_into().ok()?)) };
-    if u32_at(28)? != 1 || u32_at(32)? != 3 {
+    let kind = u32_at(28)?;
+    if !matches!(kind, 1 | 2 | 3 | 5) || u32_at(32)? != 3 {
         return None;
     }
     let text = |at: usize| -> Option<(Vec<u16>, usize)> {
@@ -1767,33 +1799,88 @@ fn nexcel_hlink(d: &[u8]) -> Option<Vec<u8>> {
             Some((d.get(p..p + n)?.iter().map(|&c| c as u16).collect(), p + n))
         }
     };
-    let (url, end) = text(36)?;
+    let (addr, end) = text(36)?;
     let display = text(end).map(|(t, _)| t).unwrap_or_default();
+    let utf16 = |o: &mut Vec<u8>, t: &[u16]| {
+        o.extend_from_slice(&(t.len() as u32 + 1).to_le_bytes());
+        for u in t {
+            o.extend_from_slice(&u.to_le_bytes());
+        }
+        o.extend_from_slice(&[0, 0]);
+    };
     let mut o = d[..28].to_vec();
-    let mut flags = 0x03u32;
+    let mut flags = if kind == 2 { 0x08u32 } else { 0x03 };
     if !display.is_empty() {
         flags |= 0x14;
     }
     o.extend_from_slice(&flags.to_le_bytes());
     if !display.is_empty() {
-        o.extend_from_slice(&(display.len() as u32 + 1).to_le_bytes());
-        for u in &display {
-            o.extend_from_slice(&u.to_le_bytes());
-        }
-        o.extend_from_slice(&[0, 0]);
+        utf16(&mut o, &display);
+    }
+    if kind == 2 {
+        // 문서 안 위치: 넥셀은 위치 글을 담지 않는다 (빈 위치)
+        utf16(&mut o, &addr);
+        return Some(o);
     }
     // URL 모니커 CLSID 79EAC9E0-BAF9-11CE-8C82-00AA004BA90B, 길이 (바이트, NUL 포함), UTF-16
-    o.extend_from_slice(&[
-        0xE0, 0xC9, 0xEA, 0x79, 0xF9, 0xBA, 0xCE, 0x11, 0x8C, 0x82, 0x00, 0xAA, 0x00, 0x4B, 0xA9,
-        0x0B,
-    ]);
-    o.extend_from_slice(&((url.len() as u32 + 1) * 2).to_le_bytes());
-    for u in &url {
+    o.extend_from_slice(&URL_MONIKER);
+    o.extend_from_slice(&((addr.len() as u32 + 1) * 2).to_le_bytes());
+    for u in &addr {
         o.extend_from_slice(&u.to_le_bytes());
     }
     o.extend_from_slice(&[0, 0]);
     Some(o)
 }
+
+/// HLINK 의 hlstmfIsAbsolute (0x02): 한셀의 .xls 저장은 파일 모니커와 `mailto:` 가 아닌 URL 에 켠다 (레거시는 끈다 —
+/// 하이퍼링크 종류 실험: URL·조각이 있는 URL·파일 0x02, 메일·문서 안 위치 없음)
+fn hlink_absolute(mut b: Vec<u8>) -> Vec<u8> {
+    let Some(flags) = b
+        .get(28..32)
+        .map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+    else {
+        return b;
+    };
+    if flags & 0x01 == 0 || flags & 0x02 != 0 {
+        return b;
+    }
+    let mut p = 32;
+    for bit in [0x14u32, 0x80] {
+        if flags & bit != 0 {
+            let Some(n) = b
+                .get(p..p + 4)
+                .map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]) as usize)
+            else {
+                return b;
+            };
+            p += 4 + n * 2;
+        }
+    }
+    let absolute = match b.get(p..p + 16) {
+        Some(c) if c == FILE_MONIKER => true,
+        Some(c) if c == URL_MONIKER => {
+            let head: Vec<u8> = "mailto:"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            b.get(p + 20..p + 20 + head.len()) != Some(head.as_slice())
+        }
+        _ => false,
+    };
+    if absolute {
+        b[28..32].copy_from_slice(&(flags | 0x02).to_le_bytes());
+    }
+    b
+}
+
+/// URL 모니커 CLSID
+const URL_MONIKER: [u8; 16] = [
+    0xE0, 0xC9, 0xEA, 0x79, 0xF9, 0xBA, 0xCE, 0x11, 0x8C, 0x82, 0x00, 0xAA, 0x00, 0x4B, 0xA9, 0x0B,
+];
+/// 파일 모니커 CLSID 00000303-0000-0000-C000-000000000046
+const FILE_MONIKER: [u8; 16] = [
+    0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+];
 
 /// OfficeArt 레코드 머리 (verInst u16, fbt u16, len u32)
 fn art_head(b: &[u8], p: usize) -> Option<(u16, u16, usize)> {
@@ -2408,7 +2495,7 @@ fn sheet_to8(
                     let b = if nxl {
                         hlink_to_nexcel(&b).unwrap_or(b)
                     } else {
-                        b
+                        hlink_absolute(b)
                     };
                     out.push((rt, b, Vec::new()));
                 }

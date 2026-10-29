@@ -24,6 +24,7 @@ pub mod props;
 pub mod reader;
 pub mod recdiff;
 mod sheetx;
+mod vbs;
 pub(crate) mod vtbuild;
 pub(crate) mod vtchart;
 pub(crate) mod vtchart_map;
@@ -182,7 +183,8 @@ pub fn write_nxl(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)
     let tips = link_tips(wb);
     let stream = container::read_entry(&bytes, "/Workbook")?;
     let wbs = xls::to_nxl(&stream, &tips)?;
-    Ok((with_summary(&bytes, &wbs), report))
+    let macros = wb.hancom.vbs_project.as_deref().and_then(vbs::to_nexcel);
+    Ok((with_summary(&bytes, &wbs, macros.as_deref()), report))
 }
 
 /// 시트마다 하이퍼링크 도구 설명 (`.xls`·`.nxl` 의 HLINK 표시 이름 자리)
@@ -203,7 +205,7 @@ fn link_tips(wb: &Workbook) -> Vec<xls::LinkTips> {
 }
 
 /// `/Workbook` 스트림 + 레거시 파일의 문서 속성 → OLE2 파일
-fn with_summary(legacy: &[u8], wbs: &[u8]) -> Vec<u8> {
+fn with_summary(legacy: &[u8], wbs: &[u8], macros: Option<&[u8]>) -> Vec<u8> {
     let summary = container::read_entry(legacy, "/SummaryInformation").ok();
     let mut streams = vec![crate::cfb_write::Stream {
         name: "Workbook",
@@ -213,6 +215,12 @@ fn with_summary(legacy: &[u8], wbs: &[u8]) -> Vec<u8> {
         streams.push(crate::cfb_write::Stream {
             name: "SummaryInformation",
             data: s,
+        });
+    }
+    if let Some(m) = macros {
+        streams.push(crate::cfb_write::Stream {
+            name: "_VBS_PROJECT",
+            data: m,
         });
     }
     crate::cfb_write::write_with_storages(&streams, &[], 0)
@@ -318,6 +326,9 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
     // 한컴 매크로 프로젝트: XML 의 `xl/vbsProject.bin` 안 스트림과 바이트가 같다 (패키지 파트 실험)
     if has(crate::ns::VBS_PROJECT_STREAM) {
         wb.hancom.vbs_project = Some(container::read_entry(bytes, crate::ns::VBS_PROJECT_STREAM)?);
+    } else if has("/_VBS_PROJECT") {
+        // 넥셀: 코드 페이지 949 글 → 한셀의 _W 꼴
+        wb.hancom.vbs_project = vbs::from_nexcel(&container::read_entry(bytes, "/_VBS_PROJECT")?);
     }
     Ok(wb)
 }
