@@ -160,6 +160,15 @@ const PIO2_PARTS: [f64; 6] = [
     f64::from_bits(0x378024e088000000),
 ];
 
+/// 66비트로 자른 π/2 (x87 의 π) 를 26비트씩: 32비트 C 런타임의 sin·cos 은 몫 k = round(x·2/π) 가 2^16 이상,
+/// tan 은 2^13 이상이면 이것으로 줄인다 — 그 위에서 C 런타임 값과 모두 같다 (참 π/2 보다 2.0223E-21 작다,
+/// 검은 상자 실험: 그 아래는 참 π/2)
+const PIO2_66: [f64; 3] = [
+    f64::from_bits(0x3ff921fb50000000),
+    f64::from_bits(0x3e5110b460000000),
+    f64::from_bits(0x3c91a60000000000),
+];
+
 // ---------------------------------------------------------------- exp
 
 /// 2^(j/64): (hi, lo/hi)
@@ -404,13 +413,19 @@ pub fn pow(x: f64, y: f64) -> f64 {
 // ---------------------------------------------------------------- 삼각
 
 /// x = k·π/2 + r (|r| ≤ π/4 쯤): (k mod 4, r)
-fn rem_pio2(x: f64) -> (i64, Dd) {
+fn rem_pio2(x: f64, k_x87: f64) -> (i64, Dd) {
     if x.abs() <= PIO4.0 {
         return (0, Dd::from(x));
     }
     let k = (x * f64::from_bits(0x3fe45f306dc9c883)).round();
     let mut r = Dd::from(x);
-    for p in PIO2_PARTS {
+    // 큰 인수는 C 런타임처럼 66비트로 자른 π/2 로 줄인다 (x87 fsin 의 π)
+    let parts: &[f64] = if k.abs() >= k_x87 {
+        &PIO2_66
+    } else {
+        &PIO2_PARTS
+    };
+    for &p in parts {
         // k·p 는 정확하다 (|k| < 2^27, p 는 26비트)
         r = r.sub(Dd::from(k * p));
     }
@@ -436,8 +451,8 @@ fn sincos_dd(r: Dd) -> (Dd, Dd) {
     (s, c)
 }
 
-fn sin_cos_x(x: f64) -> (Dd, Dd) {
-    let (q, r) = rem_pio2(x);
+fn sin_cos_x(x: f64, k_x87: f64) -> (Dd, Dd) {
+    let (q, r) = rem_pio2(x, k_x87);
     let (s, c) = sincos_dd(r);
     match q {
         0 => (s, c),
@@ -461,7 +476,7 @@ pub fn sin(x: f64) -> f64 {
     if x.abs() < 1e-8 {
         return Dd::from(x).sub(two_prod(x, x).mul_f(x).div_f(6.0)).round();
     }
-    sin_cos_x(x).0.round()
+    sin_cos_x(x, 65536.0).0.round()
 }
 
 /// cos x
@@ -472,7 +487,7 @@ pub fn cos(x: f64) -> f64 {
     if x.abs() >= TRIG_MAX {
         return libm::cos(x);
     }
-    sin_cos_x(x).1.round()
+    sin_cos_x(x, 65536.0).1.round()
 }
 
 /// tan x
@@ -486,7 +501,7 @@ pub fn tan(x: f64) -> f64 {
     if x.abs() < 1e-8 {
         return Dd::from(x).add(two_prod(x, x).mul_f(x).div_f(3.0)).round();
     }
-    let (s, c) = sin_cos_x(x);
+    let (s, c) = sin_cos_x(x, 8192.0);
     s.div(c).round()
 }
 
