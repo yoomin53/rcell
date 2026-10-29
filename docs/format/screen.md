@@ -193,7 +193,8 @@
   채우기는 경계 앞 픽셀부터 폭만큼 (선 픽셀과 겹친다 — 서식 파일 소개 시트의 채운 사각형). 렌더러는 상자를 반올림한
   경계 − 1 의 정수 픽셀에 두고 선만 반 픽셀 안쪽에 그린다 (브라우저가 SVG 상자를 정수 픽셀에 맞추므로).
 - 흐림 없는 바깥 그림자는 정수 픽셀만큼 옮긴다 (거리 1.89px·45도 → 오른쪽·아래 1px).
-- 미리 정의된 모양 100여 개 (선 설명선 12종 — callout·borderCallout·accentCallout·accentBorderCallout 1–3: 사각형 + 꺾인
+- 미리 정의된 모양 110여 개 (동작 단추 빈·앞·뒤·처음·끝, 비대칭 사다리꼴·대각 줄무늬·대각 잘린 사각형·반 틀·오프라인
+  저장소, 선 설명선 12종 — callout·borderCallout·accentCallout·accentBorderCallout 1–3: 사각형 + 꺾인
   지시선, adj 홀수 y·짝수 x 비율, accent 는 첫 점 x 의 세로선) 와 `custGeom` (가이드 수식 `*/ +- +/ ?: abs at2 cat2 sat2 cos sin tan max min mod pin sqrt val`,
   `arcTo`, 경로 채우기 `darken`·`lighten` 등).
 - 선 끝 화살표: 크기는 선 굵기 × (sm 2, med 3, lg 5) 인데 2pt 보다 가는 선은 2pt 로 본다 (1pt 선의 lg 삼각형 13px,
