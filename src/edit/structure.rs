@@ -224,6 +224,43 @@ pub(crate) fn keep_one_cell_sizes(
     }
 }
 
+/// 행·열을 숨긴 뒤 크기를 지키는 그림의 시작 표지: 칸 첫머리(오프셋 0)에서 시작하고 바로 앞 칸들이 숨겨져(폭 0)
+/// 있으면 그 맨 앞 숨긴 칸으로 옮긴다 (한셀 — G2 의 그림은 F 열을 숨기면 F2+0 에서 시작)
+pub(crate) fn snap_from_hidden(
+    sheet: &mut Sheet,
+    sizes: &[Option<(i64, i64)>],
+    g: &crate::render::Geometry,
+) {
+    let back = |list: &[(u32, u32)], mut i: u32| -> u32 {
+        while i > 0 && list.get(i as usize - 1).is_some_and(|x| x.1 == 0) {
+            i -= 1;
+        }
+        i
+    };
+    for (sh, size) in sheet.shapes.iter_mut().zip(sizes) {
+        if size.is_none() {
+            continue;
+        }
+        let mut from = sh.anchor.from;
+        if from.col_off == 0 {
+            from.col = back(&g.cols, from.col);
+        }
+        if from.row_off == 0 {
+            from.row = back(&g.rows, from.row);
+        }
+        if from != sh.anchor.from {
+            sh.anchor.from = from;
+            if let Some(raw) = &sh.raw {
+                sh.raw = Some(patch_anchor_xml(
+                    raw,
+                    &sh.anchor.from,
+                    sh.anchor.to.as_ref(),
+                ));
+            }
+        }
+    }
+}
+
 /// 열 너비·행 높이를 바꾼 뒤 메모 상자를 화면의 같은 자리에 둔다 — 셀과 함께 옮기지 않는 메모 상자(한셀 기본)는
 /// 절대 자리를 지킨다 (4행을 높이면 상자 위가 7행+10px 에서 5행+21px 로, 편집 대조 실험)
 pub(crate) fn keep_comment_boxes(

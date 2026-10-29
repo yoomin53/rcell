@@ -376,8 +376,8 @@ pub fn shift_cells(
     if insert {
         super::structure::shift_pane_breaks(sheet, op);
     }
-    // 도형: 시작 칸이 띠 안에서 움직이는 자리에 있고 끝 칸도 띠 안이면 행·열 편집처럼 옮긴다 (한셀 — 띠보다 넓은
-    // 그림은 그대로. 끝 표지가 칸 첫머리(오프셋 0)면 앞 칸까지로 본다)
+    // 도형: 시작 칸이 띠 안에서 움직이는 자리에 있고 끝 표지의 칸도 띠 안이면 행·열 편집처럼 옮긴다 (한셀 — 띠보다
+    // 넓은 그림은 그대로. 끝 표지가 칸 첫머리(오프셋 0)여도 그 칸까지 띠 안이어야 한다: B:E 그림은 B:D 띠에서 그대로)
     for sh in &mut sheet.shapes {
         let f = sh.anchor.from;
         let fr = CellRef {
@@ -385,12 +385,7 @@ pub fn shift_cells(
             col: f.col,
         };
         let end_in = sh.anchor.to.is_none_or(|t| {
-            let (i, off, start) = if rows {
-                (t.col, t.col_off, f.col)
-            } else {
-                (t.row, t.row_off, f.row)
-            };
-            let i = if off <= 0 && i > start { i - 1 } else { i };
+            let i = if rows { t.col } else { t.row };
             i >= band.0 && i <= band.1
         });
         if in_band(fr) && end_in && main(fr) >= at {

@@ -2030,13 +2030,13 @@ pub fn set_col_width(
 }
 
 /// 열 너비·행 높이를 바꾸기 전의 배치: 크기를 지키는 그림(`editAs="oneCell"`)의 크기, 메모 상자를 둘 화면 자리
-struct Before {
+pub(crate) struct Before {
     sizes: Vec<Option<(i64, i64)>>,
     old: Option<crate::render::Geometry>,
     ext: (u32, u32),
 }
 
-fn one_cell_before(wb: &Workbook, si: usize) -> Before {
+pub(crate) fn one_cell_before(wb: &Workbook, si: usize) -> Before {
     let sheet = &wb.sheets[si];
     let pictures = sheet
         .shapes
@@ -2059,6 +2059,17 @@ fn one_cell_before(wb: &Workbook, si: usize) -> Before {
         old: Some(g),
         ext,
     }
+}
+
+/// 행·열을 숨기거나 보인 뒤: 크기를 지키는 그림의 끝 표지만 다시 정한다 (한셀 — 7·8행을 숨기면 그 행에 걸친 그림
+/// 끝이 8행에서 10행으로)
+pub(crate) fn one_cell_pictures_after(wb: &mut Workbook, si: usize, before: &Before) {
+    if before.old.is_none() {
+        return;
+    }
+    let g = crate::render::sheet_geometry(wb, &wb.sheets[si], before.ext.0, before.ext.1);
+    structure::keep_one_cell_sizes(&mut wb.sheets[si], &before.sizes, &g);
+    structure::snap_from_hidden(&mut wb.sheets[si], &before.sizes, &g);
 }
 
 fn one_cell_after(wb: &mut Workbook, si: usize, before: &Before) {

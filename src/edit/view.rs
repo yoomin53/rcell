@@ -100,10 +100,11 @@ pub fn hide_rows(
     if si < wb.sheets.len() {
         super::guard_action(wb, si, "formatRows")?;
     }
-    let sheet = wb
-        .sheets
-        .get_mut(si)
-        .ok_or_else(|| err("시트가 없습니다"))?;
+    if si >= wb.sheets.len() {
+        return Err(err("시트가 없습니다"));
+    }
+    let before = super::one_cell_before(wb, si);
+    let sheet = &mut wb.sheets[si];
     for r in r0..=r1.min(r0 + 100_000) {
         if !hidden
             && sheet
@@ -115,6 +116,7 @@ pub fn hide_rows(
         }
         row_info(sheet, r).hidden = hidden;
     }
+    super::one_cell_pictures_after(wb, si, &before);
     Ok(())
 }
 
@@ -130,6 +132,7 @@ pub fn hide_cols(
         return Err(err("시트가 없습니다"));
     }
     super::guard_action(wb, si, "formatColumns")?;
+    let before = super::one_cell_before(wb, si);
     if !hidden {
         each_col(wb, si, c0, c1, &|c| c.hidden = false);
         // 너비만 기본값인 빈 열 정보는 없앤다
@@ -143,9 +146,11 @@ pub fn hide_cols(
                 && !c.custom_width
                 && c.width.is_none_or(|w| (w - dw).abs() < 1e-9))
         });
+        super::one_cell_pictures_after(wb, si, &before);
         return Ok(());
     }
     each_col(wb, si, c0, c1, &|c| c.hidden = true);
+    super::one_cell_pictures_after(wb, si, &before);
     Ok(())
 }
 
