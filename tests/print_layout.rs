@@ -607,3 +607,20 @@ fn oracle() {
     eprintln!("인쇄 페이지 대조: {} / {total} 같음", total - bad.len());
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
+
+/// 배율 100 의 99 는 인쇄 차례의 첫 한 페이지 시트만 (한셀 PDF 의 Tf — 시트 페이지 수 "21121": 92 92 | 91 | 92 | 92 92 | 92,
+/// "1111": 91 92 92 92, 첫 시트를 지우거나 옮기거나 숨겨도 인쇄 차례의 첫 한 페이지 시트가 91)
+#[test]
+fn first_single_page_sheet_99() {
+    let mut wb = base();
+    fill(&mut wb, "A1:B10");
+    assert_eq!(rcell::print::sheet_print_with(&wb, 0, true).print_scale, 99);
+    assert_eq!(
+        rcell::print::sheet_print_with(&wb, 0, false).print_scale,
+        100
+    );
+    // 수동 나누기로 두 페이지면 첫째여도 100
+    wb.sheets[0].page.row_breaks = vec![5];
+    let p = rcell::print::sheet_print_with(&wb, 0, true);
+    assert_eq!((p.pages.len(), p.print_scale), (2, 100));
+}

@@ -228,6 +228,13 @@ fn num(v: f64) -> String {
     if s == "-0" { "0".into() } else { s.into() }
 }
 
+/// 장치 단위 변환의 배율은 소수 여섯 자리 (세 자리면 0.119935 가 0.12 가 되어 오른쪽 끝에서 장치 1.4 어긋난다)
+fn num6(v: f64) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".into() } else { s.into() }
+}
+
 fn color(c: [u8; 3]) -> String {
     format!(
         "{} {} {}",
@@ -391,8 +398,8 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> 
                 let _ = writeln!(
                     s,
                     "q {} 0 0 {} 0 {} cm {} rg {} RG",
-                    num(0.12 * sx),
-                    num(-0.12 * sy),
+                    num6(0.12 * sx),
+                    num6(-0.12 * sy),
                     num(size.height),
                     color(*c),
                     color(*c)

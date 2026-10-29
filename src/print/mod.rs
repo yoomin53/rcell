@@ -20,7 +20,9 @@ mod pdf;
 mod pdfimage;
 
 pub use font::FontDb;
-pub use paginate::{Area, Page, Scaling, Settings, SheetPrint, settings, sheet_print, used_end};
+pub use paginate::{
+    Area, Page, Scaling, Settings, SheetPrint, settings, sheet_print, sheet_print_with, used_end,
+};
 
 use crate::model::Workbook;
 use crate::render::page::{
@@ -341,11 +343,14 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
         f0.and_then(|f| f.size).unwrap_or(11.0),
     );
     let mut pages: Vec<(PageSize, Vec<Op>)> = Vec::new();
+    // 인쇄 차례에서 한 페이지짜리 시트가 이미 나왔는가 (배율 100 의 99 는 첫째에만)
+    let mut single_seen = false;
     for si in sheets {
         let Some(sheet) = wb.sheets.get(si) else {
             continue;
         };
-        let sp = sheet_print(wb, si);
+        let sp = paginate::sheet_print_with(wb, si, !single_seen);
+        single_seen |= sp.pages.len() == 1;
         let size = page_size(&sp.settings);
         let po = sheet.page.print_options.as_ref();
         let setup = sheet.page.setup.as_ref();

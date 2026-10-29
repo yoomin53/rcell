@@ -9,7 +9,8 @@
 //! 1. 페이지 나누기: 행·열의 화면 px 에 배율을 곱해 쌓는다. 배율 지정이면 쓸 수 있는 자리는 1/100 인치 단위
 //!    round((용지 − 여백)/0.72pt), 페이지에 맞추기면 화면 px 단위 (용지 − 여백)/0.75pt.
 //! 2. 인쇄 배율 z (%): 행·열을 하나씩 round(px × z/100) 화면 px 로 줄였을 때 모든 페이지가 (용지 − 여백)/0.75pt
-//!    안에 들어갈 때까지 1 씩 줄인다. 배율 100 은 99 부터 (내용이 아주 작으면 세로만 6.25 배로 늘리는 한셀 동작을 따른다).
+//!    안에 들어갈 때까지 1 씩 줄인다. 배율 100 은 인쇄 차례의 첫 한 페이지 시트만 99 부터 (내용이 아주 작으면 세로만
+//!    6.25 배로 늘리는 한셀 동작을 따른다).
 
 use super::paper::{Paper, paper};
 use crate::model::{CellRef, PageLayout, Sheet, Workbook};
@@ -457,6 +458,13 @@ fn printable(s: &Settings) -> (f64, f64) {
 
 /// 시트의 인쇄 배치를 계산한다
 pub fn sheet_print(wb: &Workbook, sheet_index: usize) -> SheetPrint {
+    sheet_print_with(wb, sheet_index, true)
+}
+
+/// [`sheet_print`] — `first_single`: 인쇄 차례에서 처음 나오는 한 페이지짜리 시트인가. 한셀은 배율 100 인 그 시트만
+/// 99 로 찍는다 (시트 셋·다섯 개 실험: 한 페이지 시트 가운데 첫째만 Tf 91, 나머지와 여러 페이지 시트는 92 —
+/// 시트를 지우거나 옮기거나 숨겨도 인쇄 차례의 첫째)
+pub fn sheet_print_with(wb: &Workbook, sheet_index: usize, first_single: bool) -> SheetPrint {
     let s = settings(wb, sheet_index);
     let sheet = &wb.sheets[sheet_index];
     let max_r = s
@@ -640,7 +648,7 @@ pub fn sheet_print(wb: &Workbook, sheet_index: usize) -> SheetPrint {
     let mut tall = false;
     let mut z = page_scale;
     if matches!(s.scaling, Scaling::Zoom(100)) {
-        // 배율 100: 세로 6.25 배로도 들어가면 그렇게 (가로 1:1), 아니면 99 부터
+        // 배율 100: 세로 6.25 배로도 들어가면 그렇게 (가로 1:1), 아니면 100 부터 (첫 한 페이지 시트는 99)
         tall = pages.iter().all(|p| {
             let h: u32 = p
                 .title_rows
@@ -656,7 +664,11 @@ pub fn sheet_print(wb: &Workbook, sheet_index: usize) -> SheetPrint {
                 .sum();
             h as f64 * TALL <= avail75.1 + 1e-9 && w as f64 <= avail75.0 + 1e-9
         }) && pages.iter().any(|p| !p.rows.is_empty());
-        z = if tall { 100 } else { 99 };
+        z = if !tall && first_single && pages.len() == 1 {
+            99
+        } else {
+            100
+        };
     }
     if !tall {
         while z > 10 && !fits(z) {

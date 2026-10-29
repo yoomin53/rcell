@@ -225,6 +225,22 @@ impl Axis {
     }
 }
 
+/// 오른쪽(`right`)·가운데 맞춤 글자의 시작 — 칸의 인쇄 시작에서 인쇄 px (글자 폭 실험, 배율 50–200·열 너비 1px 씩).
+/// 화면 배치(배율 100)에서 오른쪽 = 너비 − 3 − 들여쓰기 − round(W), 가운데 = floor(너비/2) − floor(W/2) (W = 글꼴 advance ×
+/// pt·4/3 의 합, px). 배율 100 이면 그대로, 아니면 round(x·z − 1.75) (가운데 1.5) — 배율에 따라 1px 어긋나는 것이 남는다
+pub(crate) fn aligned_px(right: bool, cell_w: f64, text_w: f64, indent: f64, zoom: u32) -> f64 {
+    let (x, k) = if right {
+        (cell_w - 3.0 - indent - text_w.round(), 1.75)
+    } else {
+        ((cell_w / 2.0).floor() - (text_w / 2.0).floor(), 1.5)
+    };
+    if zoom == 100 {
+        x
+    } else {
+        (x * zoom as f64 / 100.0 - k).round()
+    }
+}
+
 /// 칸 상자가 경계에서 들어가는 거리 (장치 단위): 화면에서 칸의 마지막 픽셀이 격자선 자리인 것과 같다
 const SHIFT: f64 = 6.0;
 
@@ -652,6 +668,10 @@ fn page_body(
             Some(at - (col..j).map(|k| lay.col_w(k) as f64).sum::<f64>())
         };
         let left_at = |col: u32, extra: f64| -> Option<f64> {
+            // 배율 100 은 화면 자리 그대로 (왼쪽 + 2px)
+            if frame.zoom == 100 {
+                return Some((frame.origin_x + (x100(col)? + 2.0 + extra) * 6.25).round());
+            }
             let v = (x100(col)? + 2.0 + extra) * frame.zoom as f64 / 100.0;
             let r = v.round();
             // 반은 짝수 쪽 (75% 의 1.5 → 75 + 0)
@@ -664,6 +684,14 @@ fn page_body(
         };
         let indent = v.indent as f64 * INDENT_PX * px;
         let w = |s: &str, sz: f64| measure.width(&key, sz, s) * stretch;
+        // 오른쪽·가운데 맞춤: 화면 글자 폭 (px) 으로 [`aligned_px`]
+        let scr_w = |s: &str| measure.width(&key, pt * 4.0 / 3.0, s) * stretch;
+        let ec = lay.merge_end.get(&(r, c)).map_or(c, |m| m.1);
+        let cell_w100 = cols_set
+            .contains(&c)
+            .then(|| (c..=ec).map(|k| lay.col_w(k) as f64).sum::<f64>());
+        let lp = ((x0 - frame.origin_x) / 6.25).round();
+        let to_dev = |xp: f64| (frame.origin_x + (lp + xp) * 6.25).round();
         // 넘친 범위 (화면 px → 이어진 열의 인쇄 자리)
         let (ol, or) = ov.span.get(&(r, c)).copied().unwrap_or((0, 0));
         let mut bx0 = x0;
@@ -746,10 +774,18 @@ fn page_body(
                 continue;
             }
             let tw = w(ln, size);
-            let x = match v.h {
-                HAlign::Right => bx1 - 4.2 * px - indent - tw,
-                HAlign::Center => (bx0 + bx1) / 2.0 - 1.3 * px - tw / 2.0,
-                HAlign::CenterContinuous => (x0 + bx1) / 2.0 - 1.3 * px - tw / 2.0,
+            let fits_cell = ol == 0 && or == 0;
+            let x = match (v.h, cell_w100) {
+                (HAlign::Right | HAlign::Center, Some(cw)) if fits_cell => to_dev(aligned_px(
+                    v.h == HAlign::Right,
+                    cw,
+                    scr_w(ln),
+                    v.indent as f64 * INDENT_PX,
+                    frame.zoom,
+                )),
+                (HAlign::Right, _) => bx1 - 4.2 * px - indent - tw,
+                (HAlign::Center, _) => (bx0 + bx1) / 2.0 - 1.3 * px - tw / 2.0,
+                (HAlign::CenterContinuous, _) => (x0 + bx1) / 2.0 - 1.3 * px - tw / 2.0,
                 _ => {
                     let start = if ol > 0 { None } else { Some(c) };
                     start
@@ -1515,5 +1551,21 @@ mod tests {
         assert_eq!(wrap_text("가나다라마바", 35.0, &w), ["가나다", "라마바"]);
         assert_eq!(wrap_text("abc def", 45.0, &w), ["abc", "def"]);
         assert_eq!(wrap_text("가\n나", 100.0, &w), ["가", "나"]);
+    }
+
+    /// 한셀 PDF 에서 잰 글자 시작 (맑은 고딕 11pt: 숫자 8.078px, 한글 14.667px, "AAAA" 38.61px)
+    #[test]
+    fn aligned_text_start() {
+        let digit = 1128.0 / 2048.0 * 11.0 * 4.0 / 3.0;
+        // 배율 100 (두 번째 시트): 143px 열의 오른쪽 맞춤 "1" 은 132, "가가가" 는 96, 가운데 "1" 은 67
+        assert_eq!(aligned_px(true, 143.0, digit, 0.0, 100), 132.0);
+        assert_eq!(aligned_px(true, 143.0, 44.0, 0.0, 100), 96.0);
+        assert_eq!(aligned_px(false, 143.0, digit, 0.0, 100), 67.0);
+        assert_eq!(aligned_px(false, 144.0, 38.61, 0.0, 100), 53.0);
+        // 배율 99: 182px 열의 "1234567890" 은 95, "1111" 은 144
+        assert_eq!(aligned_px(true, 182.0, digit * 10.0, 0.0, 99), 95.0);
+        assert_eq!(aligned_px(true, 182.0, digit * 4.0, 0.0, 99), 144.0);
+        // 배율 150: 142px 열의 가운데 "AAAA" 는 77
+        assert_eq!(aligned_px(false, 142.0, 38.61, 0.0, 150), 77.0);
     }
 }
