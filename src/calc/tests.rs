@@ -255,6 +255,34 @@ fn cycles_are_reported() {
     assert_eq!(calc(&w, "C1"), n(5.0));
 }
 
+/// 반복 계산 (calcPr iterate): 파일 값에서 시작해 2×iterateCount 번, 행 차례로 (대조 실험 circ)
+#[test]
+fn iterative_calculation() {
+    let mut w = wb(vec![sheet(
+        "S",
+        &[
+            ("B1", "=B2+1"),
+            ("B2", "=B1*0.5"),
+            ("B3", "=B3+1"),
+            ("B4", "=B6*10"),
+            ("B5", "=B6+1"),
+            ("B6", "=B5+1"),
+        ],
+    )]);
+    // B3 의 파일 값 100
+    w.sheets[0].cells[2].value = CellValue::Number(100.0);
+    w.calc_attrs = vec![
+        ("iterate".into(), "1".into()),
+        ("iterateCount".into(), "2".into()),
+    ];
+    assert_eq!(calc(&w, "B1"), n(1.875));
+    assert_eq!(calc(&w, "B2"), n(0.9375));
+    assert_eq!(calc(&w, "B3"), n(104.0));
+    // 뒤 행의 순환 칸은 한 바퀴 앞 값
+    assert_eq!(calc(&w, "B4"), n(60.0));
+    assert_eq!(calc(&w, "B6"), n(8.0));
+}
+
 #[test]
 fn array_formula_and_lifting() {
     assert_eq!(one("SUM(1/{1,2,4})"), n(1.75));
