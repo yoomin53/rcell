@@ -14,10 +14,11 @@
 
 use crate::model::{
     Chart, ChartAxis, ChartCache, ChartColor, ChartData, ChartDataLabels, ChartDataPoint,
-    ChartFill, ChartFont, ChartGroup, ChartGroupProps, ChartLayout, ChartLegendProps, ChartLine,
-    ChartLineEnd, ChartLines, ChartManualLayout, ChartMarker, ChartNumFmt, ChartPara, ChartPoint,
-    ChartRich, ChartRun, ChartScaling, ChartSeries, ChartShapeProps, ChartSurface, ChartTitle,
-    ChartTx, ChartView3D, HncChartStyle,
+    ChartDataTable, ChartErrBars, ChartFill, ChartFont, ChartGroup, ChartGroupProps, ChartLayout,
+    ChartLegendProps, ChartLine, ChartLineEnd, ChartLines, ChartManualLayout, ChartMarker,
+    ChartNumFmt, ChartPara, ChartPoint, ChartRich, ChartRun, ChartScaling, ChartSeries,
+    ChartShapeProps, ChartSurface, ChartTitle, ChartTrendline, ChartTx, ChartUpDownBars,
+    ChartView3D, HncChartStyle,
 };
 use crate::ns;
 use crate::parser::drawing::{A, C, color};
@@ -113,6 +114,14 @@ pub fn parse_chart(root: &Element) -> Chart {
     };
     ch.plot_layout = plot.child_ns(C, "layout").map(layout);
     ch.plot_sp_pr = plot.child_ns(C, "spPr").map(shape_props);
+    ch.d_table = plot.child_ns(C, "dTable").map(|d| ChartDataTable {
+        show_horz_border: val_bool(d, "showHorzBorder"),
+        show_vert_border: val_bool(d, "showVertBorder"),
+        show_outline: val_bool(d, "showOutline"),
+        show_keys: val_bool(d, "showKeys"),
+        sp_pr: d.child_ns(C, "spPr").map(shape_props),
+        tx_pr: d.child_ns(C, "txPr").map(rich),
+    });
     let mut groups = plot
         .elements()
         .filter(|e| e.ns.as_deref() == Some(C) && e.name.ends_with("Chart"));
@@ -178,6 +187,15 @@ fn group(t: &Element) -> ChartGroup {
             ser_lines: lines("serLines"),
             drop_lines: lines("dropLines"),
             hi_low_lines: lines("hiLowLines"),
+            up_down_bars: t.child_ns(C, "upDownBars").map(|u| ChartUpDownBars {
+                gap_width: val_u32(u, "gapWidth"),
+                up: u
+                    .child_ns(C, "upBars")
+                    .map(|b| b.child_ns(C, "spPr").map(shape_props).unwrap_or_default()),
+                down: u
+                    .child_ns(C, "downBars")
+                    .map(|b| b.child_ns(C, "spPr").map(shape_props).unwrap_or_default()),
+            }),
             gap_depth: val_u32(t, "gapDepth"),
             shape: val("shape"),
             marker: val_bool(t, "marker"),
@@ -268,6 +286,43 @@ fn series(s: &Element) -> ChartSeries {
     out.shape = val_str(s, "shape");
     out.bubble3d = val_bool(s, "bubble3D");
     out.smooth = val_bool(s, "smooth");
+    out.trendlines = s
+        .elements()
+        .filter(|e| e.is(C, "trendline"))
+        .map(|t| ChartTrendline {
+            name: t.child_ns(C, "name").map(|n| n.text()),
+            sp_pr: t.child_ns(C, "spPr").map(shape_props),
+            kind: val_str(t, "trendlineType").unwrap_or_else(|| "linear".into()),
+            order: val_u32(t, "order"),
+            period: val_u32(t, "period"),
+            forward: val_f64(t, "forward"),
+            backward: val_f64(t, "backward"),
+            intercept: val_f64(t, "intercept"),
+            disp_r_sqr: val_bool(t, "dispRSqr"),
+            disp_eq: val_bool(t, "dispEq"),
+        })
+        .collect();
+    out.err_bars = s
+        .elements()
+        .filter(|e| e.is(C, "errBars"))
+        .map(|b| {
+            let pm = |name: &str| {
+                b.child_ns(C, name)
+                    .and_then(|x| x.elements().next())
+                    .map(data)
+            };
+            ChartErrBars {
+                dir: val_str(b, "errDir"),
+                bar_type: val_str(b, "errBarType").unwrap_or_else(|| "both".into()),
+                val_type: val_str(b, "errValType").unwrap_or_else(|| "fixedVal".into()),
+                no_end_cap: val_bool(b, "noEndCap"),
+                plus: pm("plus"),
+                minus: pm("minus"),
+                val: val_f64(b, "val"),
+                sp_pr: b.child_ns(C, "spPr").map(shape_props),
+            }
+        })
+        .collect();
     out
 }
 

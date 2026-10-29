@@ -149,6 +149,18 @@ fn chart(s: &mut String, ch: &Chart) {
         for a in &ch.axes {
             axis(s, a);
         }
+        if let Some(d) = &ch.d_table {
+            el(s, "c:dTable", no_attrs, |s| {
+                val_bool(s, "c:showHorzBorder", d.show_horz_border);
+                val_bool(s, "c:showVertBorder", d.show_vert_border);
+                val_bool(s, "c:showOutline", d.show_outline);
+                val_bool(s, "c:showKeys", d.show_keys);
+                sp_pr(s, &d.sp_pr);
+                if let Some(r) = &d.tx_pr {
+                    rich(s, "c:txPr", r);
+                }
+            });
+        }
         sp_pr(s, &ch.plot_sp_pr);
     });
     if let Some(pos) = &ch.legend {
@@ -228,6 +240,21 @@ fn group(s: &mut String, x: &Group) {
         lines(s, "c:serLines", &g.ser_lines);
         lines(s, "c:dropLines", &g.drop_lines);
         lines(s, "c:hiLowLines", &g.hi_low_lines);
+        if let Some(u) = &g.up_down_bars {
+            el(s, "c:upDownBars", no_attrs, |s| {
+                val(s, "c:gapWidth", u.gap_width);
+                for (tag, b) in [("c:upBars", &u.up), ("c:downBars", &u.down)] {
+                    if let Some(b) = b {
+                        el(s, tag, no_attrs, |s| {
+                            sp_pr(
+                                s,
+                                &Some(b.clone()).filter(|b| *b != ChartShapeProps::default()),
+                            )
+                        });
+                    }
+                }
+            });
+        }
         val(s, "c:gapDepth", g.gap_depth);
         val_str(s, "c:shape", &g.shape);
         val_bool(s, "c:marker", g.marker);
@@ -272,6 +299,34 @@ fn ser(s: &mut String, x: &ChartSeries, xy: bool) {
         }
         if let Some(d) = &x.d_lbls {
             d_lbls(s, d);
+        }
+        for t in &x.trendlines {
+            el(s, "c:trendline", no_attrs, |s| {
+                if let Some(n) = &t.name {
+                    let _ = write!(s, "<c:name>{}</c:name>", esc(n));
+                }
+                sp_pr(s, &t.sp_pr);
+                val(s, "c:trendlineType", Some(esc(&t.kind)));
+                val(s, "c:order", t.order);
+                val(s, "c:period", t.period);
+                val(s, "c:forward", t.forward.map(num));
+                val(s, "c:backward", t.backward.map(num));
+                val(s, "c:intercept", t.intercept.map(num));
+                val_bool(s, "c:dispRSqr", t.disp_r_sqr);
+                val_bool(s, "c:dispEq", t.disp_eq);
+            });
+        }
+        for b in &x.err_bars {
+            el(s, "c:errBars", no_attrs, |s| {
+                val_str(s, "c:errDir", &b.dir);
+                val(s, "c:errBarType", Some(esc(&b.bar_type)));
+                val(s, "c:errValType", Some(esc(&b.val_type)));
+                val_bool(s, "c:noEndCap", b.no_end_cap);
+                source(s, "c:plus", &b.plus);
+                source(s, "c:minus", &b.minus);
+                val(s, "c:val", b.val.map(num));
+                sp_pr(s, &b.sp_pr);
+            });
         }
         let (cat, v) = if xy {
             ("c:xVal", "c:yVal")

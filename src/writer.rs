@@ -1717,11 +1717,17 @@ fn sheet_view_xml(sheet: &Sheet, selected: bool) -> String {
     flag(&mut a, "showRowColHeaders", v.show_row_col_headers, true);
     flag(&mut a, "showZeros", v.show_zeros, true);
     flag(&mut a, "tabSelected", selected, false);
+    if v.grid_color.is_some() {
+        a.push_str(" defaultGridColor=\"0\"");
+    }
     if let Some(x) = &v.view {
         let _ = write!(a, " view=\"{}\"", esc(x));
     }
     if let Some(x) = &v.top_left_cell {
         let _ = write!(a, " topLeftCell=\"{}\"", esc(x));
+    }
+    if let Some(c) = v.grid_color {
+        let _ = write!(a, " colorId=\"{c}\"");
     }
     for (name, val) in [
         ("zoomScale", v.zoom_scale),

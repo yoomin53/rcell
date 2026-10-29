@@ -1836,6 +1836,9 @@ impl SheetCtx<'_, '_> {
         if selected {
             flags |= 0x40;
         }
+        if v.grid_color.is_some() {
+            flags &= !0x0200;
+        }
         let xl_view = match v.view.as_deref() {
             Some("pageBreakPreview") => 1,
             Some("pageLayout") => 2,
@@ -1862,7 +1865,7 @@ impl SheetCtx<'_, '_> {
                 .u32(xl_view)
                 .u32(tl.row)
                 .u32(tl.col)
-                .u8(0x40)
+                .u8(v.grid_color.map_or(0x40, |c| c.min(255) as u8))
                 .u8(0)
                 .u16(0)
                 .u16(z)

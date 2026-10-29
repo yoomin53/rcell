@@ -397,6 +397,8 @@ fn parse_sheet_view(v: &Element) -> SheetView {
         zoom_scale: v.attr_u32("zoomScale"),
         zoom_scale_normal: v.attr_u32("zoomScaleNormal"),
         zoom_scale_sheet_layout_view: v.attr_u32("zoomScaleSheetLayoutView"),
+        grid_color: (v.attr_bool("defaultGridColor") == Some(false))
+            .then(|| v.attr_u32("colorId").unwrap_or(64)),
         ..Default::default()
     };
     if let Some(p) = v.sml_child("pane") {

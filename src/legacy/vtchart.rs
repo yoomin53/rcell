@@ -907,6 +907,38 @@ pub(crate) static CLASSES: &[ClassDef] = &[
         version: 1,
         specs: &[base("VtTextBlock")],
     },
+    // 요소 하나의 서식 (VtSeries.points 의 항목 — 한셀이 COM 으로 만든 원형 차트: 요소마다 색)
+    ClassDef {
+        name: "VtSeriesPoint",
+        version: 1,
+        specs: &[
+            S::Ptr("label", &["VtSeriesLabel"]),
+            S::F32("explode"), // 쪼개기 (반지름의 비율: 0.25 = 25%)
+            S::Arr("u16s", Count::Fixed(4), Item::U16),
+            S::Ptr("element", &["VtSeriesPointElement"]),
+            S::Ptr("ptr_a", &[]),
+            base("VtObject"),
+        ],
+    },
+    // 요소 서식의 본문: VtSeries 의 칠·선·표식 부분과 같은 꼴
+    ClassDef {
+        name: "VtSeriesPointElement",
+        version: 1,
+        specs: &[
+            S::U16("u16_a"),
+            S::Group("brush", &BRUSH), // 요소 채우기 색
+            S::Group("edgePen", &PEN),
+            S::Ptr("ptr_a", &[]),
+            S::U16("u16_b"),
+            S::Group("markerPen", &PEN),
+            S::F32("markerSize"),
+            S::U16("showLine"),
+            S::Color("markerColor"),
+            S::Ptr("picture", &["VtPicture"]),
+            S::U16("markerStyle"),
+            base("VtObject"),
+        ],
+    },
     ClassDef {
         name: "VtChartTitle",
         version: 1,
@@ -3344,7 +3376,7 @@ mod tests {
 
     #[test]
     fn layout_table_is_consistent() {
-        assert_eq!(CLASSES.len(), 39);
+        assert_eq!(CLASSES.len(), 41);
         for (i, c) in CLASSES.iter().enumerate() {
             assert!(
                 CLASSES[..i].iter().all(|d| d.name != c.name),

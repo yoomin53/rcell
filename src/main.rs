@@ -86,6 +86,9 @@ enum Cmd {
         /// 빈 칸으로라도 채울 최소 크기 (px, 예: 1600x900). 0x0 이면 쓰는 범위만
         #[arg(long)]
         fill: Option<String>,
+        /// 시트마다 저장된 확대율 대신 이 확대율(%)로 그린다 (화면 갈무리와 비교할 때)
+        #[arg(long)]
+        zoom: Option<u32>,
     },
     /// 형식 변환: XML/바이너리/레거시 .cell → XML .cell. 출력 이름이 .xlsx 면 Excel, .bin.cell·.xlsb 면
     /// 바이너리 .cell (한셀 xlCellb), .legacy.cell 이면 레거시 .cell (한셀 xlCell8), .csv·.txt·.prn 이면 활성 시트를
@@ -295,12 +298,14 @@ fn main() -> ExitCode {
             sheet,
             no_headers,
             fill,
+            zoom,
         } => html(
             &file,
             output.as_deref(),
             sheet.as_deref(),
             no_headers,
             fill.as_deref(),
+            zoom,
         ),
         Cmd::Convert {
             input,
@@ -1133,8 +1138,14 @@ fn html(
     sheet: Option<&str>,
     no_headers: bool,
     fill: Option<&str>,
+    zoom: Option<u32>,
 ) -> rcell::Result<()> {
-    let wb = open_doc(file)?;
+    let mut wb = open_doc(file)?;
+    if let Some(z) = zoom {
+        for s in &mut wb.sheets {
+            s.view.zoom_scale = Some(z.clamp(10, 400));
+        }
+    }
     let title = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

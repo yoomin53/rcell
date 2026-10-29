@@ -28,6 +28,40 @@ use std::cell::Cell;
 thread_local! {
     /// TEXT 함수용: `?` 자리 공백을 이 표시 글자로 넣는다 (TEXT 가 글 앞으로 옮긴다)
     static PAD_MARK: Cell<bool> = const { Cell::new(false) };
+    /// 화면 배치용: `_x`(x 폭만큼 빈 자리)와 `*x`(채움)를 표시 글자로 남긴다 ([`format_layout`])
+    static LAYOUT_MARK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `_x` 표시 글자 (사용자 정의 영역, 다음 글자가 x)
+const SPACE_MARK: char = '\u{E0FD}';
+/// `*x` 표시 글자 (사용자 정의 영역, 다음 글자가 x)
+const FILL_MARK: char = '\u{E0FE}';
+
+/// [`format`] 과 같되 `_x` 빈 자리와 `*x` 채움의 자리를 [`Formatted::pads`]·[`Formatted::fill`] 에 담는다
+/// (화면에 그릴 때 — 회계 서식의 오른쪽 여백, 채움 글자). 글은 [`format`] 과 같다
+pub fn format_layout(value: &CellValue, code: &str, date1904: bool) -> Formatted {
+    LAYOUT_MARK.with(|p| p.set(true));
+    let mut out = format(value, code, date1904);
+    LAYOUT_MARK.with(|p| p.set(false));
+    if out.text.contains([SPACE_MARK, FILL_MARK]) {
+        let mut text = String::with_capacity(out.text.len());
+        let mut it = out.text.chars();
+        while let Some(c) = it.next() {
+            match c {
+                SPACE_MARK | FILL_MARK => {
+                    let Some(x) = it.next() else { break };
+                    if c == SPACE_MARK {
+                        out.pads.push((text.len(), x));
+                    } else if out.fill.is_none() {
+                        out.fill = Some((text.len(), x));
+                    }
+                }
+                c => text.push(c),
+            }
+        }
+        out.text = text;
+    }
+    out
 }
 
 /// TEXT 함수가 `?` 자리의 공백을 알아볼 수 있게 넣는 표시 글자 (사용자 정의 영역)
@@ -58,6 +92,12 @@ pub struct Formatted {
     pub color: Option<String>,
     /// 날짜가 범위를 벗어나 `#` 로 채워야 하는 경우
     pub overflow: bool,
+    /// `_x` 자리: (글의 바이트 위치, x) — x 의 폭만큼 빈 자리 ([`format_layout`] 만 채운다)
+    pub pads: Vec<(usize, char)>,
+    /// `*x` 채움: (글의 바이트 위치, x) — 칸의 남는 폭을 x 로 채운다 ([`format_layout`] 만 채운다)
+    pub fill: Option<(usize, char)>,
+    /// 숫자를 글 구역(`@`)으로 표시했다 — 한셀은 일반 맞춤에서 글처럼 왼쪽에 둔다 (표시 형식 실험 `[Magenta]@`)
+    pub as_text: bool,
 }
 
 /// 한셀(한국어) 내장 표시 형식. 5–8, 23–26, 41–44 는 한셀 레거시 파일의 FORMAT 레코드,
@@ -277,6 +317,12 @@ fn parse_section(src: &str) -> Section {
                 continue;
             }
             '_' | '*' => {
+                if LAYOUT_MARK.with(|p| p.get())
+                    && let Some(&d) = chars.get(i + 1)
+                {
+                    let m = if c == '_' { SPACE_MARK } else { FILL_MARK };
+                    push_lit(&mut sec.toks, &format!("{m}{d}"));
+                }
                 i += 2;
                 continue;
             }
@@ -1501,6 +1547,7 @@ pub fn format(value: &CellValue, code: &str, date1904: bool) -> Formatted {
                         text: dbnum_finish(&out, 0),
                         color: s.color.clone(),
                         overflow: false,
+                        ..Default::default()
                     }
                 }
                 None => Formatted {
@@ -1537,6 +1584,7 @@ fn format_number_value(v: f64, secs: &[Section], date1904: bool) -> Formatted {
         return Formatted::default();
     };
     let mut f = format_section(sec, v, signed, date1904);
+    f.as_text = sec.has_at();
     if sec.dbnum != 0 {
         f.text = dbnum_finish(&f.text, sec.dbnum);
     }
@@ -1551,6 +1599,7 @@ fn format_section(sec: &Section, v: f64, signed: bool, date1904: bool) -> Format
             text: String::new(),
             color,
             overflow: false,
+            ..Default::default()
         };
     }
     if sec.is_date() {
@@ -1568,11 +1617,13 @@ fn format_section(sec: &Section, v: f64, signed: bool, date1904: bool) -> Format
                 text,
                 color,
                 overflow: false,
+                ..Default::default()
             },
             None => Formatted {
                 text: "#".repeat(8),
                 color,
                 overflow: true,
+                ..Default::default()
             },
         };
     }
@@ -1596,6 +1647,7 @@ fn format_section(sec: &Section, v: f64, signed: bool, date1904: bool) -> Format
             text: out,
             color,
             overflow: false,
+            ..Default::default()
         };
     }
     if sec.has_at() && !sec.has_digits() {
@@ -1608,6 +1660,7 @@ fn format_section(sec: &Section, v: f64, signed: bool, date1904: bool) -> Format
             text: out,
             color,
             overflow: false,
+            ..Default::default()
         };
     }
     if !sec.has_digits() {
@@ -1625,12 +1678,14 @@ fn format_section(sec: &Section, v: f64, signed: bool, date1904: bool) -> Format
             text: out,
             color,
             overflow: false,
+            ..Default::default()
         };
     }
     Formatted {
         text: format_number(sec, v, signed),
         color,
         overflow: false,
+        ..Default::default()
     }
 }
 
