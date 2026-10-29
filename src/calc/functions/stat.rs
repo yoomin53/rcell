@@ -910,7 +910,8 @@ fn gammaln(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x <= 0.0 {
         return Value::Error(ErrorKind::Num);
     }
-    num(sp::ln_gamma(x))
+    // 32비트 C 런타임 lgamma 의 값 (hcmath::lgamma)
+    num(crate::calc::hcmath::lgamma(x))
 }
 
 // ---------------------------------------------------------------------------

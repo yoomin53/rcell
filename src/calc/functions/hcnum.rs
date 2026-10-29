@@ -268,40 +268,13 @@ pub fn norm_cdf_ms(x: f64, m: f64, s: f64) -> f64 {
     }
 }
 
-/// 정수·반정수 a 의 Γ(a): (a−1)! 또는 √π·½·(3/2)·…·(a−1) (한셀의 t 상수와 끝자리까지 같다)
-fn gamma_half(a: f64) -> f64 {
-    if a > 170.0 {
-        return f64::INFINITY;
-    }
-    if a == a.floor() {
-        let mut r = 1.0;
-        let mut i = 2.0;
-        while i < a {
-            r *= i;
-            i += 1.0;
-        }
-        r
-    } else {
-        let mut r = std::f64::consts::PI.sqrt();
-        let mut v = 0.5;
-        while v < a {
-            r *= v;
-            v += 1.0;
-        }
-        r
-    }
-}
-
 /// t 분포 상수 Γ((ν+1)/2)/(√(ν·3.141593)·Γ(ν/2)) 와 0..|x| 의 밀도 적분의 곱 (ν 는 정수). 밀도는
-/// e^{−(ν+1)/2·ln(1+u²/ν)} 꼴이다 (pow 가 아니다 — ν = 1–3 에서 끝자리까지 같다, 대조 실험 t6). ν ≥ 5 의 상수는
-/// 한셀 값과 ν 에 비례하는 상대 오차(ν = 100 에서 1E-14 쯤)로 다르다 — 어떻게 구하는지 아직 모른다
+/// e^{−(ν+1)/2·ln(1+u²/ν)} 꼴이다 (pow 가 아니다 — 대조 실험 t6)
 pub fn t_central(x: f64, df: f64) -> f64 {
-    let k = if df < 339.0 {
-        gamma_half((df + 1.0) / 2.0) / ((df * 3.141_593).sqrt() * gamma_half(df / 2.0))
-    } else {
-        (super::special::ln_gamma((df + 1.0) / 2.0) - super::special::ln_gamma(df / 2.0)).mexp()
-            / (df * 3.141_593).sqrt()
-    };
+    // 상수 = exp(ln Γ((ν+1)/2) − ½ln(ν·3.141593) − ln Γ(ν/2)), ln Γ 는 한셀 GAMMALN (C 런타임 lgamma) — 이 차례로
+    // ν = 1–120·150·338 의 상수가 모두 같다 (대조 실험 t6·g6)
+    use crate::calc::hcmath::lgamma;
+    let k = (lgamma((df + 1.0) / 2.0) - 0.5 * (df * 3.141_593).mln() - lgamma(df / 2.0)).mexp();
     if x == 0.0 {
         return 0.0;
     }
