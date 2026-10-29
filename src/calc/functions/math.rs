@@ -79,13 +79,13 @@ pub const FNS: &[FnSpec] = &[
         crate::calc::eval::power(x, y)
     }),
     f("SIN", 1, 1, V, |c, a| {
-        un(c, a, |x| trig_arg(x).map(libm::sin))
+        un(c, a, |x| trig_arg(x).map(Fm::msin))
     }),
     f("COS", 1, 1, V, |c, a| {
-        un(c, a, |x| trig_arg(x).map(libm::cos))
+        un(c, a, |x| trig_arg(x).map(Fm::mcos))
     }),
     f("TAN", 1, 1, V, |c, a| {
-        un(c, a, |x| trig_arg(x).map(libm::tan))
+        un(c, a, |x| trig_arg(x).map(Fm::mtan))
     }),
     f("ASIN", 1, 1, V, |c, a| {
         un(c, a, |x| {

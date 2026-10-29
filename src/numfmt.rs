@@ -1554,7 +1554,15 @@ fn format_section(sec: &Section, v: f64, signed: bool, date1904: bool) -> Format
         };
     }
     if sec.is_date() {
-        // 날짜는 부호 없이 일련번호 그대로 쓴다 (음수는 표시 불가)
+        // 날짜는 부호 없이 일련번호 그대로 쓴다 (음수는 표시 불가). 1904 체계의 음수는 절댓값의 날짜 앞에 '-'
+        // (TEXT(-1,"yyyy-mm-dd") = "-1904-01-02", 대조 실험 cdate1904)
+        if date1904 && v < 0.0 {
+            let mut f = format_section(sec, -v, signed, date1904);
+            if !f.overflow {
+                f.text.insert(0, '-');
+            }
+            return f;
+        }
         return match format_date(sec, v, date1904) {
             Some(text) => Formatted {
                 text,

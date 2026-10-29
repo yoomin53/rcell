@@ -39,6 +39,14 @@ fn case_function(formula: &str) -> String {
         .unwrap_or_else(|| "(연산자)".into())
 }
 
+/// 시각·난수에 따라 달라지는 수식 (휘발성 비교에서 뺀다)
+fn time_or_random(formula: &str) -> bool {
+    let u = formula.to_ascii_uppercase();
+    ["RAND", "NOW(", "TODAY(", "INFO("]
+        .iter()
+        .any(|k| u.contains(k))
+}
+
 fn close(a: &CellValue, b: &CellValue, rel: f64) -> bool {
     match (a, b) {
         (CellValue::Number(x), CellValue::Number(y)) => (x - y).abs() <= rel * x.abs().max(y.abs()),
@@ -73,6 +81,7 @@ fn functions_match_hancell() {
     // RCELL_CALC_ORACLE_DUMP=<파일>: 모든 경우를 탭으로 나눈 줄로 적는다 (문서, 칸, 수식, rcell, 한셀, 같음)
     let dump_path = std::env::var_os("RCELL_CALC_ORACLE_DUMP").map(PathBuf::from);
     let mut dump = String::new();
+    let include_volatile = std::env::var_os("RCELL_CALC_ORACLE_VOLATILE").is_some();
     for f in &files {
         let book = f.file_stem().unwrap().to_string_lossy().into_owned();
         let wb = rcell::open(f).expect("대조 문서 읽기");
@@ -96,7 +105,10 @@ fn functions_match_hancell() {
             *unsupported.entry(k).or_default() += n;
         }
         for r in results.iter().filter(|r| r.sheet == t) {
-            if r.status == CellStatus::Volatile {
+            // 휘발성 칸은 건너뛴다. RCELL_CALC_ORACLE_VOLATILE 이면 시각·난수가 아닌 것(INDIRECT·OFFSET·CELL …)은 비교한다
+            if r.status == CellStatus::Volatile
+                && !(include_volatile && !time_or_random(&r.formula))
+            {
                 continue;
             }
             total += 1;

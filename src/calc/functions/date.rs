@@ -48,7 +48,12 @@ pub const FNS: &[FnSpec] = &[
     f("SECOND", 1, 1, V, |c, a| hms_part(c, a, 2)),
     f("WEEKDAY", 1, 2, V, weekday),
     f("WEEKNUM", 1, 2, V, weeknum),
+    // 범위를 넘는 일련 번호는 4 (ISOWEEKNUM(2958466) = 4, 대조 실험 cdate), 음수는 #NUM! (작은 음수는 한셀을 죽인다)
     f("ISOWEEKNUM", 1, 1, V, |c, a| {
+        let raw = try_v!(num_arg(c, a, 0));
+        if raw >= dt::max_serial(c.date1904()) + 1.0 {
+            return num(4.0);
+        }
         let s = try_v!(serial_arg(c, a, 0));
         match iso_week(s, c.date1904()) {
             Some(w) => num(w as f64),
@@ -68,8 +73,18 @@ pub const FNS: &[FnSpec] = &[
     f("DAYS360", 2, 3, V, days360),
     f("DATEDIF", 3, 3, V, datedif),
     f("YEARFRAC", 2, 3, V, |c, a| {
-        let s = try_v!(serial_arg(c, a, 0)).floor();
-        let e = try_v!(serial_arg(c, a, 1)).floor();
+        // 0 쪽으로 버린다 (−0.5 는 0), 1904 체계의 음수는 절댓값 (YEARFRAC(-1,10) = 0.025, DATEDIF 와 다르다,
+        // 대조 실험 cmisc·c3_1904)
+        let mut se = [0.0; 2];
+        for (i, x) in se.iter_mut().enumerate() {
+            let v = try_v!(num_arg(c, a, i));
+            let v = if c.date1904() && v < 0.0 { -v } else { v }.trunc();
+            if v < 0.0 || v >= dt::max_serial(c.date1904()) + 1.0 {
+                return Value::Error(ErrorKind::Num);
+            }
+            *x = v;
+        }
+        let [s, e] = se;
         let b = try_v!(num_or(c, a, 2, 0.0)).trunc();
         if !(0.0..=4.0).contains(&b) {
             return Value::Error(ErrorKind::Num);
@@ -91,7 +106,19 @@ fn value_r(r: Result<f64, ErrorKind>) -> Value {
 /// 날짜 인수 (음수·마지막 날 뒤는 #NUM!)
 pub fn serial_arg(ctx: &mut Ctx, a: &[Value], i: usize) -> Result<f64, ErrorKind> {
     let v = num_arg(ctx, a, i)?;
+    // 1904 체계의 음수는 절댓값의 날짜 (YEAR(-1) = 1904, DAY(-1) = 2, 대조 실험 cdate1904)
+    let v = if ctx.date1904() && v < 0.0 { -v } else { v };
     if v < 0.0 || v >= dt::max_serial(ctx.date1904()) + 1.0 {
+        return Err(ErrorKind::Num);
+    }
+    Ok(v)
+}
+
+/// 0 쪽으로 버린 뒤 범위를 보는 일련 번호 (DATEDIF·YEARFRAC: −0.5 는 0, 대조 실험 cmisc)
+fn serial_arg_trunc(ctx: &mut Ctx, a: &[Value], i: usize) -> Result<f64, ErrorKind> {
+    let v = num_arg(ctx, a, i)?.trunc();
+    // 1904 체계는 1900-01-00 까지의 음수도 그대로 (DATEDIF(-1,5,"D") = 6, 대조 실험 c3_1904)
+    if v < dt::min_serial(ctx.date1904()) || v >= dt::max_serial(ctx.date1904()) + 1.0 {
         return Err(ErrorKind::Num);
     }
     Ok(v)
@@ -203,8 +230,21 @@ fn iso_week(serial: f64, date1904: bool) -> Option<u32> {
 }
 
 fn weeknum(ctx: &mut Ctx, a: &[Value]) -> Value {
-    let s = try_v!(serial_arg(ctx, a, 0)).floor();
     let t = try_v!(num_or(ctx, a, 1, 1.0)).trunc() as i64;
+    // 범위 밖 일련 번호는 오류가 아니라 정해진 주 (1900 체계 형식 1 → 6, 2 → 5, 21 → 4, 1904 체계 형식 1 → 5,
+    // 대조 실험 cdate·cmisc). −0.5 처럼 0 쪽으로 버려 범위 안이면 그 날 (WEEKNUM(-0.5) = 1)
+    let raw = try_v!(num_arg(ctx, a, 0)).trunc();
+    let d1904 = ctx.date1904();
+    let raw = if d1904 && raw < 0.0 { -raw } else { raw };
+    if !(0.0..dt::max_serial(d1904) + 1.0).contains(&raw) {
+        return match t {
+            1 | 17 => num(if d1904 { 5.0 } else { 6.0 }),
+            2 | 11..=16 => num(5.0),
+            21 => num(4.0),
+            _ => Value::Error(ErrorKind::Num),
+        };
+    }
+    let s = raw;
     let start = match t {
         1 | 17 => 0, // 일요일
         2 | 11 => 1, // 월요일
@@ -234,6 +274,16 @@ fn weeknum(ctx: &mut Ctx, a: &[Value]) -> Value {
 }
 
 fn add_months(ctx: &mut Ctx, a: &[Value], eom: bool) -> Value {
+    // 1904 체계의 음수는 절댓값으로 계산해 부호를 붙인다 (EOMONTH(-1,0) = −30, EDATE(-1,1) = −32, 대조 실험 cdate1904)
+    let neg = ctx.date1904() && matches!(num_arg(ctx, a, 0), Ok(v) if v < 0.0);
+    let r = add_months_abs(ctx, a, eom);
+    match r {
+        Value::Number(v) if neg => Value::Number(-v),
+        r => r,
+    }
+}
+
+fn add_months_abs(ctx: &mut Ctx, a: &[Value], eom: bool) -> Value {
     let s = try_v!(serial_arg(ctx, a, 0)).floor();
     let m = try_v!(num_arg(ctx, a, 1)).trunc();
     let d1904 = ctx.date1904();
@@ -328,8 +378,9 @@ fn days360(ctx: &mut Ctx, a: &[Value]) -> Value {
 }
 
 fn datedif(ctx: &mut Ctx, a: &[Value]) -> Value {
-    let s = try_v!(serial_arg(ctx, a, 0)).floor();
-    let e = try_v!(serial_arg(ctx, a, 1)).floor();
+    // 0 쪽으로 버린다 (DATEDIF(-0.5,45000,"D") = 45000, 대조 실험 cmisc)
+    let s = try_v!(serial_arg_trunc(ctx, a, 0));
+    let e = try_v!(serial_arg_trunc(ctx, a, 1));
     let unit = try_v!(ctx.text(&a[2])).to_ascii_uppercase();
     if s > e {
         return Value::Error(ErrorKind::Num);
@@ -350,10 +401,15 @@ fn datedif(ctx: &mut Ctx, a: &[Value]) -> Value {
             if d2 >= d1 {
                 num((d2 - d1) as f64)
             } else {
-                // 앞 달의 같은 날부터
+                // 끝 날 − 시작 날 + 앞 달의 날 수 (음수도 그대로, 1900년 2월은 29일): DATEDIF(31,61,"MD") = −1,
+                // 2023-01-31 → 2023-03-01 은 −2 (대조 실험 cmisc)
                 let (py, pm) = if m2 == 1 { (y2 - 1, 12) } else { (y2, m2 - 1) };
-                let dim = days_in_month(py, pm) as i64;
-                num((dim - d1 as i64).max(0) as f64 + d2 as f64)
+                let dim = if py == 1900 && pm == 2 && !d1904 {
+                    29
+                } else {
+                    days_in_month(py, pm) as i64
+                };
+                num((dim - d1 as i64 + d2 as i64) as f64)
             }
         }
         "YD" => {
@@ -489,11 +545,12 @@ fn networkdays(ctx: &mut Ctx, a: &[Value], intl: bool) -> Value {
     let mask = try_v!(weekend_mask(ctx, wk, ErrorKind::Value));
     let hol = try_v!(holidays(ctx, given(a, hol_i)));
     let (lo, hi, sign) = if s <= e { (s, e, 1.0) } else { (e, s, -1.0) };
-    let d1904 = ctx.date1904();
+    // 요일은 1904 체계에서도 1900 체계의 일련 번호로 센다 (1904 의 NETWORKDAYS(1,30) = 21 — 1904-01-02 는
+    // 토요일인데 일요일로 센다, 대조 실험 cdate1904. WORKDAY 는 1904 요일을 쓴다)
     let mut n = 0.0;
     let mut d = lo;
     while d <= hi {
-        let w = dt::weekday(d, d1904) as usize;
+        let w = dt::weekday(d, false) as usize;
         if !mask[w] && !hol.contains(&d) {
             n += 1.0;
         }
@@ -524,7 +581,9 @@ fn workday(ctx: &mut Ctx, a: &[Value], intl: bool) -> Value {
         if d < 0.0 || d > dt::max_serial(d1904) {
             return Value::Error(ErrorKind::Num);
         }
-        let w = dt::weekday(d, d1904) as usize;
+        // WORKDAY.INTL 은 1904 체계에서도 1900 체계의 요일로 센다 (1904 의 WORKDAY.INTL(1,10) = 13,
+        // WORKDAY(1,10) = 14, 대조 실험 c3_1904)
+        let w = dt::weekday(d, d1904 && !intl) as usize;
         if !mask[w] && !hol.contains(&d) {
             left -= 1.0;
         }
