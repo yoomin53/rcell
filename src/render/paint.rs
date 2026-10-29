@@ -290,50 +290,60 @@ impl CellBorders {
 }
 
 /// 가로선 하나 (y 행, x0..=x1) — 점선이면 무늬를 x0 에서 시작
-fn hline(s: &mut String, y: i64, x0: i64, x1: i64, dash: &[u32], color: &str) {
-    if x1 < x0 {
+/// 가로 테두리 줄: 위 y·두께 th, x0..x1 (끝 포함하지 않음). 점선은 화면 px 무늬를 확대율로 나눈다
+fn hline(s: &mut String, y: f64, th: f64, x0: f64, x1: f64, dash: &[u32], color: &str) {
+    if x1 <= x0 {
         return;
     }
     if dash.is_empty() {
         let _ = write!(
             s,
-            "<rect x='{x0}' y='{y}' width='{}' height='1' fill='{color}'/>",
-            x1 - x0 + 1
+            "<rect x='{x0}' y='{y}' width='{}' height='{th}' fill='{color}'/>",
+            x1 - x0
         );
     } else {
+        let sw = if th == 1.0 {
+            String::new()
+        } else {
+            format!(" stroke-width='{th}'")
+        };
         let _ = write!(
             s,
-            "<line x1='{x0}' y1='{}' x2='{}' y2='{}' stroke='{color}' stroke-dasharray='{}'/>",
-            y as f64 + 0.5,
-            x1 + 1,
-            y as f64 + 0.5,
+            "<line x1='{x0}' y1='{}' x2='{x1}' y2='{}' stroke='{color}'{sw} stroke-dasharray='{}'/>",
+            y + th / 2.0,
+            y + th / 2.0,
             dash.iter()
-                .map(u32::to_string)
+                .map(|d| (*d as f64 * th).to_string())
                 .collect::<Vec<_>>()
                 .join(" ")
         );
     }
 }
 
-fn vline(s: &mut String, x: i64, y0: i64, y1: i64, dash: &[u32], color: &str) {
-    if y1 < y0 {
+/// 세로 테두리 줄: 왼쪽 x·두께 th, y0..y1 (끝 포함하지 않음)
+fn vline(s: &mut String, x: f64, th: f64, y0: f64, y1: f64, dash: &[u32], color: &str) {
+    if y1 <= y0 {
         return;
     }
     if dash.is_empty() {
         let _ = write!(
             s,
-            "<rect x='{x}' y='{y0}' width='1' height='{}' fill='{color}'/>",
-            y1 - y0 + 1
+            "<rect x='{x}' y='{y0}' width='{th}' height='{}' fill='{color}'/>",
+            y1 - y0
         );
     } else {
+        let sw = if th == 1.0 {
+            String::new()
+        } else {
+            format!(" stroke-width='{th}'")
+        };
         let _ = write!(
             s,
-            "<line x1='{}' y1='{y0}' x2='{}' y2='{}' stroke='{color}' stroke-dasharray='{}'/>",
-            x as f64 + 0.5,
-            x as f64 + 0.5,
-            y1 + 1,
+            "<line x1='{}' y1='{y0}' x2='{}' y2='{y1}' stroke='{color}'{sw} stroke-dasharray='{}'/>",
+            x + th / 2.0,
+            x + th / 2.0,
             dash.iter()
-                .map(u32::to_string)
+                .map(|d| (*d as f64 * th).to_string())
                 .collect::<Vec<_>>()
                 .join(" ")
         );
@@ -359,45 +369,60 @@ fn offsets(e: &Edge) -> (&'static [i64], &'static [u32]) {
 /// SVG 는 칸 왼쪽 위에서 (-2,-2) 만큼 밖으로 나가 (w+3)×(h+3) 을 덮는다.
 /// 이중선의 가운데 틈(경계 픽셀)은 `gap` 색으로 칠한다 (위·아래·왼쪽·오른쪽 차례) — 그 자리를 덮는 칸 채우기, 없으면
 /// 흰색 (한셀 화면: 격자선이 보이지 않는다, 표 스타일 실험의 요약 행 위 이중선)
-pub fn borders_svg(b: &CellBorders, w: u32, h: u32, gap: &[String; 4]) -> String {
+pub fn borders_svg(b: &CellBorders, w: u32, h: u32, gap: &[String; 4], z: f64) -> String {
     let (w, h) = (w as i64, h as i64);
     // SVG 좌표의 경계 픽셀: 왼쪽 = 이전 칸의 격자선, 오른쪽 = 이 칸의 마지막 픽셀
     let (bl, br, bt, bb) = (1i64, w + 1, 1i64, h + 1);
+    // 확대율 z 에서도 선은 화면 1px 씩 (한셀 화면 — 확대 50~200% 의 가는·보통·굵은 선이 늘 1·2·3px). SVG 는 칸 왼쪽
+    // 위에서 화면 2px 밖 (2/z), 칸 좌표의 경계 끝 E (왼쪽·위 0, 오른쪽 w, 아래 h) 에서 k 번째 줄은
+    // [E + 2/z + (k − 1)/z, E + 2/z + k/z)
+    let z = if z > 0.0 { z } else { 1.0 };
+    let t = 1.0 / z;
+    let end = |bnd: i64| {
+        if bnd == bl || bnd == bt {
+            0.0
+        } else {
+            (bnd - 1) as f64
+        }
+    };
+    let at = |bnd: i64, k: i64| end(bnd) + 2.0 * t + (k - 1) as f64 * t;
+    let (x0, x1) = (at(bl, 0), end(br) + 2.0 * t);
+    let (y0, y1) = (at(bt, 0), end(bb) + 2.0 * t);
     let mut s = String::new();
     if let Some(e) = &b.top {
         let (o, d) = offsets(e);
         if o.len() == 2 && o[0] == -1 && o[1] == 1 {
-            hline(&mut s, bt, bl, br, &[], &gap[0]);
+            hline(&mut s, at(bt, 0), t, x0, x1, &[], &gap[0]);
         }
         for &k in o {
-            hline(&mut s, bt + k, bl, br, d, &e.color);
+            hline(&mut s, at(bt, k), t, x0, x1, d, &e.color);
         }
     }
     if let Some(e) = &b.bottom {
         let (o, d) = offsets(e);
         if o.len() == 2 && o[0] == -1 && o[1] == 1 {
-            hline(&mut s, bb, bl, br, &[], &gap[1]);
+            hline(&mut s, at(bb, 0), t, x0, x1, &[], &gap[1]);
         }
         for &k in o {
-            hline(&mut s, bb + k, bl, br, d, &e.color);
+            hline(&mut s, at(bb, k), t, x0, x1, d, &e.color);
         }
     }
     if let Some(e) = &b.left {
         let (o, d) = offsets(e);
         if o.len() == 2 && o[0] == -1 && o[1] == 1 {
-            vline(&mut s, bl, bt, bb, &[], &gap[2]);
+            vline(&mut s, at(bl, 0), t, y0, y1, &[], &gap[2]);
         }
         for &k in o {
-            vline(&mut s, bl + k, bt, bb, d, &e.color);
+            vline(&mut s, at(bl, k), t, y0, y1, d, &e.color);
         }
     }
     if let Some(e) = &b.right {
         let (o, d) = offsets(e);
         if o.len() == 2 && o[0] == -1 && o[1] == 1 {
-            vline(&mut s, br, bt, bb, &[], &gap[3]);
+            vline(&mut s, at(br, 0), t, y0, y1, &[], &gap[3]);
         }
         for &k in o {
-            vline(&mut s, br + k, bt, bb, d, &e.color);
+            vline(&mut s, at(br, k), t, y0, y1, d, &e.color);
         }
     }
     for (e, up) in [(&b.down, false), (&b.up, true)] {
@@ -432,8 +457,13 @@ pub fn borders_svg(b: &CellBorders, w: u32, h: u32, gap: &[String; 4]) -> String
             );
         }
     }
+    let pos = if z == 1.0 {
+        String::new()
+    } else {
+        format!(" style=\"left:-{t}px;top:-{t}px\"", t = 2.0 * t)
+    };
     format!(
-        "<svg class=\"rc-bd\" width=\"{}\" height=\"{}\" shape-rendering=\"crispEdges\">{s}</svg>",
+        "<svg class=\"rc-bd\"{pos} width=\"{}\" height=\"{}\" shape-rendering=\"crispEdges\">{s}</svg>",
         w + 3,
         h + 3
     )
@@ -481,6 +511,7 @@ mod tests {
             72,
             22,
             &[white.clone(), white.clone(), white.clone(), white],
+            1.0,
         );
         assert!(s.contains("<rect x='1' y='22' width='73' height='1'"));
         assert!(s.contains("<rect x='1' y='24' width='73' height='1'"));

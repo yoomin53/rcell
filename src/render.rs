@@ -1011,7 +1011,13 @@ pub fn sheet_table_grid(
                     .unwrap_or_else(|| own.clone())
                 };
                 let gaps = [own.clone(), edge(false), own.clone(), edge(true)];
-                inner.push_str(&paint::borders_svg(&b, w, h, &gaps));
+                inner.push_str(&paint::borders_svg(
+                    &b,
+                    w,
+                    h,
+                    &gaps,
+                    f64::from(zoom_pct) / 100.0,
+                ));
             }
             if let Some((gi, vals)) = sparks.get(&(r, c))
                 && let Some(g) = spark_groups.get(*gi)
