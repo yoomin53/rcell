@@ -11,6 +11,7 @@
 #   파일<TAB>시트번호(1부터)<TAB>시트이름<TAB>페이지 수<TAB>가로 나누기(행, m = 수동)<TAB>세로 나누기(열)<TAB>배율(맞추기면 fit)<TAB>인쇄 영역<TAB>보임
 #
 # 사용: powershell -File print-oracle.ps1 -InDir <폴더> -Out print.tsv [-Filter *.cell] [-Only 정규식] [-PdfDir <폴더>]
+#   -MaxRows / -MaxCols : 쓰는 범위가 이보다 큰 시트는 건너뛴다 (한셀이 수십만 페이지를 세다 멈춘다)
 # 주의: UTF-8(BOM) 으로 저장해야 Windows PowerShell 5.1 이 한글을 바르게 읽는다. 한셀 인스턴스를 따로 띄우고
 #       끝나면 닫는다. 기본 프린터(한셀이 설치하는 Hancom PDF)에 맞춘 페이지다. 문서는 저장하지 않는다.
 param(
@@ -18,7 +19,9 @@ param(
     [Parameter(Mandatory = $true)][string]$Out,
     [string]$Filter = "*.cell",
     [string]$Only = "",
-    [string]$PdfDir = ""
+    [string]$PdfDir = "",
+    [int]$MaxRows = 20000,
+    [int]$MaxCols = 2000
 )
 $ErrorActionPreference = "Stop"
 
@@ -32,8 +35,12 @@ function Retry([scriptblock]$action) {
 }
 
 if ($PdfDir) { New-Item -ItemType Directory -Force $PdfDir | Out-Null }
-$lines = New-Object System.Collections.Generic.List[string]
-$lines.Add("#dir`t$((Resolve-Path $InDir).Path)")
+# 한 줄씩 바로 쓴다 (한셀이 어떤 문서에서 멈춰도 앞 결과는 남는다)
+$writer = New-Object IO.StreamWriter($Out, $false, (New-Object Text.UTF8Encoding $false))
+$writer.AutoFlush = $true
+$count = 0
+function Emit([string]$line) { $script:writer.WriteLine($line); $script:count++ }
+Emit "#dir`t$((Resolve-Path $InDir).Path)"
 $files = Get-ChildItem $InDir -File -Filter $Filter |
     Where-Object { $_.Name -notmatch '\.(as|rcell|bin)\.' -and (-not $Only -or $_.Name -match $Only) } | Sort-Object Name
 # 바이너리 판은 한셀 COM 이 다시 열지 못한다 (.bin. 은 뺀다)
@@ -54,8 +61,18 @@ try {
         try {
             $wb = Retry { $app.Workbooks.Open($f.FullName) }
             $k = 0
+            $huge = $false
             foreach ($ws in @($wb.Worksheets)) {
                 $k++
+                # 쓰는 범위가 아주 크면 (마지막 칸에 값 — 수십만 페이지) 한셀이 페이지를 세다 멈추므로 건너뛴다
+                $ur = $ws.UsedRange
+                $lastRow = [int]$ur.Row + [int]$ur.Rows.Count - 1
+                $lastCol = [int]$ur.Column + [int]$ur.Columns.Count - 1
+                if ($lastRow -gt $MaxRows -or $lastCol -gt $MaxCols) {
+                    Write-Host "SKIP $($f.Name) $k : $lastRow x $lastCol"
+                    $huge = $true
+                    continue
+                }
                 $ps = $ws.PageSetup
                 $pages = Retry { [int]$ps.Pages.Count }
                 $h = @(); $v = @()
@@ -66,10 +83,10 @@ try {
                 $zoom = $ps.Zoom
                 if ($zoom -is [bool]) { $zoom = "fit" }
                 $vis = [int]$ws.Visible
-                $lines.Add(("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}`t{8}" -f $f.Name, $k, $ws.Name, $pages, ($h -join ','), ($v -join ','), $zoom, $ps.PrintArea, $vis))
+                Emit ("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}`t{8}" -f $f.Name, $k, $ws.Name, $pages, ($h -join ','), ($v -join ','), $zoom, $ps.PrintArea, $vis)
             }
             # 시트의 ExportAsFixedFormat 은 통합 문서의 보이는 시트를 모두 PDF 로 쓴다 (한 번만)
-            if ($PdfDir) {
+            if ($PdfDir -and -not $huge) {
                 $pdf = Join-Path $PdfDir ("{0}.pdf" -f $f.Name)
                 $first = @($wb.Worksheets)[0]
                 try { Retry { $first.ExportAsFixedFormat(0, $pdf) } } catch { Write-Host "PDF FAIL $($f.Name): $($_.Exception.Message)" }
@@ -89,5 +106,5 @@ try {
 } finally {
     QuitApp $app
 }
-[IO.File]::WriteAllLines($Out, $lines, (New-Object Text.UTF8Encoding $false))
-"wrote $($lines.Count) lines to $Out"
+$writer.Close()
+"wrote $count lines to $Out"
