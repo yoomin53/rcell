@@ -545,8 +545,9 @@ pub fn paste_with(
     if filling {
         super::cfpaste::place_filled(sheet, cf_lines);
     } else {
-        super::cfpaste::place_pasted(sheet, cf_lines.concat());
+        super::cfpaste::place_pasted(sheet, &mut wb.styles.dxfs, cf_lines.concat());
     }
+    let sheet = &mut wb.sheets[si];
     // 같은 시트에 붙인 유효성은 원본 개체에 범위를 더한다 (원본이 그대로 있으면)
     for (k, m) in dvs {
         let target = clip.dv_src.get(k).and_then(|(i, orig)| {

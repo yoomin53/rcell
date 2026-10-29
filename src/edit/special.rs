@@ -291,6 +291,11 @@ pub fn paste_special(
         o.what,
         PasteWhat::All | PasteWhat::AllExceptBorders | PasteWhat::Formats
     );
+    if !formats {
+        // 값·수식만 붙여도 복사는 시트의 서식 없는 고유·중복 값 규칙을 고친다 (한셀)
+        let crate::model::Workbook { sheets, styles, .. } = wb;
+        super::cfpaste::fix_bare(&mut sheets[si], &mut styles.dxfs);
+    }
     if formats {
         clip::paste_with(wb, dsi, at, &c, Some(area), false)?;
         // 붙이기는 유효성마다 범위 차례를 뒤집지만 서식만·행/열 바꿈 붙이기는 뒤집지 않는다 (한셀 — 바꿔 붙인 범위는 끝에)
@@ -298,7 +303,7 @@ pub fn paste_special(
             clip::reverse_dv_areas(&mut wb.sheets[dsi]);
         }
         for blocks in cf_cells {
-            super::cfpaste::place_pasted(&mut wb.sheets[dsi], blocks);
+            super::cfpaste::place_pasted(&mut wb.sheets[dsi], &mut wb.styles.dxfs, blocks);
         }
     }
     let with_formulas = matches!(
