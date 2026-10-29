@@ -226,12 +226,34 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
         return Err(Error::MissingPart("/Workbook".into()));
     }
     let mut stream = container::read_entry(bytes, "/Workbook")?;
-    // Excel 97-2003 `.xls` (BIFF8): 레거시 레코드로 바꿔 같은 리더로 읽는다
+    // Excel 97-2003 `.xls` (BIFF8): 레거시 레코드로 바꿔 같은 리더로 읽는다 (차트는 따로 — 차트 부분 스트림)
     let xls = xls::is_biff8(&stream);
+    let xls_charts = xls.then(|| xls::charts(&stream));
     if xls {
         stream = xls::to_hancom(&stream)?;
     }
     let mut wb = reader::read_workbook_stream(&stream)?;
+    if let Some(xc) = &xls_charts {
+        let ctx = xls_chart::ReadCtx {
+            xti_names: &xc.xti_names,
+            font: xc.font.clone(),
+            palette: &xc.palette,
+        };
+        for (sheet, charts) in wb.sheets.iter_mut().zip(&xc.sheets) {
+            let shapes = sheet
+                .shapes
+                .iter_mut()
+                .filter(|s| s.kind == crate::model::ShapeKind::Chart);
+            for (shape, recs) in shapes.zip(charts) {
+                // 한셀은 .xls 의 차트 도형 잠금을 읽지 않는다
+                shape.locks.clear();
+                shape.chart = xls_chart::read(recs, &ctx);
+            }
+        }
+    }
+    if xls_charts.is_some() {
+        xls_chart::apply_cell_formats(&mut wb);
+    }
     if xls {
         wb.application = Some("Excel".into());
         // 표 스타일 표(TABLESTYLES)가 없는 파일 (넥셀 .nxl 등): 한셀은 새 문서의 기본 표·피벗 스타일을 쓴다

@@ -1599,6 +1599,46 @@ fn hlink_display(b: &[u8], tip: Option<&[u8]>) -> Vec<u8> {
     o
 }
 
+/// 넥셀(.nxl) 의 한컴 차트 0x7EF0 → 레거시 꼴: 앵커의 행 u16 → u32 (18 → 22바이트), 예약 11바이트는 0 (넥셀은 끝
+/// 바이트 1), 원본 범위·항목·계열 수식의 행 u16 → u32. Vt 아카이브는 그대로 (docs/format/cell-legacy-chart.md 1·5절)
+fn nexcel_chart(d: &[u8]) -> Option<Vec<u8>> {
+    let u16_at = |k: usize| -> Option<u16> { Some(u16::from_le_bytes([*d.get(k)?, *d.get(k + 1)?])) };
+    let mut o = d.get(..8)?.to_vec();
+    // 앵커: flags, col1, dx1, row1, dy1, col2, dx2, row2, dy2
+    for (k, wide) in [(8, false), (10, false), (12, false), (14, true), (16, false), (18, false), (20, false), (22, true), (24, false)] {
+        let v = u16_at(k)?;
+        if wide {
+            o.extend_from_slice(&(v as u32).to_le_bytes());
+        } else {
+            o.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    o.extend_from_slice(&[0; 11]);
+    o.extend_from_slice(d.get(37..39)?);
+    let mut p = 39;
+    let formula = |p: &mut usize, o: &mut Vec<u8>| -> Option<()> {
+        let cce = u16_at(*p)? as usize;
+        let t = ptgs(d.get(*p + 2..*p + 2 + cce)?, false, false)?;
+        o.extend_from_slice(&(t.len() as u16).to_le_bytes());
+        o.extend_from_slice(&t);
+        *p += 2 + cce;
+        Some(())
+    };
+    formula(&mut p, &mut o)?;
+    let alen = u32::from_le_bytes(d.get(p..p + 4)?.try_into().ok()?) as usize;
+    o.extend_from_slice(d.get(p..p + 4 + alen)?);
+    p += 4 + alen;
+    formula(&mut p, &mut o)?;
+    let n = u16_at(p)?;
+    o.extend_from_slice(&n.to_le_bytes());
+    p += 2;
+    for _ in 0..n {
+        formula(&mut p, &mut o)?;
+        formula(&mut p, &mut o)?;
+    }
+    Some(o)
+}
+
 /// 넥셀(.nxl) 의 HLINK: Ref8U + CLSID + 2 + 플래그 1 뒤에 종류 u32 (3 = URL), 주소 (u32 글자 수 + 플래그 u8 + 글자),
 /// 표시 이름 (같은 꼴) — 한셀 -2003 저장에서 본 꼴. URL 이면 BIFF8 HLINK (표시 이름 + URL 모니커) 로 바꾼다
 fn nexcel_hlink(d: &[u8]) -> Option<Vec<u8>> {
@@ -1921,6 +1961,138 @@ pub(crate) fn sheet_xti(stream: &[u8]) -> HashMap<u16, u16> {
         }
     }
     out
+}
+
+/// 차트 부분 스트림 하나의 레코드 (종류, 내용)
+pub(crate) type ChartRecs = Vec<(u16, Vec<u8>)>;
+
+/// .xls 의 차트: 시트마다 차트 부분 스트림 (BOF dt 0x20 … EOF 의 레코드, CONTINUE 는 이어 붙인다) 과 읽기 맥락
+pub(crate) struct XlsCharts {
+    pub sheets: Vec<Vec<ChartRecs>>,
+    /// ixti → 시트 이름 (내부 SUPBOOK 의 시트 하나짜리 XTI)
+    pub xti_names: Vec<Option<String>>,
+    /// 문서 기본 글꼴 (FONT 0 의 이름, 1/100 pt)
+    pub font: (String, u32),
+    pub palette: Vec<u32>,
+}
+
+/// BIFF8 `/Workbook` → [`XlsCharts`]
+pub(crate) fn charts(stream: &[u8]) -> XlsCharts {
+    let recs = split_biff8(stream);
+    let mut starts = Vec::with_capacity(recs.len());
+    let mut pos = 0usize;
+    for r in &recs {
+        starts.push(pos);
+        pos += 4 + r.data.len() + r.conts.iter().map(|c| 4 + c.len()).sum::<usize>();
+    }
+    let gend = recs.iter().position(|r| r.rt == 0x000A).unwrap_or(0);
+    let globals = &recs[..=gend.min(recs.len().saturating_sub(1))];
+    let mut names = Vec::new();
+    let mut offs = Vec::new();
+    let mut internal = Vec::new();
+    let mut xti: Vec<(u16, u16, u16)> = Vec::new();
+    let mut palette: Vec<u32> = super::reader::DEFAULT_PALETTE.to_vec();
+    let mut font: Option<(String, u32)> = None;
+    for r in globals {
+        let d = r.joined();
+        match r.rt {
+            0x0085 if d.len() >= 8 => {
+                offs.push(u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize);
+                let n = d[6] as usize;
+                names.push(string_at(&d[7..], n));
+            }
+            0x01AE => internal.push(d.get(2..4) == Some(&[0x01, 0x04][..])),
+            0x0017 if d.len() >= 2 => {
+                let (x, _) = d[2..].as_chunks::<6>();
+                xti = x
+                    .iter()
+                    .map(|e| {
+                        let v = |k: usize| u16::from_le_bytes([e[k], e[k + 1]]);
+                        (v(0), v(2), v(4))
+                    })
+                    .collect();
+            }
+            0x0092 if d.len() >= 2 => {
+                let n = u16::from_le_bytes([d[0], d[1]]) as usize;
+                for (i, c) in d[2..].chunks(4).take(n).enumerate() {
+                    if c.len() == 4 && i < palette.len() {
+                        palette[i] = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32;
+                    }
+                }
+            }
+            0x0031 if font.is_none() && d.len() >= 16 => {
+                let twips = u16::from_le_bytes([d[0], d[1]]) as u32;
+                font = Some((string_at(&d[15..], d[14] as usize), twips * 5));
+            }
+            _ => {}
+        }
+    }
+    let xti_names = xti
+        .iter()
+        .map(|&(sb, a, b)| {
+            (internal.get(sb as usize) == Some(&true) && a == b)
+                .then(|| names.get(a as usize).cloned())
+                .flatten()
+        })
+        .collect();
+    let mut sheets = Vec::new();
+    for off in offs {
+        let mut charts = Vec::new();
+        if let Some(start) = starts.iter().position(|&s| s == off) {
+            let mut depth = 0usize;
+            let mut cur: Option<Vec<(u16, Vec<u8>)>> = None;
+            for r in recs.iter().skip(start) {
+                if r.rt == 0x0809 {
+                    depth += 1;
+                    if depth == 2 {
+                        cur = Some(Vec::new());
+                    }
+                }
+                if let Some(c) = cur.as_mut() {
+                    c.push((r.rt, r.joined()));
+                }
+                if r.rt == 0x000A {
+                    if depth == 2
+                        && let Some(c) = cur.take()
+                    {
+                        charts.push(c);
+                    }
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        sheets.push(charts);
+    }
+    XlsCharts {
+        sheets,
+        xti_names,
+        font: font.unwrap_or_else(|| ("맑은 고딕".into(), 1100)),
+        palette,
+    }
+}
+
+/// 플래그 바이트 + 글자 (플래그 1 이면 UTF-16)
+fn string_at(d: &[u8], cch: usize) -> String {
+    match d.first() {
+        Some(f) if f & 1 != 0 => {
+            let u: Vec<u16> = d
+                .get(1..1 + cch * 2)
+                .unwrap_or_default()
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&u)
+        }
+        _ => d
+            .get(1..1 + cch)
+            .unwrap_or_default()
+            .iter()
+            .map(|&b| b as char)
+            .collect(),
+    }
 }
 
 /// 하이퍼링크의 도구 설명 (범위의 왼쪽 위 칸 (행, 열) → 글) — 한셀의 .xls 저장은 HLINK 의 표시 이름 자리에 쓴다
@@ -2941,6 +3113,11 @@ fn sheet_to_hancom(recs: &[Rec], dxfs: &mut CfDxfs) -> Vec<(u16, Vec<u8>)> {
             }
             0x01BE => {
                 if let Some(b) = dv(&d, false) {
+                    out.push((rt, b));
+                }
+            }
+            0x7EF0 => {
+                if let Some(b) = nexcel_chart(&d) {
                     out.push((rt, b));
                 }
             }

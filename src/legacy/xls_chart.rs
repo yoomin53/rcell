@@ -626,3 +626,629 @@ pub(crate) fn write(
     w.r(0x000A, Vec::new());
     w.0
 }
+
+// ---------------------------------------------------------------------------
+// 읽기: 차트 부분 스트림 → 차트 모델 (한셀이 .xls 를 열어 XML 로 쓰는 차트의 꼴로 만든 뒤 XML 차트 리더로 읽는다)
+// ---------------------------------------------------------------------------
+
+/// 수식의 시트 이름과 글꼴: ixti → 시트 이름, 문서 기본 글꼴 (이름, 1/100 pt)
+pub(crate) struct ReadCtx<'a> {
+    pub xti_names: &'a [Option<String>],
+    pub font: (String, u32),
+    pub palette: &'a [u32],
+}
+
+#[derive(Default)]
+struct RSeries {
+    sdt_x: u16,
+    name_ref: Option<String>,
+    name_lit: Option<String>,
+    name_text: Option<String>,
+    val: Option<(Option<String>, u16)>,
+    cat: Option<Option<String>>,
+    fill: Option<u16>,
+    line: Option<(i16, u16)>,
+}
+
+#[derive(Default)]
+struct RAxis {
+    kind: u16,
+    tlt: u8,
+    shown: bool,
+    gridlines: bool,
+}
+
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// BIFF8 차트 수식 (PtgRef3d / PtgArea3d 하나) → `시트!$A$1:$B$2`
+fn ref_text(t: &[u8], ctx: &ReadCtx) -> Option<String> {
+    let u = |k: usize| -> Option<u16> { Some(u16::from_le_bytes([*t.get(k)?, *t.get(k + 1)?])) };
+    let cell = |v: u16, row: u16| -> String {
+        let c = crate::model::CellRef {
+            row: row as u32,
+            col: (v & 0x3FFF) as u32,
+        }
+        .to_string();
+        let split = c.find(|ch: char| ch.is_ascii_digit()).unwrap_or(c.len());
+        let (l, d) = c.split_at(split);
+        format!(
+            "{}{l}{}{d}",
+            if v & 0x4000 != 0 { "" } else { "$" },
+            if v & 0x8000 != 0 { "" } else { "$" }
+        )
+    };
+    let sheet = |ixti: u16| -> Option<String> {
+        let n = ctx.xti_names.get(ixti as usize)?.as_deref()?;
+        Some(super::formula::quote_sheet(n))
+    };
+    match *t.first()? {
+        0x3A | 0x5A | 0x7A => Some(format!("{}!{}", sheet(u(1)?)?, cell(u(5)?, u(3)?))),
+        0x3B | 0x5B | 0x7B => Some(format!(
+            "{}!{}:{}",
+            sheet(u(1)?)?,
+            cell(u(7)?, u(3)?),
+            cell(u(9)?, u(5)?)
+        )),
+        _ => None,
+    }
+}
+
+/// PtgStr (cch u8, 플래그, 글자)
+fn ptg_str(t: &[u8]) -> Option<String> {
+    if *t.first()? != 0x17 {
+        return None;
+    }
+    Some(xl_string(t.get(2..)?, *t.get(1)? as usize))
+}
+
+/// 플래그 + 글자 (플래그 1 이면 UTF-16)
+fn xl_string(d: &[u8], cch: usize) -> String {
+    match d.first() {
+        Some(f) if f & 1 != 0 => {
+            let u: Vec<u16> = d
+                .get(1..1 + cch * 2)
+                .unwrap_or_default()
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&u)
+        }
+        _ => d
+            .get(1..1 + cch)
+            .unwrap_or_default()
+            .iter()
+            .map(|&b| b as char)
+            .collect(),
+    }
+}
+
+/// 글자 속성 (`a:defRPr` / `a:rPr`): 크기, 보통, 검정, 글꼴
+fn rich_props(tag: &str, sz: u32, face: &str) -> String {
+    let face = esc(face);
+    format!(
+        r#"<{tag} sz="{sz}" b="0" i="0" u="none"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:latin typeface="{face}"/><a:ea typeface="{face}"/><a:cs typeface="{face}"/><a:sym typeface="{face}"/></{tag}>"#
+    )
+}
+
+const BODY_PR: &str = r#"<a:bodyPr rot="0" vert="horz" wrap="none" lIns="0" tIns="0" rIns="0" bIns="0" anchor="ctr" anchorCtr="1"/>"#;
+const LN_TAIL: &str = r#"<a:prstDash val="solid"/><a:round/><a:headEnd w="med" len="med"/><a:tailEnd w="med" len="med"/></a:ln>"#;
+const DLBLS: &str = r#"<c:dLbls><c:delete val="0"/><c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/><c:showLeaderLines val="0"/></c:dLbls>"#;
+
+/// 팔레트 색 번호 → `rrggbb`
+fn palette_hex(icv: u16, palette: &[u32]) -> String {
+    let rgb = match icv {
+        8..=63 => palette.get(icv as usize - 8).copied().unwrap_or(0),
+        _ => 0,
+    };
+    format!("{rgb:06x}")
+}
+
+/// 차트 부분 스트림의 해석 결과
+#[derive(Default)]
+struct Parsed {
+    series: Vec<RSeries>,
+    axes: Vec<RAxis>,
+    kind: String,
+    bar: (i16, u16),
+    vary: bool,
+    three_d: bool,
+    legend: Option<u8>,
+    title: Option<String>,
+    labels: std::collections::BTreeMap<(u16, u16), String>,
+    numbers: std::collections::BTreeMap<(u16, u16), f64>,
+}
+
+fn u16_at(d: &[u8], k: usize) -> u16 {
+    d.get(k..k + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .unwrap_or(0)
+}
+
+fn parse(recs: &[(u16, Vec<u8>)], ctx: &ReadCtx) -> Parsed {
+    let mut p = Parsed::default();
+    let mut stack: Vec<u16> = Vec::new();
+    let mut last = 0u16;
+    let mut axis_line = 0u16;
+    let mut text_buf: Option<String> = None;
+    let mut si_index = 0u16;
+    for (rt, d) in recs.iter().skip(1) {
+        let rt = *rt;
+        let parent = stack.last().copied();
+        let in_series_format =
+            parent == Some(0x1006) && stack.len() >= 2 && stack[stack.len() - 2] == 0x1003;
+        match rt {
+            0x1033 => {
+                stack.push(last);
+                continue;
+            }
+            0x1034 => {
+                if stack.pop() == Some(0x1025)
+                    && let Some(t) = text_buf.take()
+                {
+                    p.title = Some(t);
+                }
+                continue;
+            }
+            0x1003 => p.series.push(RSeries {
+                sdt_x: u16_at(d, 0),
+                ..Default::default()
+            }),
+            0x1051 if parent == Some(0x1003) && d.len() >= 8 => {
+                if let Some(s) = p.series.last_mut() {
+                    let cce = u16_at(d, 6) as usize;
+                    let toks = d.get(8..8 + cce).unwrap_or_default();
+                    let f = ref_text(toks, ctx);
+                    match d[0] {
+                        0 => {
+                            s.name_ref = f;
+                            s.name_lit = ptg_str(toks);
+                        }
+                        1 => s.val = Some((f, u16_at(d, 4))),
+                        2 if d[1] != 0 => s.cat = Some(f),
+                        _ => {}
+                    }
+                }
+            }
+            0x100D if parent == Some(0x1003) && d.len() >= 3 => {
+                if let Some(s) = p.series.last_mut() {
+                    s.name_text = Some(xl_string(&d[3..], d[2] as usize));
+                }
+            }
+            0x100D if parent == Some(0x1025) && d.len() >= 3 => {
+                text_buf = Some(xl_string(&d[3..], d[2] as usize));
+            }
+            0x1027 if parent == Some(0x1025) => {
+                if u16_at(d, 0) != 1 {
+                    text_buf = None;
+                }
+            }
+            0x100A if in_series_format => {
+                if let Some(s) = p.series.last_mut()
+                    && u16_at(d, 10) & 1 == 0
+                {
+                    s.fill = Some(u16_at(d, 12));
+                }
+            }
+            0x1007 if in_series_format => {
+                if let Some(s) = p.series.last_mut()
+                    && u16_at(d, 8) & 1 == 0
+                {
+                    s.line = Some((u16_at(d, 6) as i16, u16_at(d, 10)));
+                }
+            }
+            0x101D => p.axes.push(RAxis {
+                kind: u16_at(d, 0),
+                tlt: 3,
+                ..Default::default()
+            }),
+            0x101E if parent == Some(0x101D) => {
+                if let Some(a) = p.axes.last_mut() {
+                    a.tlt = d.get(2).copied().unwrap_or(3);
+                }
+            }
+            0x1021 if parent == Some(0x101D) => axis_line = u16_at(d, 0),
+            0x1007 if parent == Some(0x101D) => {
+                if let Some(a) = p.axes.last_mut() {
+                    match axis_line {
+                        0 => a.shown = u16_at(d, 8) & 0x0004 != 0,
+                        1 => a.gridlines = true,
+                        _ => {}
+                    }
+                }
+            }
+            0x1014 => p.vary = u16_at(d, 16) & 1 != 0,
+            0x1017 => {
+                p.kind = if u16_at(d, 4) & 1 != 0 { "barh" } else { "bar" }.into();
+                p.bar = (u16_at(d, 0) as i16, u16_at(d, 4));
+            }
+            0x1018 => p.kind = "line".into(),
+            0x101A => p.kind = "area".into(),
+            0x1019 => p.kind = "pie".into(),
+            0x101B => p.kind = "scatter".into(),
+            0x103A => p.three_d = true,
+            0x1015 => p.legend = Some(d.get(16).copied().unwrap_or(3)),
+            0x1065 => si_index = u16_at(d, 0),
+            0x0204 if d.len() >= 8 => {
+                let n = u16_at(d, 6) as usize;
+                p.labels
+                    .insert((u16_at(d, 0), u16_at(d, 2)), xl_string(&d[8..], n));
+            }
+            0x0203 if si_index == 1 => {
+                if let Some(b) = d.get(6..14) {
+                    let mut a = [0u8; 8];
+                    a.copy_from_slice(b);
+                    p.numbers
+                        .insert((u16_at(d, 0), u16_at(d, 2)), f64::from_le_bytes(a));
+                }
+            }
+            _ => {}
+        }
+        last = rt;
+    }
+    p
+}
+
+/// 차트 부분 스트림 (BOF … EOF 의 레코드들) → 차트 XML (한셀이 .xls 를 열어 XML 로 쓰는 꼴: 차트 영역 흰 채우기 +
+/// 검정 1pt 선, 그림 영역 없음, 축 글자 = 문서 기본 글꼴, 제목 10pt, 3차원 회전은 기본 15·20)
+pub(crate) fn read_xml(recs: &[(u16, Vec<u8>)], ctx: &ReadCtx) -> Option<String> {
+    let p = parse(recs, ctx);
+    if p.kind.is_empty() {
+        return None;
+    }
+    let (face, axis_sz) = (&ctx.font.0, ctx.font.1);
+    let kind = if p.kind == "barh" { "bar" } else { p.kind.as_str() };
+    let scatter = kind == "scatter";
+    let mut x = String::new();
+    x.push_str(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><c:chartSpace xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:date1904 val="0"/><c:roundedCorners val="0"/><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice xmlns:c14="http://schemas.microsoft.com/office/drawing/2007/8/2/chart" Requires="c14"><c14:style val="102"/></mc:Choice><mc:Fallback><c:style val="2"/></mc:Fallback></mc:AlternateContent><c:chart>"#);
+    if let Some(t) = &p.title {
+        x.push_str(&format!(
+            r#"<c:title><c:tx><c:rich>{BODY_PR}<a:p><a:pPr algn="l">{}</a:pPr><a:r>{}<a:t>{}</a:t></a:r><a:endParaRPr/></a:p></c:rich></c:tx><c:layout><c:manualLayout><c:xMode val="edge"/><c:yMode val="edge"/></c:manualLayout></c:layout><c:overlay val="0"/></c:title>"#,
+            rich_props("a:defRPr", 1000, face),
+            rich_props("a:rPr", 1000, face),
+            esc(t)
+        ));
+    }
+    x.push_str(r#"<c:autoTitleDeleted val="0"/>"#);
+    if p.three_d {
+        x.push_str(r#"<c:view3D><c:rAngAx val="1"/><c:rotX val="15"/><c:rotY val="20"/><c:perspective val="30"/><c:depthPercent val="100"/></c:view3D>"#);
+    }
+    x.push_str("<c:plotArea><c:layout/>");
+    let tag = match (kind, p.three_d) {
+        ("bar", true) => "c:bar3DChart",
+        ("bar", false) => "c:barChart",
+        ("line", _) => "c:lineChart",
+        ("area", _) => "c:areaChart",
+        ("pie", _) => "c:pieChart",
+        _ => "c:scatterChart",
+    };
+    x.push_str(&format!("<{tag}>"));
+    match kind {
+        "bar" => {
+            let dir = if p.bar.1 & 1 != 0 { "bar" } else { "col" };
+            let grp = if p.bar.1 & 4 != 0 {
+                "percentStacked"
+            } else if p.bar.1 & 2 != 0 {
+                "stacked"
+            } else {
+                "clustered"
+            };
+            x.push_str(&format!(
+                r#"<c:barDir val="{dir}"/><c:grouping val="{grp}"/>"#
+            ));
+        }
+        "line" | "area" => x.push_str(r#"<c:grouping val="standard"/>"#),
+        "scatter" => x.push_str(r#"<c:scatterStyle val="marker"/>"#),
+        _ => {}
+    }
+    x.push_str(&format!(
+        r#"<c:varyColors val="{}"/>"#,
+        u8::from(p.vary)
+    ));
+    let n_rows = p
+        .labels
+        .keys()
+        .chain(p.numbers.keys())
+        .map(|k| k.0 + 1)
+        .max()
+        .unwrap_or(0);
+    // 값 참조가 없는 계열(#REF! 등)은 한셀이 버린다
+    let series: Vec<(usize, &RSeries)> = p
+        .series
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.val.as_ref().is_some_and(|v| v.0.is_some()))
+        .collect();
+    for (i, (orig, s)) in series.iter().enumerate() {
+        x.push_str(&format!(
+            r#"<c:ser><c:idx val="{i}"/><c:order val="{i}"/>"#
+        ));
+        if let Some(f) = &s.name_ref {
+            x.push_str(&format!(
+                r#"<c:tx><c:strRef><c:f>{}</c:f><c:strCache><c:ptCount val="1"/>"#,
+                esc(f)
+            ));
+            if let Some(t) = &s.name_text {
+                x.push_str(&format!(
+                    r#"<c:pt idx="0"><c:v>{}</c:v></c:pt>"#,
+                    esc(t)
+                ));
+            }
+            x.push_str("</c:strCache></c:strRef></c:tx>");
+        } else if let Some(t) = s.name_lit.as_ref().or(s.name_text.as_ref()) {
+            x.push_str(&format!("<c:tx><c:v>{}</c:v></c:tx>", esc(t)));
+        }
+        x.push_str("<c:spPr>");
+        if let Some(icv) = s.fill {
+            x.push_str(&format!(
+                r#"<a:solidFill><a:srgbClr val="{}"/></a:solidFill>"#,
+                palette_hex(icv, ctx.palette)
+            ));
+        }
+        match s.line {
+            Some((we, icv)) => {
+                let w = match we {
+                    1 => 25400,
+                    2 => 38100,
+                    -1 => 3175,
+                    _ => 12700,
+                };
+                x.push_str(&format!(
+                    r#"<a:ln w="{w}" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:srgbClr val="{}"/></a:solidFill>{LN_TAIL}"#,
+                    palette_hex(icv, ctx.palette)
+                ));
+            }
+            None => x.push_str(&format!(
+                r#"<a:ln w="9525" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:prstClr val="black"/></a:solidFill>{LN_TAIL}"#
+            )),
+        }
+        x.push_str("</c:spPr>");
+        match kind {
+            "bar" => x.push_str(r#"<c:invertIfNegative val="0"/>"#),
+            "line" => x.push_str("<c:marker/>"),
+            "pie" => x.push_str(r#"<c:explosion val="0"/>"#),
+            _ => {}
+        }
+        if kind != "bar" {
+            x.push_str(DLBLS);
+        }
+        let col = *orig as u16;
+        if let Some(f) = &s.cat {
+            let (open, close) = if scatter {
+                ("<c:xVal>", "</c:xVal>")
+            } else {
+                ("<c:cat>", "</c:cat>")
+            };
+            x.push_str(open);
+            let pts: Vec<(u16, &String)> = (0..n_rows)
+                .filter_map(|r| p.labels.get(&(r, col)).map(|v| (r, v)))
+                .collect();
+            let f = esc(f.as_deref().unwrap_or(""));
+            if s.sdt_x == 3 {
+                x.push_str(&format!(
+                    r#"<c:strRef><c:f>{f}</c:f><c:strCache><c:ptCount val="{n_rows}"/>"#
+                ));
+                for (r, v) in &pts {
+                    x.push_str(&format!(
+                        r#"<c:pt idx="{r}"><c:v>{}</c:v></c:pt>"#,
+                        esc(v)
+                    ));
+                }
+                x.push_str("</c:strCache></c:strRef>");
+            } else {
+                x.push_str(&format!(
+                    r#"<c:numRef><c:f>{f}</c:f><c:numCache><c:formatCode>G/표준</c:formatCode><c:ptCount val="{n_rows}"/>"#
+                ));
+                for (r, v) in &pts {
+                    x.push_str(&format!(
+                        r#"<c:pt idx="{r}"><c:v>{}</c:v></c:pt>"#,
+                        esc(v)
+                    ));
+                }
+                x.push_str("</c:numCache></c:numRef>");
+            }
+            x.push_str(close);
+        }
+        if let Some((f, ifmt)) = &s.val {
+            let (open, close) = if scatter {
+                ("<c:yVal>", "</c:yVal>")
+            } else {
+                ("<c:val>", "</c:val>")
+            };
+            let code = match ifmt {
+                0 => "G/표준",
+                n => crate::numfmt::builtin(*n as u32).unwrap_or("G/표준"),
+            };
+            let code = esc(code);
+            x.push_str(&format!(
+                r#"{open}<c:numRef><c:f>{}</c:f><c:numCache><c:formatCode>{code}</c:formatCode><c:ptCount val="{n_rows}"/>"#,
+                esc(f.as_deref().unwrap_or(""))
+            ));
+            for r in 0..n_rows {
+                if let Some(v) = p.numbers.get(&(r, col)) {
+                    x.push_str(&format!(
+                        r#"<c:pt idx="{r}" formatCode="{code}"><c:v>{v}</c:v></c:pt>"#
+                    ));
+                }
+            }
+            x.push_str(&format!("</c:numCache></c:numRef>{close}"));
+        }
+        if matches!(kind, "line" | "scatter") {
+            x.push_str(r#"<c:smooth val="0"/>"#);
+        }
+        x.push_str("</c:ser>");
+    }
+    match kind {
+        "bar" => {
+            x.push_str(r#"<c:gapWidth val="150"/>"#);
+            if p.three_d {
+                x.push_str(r#"<c:gapDepth val="150"/><c:shape val="box"/>"#);
+            } else {
+                x.push_str(&format!(
+                    r#"<c:overlap val="{}"/>"#,
+                    -(p.bar.0 as i32)
+                ));
+            }
+        }
+        "line" => x.push_str(r#"<c:marker val="1"/><c:smooth val="0"/>"#),
+        "pie" => x.push_str(r#"<c:firstSliceAng val="0"/>"#),
+        _ => {}
+    }
+    if kind != "pie" {
+        x.push_str(r#"<c:axId val="0"/><c:axId val="1"/>"#);
+        if p.three_d {
+            x.push_str(r#"<c:axId val="2"/>"#);
+        }
+    }
+    x.push_str(&format!("</{tag}>"));
+    if kind != "pie" {
+        let tx_pr = format!(
+            r#"<c:txPr>{BODY_PR}<a:p><a:pPr algn="l">{}</a:pPr><a:endParaRPr/></a:p></c:txPr>"#,
+            rich_props("a:defRPr", axis_sz, face)
+        );
+        for a in &p.axes {
+            let tlt = match a.tlt {
+                0 => "none",
+                1 => "low",
+                2 => "high",
+                _ => "nextTo",
+            };
+            let del = u8::from(!a.shown);
+            let grid = if a.gridlines { "<c:majorGridlines/>" } else { "" };
+            // 누적 막대(fStacked)면 한셀은 축마다 0% 표시 형식을 붙인다 (원본에 연결 안 함)
+            let stacked = kind == "bar" && p.bar.1 & 2 != 0;
+            let pct = if stacked {
+                r#"<c:numFmt formatCode="0%" sourceLinked="0"/>"#
+            } else {
+                ""
+            };
+            let common = |id: u16, pos: &str, cross: u16| -> String {
+                format!(
+                    r#"<c:axId val="{id}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="{pos}"/><c:crossAx val="{cross}"/><c:delete val="{del}"/>{grid}"#
+                )
+            };
+            let ticks = format!(
+                r#"<c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="{tlt}"/>{tx_pr}<c:crosses val="autoZero"/>"#
+            );
+            match (a.kind, scatter) {
+                (0, true) => x.push_str(&format!(
+                    r#"<c:valAx>{}<c:numFmt formatCode="General" sourceLinked="1"/>{ticks}<c:crossBetween val="between"/></c:valAx>"#,
+                    common(0, "b", 1)
+                )),
+                (0, false) => x.push_str(&format!(
+                    r#"<c:catAx>{}{pct}{ticks}<c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/><c:tickLblSkip val="1"/><c:tickMarkSkip val="1"/><c:noMultiLvlLbl val="0"/></c:catAx>"#,
+                    common(0, "b", 1)
+                )),
+                (1, _) => x.push_str(&format!(
+                    r#"<c:valAx>{}{}{ticks}<c:crossBetween val="between"/></c:valAx>"#,
+                    common(1, "l", 0),
+                    if stacked {
+                        pct
+                    } else {
+                        r#"<c:numFmt formatCode="G/표준" sourceLinked="1"/>"#
+                    }
+                )),
+                _ => x.push_str(&format!(
+                    r#"<c:serAx>{}{pct}{ticks}<c:tickMarkSkip val="1"/></c:serAx>"#,
+                    common(2, "b", 1)
+                )),
+            }
+        }
+    }
+    x.push_str(&format!(
+        r#"<c:spPr><a:noFill/><a:ln w="9525" cap="flat" cmpd="sng" algn="ctr"><a:noFill/>{LN_TAIL}</c:spPr></c:plotArea>"#
+    ));
+    if let Some(w) = p.legend {
+        let pos = match w {
+            0 => "b",
+            1 => "tr",
+            2 => "t",
+            4 => "l",
+            _ => "r",
+        };
+        x.push_str(&format!(
+            r#"<c:legend><c:legendPos val="{pos}"/><c:layout/><c:overlay val="0"/><c:spPr><a:solidFill><a:srgbClr val="ffffff"/></a:solidFill></c:spPr></c:legend>"#
+        ));
+    }
+    x.push_str(r#"<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart>"#);
+    x.push_str(&format!(
+        r#"<c:spPr><a:solidFill><a:srgbClr val="ffffff"/></a:solidFill><a:ln w="12700" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:srgbClr val="000000"/></a:solidFill>{LN_TAIL}</c:spPr>"#
+    ));
+    x.push_str(r#"<c:extLst><c:ext uri="CC8EB2C9-7E31-499d-B8F2-F6CE61031016"><ho:hncChartStyle xmlns:ho="http://schemas.haansoft.com/office/8.0" layoutIndex="-1" colorIndex="0" styleIndex="0"/></c:ext></c:extLst></c:chartSpace>"#);
+    Some(x)
+}
+
+/// [`read_xml`] → 차트 모델
+pub(crate) fn read(recs: &[(u16, Vec<u8>)], ctx: &ReadCtx) -> Option<Chart> {
+    let xml = read_xml(recs, ctx)?;
+    let root = crate::xml::parse_raw(&xml, "xl/charts/chart.xml").ok()?;
+    Some(crate::parser::chart::parse_chart(&root))
+}
+
+/// 칸의 표시 형식 글 (한셀이 차트 캐시에 쓰는 꼴 — `General` 은 `G/표준`, 따옴표·`` 를 벗기고 `[빨강]`)
+fn cell_format_code(wb: &Workbook, cell: Option<&Cell>) -> String {
+    let id = cell
+        .and_then(|c| wb.styles.cell_xfs.get(c.style as usize))
+        .map_or(0, |x| x.num_fmt_id);
+    if id == 0 {
+        return "G/표준".into();
+    }
+    let code = wb
+        .styles
+        .num_fmts
+        .iter()
+        .find(|f| f.id == id)
+        .map(|f| f.code.clone())
+        .or_else(|| crate::numfmt::builtin(id).map(str::to_string))
+        .unwrap_or_else(|| "General".into());
+    super::vtchart_map::chart_format_code(&code)
+}
+
+/// .xls 에서 읽은 차트의 값 캐시 표시 형식: 한셀은 값 범위의 칸 서식을 쓴다 (캐시 전체는 첫 칸, 점마다는 그 칸)
+pub(crate) fn apply_cell_formats(wb: &mut Workbook) {
+    let mut fixes: Vec<(usize, usize, usize, Vec<String>)> = Vec::new();
+    for (si, sheet) in wb.sheets.iter().enumerate() {
+        for (k, shape) in sheet.shapes.iter().enumerate() {
+            let Some(ch) = &shape.chart else { continue };
+            for (i, s) in ch.series.iter().enumerate() {
+                let Some(cells) = s
+                    .val
+                    .as_ref()
+                    .and_then(|v| v.formula.as_deref())
+                    .and_then(|f| range_cells(wb, si, f))
+                else {
+                    continue;
+                };
+                fixes.push((
+                    si,
+                    k,
+                    i,
+                    cells.iter().map(|c| cell_format_code(wb, *c)).collect(),
+                ));
+            }
+        }
+    }
+    for (si, k, i, codes) in fixes {
+        let Some(cache) = wb.sheets[si].shapes[k]
+            .chart
+            .as_mut()
+            .and_then(|c| c.series.get_mut(i))
+            .and_then(|s| s.val.as_mut())
+            .and_then(|v| v.cache.as_mut())
+        else {
+            continue;
+        };
+        if let Some(first) = codes.first() {
+            cache.format_code = Some(first.clone());
+        }
+        for p in &mut cache.points {
+            if let Some(c) = codes.get(p.idx as usize) {
+                p.format_code = Some(c.clone());
+            }
+        }
+    }
+}
