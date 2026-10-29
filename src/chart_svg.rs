@@ -2879,7 +2879,12 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
             }
         }
     }
-    let (top, bottom) = (18.0, p.h - 36.0);
+    // 레거시는 상자가 더 아래 (틀 위 + 39 ~ 아래 − 15, 차트 종류 실험)
+    let (top, bottom) = if ch.legacy.is_some() {
+        (39.0, p.h - 15.0)
+    } else {
+        (18.0, p.h - 36.0)
+    };
     v.k = ((bottom - top) / (y1 - y0))
         .min((p.right - p.left).max(10.0) / (x1 - x0))
         .max(1.0);
@@ -2923,6 +2928,51 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
     // 바닥 왼쪽·뒤 모서리
     line3(out, (0.0, 0.0, 0.0), (0.0, 0.0, dd), &axis_st);
     line3(out, (0.0, 0.0, dd), (1.0, 0.0, dd), &axis_st);
+    // 레거시: 옆벽·바닥은 두꺼운 회색 판 (999999, 테두리 808080) — 앞에서 보이는 두께 옆벽 14px·바닥 9px
+    // (차트 종류 실험의 3차원 세로 막대)
+    let slab = if ch.legacy.is_some() {
+        (14.0, 9.0)
+    } else {
+        (0.0, 0.0)
+    };
+    if slab.0 > 0.0 {
+        let st = Style {
+            fill: Some(("#999999".into(), 1.0)),
+            stroke: Some(Stroke::new("#808080", 1.0)),
+        };
+        let (tx, ty) = v.p(0.0, hh, 0.0);
+        let (bx0, by0) = v.p(0.0, 0.0, 0.0);
+        let (bx1, by1) = v.p(1.0, 0.0, 0.0);
+        let (tw, th) = slab;
+        out.path(
+            &format!(
+                "M{:.1},{:.1}L{:.1},{:.1}L{:.1},{:.1}L{:.1},{:.1}Z",
+                tx - tw,
+                ty,
+                tx,
+                ty,
+                bx0,
+                by0,
+                bx0 - tw,
+                by0 + th
+            ),
+            &st,
+        );
+        out.path(
+            &format!(
+                "M{:.1},{:.1}L{:.1},{:.1}L{:.1},{:.1}L{:.1},{:.1}Z",
+                bx0 - tw,
+                by0 + th,
+                bx0,
+                by0,
+                bx1,
+                by1,
+                bx1,
+                by1 + th
+            ),
+            &st,
+        );
+    }
 
     // 계열
     let n = p.n_cat.max(1);
@@ -3060,7 +3110,7 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
                 let t = cat_text(c, p.cat_fmt);
                 out.text(
                     a - 9.0,
-                    b + 21.0 + p.cat_font.px() * 0.35,
+                    b + if slab.1 > 0.0 { slab.1 + 9.0 } else { 21.0 } + p.cat_font.px() * 0.35,
                     &t,
                     p.cat_font,
                     "middle",
