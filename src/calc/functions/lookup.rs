@@ -547,11 +547,12 @@ fn offset(ctx: &mut Ctx, a: &[Value]) -> Value {
     };
     let dr = try_v!(num_arg(ctx, a, 1)).trunc();
     let dc = try_v!(num_arg(ctx, a, 2)).trunc();
-    let h = match opt(a, 3) {
+    // 비운 높이·너비는 생략과 같다 (SUM(OFFSET(Data!A1:A3,1,0,,2)) = A2:B4 의 합, 대조 실험 lookup)
+    let h = match super::given(a, 3) {
         Some(v) => try_v!(ctx.num(v)).trunc(),
         None => area.rows() as f64,
     };
-    let w = match opt(a, 4) {
+    let w = match super::given(a, 4) {
         Some(v) => try_v!(ctx.num(v)).trunc(),
         None => area.cols() as f64,
     };

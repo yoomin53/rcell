@@ -2330,14 +2330,22 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
         }
         wbx.push_str("</x:definedNames>");
     }
+    // calcPr: 읽은 표준 속성(반복 계산 설정 …)과 한셀 계산 엔진 번호
+    let calc_attrs: String = wb
+        .calc_attrs
+        .iter()
+        .map(|(k, v)| format!(" {k}=\"{}\"", esc(v)))
+        .collect();
     match wb.hancom.calc_id {
         Some(id) => {
             let _ = write!(
                 wbx,
-                "<x:calcPr xmlns:mc=\"{MC}\" xmlns:hs=\"{HS}\" mc:Ignorable=\"hs\" hs:hclCalcId=\"{id}\"/>"
+                "<x:calcPr{calc_attrs} xmlns:mc=\"{MC}\" xmlns:hs=\"{HS}\" mc:Ignorable=\"hs\" hs:hclCalcId=\"{id}\"/>"
             );
         }
-        None => wbx.push_str("<x:calcPr/>"),
+        None => {
+            let _ = write!(wbx, "<x:calcPr{calc_attrs}/>");
+        }
     }
     // 피벗 캐시 (CT_Workbook 에서 calcPr 다음)
     let caches: Vec<(u32, usize)> = wb_links
