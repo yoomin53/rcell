@@ -848,6 +848,15 @@ pub fn sheet_table_grid(
             if let Some(col) = edge_color(er, c, false) {
                 let _ = write!(css, "border-bottom-color:{col};");
             }
+            // 틀 고정 선: 고정한 마지막 행의 아래·마지막 열의 오른쪽 격자선 자리 (한셀 화면 D25140 — 틀 고정 실험)
+            if let Some(f) = freeze {
+                if f.row > 0 && er + 1 == f.row {
+                    css.push_str("border-bottom-color:#D25140;");
+                }
+                if f.col > 0 && ec + 1 == f.col {
+                    css.push_str("border-right-color:#D25140;");
+                }
+            }
             let mut inner = String::new();
             if let Some(v) = views.get(&(r, c)) {
                 if let Some(f) = &v.fill {
