@@ -472,7 +472,7 @@ pub fn autofit_cols(wb: &mut Workbook, si: usize, c0: u32, c1: u32) -> crate::Re
                 font.is_some_and(|f| f.bold),
             );
             // 한셀: 글자마다 정수 px 폭의 합 × (K + 0.1)/K + K + 0.085 (맑은 고딕 11pt, K = 8 — 열 너비 자동 맞춤
-            // 대조 실험 30가지: 숫자 8, 한글 15, 공백 5, W 14, i 4, 마침표 3 px 의 합 × 1.0125 + 8.085)
+            // 대조 실험 125가지: 숫자 8, 한글 15, 공백 5, W 14, i 4, 마침표 3 px 의 합 × 1.0125 + 8.085)
             let malgun = font
                 .and_then(|f| f.name.as_deref())
                 .is_none_or(|n| n == "맑은 고딕" || n.eq_ignore_ascii_case("Malgun Gothic"));
