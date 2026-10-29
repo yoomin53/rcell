@@ -843,6 +843,11 @@ pub(super) fn shape_body(
                     defs.push_str(&compound_mask(&format!("{id}m"), l, &strokes, w, h));
                     format!("{id}m")
                 });
+                // 선 가운데: 홀수 px 선은 반 픽셀 안쪽, 짝수 px 선은 정수 자리 (한셀 화면 — 2px 선이 경계 앞 두 픽셀)
+                let so = match line.as_ref().map(|l| l.px.round() as i64) {
+                    Some(n) if n > 0 && n % 2 == 0 => "0",
+                    _ => "0.5",
+                };
                 let mut body = String::new();
                 for p in &paths {
                     let filled = fill.is_some() && p.fill != shape::PathFill::None;
@@ -871,7 +876,7 @@ pub(super) fn shape_body(
                     if !st.is_empty() {
                         let _ = write!(
                             body,
-                            "<path d=\"{}\" fill=\"none\"{st} transform=\"translate(0.5 0.5)\"/>",
+                            "<path d=\"{}\" fill=\"none\"{st} transform=\"translate({so} {so})\"/>",
                             p.d
                         );
                     }
@@ -880,7 +885,7 @@ pub(super) fn shape_body(
                     {
                         let _ = write!(
                             body,
-                            "<path d=\"{}\" fill=\"none\"{stroke} mask=\"url(#{m})\" transform=\"translate(0.5 0.5)\"/>",
+                            "<path d=\"{}\" fill=\"none\"{stroke} mask=\"url(#{m})\" transform=\"translate({so} {so})\"/>",
                             p.d
                         );
                     }

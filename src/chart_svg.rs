@@ -163,7 +163,7 @@ impl Svg {
     fn new(w: f64, h: f64) -> Svg {
         Svg {
             s: format!(
-                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.1} {h:.1}\" font-family=\"'맑은 고딕','Malgun Gothic',sans-serif\">"
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.1} {h:.1}\" style=\"will-change:transform\" font-family=\"'맑은 고딕','Malgun Gothic',sans-serif\">"
             ),
             defs: String::new(),
             clip: 0,
@@ -329,6 +329,19 @@ struct Font {
 impl Font {
     fn px(&self) -> f64 {
         self.size * 96.0 / 72.0
+    }
+    /// 줄 높이 비 (맑은 고딕 = 1): latin 글꼴이 Calibri 면 0.9 — 한셀은 라틴 글꼴의 줄 높이로 범례 줄·항목 레이블
+    /// 자리를 잡는다 (차트 종류 실험: 10pt 범례 줄 18px, 맑은 고딕 10pt 는 20px)
+    fn line_ratio(&self) -> f64 {
+        if self
+            .family
+            .as_deref()
+            .is_some_and(|f| f.starts_with("'Calibri'"))
+        {
+            0.9
+        } else {
+            1.0
+        }
     }
     fn attrs(&self) -> String {
         let mut a = format!(" font-size=\"{:.1}px\" fill=\"{}\"", self.px(), self.color);
@@ -981,7 +994,7 @@ fn draw_legend(
     cx: &Ctx,
 ) -> Rect {
     let fpx = font.px();
-    let row = LEG_ROW * font.size / BASE_PT;
+    let row = LEG_ROW * font.size / BASE_PT * font.line_ratio();
     let key = LEG_KEY;
     let has_line = items.iter().any(|i| i.stroke.is_some() && i.fill.is_none());
     let (kw, key_gap, right, plot_gap) = if has_line {
@@ -1656,7 +1669,7 @@ fn draw_axis_chart(
         0.0
     };
     let cat_label_h = if labels_on(cat_ax) || xy {
-        cat_font.px() * 1.1 + VAL_GAP
+        cat_font.px() * 1.1 * cat_font.line_ratio() + VAL_GAP
     } else {
         0.0
     };
