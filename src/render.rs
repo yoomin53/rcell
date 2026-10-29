@@ -994,12 +994,24 @@ pub fn sheet_table_grid(
                 b.left = None;
             }
             if !b.is_empty() {
-                let gap = views
+                let own = views
                     .get(&(r, c))
                     .and_then(|v| v.fill.as_ref())
                     .and_then(|f| f.color.clone())
                     .unwrap_or_else(|| "#FFFFFF".into());
-                inner.push_str(&paint::borders_svg(&b, w, h, &gap));
+                // 아래·오른쪽 틈은 그 격자선 자리를 덮는 채우기 (아래 칸이 채워져 있으면 그 색 — 대출 계산기의
+                // 머리글 아래 이중선), 위·왼쪽은 칸 채우기
+                let edge = |right: bool| {
+                    edge_color(
+                        if right { r } else { er },
+                        if right { ec } else { c },
+                        right,
+                    )
+                    .filter(|v| v.starts_with('#'))
+                    .unwrap_or_else(|| own.clone())
+                };
+                let gaps = [own.clone(), edge(false), own.clone(), edge(true)];
+                inner.push_str(&paint::borders_svg(&b, w, h, &gaps));
             }
             if let Some((gi, vals)) = sparks.get(&(r, c))
                 && let Some(g) = spark_groups.get(*gi)
