@@ -624,3 +624,63 @@ fn first_single_page_sheet_99() {
     let p = rcell::print::sheet_print_with(&wb, 0, true);
     assert_eq!((p.pages.len(), p.print_scale), (2, 100));
 }
+
+/// 한셀이 문서를 열 때 다시 계산하는 칸 (값을 틀리게 적은 20 칸 문서를 형식·계산 엔진 번호별로 한셀 COM 에서 읽은 값):
+/// XML 은 엔진 번호가 없거나 904 보다 작으면 모두, 904 면 하지 않는다. 레거시는 904 면 휘발성 칸(과 그에 기대는 칸)만.
+#[test]
+fn open_recalc_rules() {
+    use rcell::print::{OpenRecalc, apply_open_recalc, open_recalc};
+    let mut wb = base();
+    let cell = |r: &str, f: Option<&str>, v: f64| rcell::model::Cell {
+        r: CellRef::parse(r).unwrap(),
+        style: 0,
+        value: CellValue::Number(v),
+        formula: f.map(|t| rcell::model::Formula {
+            text: t.into(),
+            kind: Default::default(),
+            shared_index: None,
+            range: None,
+            data_table: None,
+        }),
+    };
+    wb.sheets[0].cells = vec![
+        cell("A1", None, 5.0),
+        cell("B1", Some("A1*2"), 999.0),
+        cell("B2", Some("NOW()*0+3"), 1.0),
+        cell("B3", Some("B2+1"), 1.0),
+    ];
+    let dir = std::env::temp_dir().join(format!("rcell-recalc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mode = |wb: &Workbook, name: &str| {
+        let path = dir.join(name);
+        rcell::save(wb, &path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        open_recalc(&bytes, &rcell::open(&path).unwrap())
+    };
+    assert_eq!(mode(&wb, "a.cell"), OpenRecalc::Full);
+    assert_eq!(mode(&wb, "a.legacy.cell"), OpenRecalc::Full);
+    wb.hancom.calc_id = Some(903);
+    assert_eq!(mode(&wb, "b.cell"), OpenRecalc::Full);
+    wb.hancom.calc_id = Some(904);
+    assert_eq!(mode(&wb, "c.cell"), OpenRecalc::None);
+    assert_eq!(mode(&wb, "c.legacy.cell"), OpenRecalc::Volatile);
+    let _ = std::fs::remove_dir_all(&dir);
+    let value = |wb: &Workbook, r: &str| {
+        let r = CellRef::parse(r).unwrap();
+        wb.sheets[0]
+            .cells
+            .iter()
+            .find(|c| c.r == r)
+            .unwrap()
+            .value
+            .clone()
+    };
+    // 휘발성: NOW 와 그에 기대는 칸만 (A1*2 의 999 는 그대로)
+    let mut v = wb.clone();
+    apply_open_recalc(&mut v, OpenRecalc::Volatile);
+    assert_eq!(value(&v, "B1"), CellValue::Number(999.0));
+    assert_eq!(value(&v, "B3"), CellValue::Number(4.0));
+    let mut f = wb.clone();
+    apply_open_recalc(&mut f, OpenRecalc::Full);
+    assert_eq!(value(&f, "B1"), CellValue::Number(10.0));
+}

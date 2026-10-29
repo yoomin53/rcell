@@ -1079,6 +1079,10 @@ fn pdf(input: &Path, output: &Path, sheets: &[String], fonts: &[PathBuf]) -> rce
         time,
         max_pages: None,
         quality_settings: false,
+        // 한셀이 열 때 다시 계산하는 칸 (형식·계산 엔진 번호)
+        recalc: std::fs::read(input)
+            .map(|b| rcell::print::open_recalc(&b, &wb))
+            .unwrap_or_default(),
     };
     let bytes = rcell::print::workbook_pdf(&wb, &db, &opts);
     std::fs::write(output, bytes)?;

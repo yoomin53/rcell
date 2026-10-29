@@ -677,9 +677,12 @@ pub unsafe extern "C" fn rcell_font_add(ptr: *const u8, len: usize) {
     FONTS.with(|f| f.borrow_mut().add_data(bytes));
 }
 
-fn pdf_of(wb: &Workbook) -> Vec<u8> {
+fn pdf_of(wb: &Workbook, recalc: rcell::print::OpenRecalc) -> Vec<u8> {
     FONTS.with(|f| {
-        let opts = rcell::print::PdfOptions::default();
+        let opts = rcell::print::PdfOptions {
+            recalc,
+            ..Default::default()
+        };
         rcell::print::workbook_pdf(wb, &f.borrow(), &opts)
     })
 }
@@ -690,11 +693,16 @@ fn pdf_of(wb: &Workbook) -> Vec<u8> {
 /// `ptr`/`len` 은 `rcell_alloc` 으로 받은 유효한 범위여야 한다.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rcell_pdf(ptr: *const u8, len: usize) -> u64 {
-    run(rcell::from_bytes(input(ptr, len)).map(|wb| pdf_of(&wb)))
+    let bytes = input(ptr, len);
+    // 한셀이 열 때 다시 계산하는 칸 (형식·계산 엔진 번호)
+    let mode = |wb: &Workbook| rcell::print::open_recalc(&bytes, wb);
+    run(rcell::from_bytes(bytes.clone()).map(|wb| pdf_of(&wb, mode(&wb))))
 }
 
 /// 편집 중인 문서 → PDF
 #[unsafe(no_mangle)]
 pub extern "C" fn rcell_doc_pdf(id: u32) -> u64 {
-    run(with_doc(id, |d| Ok(pdf_of(&d.wb))))
+    run(with_doc(id, |d| {
+        Ok(pdf_of(&d.wb, rcell::print::OpenRecalc::None))
+    }))
 }

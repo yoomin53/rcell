@@ -249,6 +249,10 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> 
     let mut s = String::new();
     let sx = size.width / (size.dev_w * 0.12);
     let sy = size.height / (size.dev_h * 0.12);
+    // 글자 변환의 배율: 채우기가 있는 페이지는 0.12 그대로, 없으면 용지 비율을 곱한다 (한셀 PDF 1105 페이지:
+    // 채우기 있는 192 페이지 중 168 이 `0.120 0 0 -0.120`, 없는 913 페이지 중 904 가 `0.119935 0 0 -0.119869` 꼴)
+    let filled = ops.iter().any(|o| matches!(o, Op::Rect { .. }));
+    let (tsx, tsy) = if filled { (1.0, 1.0) } else { (sx, sy) };
     // 선·채우기는 pt 좌표로 (한셀 PDF 처럼 — 같은 렌더러에서 선 굵기·자리가 같게 그려진다), 글자만 장치 단위 cm 아래
     let px = |x: f64| x * 0.12 * sx;
     let py = |y: f64| size.height - y * 0.12 * sy;
@@ -398,8 +402,8 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> 
                 let _ = writeln!(
                     s,
                     "q {} 0 0 {} 0 {} cm {} rg {} RG",
-                    num6(0.12 * sx),
-                    num6(-0.12 * sy),
+                    num6(0.12 * tsx),
+                    num6(-0.12 * tsy),
                     num(size.height),
                     color(*c),
                     color(*c)
