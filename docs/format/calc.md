@@ -271,8 +271,8 @@ rcell 의 `hcmath::lgamma` 는 반정수 k/2 (k ≤ 400) 는 한셀에서 잰 �
 | TYPE | 여러 칸 범위는 16 |
 | ISFORMULA | 참조가 아니면 오류 값이라도 #VALUE! |
 | ISEVEN·ISODD | 논리 값은 1·0 |
-| CELL | 참조 없으면 #REF!, 다른 시트 주소는 `[파일 이름]시트!$B$3`, contents 는 글, width 8 |
-| INFO | numfile 은 시트 수, recalc "자동", osversion "Windows (32-bit) NT 6.2", 모르는 항목 #VALUE! |
+| CELL | 참조 없으면 #REF!, 다른 시트 주소는 `[파일 이름]시트!$B$3` — 파일·시트 이름에 따옴표가 필요한 글자(`-` 따위)가 있으면 `'[cvol-002.cell]Data'!$B$2` 처럼 전체를 감싼다 (대조 실험 cvol), contents 는 글, width 8 |
+| INFO | numfile 은 시트 수, recalc "자동", osversion "Windows (32-bit) NT 6.2", release "13.0", memavail #N/A, 모르는 항목 #VALUE! |
 | GETPIVOTDATA·CALL·REGISTER.ID | #VALUE! |
 
 ### 날짜
