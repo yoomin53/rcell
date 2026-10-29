@@ -98,7 +98,7 @@ const SCRIPTS = {
     { op: "replace", find: "합계", replace: "총계", all: true, range: "A1:Z200" },
     { op: "replace", sheet: 0, find: "a", replace: "Ä", wholeCell: true, range: "A1:Z200" },
   ],
-  cells: [
+  shift: [
     { op: "insertCells", sheet: 0, range: "B3:C4", shift: "down" },
     { op: "deleteCells", sheet: 0, range: "D6:E6", shift: "left" },
     { op: "insertCells", sheet: 0, range: "A10:B10", shift: "right" },
