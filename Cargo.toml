@@ -34,6 +34,10 @@ flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] 
 # 수식 계산의 초월 함수: 플랫폼마다 C 라이브러리가 다르면 결과가 다르다 (windows-gnu 의 sin 은 x87 fsin 이라
 # SIN(PI()) 가 1.2246063538e-16 — 한셀·MSVC 는 1.2246467991e-16). 순수 Rust 구현으로 어디서나 같게 한다.
 libm = "0.2.16"
+# PDF 출력 (rcell::print): 낮은 단계 PDF 쓰기, 글꼴 읽기, 글꼴 부분 집합 — 모두 MIT OR Apache-2.0, 순수 Rust (wasm 가능)
+pdf-writer = "0.15.0"
+ttf-parser = { version = "0.25.1", default-features = false, features = ["std"] }
+subsetter = { version = "0.2.6", default-features = false }
 
 [workspace]
 members = [".", "crates/rcell-wasm"]

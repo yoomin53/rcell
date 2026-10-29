@@ -3105,6 +3105,8 @@ fn read_sheet(
                     black_and_white: g & 0x0008 != 0,
                     draft: g & 0x0010 != 0,
                     use_first_page_number: g & 0x0080 != 0,
+                    cell_comments: crate::model::comments_flag(g & 0x0020 != 0, g & 0x0200 != 0),
+                    errors: crate::model::errors_flag((g >> 10) & 3),
                     horizontal_dpi: res.map(u32::from),
                     vertical_dpi: vres.map(u32::from),
                     copies: copies.map(u32::from),
