@@ -971,19 +971,21 @@ pub fn preset_paths(
                 r = f(r)
             ))
         }
+        // 눈물: 왼쪽 위·오른쪽 아래·왼쪽 아래는 타원, 오른쪽 위는 끝점 (x1, y1) 으로 가는 2차 곡선 둘 (도형 모양 실험)
         "teardrop" => {
-            let k = a("adj", 100000.0);
+            let k = a("adj", 100000.0).clamp(0.0, 2.0);
+            let (x1, y1) = (hc + hc * k, vc - vc * k);
+            let (x2, y2) = ((hc + x1) / 2.0, (vc + y1) / 2.0);
             one(format!(
-                "M0,{}A{},{} 0 0 1 {},0L{},{}A{},{} 0 1 1 0,{}Z",
-                f(vc),
-                f(hc),
-                f(vc),
-                f(hc),
-                f(hc + hc * k),
-                f(vc - vc * k),
-                f(hc),
-                f(vc),
-                f(vc)
+                "M0,{vc}A{hc},{vc} 0 0 1 {hc},0Q{x2},0 {x1},{y1}Q{w},{y2} {w},{vc}A{hc},{vc} 0 0 1 {hc},{h}A{hc},{vc} 0 0 1 0,{vc}Z",
+                vc = f(vc),
+                hc = f(hc),
+                x1 = f(x1),
+                y1 = f(y1),
+                x2 = f(x2),
+                y2 = f(y2),
+                w = f(w),
+                h = f(h)
             ))
         }
         "heart" => one(format!(
@@ -1523,7 +1525,36 @@ pub fn preset_paths(
             if dx < 0.0 && dx.abs() > dy.abs() {
                 pts.extend([(0.0, h * 7.0 / 12.0), (tx, ty), (0.0, h * 5.0 / 12.0)]);
             }
-            one(poly(&pts))
+            if r <= 0.0 {
+                return one(poly(&pts));
+            }
+            // 둥근 모서리: 꼭짓점 넷을 반지름 r 의 호로 (둥근 사각형 설명선)
+            let corner = |p: (f64, f64)| [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].contains(&p);
+            let mut d = format!("M{},0", f(r));
+            for &(x, y) in pts.iter().skip(1).chain(std::iter::once(&(0.0, 0.0))) {
+                if corner((x, y)) {
+                    let (ax, ay, bx, by) = match (x == 0.0, y == 0.0) {
+                        (false, true) => (w - r, 0.0, w, r),
+                        (false, false) => (w, h - r, w - r, h),
+                        (true, false) => (r, h, 0.0, h - r),
+                        _ => (0.0, r, r, 0.0),
+                    };
+                    let _ = write!(
+                        d,
+                        "L{},{}A{},{} 0 0 1 {},{}",
+                        f(ax),
+                        f(ay),
+                        f(r),
+                        f(r),
+                        f(bx),
+                        f(by)
+                    );
+                } else {
+                    let _ = write!(d, "L{},{}", f(x), f(y));
+                }
+            }
+            d.push('Z');
+            one(d)
         }
         "wave" | "doubleWave" => {
             let amp = h * a("adj1", if prst == "wave" { 12500.0 } else { 6250.0 });
