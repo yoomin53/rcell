@@ -349,6 +349,17 @@
     }
     var act = m ? { r0: m[0], c0: m[1], r1: m[2], c1: m[3] } : { r0: sel.active.r, c0: sel.active.c, r1: sel.active.r, c1: sel.active.c };
     place(document.createElement("div"), box(act), "ed-act");
+    // 채우기 핸들 (선택 범위 오른쪽 아래)
+    if (g.r1 < MAX_ROWS - 1 && g.c1 < MAX_COLS - 1 && !(g.r0 === 0 && g.r1 >= MAX_ROWS - 1) && !(g.c0 === 0 && g.c1 >= MAX_COLS - 1)) {
+      var hb = box(g);
+      var hd = document.createElement("div");
+      hd.className = "ed-handle";
+      hd.id = "ed-handle";
+      hd.style.left = hb.left + hb.width - 4 + "px";
+      hd.style.top = hb.top + hb.height - 4 + "px";
+      layer.appendChild(hd);
+    }
+    if (drag && drag.kind === "fill" && drag.to) place(document.createElement("div"), box(drag.to), "ed-clip");
     if (clipMark && clipMark.sheet === sheet) place(document.createElement("div"), box(clipMark), "ed-clip");
     if (refPick && refPick.r0 !== undefined) place(document.createElement("div"), box(refPick.g), "ed-ref");
     // 머리글 강조
@@ -455,6 +466,18 @@
           null,
           ["왼쪽으로 옮기기", function () { moveSheet(s.index, -1); }],
           ["오른쪽으로 옮기기", function () { moveSheet(s.index, 1); }],
+          null,
+          ["탭 색…", function () {
+            var t = window.prompt("탭 색 (RRGGBB, 비우면 없앤다)", "FF0000");
+            if (t != null) edit({ op: "tabColor", sheet: s.index, color: t.replace("#", "") }, true);
+          }],
+          ["시트 숨기기", function () { var info = edit({ op: "hideSheet", sheet: s.index }, true); if (info) switchSheet(info.active != null ? info.active : 0); }],
+          ["숨긴 시트 보이기", function () {
+            var hid = doc.info.sheets.filter(function (x) { return !x.visible; });
+            if (!hid.length) { status("숨긴 시트가 없습니다"); return; }
+            var t = window.prompt("보일 시트 이름: " + hid.map(function (x) { return x.name; }).join(", "), hid[0].name);
+            if (t != null) edit({ op: "unhideSheet", sheet: t }, true);
+          }],
         ]);
       };
       tabs.appendChild(b);
@@ -875,6 +898,12 @@
       e.preventDefault();
       return;
     }
+    if (e.target.id === "ed-handle") {
+      if (!commitEdit()) return;
+      drag = { kind: "fill", g: range(), to: null };
+      e.preventDefault();
+      return;
+    }
     var rr = rowAtY(p.y), cc = colAtX(p.x);
     if (editing && wantsRef()) {
       insertRef({ r0: rr, c0: cc, r1: rr, c1: cc });
@@ -912,6 +941,11 @@
     if (drag.kind === "ref") {
       var g = { r0: Math.min(drag.r, rowAtY(p.y)), c0: Math.min(drag.c, colAtX(p.x)), r1: Math.max(drag.r, rowAtY(p.y)), c1: Math.max(drag.c, colAtX(p.x)) };
       insertRef(g);
+      return;
+    }
+    if (drag.kind === "fill") {
+      drag.to = fillTarget(drag.g, rowAtY(p.y), colAtX(p.x));
+      drawSelection();
       return;
     }
     if (drag.kind === "cols") sel.focus = { r: MAX_ROWS - 1, c: colAtX(p.x) };
@@ -958,6 +992,14 @@
       edit({ op: "rowHeight", sheet: sheet, row: r0 + 1, count: n2, height: Math.round(h * 0.75 * 100) / 100 }, true);
     } else if (d.kind === "ref") {
       // 계속 입력
+    } else if (d.kind === "fill") {
+      var to = fillTarget(d.g, rowAtY(p.y), colAtX(p.x));
+      if (to) {
+        edit({ op: "autoFill", sheet: sheet, range: rangeText(d.g), to: rangeText(to) }, true);
+        sel.anchor = { r: to.r0, c: to.c0 };
+        sel.focus = { r: to.r1, c: to.c1 };
+        drawSelection();
+      } else drawSelection();
     } else {
       ensureRendered();
       updateCell();
@@ -967,6 +1009,11 @@
   function onDblClick(e) {
     if (!view || e.target.id === "editor") return;
     var p = canvasPoint(e);
+    if (p.y < view.grid.header_h && p.x >= view.grid.header_w) {
+      var ce = colEdge(p.x);
+      if (ce >= 0 && !blocked("formatColumns")) edit({ op: "autoFitCols", sheet: sheet, col: colName(ce) }, true);
+      return;
+    }
     if (p.x < view.grid.header_w || p.y < view.grid.header_h) return;
     startEdit(null, true);
     editing.quick = false;
@@ -1004,6 +1051,8 @@
         return;
       }
       if (lk === "s") { e.preventDefault(); save(0, ".cell", "application/octet-stream"); return; }
+      if (lk === "f") { e.preventDefault(); findNext(); return; }
+      if (lk === "h") { e.preventDefault(); replaceDialog(); return; }
       if (k === "Home") { e.preventDefault(); setActive(0, 0, e.shiftKey); return; }
       if (k === "End") {
         e.preventDefault();
@@ -1116,6 +1165,202 @@
     edit(o, true);
   }
 
+  // 정렬: 선택 범위를 활성 칸의 열로 (머리글 없이). 한 칸만 고르면 묻는다
+  function sortSel(desc) {
+    var g = range();
+    if (g.r0 === g.r1) {
+      status("정렬할 범위를 고르세요", true);
+      return;
+    }
+    edit({ op: "sort", sheet: sheet, range: rangeText(g), keys: [{ by: colName(sel.active.c), desc: !!desc }] }, true);
+  }
+
+  function sortDialog() {
+    var g = range();
+    var t = window.prompt("정렬 기준 열 (쉼표로 여럿, 내림차순은 앞에 -) — 예: B,-C", colName(sel.active.c));
+    if (t == null) return;
+    var keys = t.split(",").map(function (x) {
+      x = x.trim();
+      var desc = x.charAt(0) === "-";
+      return { by: desc ? x.slice(1) : x, desc: desc };
+    }).filter(function (k) { return k.by; });
+    if (!keys.length) return;
+    var header = window.confirm("첫 행이 머리글인가요?");
+    edit({ op: "sort", sheet: sheet, range: rangeText(g), keys: keys, header: header }, true);
+  }
+
+  // 채우기 핸들: 씨앗 범위 g 를 끌어 넓힌 범위로
+  function fillTarget(g, r, c) {
+    var down = r - g.r1, up = g.r0 - r, right = c - g.c1, left = g.c0 - c;
+    var best = Math.max(down, up, right, left);
+    if (best <= 0) return null;
+    if (best === down) return { r0: g.r0, c0: g.c0, r1: r, c1: g.c1 };
+    if (best === up) return { r0: r, c0: g.c0, r1: g.r1, c1: g.c1 };
+    if (best === right) return { r0: g.r0, c0: g.c0, r1: g.r1, c1: c };
+    return { r0: g.r0, c0: c, r1: g.r1, c1: g.c1 };
+  }
+
+  function seriesDialog() {
+    var g = range();
+    var t = window.prompt("연속 데이터 — 단계 값[, 끝 값] (예: 2 또는 1,100). 날짜는 단위를 붙인다: 1 month", "1");
+    if (t == null) return;
+    var m = t.match(/^\s*(-?[\d.]+)\s*(day|weekday|month|year)?\s*(?:,\s*(-?[\d.]+))?\s*$/);
+    if (!m) {
+      status("단계 값을 읽지 못했습니다: " + t, true);
+      return;
+    }
+    var o = { op: "series", sheet: sheet, range: rangeText(g), step: parseFloat(m[1]) };
+    if (m[2]) {
+      o.type = "date";
+      o.date = m[2];
+    }
+    if (m[3]) o.stop = parseFloat(m[3]);
+    edit(o, true);
+  }
+
+  // 찾기 (Ctrl+F): 활성 칸 다음의 찾은 칸으로
+  var lastFind = "";
+  function findNext() {
+    var t = window.prompt("찾을 글", lastFind);
+    if (t == null || t === "") return;
+    lastFind = t;
+    var res = withBytes(enc.encode(JSON.stringify({ what: t, all: true })), function (p, n) { return json(take(wasm.rcell_doc_find(doc.id, sheet, p, n))); });
+    if (!res.length) {
+      status("찾지 못했습니다: " + t, true);
+      return;
+    }
+    var key = function (x) { return [x[0], x[1], x[2]]; };
+    var here = [sheet, sel.active.r, sel.active.c];
+    var after = res.filter(function (x) {
+      var a = key(x);
+      for (var i = 0; i < 3; i++) if (a[i] !== here[i]) return a[i] > here[i];
+      return false;
+    });
+    var hit = after.length ? after[0] : res[0];
+    if (hit[0] !== sheet) switchSheet(hit[0]);
+    setActive(hit[1], hit[2], false);
+    status(res.length + "개 찾음 — " + a1(hit[1], hit[2]));
+  }
+
+  // 바꾸기 (Ctrl+H): 시트 전체
+  function replaceDialog() {
+    var t = window.prompt("찾을 글", lastFind);
+    if (t == null || t === "") return;
+    var w = window.prompt("바꿀 글", "");
+    if (w == null) return;
+    lastFind = t;
+    edit({ op: "replace", sheet: sheet, find: t, replace: w }, true);
+  }
+
+  // 선택하여 붙이기: 복사해 둔 범위를 지금 칸에
+  function pasteSpecialDialog() {
+    if (!clipMark) {
+      status("먼저 복사하세요 (Ctrl+C)", true);
+      return;
+    }
+    var t = window.prompt("붙일 것: 값 / 서식 / 수식 / 모두 — 뒤에 +, -, *, / 연산, '바꿈'(행/열 바꿈), '빈칸'(빈 셀 무시) 을 붙일 수 있다", "값");
+    if (t == null) return;
+    var kinds = { "값": "values", "서식": "formats", "수식": "formulas", "모두": "all", "테두리빼고": "allExceptBorders" };
+    var paste = "all";
+    Object.keys(kinds).forEach(function (k) { if (t.indexOf(k) >= 0) paste = kinds[k]; });
+    var ops = { "+": "add", "-": "subtract", "*": "multiply", "/": "divide" };
+    var op = "none";
+    Object.keys(ops).forEach(function (k) { if (t.indexOf(k) >= 0) op = ops[k]; });
+    var g = range();
+    edit({
+      op: "pasteSpecial", sheet: clipMark.sheet, from: rangeText(clipMark), toSheet: sheet, to: rangeText(g),
+      paste: paste, operation: op, transpose: t.indexOf("바꿈") >= 0, skipBlanks: t.indexOf("빈칸") >= 0,
+    }, true);
+  }
+
+  function cellsShift(kind) {
+    var g = range();
+    var o = { sheet: sheet, range: rangeText(g) };
+    if (kind === "down" || kind === "right") o.op = "insertCells";
+    else o.op = "deleteCells";
+    o.shift = kind;
+    edit(o, true);
+  }
+
+  function hideSel(rows, hide) {
+    var g = range();
+    var o = { sheet: sheet };
+    if (rows) {
+      o.op = hide ? "hideRows" : "unhideRows";
+      o.row = g.r0 + 1;
+      o.count = Math.min(g.r1 - g.r0 + 1, 100000);
+    } else {
+      o.op = hide ? "hideCols" : "unhideCols";
+      o.col = colName(g.c0);
+      o.count = Math.min(g.c1 - g.c0 + 1, MAX_COLS);
+    }
+    edit(o, true);
+  }
+
+  function groupSel(rows, group) {
+    var g = range();
+    var o = { sheet: sheet };
+    if (rows) {
+      o.op = group ? "groupRows" : "ungroupRows";
+      o.row = g.r0 + 1;
+      o.count = Math.min(g.r1 - g.r0 + 1, 100000);
+    } else {
+      o.op = group ? "groupCols" : "ungroupCols";
+      o.col = colName(g.c0);
+      o.count = Math.min(g.c1 - g.c0 + 1, MAX_COLS);
+    }
+    edit(o, true);
+  }
+
+  function commentDialog() {
+    var at = a1(sel.active.r, sel.active.c);
+    var has = cur && cur.comment != null;
+    var t = window.prompt(has ? "메모 고치기" : "메모 넣기", has ? cur.comment : "");
+    if (t == null) return;
+    if (has) edit({ op: "editComment", sheet: sheet, cell: at, text: t }, true);
+    else edit({ op: "addComment", sheet: sheet, cell: at, text: t }, true);
+  }
+
+  function linkDialog() {
+    var t = window.prompt("하이퍼링크 주소 (문서 안이면 #Sheet1!A1)", "https://");
+    if (t == null || t === "") return;
+    var o = { op: "addHyperlink", sheet: sheet, cell: a1(sel.active.r, sel.active.c) };
+    if (t.charAt(0) === "#") o.location = t.slice(1);
+    else o.address = t;
+    edit(o, true);
+  }
+
+  function nameDialog() {
+    var g = range();
+    var t = window.prompt("이름 (선택 범위 " + rangeText(g) + ")", "");
+    if (t == null || t === "") return;
+    var sname = doc.info.sheets[sheet].name;
+    var q = /^[A-Za-z_\u3131-\uD7A3][\w\u3131-\uD7A3.]*$/.test(sname) ? sname : "'" + sname.replace(/'/g, "''") + "'";
+    var abs = "$" + colName(g.c0) + "$" + (g.r0 + 1) + (g.r0 === g.r1 && g.c0 === g.c1 ? "" : ":$" + colName(g.c1) + "$" + (g.r1 + 1));
+    edit({ op: "addName", name: t, refersTo: q + "!" + abs }, true);
+  }
+
+  function cfDialog() {
+    var t = window.prompt("조건부 서식 — 셀 값이 이 값보다 크면 빨간 채우기 (식은 = 로 시작)", "");
+    if (t == null || t === "") return;
+    var o = { op: "addCf", sheet: sheet, range: rangeText(range()), fill: "FFC7CE", fontColor: "9C0006" };
+    if (t.charAt(0) === "=") {
+      o.type = "expression";
+      o.formula1 = t.slice(1);
+    } else {
+      o.type = "cellIs";
+      o.operator = "greaterThan";
+      o.formula1 = t;
+    }
+    edit(o, true);
+  }
+
+  function listDialog() {
+    var t = window.prompt("목록으로 받을 값 (쉼표로 나눔)", "");
+    if (t == null || t === "") return;
+    edit({ op: "addValidation", sheet: sheet, range: rangeText(range()), type: "list", formula1: t }, true);
+  }
+
   // ---------------------------------------------------------------- 클립보드
   function copySel(cut) {
     var g = range();
@@ -1212,6 +1457,40 @@
       ["아래로 채우기 (Ctrl+D)", function () { fillSel(true); }],
       ["오른쪽으로 채우기 (Ctrl+R)", function () { fillSel(false); }],
       ["병합 / 병합 풀기", mergeToggle],
+      ["선택하여 붙이기…", pasteSpecialDialog],
+      null,
+      ["셀 삽입 — 아래로 밀기", function () { cellsShift("down"); }],
+      ["셀 삽입 — 오른쪽으로 밀기", function () { cellsShift("right"); }],
+      ["셀 삭제 — 위로 당기기", function () { cellsShift("up"); }],
+      ["셀 삭제 — 왼쪽으로 당기기", function () { cellsShift("left"); }],
+      null,
+      ["오름차순 정렬", function () { sortSel(false); }],
+      ["내림차순 정렬", function () { sortSel(true); }],
+      ["정렬…", sortDialog],
+      ["연속 데이터…", seriesDialog],
+      ["찾기 (Ctrl+F)", findNext],
+      ["바꾸기 (Ctrl+H)", replaceDialog],
+      null,
+      ["행 숨기기", function () { hideSel(true, true); }],
+      ["행 숨기기 취소", function () { hideSel(true, false); }],
+      ["열 숨기기", function () { hideSel(false, true); }],
+      ["열 숨기기 취소", function () { hideSel(false, false); }],
+      ["행 그룹", function () { groupSel(true, true); }],
+      ["행 그룹 해제", function () { groupSel(true, false); }],
+      ["열 그룹", function () { groupSel(false, true); }],
+      ["열 그룹 해제", function () { groupSel(false, false); }],
+      ["틀 고정", function () { edit({ op: "freeze", sheet: sheet, cell: a1(sel.active.r, sel.active.c) }, true); }],
+      ["틀 고정 취소", function () { edit({ op: "unfreeze", sheet: sheet }, true); }],
+      null,
+      ["메모…", commentDialog],
+      ["메모 지우기", function () { edit({ op: "deleteComment", sheet: sheet, range: rangeText(range()) }, true); }],
+      ["하이퍼링크…", linkDialog],
+      ["하이퍼링크 지우기", function () { edit({ op: "removeHyperlink", sheet: sheet, range: rangeText(range()) }, true); }],
+      ["이름 정의…", nameDialog],
+      ["조건부 서식…", cfDialog],
+      ["조건부 서식 지우기", function () { edit({ op: "deleteCf", sheet: sheet, range: rangeText(range()) }, true); }],
+      ["유효성 검사 (목록)…", listDialog],
+      ["유효성 검사 지우기", function () { edit({ op: "deleteValidation", sheet: sheet, range: rangeText(range()) }, true); }],
     ]);
   }
 
@@ -1323,6 +1602,9 @@
     $("del-row").onclick = function () { rowsCols("delRow"); };
     $("ins-col").onclick = function () { rowsCols("insCol"); };
     $("del-col").onclick = function () { rowsCols("delCol"); };
+    $("sort-asc").onclick = function () { sortSel(false); };
+    $("sort-desc").onclick = function () { sortSel(true); };
+    $("find").onclick = findNext;
 
     // 파일
     $("file").addEventListener("change", function (e) {
@@ -1387,6 +1669,9 @@
     save: function (fmt) {
       var r = take(wasm.rcell_doc_save(doc.id, fmt));
       return r.ok ? r.body : null;
+    },
+    find: function (o) {
+      return withBytes(enc.encode(JSON.stringify(o)), function (p, n) { return json(take(wasm.rcell_doc_find(doc.id, sheet, p, n))); });
     },
     info: function () { return doc && doc.info; },
     sheet: function () { return sheet; },

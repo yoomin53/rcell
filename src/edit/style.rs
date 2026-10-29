@@ -110,6 +110,11 @@ pub fn intern_xf(styles: &mut Styles, xf: Xf) -> u32 {
     find_or_push(&mut styles.cell_xfs, xf)
 }
 
+/// 글꼴 하나를 더한다 (같은 것이 있으면 그 번호)
+pub fn intern_font(styles: &mut Styles, f: crate::model::Font) -> u32 {
+    find_or_push(&mut styles.fonts, f)
+}
+
 /// 테두리 하나를 더한다 (같은 것이 있으면 그 번호)
 pub fn intern_border(styles: &mut Styles, b: Border) -> u32 {
     find_or_push(&mut styles.borders, b)

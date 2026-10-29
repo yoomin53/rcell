@@ -2074,6 +2074,7 @@ fn read_sheet(
                     t.auto_filter = Some(crate::model::AutoFilter {
                         range: rg.to_string(),
                         columns: Vec::new(),
+                        sort_state: None,
                     });
                 }
             }

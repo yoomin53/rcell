@@ -59,7 +59,10 @@ fn shift(sheet: &mut Sheet, k: u32) {
 }
 
 /// 맞닿은 두 범위 (같은 열 폭으로 위아래, 같은 행 높이로 좌우)를 하나로
-fn join(x: (u32, u32, u32, u32), y: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
+pub(crate) fn join(
+    x: (u32, u32, u32, u32),
+    y: (u32, u32, u32, u32),
+) -> Option<(u32, u32, u32, u32)> {
     let vertical = x.1 == y.1 && x.3 == y.3 && x.2 + 1 == y.0;
     let horizontal = x.0 == y.0 && x.2 == y.2 && x.3 + 1 == y.1;
     (vertical || horizontal).then_some((x.0, x.1, y.2, y.3))

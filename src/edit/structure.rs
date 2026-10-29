@@ -224,6 +224,43 @@ pub(crate) fn keep_one_cell_sizes(
     }
 }
 
+/// 행·열을 숨긴 뒤 크기를 지키는 그림의 시작 표지: 칸 첫머리(오프셋 0)에서 시작하고 바로 앞 칸들이 숨겨져(폭 0)
+/// 있으면 그 맨 앞 숨긴 칸으로 옮긴다 (한셀 — G2 의 그림은 F 열을 숨기면 F2+0 에서 시작)
+pub(crate) fn snap_from_hidden(
+    sheet: &mut Sheet,
+    sizes: &[Option<(i64, i64)>],
+    g: &crate::render::Geometry,
+) {
+    let back = |list: &[(u32, u32)], mut i: u32| -> u32 {
+        while i > 0 && list.get(i as usize - 1).is_some_and(|x| x.1 == 0) {
+            i -= 1;
+        }
+        i
+    };
+    for (sh, size) in sheet.shapes.iter_mut().zip(sizes) {
+        if size.is_none() {
+            continue;
+        }
+        let mut from = sh.anchor.from;
+        if from.col_off == 0 {
+            from.col = back(&g.cols, from.col);
+        }
+        if from.row_off == 0 {
+            from.row = back(&g.rows, from.row);
+        }
+        if from != sh.anchor.from {
+            sh.anchor.from = from;
+            if let Some(raw) = &sh.raw {
+                sh.raw = Some(patch_anchor_xml(
+                    raw,
+                    &sh.anchor.from,
+                    sh.anchor.to.as_ref(),
+                ));
+            }
+        }
+    }
+}
+
 /// 열 너비·행 높이를 바꾼 뒤 메모 상자를 화면의 같은 자리에 둔다 — 셀과 함께 옮기지 않는 메모 상자(한셀 기본)는
 /// 절대 자리를 지킨다 (4행을 높이면 상자 위가 7행+10px 에서 5행+21px 로, 편집 대조 실험)
 pub(crate) fn keep_comment_boxes(
@@ -260,7 +297,7 @@ pub(crate) fn keep_comment_boxes(
 }
 
 /// 화면 px 자리 → (칸, 칸 안 px)
-fn locate_px(list: &[(u32, u32)], pos: i64) -> (u32, u32) {
+pub(crate) fn locate_px(list: &[(u32, u32)], pos: i64) -> (u32, u32) {
     for (i, &(l, w)) in list.iter().enumerate() {
         if pos >= l as i64 && pos < (l + w) as i64 {
             return (i as u32, (pos - l as i64) as u32);
@@ -273,7 +310,7 @@ fn locate_px(list: &[(u32, u32)], pos: i64) -> (u32, u32) {
 }
 
 /// (칸, 칸 안 px) → 화면 px (칸 안 px 는 칸 너비까지)
-fn at_px(list: &[(u32, u32)], i: u32, off: u32) -> i64 {
+pub(crate) fn at_px(list: &[(u32, u32)], i: u32, off: u32) -> i64 {
     match list.get(i as usize) {
         Some(&(l, w)) => l as i64 + off.min(w) as i64,
         None => list.last().map_or(0, |&(l, w)| (l + w) as i64) + off as i64,
@@ -281,7 +318,7 @@ fn at_px(list: &[(u32, u32)], i: u32, off: u32) -> i64 {
 }
 
 /// 메모 상자를 다시 정할 때 쓰는 배치 (상자가 있는 메모가 없으면 None)
-fn comment_geometry(
+pub(crate) fn comment_geometry(
     wb: &Workbook,
     si: usize,
     extra: u32,
@@ -300,7 +337,7 @@ fn comment_geometry(
 }
 
 /// 메모 상자 앵커의 열 배치: 한셀 VML 앵커의 열 px 는 화면 너비보다 1 작다 (기본 너비 54pt = 72px 열이 71)
-fn anchor_cols(g: &crate::render::Geometry) -> Vec<(u32, u32)> {
+pub(crate) fn anchor_cols(g: &crate::render::Geometry) -> Vec<(u32, u32)> {
     let mut x = 0;
     g.cols
         .iter()
@@ -318,7 +355,7 @@ fn anchor_cols(g: &crate::render::Geometry) -> Vec<(u32, u32)> {
 /// 한 열 왼쪽·한 행 위로 간다. 다만 옛 상자 왼쪽이 A 열에 있으면 그 왼쪽을 A 열 너비 − 1px 만큼 오른쪽에서 잰다:
 /// A 열 메모의 상자는 칸이 옮겨질 때마다 그만큼 좁아진다 (A10 메모는 행 삽입 세 번이면 오른쪽 끝이 A 열 처음).
 /// 열 너비가 기본이 아닌 열에서는 한셀의 오프셋이 1px 다를 수 있다 (docs/editing.md 11절)
-fn moved_comment_box(
+pub(crate) fn moved_comment_box(
     old: &crate::render::Geometry,
     new: &crate::render::Geometry,
     a: [u32; 8],
@@ -394,7 +431,7 @@ fn inside_deleted(sh: &Shape, op: Shift) -> bool {
 }
 
 /// 도형 앵커를 옮긴다: 두 칸 앵커(기본)는 양 끝을 따로, `oneCell` 은 시작 칸만큼 함께, `absolute` 는 그대로
-fn shift_shape(sh: &mut Shape, op: Shift) {
+pub(crate) fn shift_shape(sh: &mut Shape, op: Shift) {
     use crate::model::AnchorKind;
     let a = &mut sh.anchor;
     if a.kind == AnchorKind::Absolute || a.edit_as.as_deref() == Some("absolute") {
@@ -1454,6 +1491,42 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
         }
     }
 
+    // 9·10. 틀 고정과 페이지 나누기
+    shift_pane_breaks(sheet, op);
+
+    update_dimension(sheet);
+
+    // 11. 필터 다시 적용
+    if filter_moved {
+        super::filter::reapply(wb, si);
+    }
+
+    // 12. 자리가 바뀐 메모 상자
+    if let Some((old, ext)) = boxes_before
+        && !moved_boxes.is_empty()
+    {
+        let n = match op {
+            Shift::InsRows { n, .. }
+            | Shift::DelRows { n, .. }
+            | Shift::InsCols { n, .. }
+            | Shift::DelCols { n, .. } => n.min(1024),
+        };
+        let new = crate::render::sheet_geometry(wb, &wb.sheets[si], ext.0 + n, ext.1 + n);
+        let sheet = &mut wb.sheets[si];
+        for (i, a) in moved_boxes {
+            let c = &mut sheet.comments[i];
+            let cell = c.cell;
+            if let Some(s) = &mut c.shape {
+                s.anchor = moved_comment_box(&old, &new, a, cell);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 행·열 편집에 따른 틀 고정 범위와 페이지 나누기 (셀 삽입도 같이 쓴다)
+pub(crate) fn shift_pane_breaks(sheet: &mut Sheet, op: Shift) {
+    let rows = op.on_rows();
     // 9. 틀 고정: 고정한 행·열 안에 넣거나 지우면 고정 범위가 늘거나 준다 (한셀 — 왼쪽 위 칸은 그대로)
     if let Some(p) = &mut sheet.view.pane
         && p.state.as_deref().is_some_and(|s| s.starts_with("frozen"))
@@ -1495,35 +1568,6 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
             }
         })
         .collect();
-
-    update_dimension(sheet);
-
-    // 11. 필터 다시 적용
-    if filter_moved {
-        super::filter::reapply(wb, si);
-    }
-
-    // 12. 자리가 바뀐 메모 상자
-    if let Some((old, ext)) = boxes_before
-        && !moved_boxes.is_empty()
-    {
-        let n = match op {
-            Shift::InsRows { n, .. }
-            | Shift::DelRows { n, .. }
-            | Shift::InsCols { n, .. }
-            | Shift::DelCols { n, .. } => n.min(1024),
-        };
-        let new = crate::render::sheet_geometry(wb, &wb.sheets[si], ext.0 + n, ext.1 + n);
-        let sheet = &mut wb.sheets[si];
-        for (i, a) in moved_boxes {
-            let c = &mut sheet.comments[i];
-            let cell = c.cell;
-            if let Some(s) = &mut c.shape {
-                s.anchor = moved_comment_box(&old, &new, a, cell);
-            }
-        }
-    }
-    Ok(())
 }
 
 /// 새 열의 기본 너비 (글자 수): 시트의 기본 너비, 없으면 한셀 규칙 (첫 글꼴의 숫자 폭)
