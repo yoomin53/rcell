@@ -197,7 +197,14 @@ for (const j of jobs) {
     bySCRIPT[sname].same++;
     continue;
   }
-  const diffs = out ? out.split(/\n(?=\S)/).filter((d) => !d.startsWith("… 외")) : [];
+  // 편집 시간(app.xml TotalTime)은 한셀 자동화가 편집에 쓴 분 수라 편집 결과가 아니다 — 그것만 다르면 같다고 본다
+  const diffs = out ? out.split(/\n(?=\S)/).filter((d) => !d.startsWith("… 외") && !d.startsWith("차이 ") && !d.startsWith("편집 시간")) : [];
+  if (!diffs.length) {
+    same++;
+    bySCRIPT[sname].same++;
+    lines.push(`${key}: 편집 시간만 다름 (같다고 봄)`);
+    continue;
+  }
   differ.push({ key, sname, a, b });
   items += diffs.length;
   lines.push(`${key}: 차이 ${diffs.length}`);

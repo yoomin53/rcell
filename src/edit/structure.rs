@@ -1454,6 +1454,42 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
         }
     }
 
+    // 9·10. 틀 고정과 페이지 나누기
+    shift_pane_breaks(sheet, op);
+
+    update_dimension(sheet);
+
+    // 11. 필터 다시 적용
+    if filter_moved {
+        super::filter::reapply(wb, si);
+    }
+
+    // 12. 자리가 바뀐 메모 상자
+    if let Some((old, ext)) = boxes_before
+        && !moved_boxes.is_empty()
+    {
+        let n = match op {
+            Shift::InsRows { n, .. }
+            | Shift::DelRows { n, .. }
+            | Shift::InsCols { n, .. }
+            | Shift::DelCols { n, .. } => n.min(1024),
+        };
+        let new = crate::render::sheet_geometry(wb, &wb.sheets[si], ext.0 + n, ext.1 + n);
+        let sheet = &mut wb.sheets[si];
+        for (i, a) in moved_boxes {
+            let c = &mut sheet.comments[i];
+            let cell = c.cell;
+            if let Some(s) = &mut c.shape {
+                s.anchor = moved_comment_box(&old, &new, a, cell);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 행·열 편집에 따른 틀 고정 범위와 페이지 나누기 (셀 삽입도 같이 쓴다)
+pub(crate) fn shift_pane_breaks(sheet: &mut Sheet, op: Shift) {
+    let rows = op.on_rows();
     // 9. 틀 고정: 고정한 행·열 안에 넣거나 지우면 고정 범위가 늘거나 준다 (한셀 — 왼쪽 위 칸은 그대로)
     if let Some(p) = &mut sheet.view.pane
         && p.state.as_deref().is_some_and(|s| s.starts_with("frozen"))
@@ -1495,35 +1531,6 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
             }
         })
         .collect();
-
-    update_dimension(sheet);
-
-    // 11. 필터 다시 적용
-    if filter_moved {
-        super::filter::reapply(wb, si);
-    }
-
-    // 12. 자리가 바뀐 메모 상자
-    if let Some((old, ext)) = boxes_before
-        && !moved_boxes.is_empty()
-    {
-        let n = match op {
-            Shift::InsRows { n, .. }
-            | Shift::DelRows { n, .. }
-            | Shift::InsCols { n, .. }
-            | Shift::DelCols { n, .. } => n.min(1024),
-        };
-        let new = crate::render::sheet_geometry(wb, &wb.sheets[si], ext.0 + n, ext.1 + n);
-        let sheet = &mut wb.sheets[si];
-        for (i, a) in moved_boxes {
-            let c = &mut sheet.comments[i];
-            let cell = c.cell;
-            if let Some(s) = &mut c.shape {
-                s.anchor = moved_comment_box(&old, &new, a, cell);
-            }
-        }
-    }
-    Ok(())
 }
 
 /// 새 열의 기본 너비 (글자 수): 시트의 기본 너비, 없으면 한셀 규칙 (첫 글꼴의 숫자 폭)

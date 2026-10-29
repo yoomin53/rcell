@@ -257,7 +257,7 @@ pub enum Edit {
         sheet: Option<SheetSel>,
         from: String,
         to: String,
-        #[serde(default)]
+        #[serde(default, alias = "to_sheet")]
         to_sheet: Option<SheetSel>,
     },
     /// 잘라 붙이기 (셀 옮기기)
@@ -266,7 +266,7 @@ pub enum Edit {
         sheet: Option<SheetSel>,
         from: String,
         to: String,
-        #[serde(default)]
+        #[serde(default, alias = "to_sheet")]
         to_sheet: Option<SheetSel>,
     },
     FillDown {
@@ -355,7 +355,7 @@ pub enum Edit {
         sheet: Option<SheetSel>,
         from: String,
         to: String,
-        #[serde(default)]
+        #[serde(default, alias = "to_sheet")]
         to_sheet: Option<SheetSel>,
         #[serde(default)]
         paste: special::PasteWhat,

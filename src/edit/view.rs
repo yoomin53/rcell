@@ -96,6 +96,10 @@ pub fn hide_rows(
     r1: u32,
     hidden: bool,
 ) -> crate::Result<()> {
+    // 보호된 시트는 행 서식이 허용됐을 때만 (한셀)
+    if si < wb.sheets.len() {
+        super::guard_action(wb, si, "formatRows")?;
+    }
     let sheet = wb
         .sheets
         .get_mut(si)
@@ -125,6 +129,7 @@ pub fn hide_cols(
     if si >= wb.sheets.len() {
         return Err(err("시트가 없습니다"));
     }
+    super::guard_action(wb, si, "formatColumns")?;
     if !hidden {
         each_col(wb, si, c0, c1, &|c| c.hidden = false);
         // 너비만 기본값인 빈 열 정보는 없앤다

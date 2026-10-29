@@ -252,15 +252,28 @@ pub fn shift_cells(
                             .and_then(|x| x.style)
                             .unwrap_or(0)
                     };
-                    // 옮긴 자리의 행(열) 서식과 다를 때만 (그 서식이 덮지 않으면 셀이 없어도 같다)
+                    // 옮긴 자리가 셀 없이 보이는 서식과 다를 때만. 위아래로 옮기면 그 행 서식(없으면 기본), 좌우로
+                    // 옮기면 행 서식이 있는 행은 행 서식, 아니면 옮긴 자리의 열 서식 (한셀: 행 서식 행의 칸을
+                    // 오른쪽으로 밀면 열 서식 칸이 끝 열까지 생긴다)
                     let dest_line = if rows {
-                        sheet.rows.iter().find(|x| x.index == nm + 1).and_then(|x| x.style)
+                        sheet
+                            .rows
+                            .iter()
+                            .find(|y| y.index == nm + 1)
+                            .and_then(|y| y.style)
                     } else {
                         sheet
-                            .cols
+                            .rows
                             .iter()
-                            .find(|x| (x.min..=x.max).contains(&(nm + 1)))
-                            .and_then(|x| x.style)
+                            .find(|y| y.index == x + 1)
+                            .and_then(|y| y.style)
+                            .or_else(|| {
+                                sheet
+                                    .cols
+                                    .iter()
+                                    .find(|y| (y.min..=y.max).contains(&(nm + 1)))
+                                    .and_then(|y| y.style)
+                            })
                     };
                     if st != dest_line.unwrap_or(0) {
                         v.push((to, st));
@@ -359,14 +372,28 @@ pub fn shift_cells(
         dv.sqref = fix(&dv.sqref);
     }
     sheet.data_validations.retain(|d| !d.sqref.is_empty());
-    // 도형: 시작 칸이 띠 안에서 움직이는 자리에 있으면 행·열 편집처럼 옮긴다
+    // 넣을 때만 틀 고정 범위와 페이지 나누기를 행·열을 넣은 것처럼 옮긴다 (한셀 — 지울 때는 그대로)
+    if insert {
+        super::structure::shift_pane_breaks(sheet, op);
+    }
+    // 도형: 시작 칸이 띠 안에서 움직이는 자리에 있고 끝 칸도 띠 안이면 행·열 편집처럼 옮긴다 (한셀 — 띠보다 넓은
+    // 그림은 그대로. 끝 표지가 칸 첫머리(오프셋 0)면 앞 칸까지로 본다)
     for sh in &mut sheet.shapes {
         let f = sh.anchor.from;
         let fr = CellRef {
             row: f.row,
             col: f.col,
         };
-        if in_band(fr) && main(fr) >= at {
+        let end_in = sh.anchor.to.is_none_or(|t| {
+            let (i, off, start) = if rows {
+                (t.col, t.col_off, f.col)
+            } else {
+                (t.row, t.row_off, f.row)
+            };
+            let i = if off <= 0 && i > start { i - 1 } else { i };
+            i >= band.0 && i <= band.1
+        });
+        if in_band(fr) && end_in && main(fr) >= at {
             super::structure::shift_shape(sh, op);
         }
     }
@@ -453,7 +480,18 @@ fn band_sqref(sq: &str, op: Shift, band: (u32, u32), insert: bool, area: CellRan
                 }
             };
             let (a0, b0) = corner(r0, c0);
-            let (a1, b1) = corner(r1, c1);
+            let (mut a1, mut b1) = corner(r1, c1);
+            // 한셀: 끝 행(열)이 넣은 자리 바로 앞이거나, 띠 바로 앞(위)에서 끝나는 범위는 띠와 겹치지 않아도
+            // 넣은 줄 수만큼 늘어난다 (아래로: 오른쪽 끝 열 = 띠 첫 열 - 1 또는 끝 행 = 넣은 행 - 1)
+            if rows {
+                if c1 + 1 == band.0 || r1 + 1 == area.start.row {
+                    let n = area.end.row - area.start.row + 1;
+                    a1 = (a1 + n).min(refs::MAX_ROWS - 1);
+                }
+            } else if r1 + 1 == band.0 || c1 + 1 == area.start.col {
+                let n = area.end.col - area.start.col + 1;
+                b1 = (b1 + n).min(refs::MAX_COLS - 1);
+            }
             let text = if a0 == a1 && b0 == b1 {
                 Area::rect(a0, b0, a0, b0).text()
             } else {
@@ -540,8 +578,15 @@ mod tests {
         let (op, band) = op_of(a, ShiftDir::Down);
         assert_eq!(band_sqref("C3:D8", op, band, true, a), "C5:D8");
         assert_eq!(band_sqref("B1:B10", op, band, true, a), "B1:B12");
+        // 띠 왼쪽 열에서 끝나거나 넣은 행 바로 위에서 끝나는 범위는 늘어난다
+        assert_eq!(band_sqref("A1:A12", op, band, true, a), "A1:A14");
+        assert_eq!(band_sqref("G1:H2", op, band, true, a), "G1:H4");
+        assert_eq!(band_sqref("Q5", op, band, true, a), "Q5");
         let (op, band) = op_of(a, ShiftDir::Right);
         assert_eq!(band_sqref("C3:D8", op, band, true, a), "E3:D8");
+        assert_eq!(band_sqref("A1", op, band, true, a), "A1:C1");
+        assert_eq!(band_sqref("G1:H2", op, band, true, a), "G1:J2");
+        assert_eq!(band_sqref("Q1:R2", op, band, true, a), "Q1:T2");
         let (op, band) = op_of(a, ShiftDir::Up);
         assert_eq!(band_sqref("C3:D8", op, band, false, a), "D3:D8 C3:C6");
         let (op, band) = op_of(a, ShiftDir::Left);
