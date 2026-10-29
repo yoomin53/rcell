@@ -112,6 +112,10 @@ pub(super) struct CellView<'a> {
     pub wrap: bool,
     pub shrink: bool,
     pub rotation: i32,
+    /// 서식의 `_x` 빈 자리 (글의 바이트 위치, x)
+    pub pads: Vec<(usize, char)>,
+    /// 서식의 `*x` 채움 (글의 바이트 위치, x)
+    pub fill_char: Option<(usize, char)>,
     pub indent: u32,
     pub fill: Option<paint::FillPaint>,
     pub borders: paint::CellBorders,
@@ -360,13 +364,63 @@ pub(super) fn cell_content(
         VAlign::Bottom => "bottom:0".to_string(),
     };
     let vshift = if v.v == VAlign::Center { "-50%" } else { "0" };
-    let body = rich_html(v, &text, theme);
+    let mut body = rich_html(v, &text, theme);
+    // 칸 전체 위·아래 첨자: 60% 글꼴을 기준선에서 올리거나 내린다 (한셀 화면 — 글꼴 실험의 11pt: 위 첨자 잉크
+    // 1–9px, 아래 첨자 10–17px, 보통 글 3–16px)
+    if let Some(va) = v.font.and_then(|f| f.vert_align.as_deref()) {
+        let px = v.font.and_then(|f| f.size).unwrap_or(metrics::DEFAULT_SIZE) * 4.0 / 3.0;
+        let dy = match va {
+            "superscript" => -0.45 * px,
+            "subscript" => 0.19 * px,
+            _ => 0.0,
+        };
+        if dy != 0.0 {
+            fcss = fcss.replace("vertical-align:super;font-size:smaller;", "");
+            fcss = fcss.replace("vertical-align:sub;font-size:smaller;", "");
+            body = format!(
+                "<span style=\"font-size:60%;position:relative;top:{dy:.1}px\">{body}</span>"
+            );
+        }
+    }
 
     // 돌린 글자·세로 쓰기
     if v.rotation != 0 {
         return out + &rotated(v, &fcss, &body, bw, bh, line);
     }
-    // 여러 줄 (줄 바꿈·양쪽 맞춤·균등 분할)
+    // 균등 분할 글: 들여쓰기를 양쪽에 두고, 넘치면 줄을 바꿔 줄마다 글자 사이(공백도 한 글자)를 고르게 벌린다
+    // (한셀 화면 — 들여쓰기 실험). 한 글자 줄은 가운데
+    if v.h == HAlign::Distributed && matches!(v.value, CellValue::Text(_)) && !v.shrink {
+        let ind = v.indent as f64 * INDENT_PX;
+        let avail = (bw - PAD - PAD_R - 2.0 * ind).max(1.0);
+        let k = ratio.unwrap_or(1.0);
+        let jc = match v.v {
+            VAlign::Top => "flex-start",
+            VAlign::Center => "center",
+            VAlign::Bottom => "flex-end",
+        };
+        let mut inner = String::new();
+        for l in super::layout::wrap_split(&text, avail / k, &v.m) {
+            let n = l.chars().count();
+            let tw = v.m.text_width(&l) * k;
+            let (gap, lead) = match n {
+                0 => (0.0, 0.0),
+                1 => (0.0, ((avail - tw) / 2.0).max(0.0)),
+                _ => (((avail - tw) / (n - 1) as f64).max(0.0), 0.0),
+            };
+            let _ = write!(
+                inner,
+                "<div style=\"padding-left:{:.1}px;letter-spacing:{gap:.2}px\">{}</div>",
+                PAD + ind + lead,
+                scaled(esc(&l), "left")
+            );
+        }
+        let _ = write!(
+            out,
+            "<div class=\"rc-t rc-w\" style=\"{fcss}width:{bw:.0}px;height:{bh:.0}px;justify-content:{jc};padding:0\">{inner}</div>"
+        );
+        return out;
+    }
+    // 여러 줄 (줄 바꿈·양쪽 맞춤)
     if v.wrap {
         let ta = match v.h {
             HAlign::Right => "right",
@@ -405,7 +459,36 @@ pub(super) fn cell_content(
     }
 
     let avail = (bw - PAD - PAD_R - indent).max(1.0);
-    let mut body = body;
+    // 서식의 `*x` 채움: 앞 글은 왼쪽, 뒤 글은 오른쪽 끝에 붙이고 사이를 x 로 채운다 (맞춤과 상관없이 —
+    // 표시 형식 실험 `0*-`·`@*.`·회계 서식). `_x` 는 x 폭의 보이지 않는 글자
+    if let Some((at, fc)) = v
+        .fill_char
+        .filter(|&(at, _)| at <= text.len() && v.text == text)
+    {
+        let (l, r) = text.split_at(at);
+        let lp: Vec<(usize, char)> = v.pads.iter().copied().filter(|p| p.0 <= at).collect();
+        let rp: Vec<(usize, char)> = v
+            .pads
+            .iter()
+            .filter(|p| p.0 > at)
+            .map(|&(p, c)| (p - at, c))
+            .collect();
+        let n = (avail / v.m.char_width(fc).max(1.0)).ceil() as usize + 1;
+        let filler = esc(&fc.to_string().repeat(n));
+        let _ = write!(
+            out,
+            "<div class=\"rc-t\" style=\"left:0;width:{bw:.0}px;height:{bh:.0}px;{fcss}\"><span style=\"left:{:.1}px;width:{avail:.1}px;{vpos};transform:translateY({vshift});display:flex\"><span>{}</span><span style=\"flex:1 1 0;overflow:hidden\">{filler}</span><span>{}</span></span></div>",
+            PAD + indent,
+            with_pads(l, &lp),
+            with_pads(r, &rp)
+        );
+        return out;
+    }
+    let mut body = if v.pads.is_empty() || v.rich.is_some() || v.text != text {
+        body
+    } else {
+        with_pads(&text, &v.pads)
+    };
     // 줄여 맞춤: 글꼴을 칸 너비에 맞게 줄인다
     if v.shrink {
         let tw = v.text_px();
@@ -470,55 +553,117 @@ pub(super) fn cell_content(
     out
 }
 
-/// 돌린 글자 (1–90: 반시계, 91–180: 시계 방향 rot−90), 세로 쓰기 (255)
+/// 서식의 `_x` 빈 자리를 x 폭의 보이지 않는 글자로 넣은 HTML
+fn with_pads(text: &str, pads: &[(usize, char)]) -> String {
+    let mut s = String::new();
+    let mut last = 0;
+    for &(p, x) in pads {
+        if p < last || p > text.len() || !text.is_char_boundary(p) {
+            continue;
+        }
+        s.push_str(&esc(&text[last..p]));
+        let _ = write!(
+            s,
+            "<span style=\"visibility:hidden\">{}</span>",
+            esc(&x.to_string())
+        );
+        last = p;
+    }
+    s.push_str(&esc(&text[last..]));
+    s
+}
+
+/// 돌린 글자의 여백 (px): 왼쪽, 오른쪽, 위, 아래 (회전 실험 — 10 각도 × 맞춤 12가지)
+const ROT_PAD: (f64, f64, f64, f64) = (2.0, 2.0, 2.0, 2.0);
+/// 세로 쓰기 여백 (px): 왼쪽, 오른쪽, 위, 아래
+const VERT_PAD: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, -1.5);
+
+/// 돌린 글자 (1–90: 반시계, 91–180: 시계 방향 rot−90), 세로 쓰기 (255).
+/// 한셀 화면 (회전 실험): 글 한 줄 상자(글 폭 × 줄 높이)를 돌린 경계 상자를 칸 맞춤대로 놓는다. 세로 쓰기는 글자마다
+/// 줄 높이 한 칸(폭도 줄 높이)을 위에서 아래로 쌓고, 칸을 넘치면 잘린다
 fn rotated(v: &CellView, fcss: &str, body: &str, bw: f64, bh: f64, line: f64) -> String {
-    let ai = match v.h {
-        HAlign::Left => "flex-start",
-        HAlign::Center | HAlign::CenterContinuous => "center",
-        HAlign::Right => "flex-end",
-        _ => "center",
-    };
-    let jc = match v.v {
-        VAlign::Top => "flex-start",
-        VAlign::Center => "center",
-        VAlign::Bottom => "flex-end",
-    };
     let frame = format!("width:{bw:.0}px;height:{bh:.0}px;{fcss}");
     if v.rotation == 255 {
-        // 세로 쓰기: 글자를 위에서 아래로 쌓는다
+        let (pl, pr, pt, pb) = VERT_PAD;
+        let chars: Vec<char> = match v.rich {
+            Some(rt) if rt.text == v.text => rt.text.chars().collect(),
+            _ => v.text.chars().collect(),
+        };
+        let n = chars.len().max(1) as f64;
+        let col_w = line;
+        let x = match v.h {
+            HAlign::Right => bw - pr - col_w,
+            HAlign::Center | HAlign::CenterContinuous | HAlign::Distributed | HAlign::Justify => {
+                (bw - col_w) / 2.0
+            }
+            _ => pl,
+        };
+        let y = match v.v {
+            VAlign::Top => pt,
+            VAlign::Center => (bh - n * line) / 2.0 + 3.0,
+            VAlign::Bottom => bh - pb - n * line,
+        };
+        let mut s = String::new();
+        for ch in chars {
+            let _ = write!(s, "<span>{}</span>", esc(&ch.to_string()));
+        }
         return format!(
-            "<div class=\"rc-t rc-flex\" style=\"{frame}justify-content:{jc};align-items:{ai}\"><span class=\"rc-vert\" style=\"line-height:{line:.2}px\">{body}</span></div>"
+            "<div class=\"rc-t\" style=\"{frame}\"><span class=\"rc-vert\" style=\"left:{x:.1}px;top:{y:.1}px;width:{col_w:.1}px;line-height:{line:.2}px\">{s}</span></div>"
         );
     }
     let deg = if v.rotation > 90 {
         -(v.rotation - 90)
     } else {
         v.rotation
+    } as f64;
+    let (pl, pr, pt, pb) = ROT_PAD;
+    let w = v.text_px();
+    let th = deg.to_radians();
+    let (c, s) = (th.cos().abs(), th.sin().abs());
+    let (bbw, bbh) = (w * c + line * s, w * s + line * c);
+    // 상자가 칸보다 크면 글의 시작이 보이게 붙인다: 가로는 왼쪽, 세로는 반시계면 아래·시계면 위
+    let x0 = match v.h {
+        _ if bbw > bw - pl - pr => pl,
+        HAlign::Right => bw - pr - bbw,
+        HAlign::Center | HAlign::CenterContinuous | HAlign::Distributed | HAlign::Justify => {
+            (bw - bbw) / 2.0
+        }
+        _ => pl,
     };
-    if deg.abs() == 90 {
-        // 90도: 아래에서 위로(반시계) 또는 위에서 아래로(시계)
-        let wm = if deg > 0 {
-            "writing-mode:vertical-rl;transform:rotate(180deg)"
+    let va = if bbh > bh - pt - pb {
+        if deg > 0.0 {
+            VAlign::Bottom
         } else {
-            "writing-mode:vertical-rl"
-        };
-        let jc90 = match (v.v, deg > 0) {
-            (VAlign::Top, _) => "flex-start",
-            (VAlign::Center, _) => "center",
-            (VAlign::Bottom, _) => "flex-end",
-        };
-        return format!(
-            "<div class=\"rc-t rc-flex\" style=\"{frame}justify-content:{jc90};align-items:{ai};padding:{PAD}px 0\"><span style=\"{wm};line-height:{line:.2}px;white-space:pre\">{body}</span></div>"
-        );
-    }
-    // 그 밖의 각도: 글자 기준선의 시작점을 축으로 돌린다. 반시계면 왼쪽 아래, 시계면 왼쪽 위에서 시작
-    let (x, y, origin, ty) = if deg > 0 {
-        (PAD, bh - PAD, "left bottom", "-100%")
+            VAlign::Top
+        }
     } else {
-        (PAD, PAD, "left top", "0")
+        v.v
     };
+    // 한셀 글자 자리와의 차이 (회전 실험의 잉크 상자 — 맑은 고딕 9·11pt, 바탕·Arial 11pt): 90도가 아닌 각도는
+    // 경계 상자보다 위쪽, 시계 방향은 더 위
+    let dy = match (deg as i32, va) {
+        (90, VAlign::Top) => 0.0,
+        (90, VAlign::Center) => -1.5,
+        (90, VAlign::Bottom) => -3.0,
+        (-90, VAlign::Top) => 2.0,
+        (-90, VAlign::Center) => 1.5,
+        (-90, VAlign::Bottom) => -2.5,
+        (d, VAlign::Top) if d > 0 => -3.5,
+        (d, VAlign::Center) if d > 0 => -1.0,
+        (d, VAlign::Bottom) if d > 0 => 2.0,
+        (_, VAlign::Top) => -5.0,
+        (_, VAlign::Center) => -2.0,
+        (_, VAlign::Bottom) => -1.5,
+    };
+    let y0 = dy
+        + match va {
+            VAlign::Top => pt,
+            VAlign::Center => (bh - bbh) / 2.0,
+            VAlign::Bottom => bh - pb - bbh,
+        };
+    let (cx, cy) = (x0 + bbw / 2.0, y0 + bbh / 2.0);
     format!(
-        "<div class=\"rc-t\" style=\"{frame}\"><span class=\"rc-rot\" style=\"left:{x:.1}px;top:{y:.1}px;transform-origin:{origin};transform:translateY({ty}) rotate({}deg)\">{body}</span></div>",
+        "<div class=\"rc-t\" style=\"{frame}\"><span class=\"rc-rot\" style=\"left:{cx:.2}px;top:{cy:.2}px;line-height:{line:.2}px;transform:translate(-50%,-50%) rotate({}deg)\">{body}</span></div>",
         -deg
     )
 }

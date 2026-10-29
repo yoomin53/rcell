@@ -1012,6 +1012,135 @@ pub fn preset_paths(
                 )),
             }
         }
+        "nonIsoscelesTrapezoid" => {
+            let (x2, dx3) = (ss * a("adj1", 25000.0), ss * a("adj2", 25000.0));
+            one(poly(&[(0.0, h), (x2, 0.0), (w - dx3, 0.0), (w, h)]))
+        }
+        "diagStripe" => {
+            let k = a("adj", 50000.0);
+            one(poly(&[(0.0, h * k), (w * k, 0.0), (w, 0.0), (0.0, h)]))
+        }
+        "snip2DiagRect" => {
+            let (l, r) = (ss * a("adj1", 0.0), ss * a("adj2", 16667.0));
+            one(poly(&[
+                (l, 0.0),
+                (w - r, 0.0),
+                (w, r),
+                (w, h - l),
+                (w - l, h),
+                (r, h),
+                (0.0, h - r),
+                (0.0, l),
+            ]))
+        }
+        "halfFrame" => {
+            let x1 = ss * a("adj2", 33333.0).clamp(0.0, w / ss);
+            let g2 = h - h * x1 / w;
+            let y1 = ss * a("adj1", 33333.0).clamp(0.0, g2 / ss);
+            let (x2, y2) = (w - y1 * w / h, h - x1 * h / w);
+            one(poly(&[
+                (0.0, 0.0),
+                (w, 0.0),
+                (x2, y1),
+                (x1, y1),
+                (x1, y2),
+                (0.0, h),
+            ]))
+        }
+        "flowChartOfflineStorage" => Some(vec![
+            PathSpec::new(poly(&[(0.0, 0.0), (w, 0.0), (hc, h)])),
+            PathSpec::with(
+                format!("M{},{}H{}", f(w * 0.4), f(h * 0.8), f(w * 0.6)),
+                PathFill::None,
+                true,
+            ),
+        ]),
+        // 동작 단추: 사각형 + 어둡게 칠한 그림 (빈 단추·앞·뒤·처음·끝 — 도형 모양 실험 4번 시트)
+        "actionButtonBlank" => one(poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])),
+        "actionButtonBackPrevious"
+        | "actionButtonForwardNext"
+        | "actionButtonBeginning"
+        | "actionButtonEnd" => {
+            let dx2 = ss * 3.0 / 8.0;
+            let (g9, g10, g11, g12) = (vc - dx2, vc + dx2, hc - dx2, hc + dx2);
+            let g13 = ss * 3.0 / 4.0;
+            let mut icon = Vec::new();
+            match prst {
+                "actionButtonBackPrevious" => icon.push(poly(&[(g11, vc), (g12, g9), (g12, g10)])),
+                "actionButtonForwardNext" => icon.push(poly(&[(g12, vc), (g11, g9), (g11, g10)])),
+                "actionButtonBeginning" => {
+                    let (g16, g17) = (g11 + g13 / 8.0, g11 + g13 / 4.0);
+                    icon.push(poly(&[(g17, vc), (g12, g9), (g12, g10)]));
+                    icon.push(poly(&[(g11, g9), (g16, g9), (g16, g10), (g11, g10)]));
+                }
+                _ => {
+                    let (g16, g17) = (g11 + g13 * 3.0 / 4.0, g11 + g13 * 7.0 / 8.0);
+                    icon.push(poly(&[(g16, vc), (g11, g9), (g11, g10)]));
+                    icon.push(poly(&[(g17, g9), (g12, g9), (g12, g10), (g17, g10)]));
+                }
+            }
+            let mut v = vec![PathSpec::new(poly(&[
+                (0.0, 0.0),
+                (w, 0.0),
+                (w, h),
+                (0.0, h),
+            ]))];
+            v.extend(
+                icon.into_iter()
+                    .map(|d| PathSpec::with(d, PathFill::Darken, true)),
+            );
+            Some(v)
+        }
+        // 선 설명선: 사각형 + 꺾인 지시선 (adj 홀수 = y, 짝수 = x — 상자 기준 비율). border 는 사각형 테두리,
+        // accent 는 첫 점 x 의 세로 강조선 (도형 모양 실험)
+        "callout1"
+        | "callout2"
+        | "callout3"
+        | "borderCallout1"
+        | "borderCallout2"
+        | "borderCallout3"
+        | "accentCallout1"
+        | "accentCallout2"
+        | "accentCallout3"
+        | "accentBorderCallout1"
+        | "accentBorderCallout2"
+        | "accentBorderCallout3" => {
+            let def: &[f64] = match prst.as_bytes().last() {
+                Some(b'1') => &[18750.0, -8333.0, 112500.0, -38333.0],
+                Some(b'2') => &[18750.0, -8333.0, 18750.0, -16667.0, 112500.0, -46667.0],
+                _ => &[
+                    18750.0, -8333.0, 18750.0, -16667.0, 100000.0, -16667.0, 112963.0, -8333.0,
+                ],
+            };
+            let pts: Vec<(f64, f64)> = def
+                .chunks(2)
+                .enumerate()
+                .map(|(k, d)| {
+                    let y = h * a(&format!("adj{}", 2 * k + 1), d[0]);
+                    let x = w * a(&format!("adj{}", 2 * k + 2), d[1]);
+                    (x, y)
+                })
+                .collect();
+            let border = prst.contains("order");
+            let mut v = vec![PathSpec::with(
+                poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]),
+                PathFill::Norm,
+                border,
+            )];
+            if prst.starts_with("accent") {
+                v.push(PathSpec::with(
+                    format!("M{},0V{}", f(pts[0].0), f(h)),
+                    PathFill::None,
+                    true,
+                ));
+            }
+            let mut d = String::new();
+            for (i, (x, y)) in pts.iter().enumerate() {
+                let _ = write!(d, "{}{},{}", if i == 0 { 'M' } else { 'L' }, f(*x), f(*y));
+            }
+            v.push(PathSpec::with(d, PathFill::None, true));
+            Some(v)
+        }
         "wedgeRectCallout" | "wedgeRoundRectCallout" | "wedgeEllipseCallout" => {
             let tx = hc + w * a("adj1", -20833.0);
             let ty = vc + h * a("adj2", 62500.0);

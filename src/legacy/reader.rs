@@ -2284,7 +2284,12 @@ fn read_sheet(
                         .to_string(),
                     );
                 }
-                r.take(6);
+                // icvHdr: fDefaultHdr(0x20)가 꺼져 있으면 눈금선 색
+                let icv = r.u32();
+                if grbit & 0x0020 == 0 {
+                    v.grid_color = icv;
+                }
+                r.take(2);
                 let normal = r.u16().filter(|&z| z != 0);
                 let slv = r.u16().filter(|&z| z != 0);
                 v.zoom_scale_normal = normal.map(u32::from);

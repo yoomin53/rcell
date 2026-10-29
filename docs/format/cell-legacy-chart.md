@@ -260,6 +260,8 @@ VtTextBlock{backdrop → VtBackdrop | 없음, font → VtFont{name → VtString}
 | VtCLineItem (1) | reserved[4], u16_a, brush Brush, pen Pen, →ptr_a (늘 없음), **기반** VtObject |
 | VtSeries (5) | linePen, edgePen (Pen), u16_a, brush Brush, →ptr_a (늘 없음), →points VtArray, u16s1[4], pen3 Pen, u16s2[18], markerPen Pen, u16_b, →name VtString, →seriesLabel VtSeriesLabel, →textBlock VtTextBlock, labelComponents, →valueFormat VtTextFormat, →percentFormat VtTextFormat, →dataLabel VtSeriesLabel, u16_c, u16_d, u16_e, pen5 Pen, markerSize f32, showLine, markerColor 색, →picture VtPicture, markerStyle, u16_f, u16_g, f32_a f32, color2 색, color3 색, index, typeCount u32 (27), typeTable[typeCount], u16s3[10], **기반** VtObject |
 | VtSeriesLabel (1) | **기반** VtTextBlock |
+| VtSeriesPoint (1) | →label VtSeriesLabel, explode f32 (쪼개기 비율, 0.25 = 25%), u16s[4], →element VtSeriesPointElement, →ptr_a (늘 없음), **기반** VtObject |
+| VtSeriesPointElement (1) | u16_a, brush Brush (요소 채우기), edgePen Pen, →ptr_a (늘 없음), u16_b, markerPen Pen, markerSize f32, showLine, markerColor 색, →picture VtPicture, markerStyle, **기반** VtObject |
 | VtChartTitle (1) | **기반** VtChartText |
 | VtList (2) | u32_a u32 (3), count (0), **기반** VtObject, →items[count] (추정, 표본에서 늘 빔) |
 | VtChSsLink (2) | u16_a, →dataSource VtDataSourceSsLink, **기반** VtObject |
@@ -277,10 +279,12 @@ VtTextBlock{backdrop → VtBackdrop | 없음, font → VtFont{name → VtString}
   뒤에서 끝난다고 보았다).
 - **`XYScale` 의 자리.** 분산형 X 축의 24바이트는 `f32_d` 와 `u16_r` 사이에 둔다. 이웃이 0 이라 2바이트 뒤(`u16_r` 다음)에
   두어도 표본과 맞는다. 붙는 조건은 `xy == 1` 로 보았다 (축 385개에서 성립).
-- **채워진 적 없는 그릇.** `VtList` 항목, `VtSeries.points`, `VtChartPlot.ptr_a`, `VtSurfaceDesc.list`, `VtPicture.data`,
+- **채워진 적 없는 그릇.** `VtList` 항목, `VtChartPlot.ptr_a`, `VtSurfaceDesc.list`, `VtPicture.data`,
   `VtBytes`, `VtValueBlock.ptr_a`, `VtDataSourceSsLink.ptr_a/ptr_b`, `VtCLineItem.ptr_a` 는 표본에서 늘 비었다. 이것들을
   채우는 파일은 표에 없는 클래스나 배치를 가질 수 있다 — 그때 rcell 은 추측하지 않고 "배치를 모르는 클래스" 나 클래스
-  불일치 오류를 낸다.
+  불일치 오류를 낸다. `VtSeries.points` 는 한셀이 COM 으로 만든 원형·도넛 차트(요소마다 색)를 레거시로 저장하면
+  채워진다 (차트 종류 실험 73종: VtSeriesPoint 요소 서식 — 한셀 화면은 원형 조각 k 를 계열 목록 k 번째의 요소 서식 0 번
+  칠 색으로 그리고, 범례 표지는 그 계열의 칠, 쪼개기는 explode).
 - **뜻을 모르는 것.** `u16_*`·`f32_*` 필드 대부분, Pen 의 `u16_a/u16_b/u16_c`, VtColor 플래그 (0x20 은 한셀의 읽기가 보지 않는다 — 표식 채우기는 pen5 의 색, 9.5절
   읽힌다, 9.5절), `VtSeries.typeTable` (27개, 늘 같음: 차트 종류별 계열 종류로 보인다), `VtFormatter` 의 숫자 필드
   (서식 코드의 부호는 9.6절), 광원 벡터, `VtChartSection.u16_a/u16_b` (160/150).
@@ -299,9 +303,9 @@ VtTextBlock{backdrop → VtBackdrop | 없음, font → VtFont{name → VtString}
 |---|---|---|
 | `VtChart.chartType` | 0 `bar3DChart` col, 1 `barChart` col, 2 `line3DChart`, 3 `lineChart`, 4 `area3DChart`, 5 `areaChart`, 11 `barChart` bar, 13 `pie3DChart`, 14 `pieChart`, 15 `doughnutChart`, 18 `radarChart`. 분산형·거품형(3)은 `lineChart`, 주식형(1)은 `barChart` 로 읽힌다 | 관측 |
 | 표본에 없는 번호 | MSChart VtChChartType 이름에 가장 가까운 관측 종류: 단계형 6/7 → 꺾은선, 조합 8/9 → 막대, 10 → 3차원 가로 막대, 12 → 3차원 막대 (`clustered`), 16·19 → 꺾은선, 17 → 방사형, 20 → 막대, 21/22 → 가로 막대, 23/24 → 영역, 25/26 → 3차원 꺾은선, 그 밖 → 막대 | 추정 |
-| 누적 | 쓰는 계열(꼬리의 계열 수, 적어도 1) 중 하나라도 `VtSeries.u16s2[6]` ≠ 계열 순서 또는 `u16s2[7]` ≠ 0 | 관측 |
+| 누적 | 쓰는 계열(꼬리의 계열 수, 적어도 1) 중 하나라도 `VtSeries.u16s2[7]` (묶음 안 순서) ≠ 0, 또는 계열이 둘 이상이고 `u16s2[6]` (묶음) 이 모두 같다. 묶은 가로 막대(11)는 `[6]` 이 3·2·1·0 으로 거꾸로 저장된다 — 한셀 화면은 묶은 막대 | 관측 (차트 종류 실험) |
 | 100% | 값 축(`axesY[0]`)의 `u16_r` = 2 | 관측 |
-| `c:grouping` | 2차원 막대 `percentStacked`/`stacked`/`clustered`, 2차원 꺾은선·영역 `percentStacked`/`stacked`/`standard`, 3차원 막대·꺾은선·영역은 누적이 저장되어 있어도 `standard` (서식 파일 8개는 원본이 `stacked`) | 관측 |
+| `c:grouping` | 2차원 막대 `percentStacked`/`stacked`/`clustered`, 2차원 꺾은선·영역 `percentStacked`/`stacked`/`standard`, 3차원 막대·꺾은선·영역은 누적이 저장되어 있어도 `standard` (서식 파일 8개는 원본이 `stacked`). 한셀 화면은 3차원도 누적·100% 로 그린다 (차트 종류 실험의 3차원 누적·100% 세로 막대 — 렌더러만 따른다) | 관측 |
 | `c:varyColors` | 원형·도넛만 1 (저장된 표시 없음 — 서식 파일 원본의 1 도 0 으로 읽힌다) | 관측 |
 | `c:gapWidth` | 막대: `round(VtChartPlot.gap × 100)` (1.5 → 150, 주식형 실험 0.5 → 50) | 관측 |
 | `c:overlap` | 2차원 막대만: `round(−overlap × 100)` (누적 −1 → 100) | 관측 |

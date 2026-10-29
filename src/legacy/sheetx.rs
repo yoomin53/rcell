@@ -643,6 +643,9 @@ fn window(out: &mut Out, ctx: &SheetCtx) {
     if v.view.as_deref() == Some("pageBreakPreview") {
         g |= 0x0800;
     }
+    if v.grid_color.is_some() {
+        g &= !0x0020;
+    }
     let tl = v
         .top_left_cell
         .as_deref()
@@ -671,7 +674,7 @@ fn window(out: &mut Out, ctx: &SheetCtx) {
     b.u16(g)
         .u32(tl.row)
         .u16(tl.col as u16)
-        .u32(0)
+        .u32(v.grid_color.unwrap_or(0))
         .u16(0)
         .u16(normal as u16)
         .u16(slv as u16)
