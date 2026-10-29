@@ -269,48 +269,7 @@ pub unsafe extern "C" fn rcell_doc_open(ptr: *const u8, len: usize) -> u64 {
 /// 빈 새 문서 (시트 하나, 한셀 기본 글꼴)
 #[unsafe(no_mangle)]
 pub extern "C" fn rcell_doc_new() -> u64 {
-    let mut wb = Workbook {
-        application: Some("rcell".into()),
-        styles: rcell::model::Styles {
-            fonts: vec![rcell::model::Font {
-                name: Some("맑은 고딕".into()),
-                size: Some(11.0),
-                ..Default::default()
-            }],
-            fills: vec![
-                rcell::model::Fill {
-                    pattern_type: Some("none".into()),
-                    ..Default::default()
-                },
-                rcell::model::Fill {
-                    pattern_type: Some("gray125".into()),
-                    ..Default::default()
-                },
-            ],
-            borders: vec![Default::default()],
-            cell_style_xfs: vec![Default::default()],
-            cell_xfs: vec![rcell::model::Xf {
-                xf_id: Some(0),
-                alignment: Some(rcell::model::Alignment {
-                    vertical: Some("center".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }],
-            cell_styles: vec![rcell::model::NamedStyle {
-                name: "표준".into(),
-                xf_id: 0,
-                builtin_id: Some(0),
-                i_level: None,
-            }],
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let _ = edit::add_sheet(&mut wb, Some("Sheet1"), 0);
-    wb.sheets[0].view.tab_selected = true;
-    wb.sheets[0].default_col_width = Some(9.00390625);
-    wb.sheets[0].default_row_height = Some(16.5);
+    let wb = edit::new_workbook();
     let doc = Doc {
         wb,
         extras: Default::default(),

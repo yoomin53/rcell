@@ -49,7 +49,9 @@ pub fn esc(s: &str) -> String {
             '<' => o.push_str("&lt;"),
             '>' => o.push_str("&gt;"),
             '"' => o.push_str("&quot;"),
-            '\t' | '\n' | '\r' => o.push(c),
+            // CR 은 문자 참조로 (그대로 쓰면 XML 줄 끝 정규화로 LF 가 된다 — CSV 의 CRLF 가 든 칸)
+            '\r' => o.push_str("&#13;"),
+            '\t' | '\n' => o.push(c),
             c if (c as u32) < 0x20 => {}
             c => o.push(c),
         }
@@ -1193,13 +1195,10 @@ fn note_guid(n: usize, k: usize) -> String {
     )
 }
 
-/// 메모 도형 VML (`xl/drawings/vmlDrawingN.vml`) — XML·바이너리 `.cell` 은 한셀이 쓰는 꼴로 ([`hcell_comments_vml`]),
-/// Excel 형식은 Excel 의 꼴로 (`_x0000_s{1024n+k+1}`, `o:idmap data="n"`)
-pub(crate) fn comments_vml(sheet: &Sheet, n: usize, hcell: bool) -> String {
-    if hcell {
-        return hcell_comments_vml(sheet, n);
-    }
-    excel_comments_vml(sheet, n)
+/// 메모 도형 VML (`xl/drawings/vmlDrawingN.vml`) — 한셀이 쓰는 꼴 ([`hcell_comments_vml`]). 한셀의 `.xlsx` 저장도
+/// `.cell` 과 같은 VML 을 쓴다 (xlsx 대조 실험: 메모 문서 4개)
+pub(crate) fn comments_vml(sheet: &Sheet, n: usize) -> String {
+    hcell_comments_vml(sheet, n)
 }
 
 /// 한셀이 쓰는 메모 VML (메모 대조 실험, 메모 이름 실험 — 한셀의 XML·바이너리 저장본이 같다): 이름은 `v:shape/@id`
@@ -1269,58 +1268,6 @@ fn hcell_comments_vml(sheet: &Sheet, n: usize) -> String {
     s.push_str(
         "<o:shapelayout v:ext=\"edit\"><o:idmap data=\"0\" v:ext=\"edit\"/></o:shapelayout></xml>",
     );
-    s
-}
-
-/// Excel 꼴 메모 VML: 선·채우기는 `v:shape` 속성과 `v:stroke`, 그림자는 `v:shadow`, 셀 고정은 `x:MoveWithCells`·
-/// `x:SizeWithCells` (있으면 고정). 모양이 없는 메모는 셀 오른쪽 위에 둔다
-fn excel_comments_vml(sheet: &Sheet, n: usize) -> String {
-    let mut s = format!(
-        "<xml xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:x=\"urn:schemas-microsoft-com:office:excel\"><o:shapelayout v:ext=\"edit\"><o:idmap v:ext=\"edit\" data=\"{n}\"/></o:shapelayout><v:shapetype id=\"_x0000_t202\" coordsize=\"21600,21600\" o:spt=\"202\" path=\"m,l,21600r21600,l21600,xe\"><v:stroke joinstyle=\"miter\"/><v:path gradientshapeok=\"t\" o:connecttype=\"rect\"/></v:shapetype>"
-    );
-    for (k, c) in sheet.comments.iter().enumerate() {
-        let (row, col) = (c.cell.row, c.cell.col);
-        let sh = c
-            .shape
-            .clone()
-            .unwrap_or_else(|| crate::model::CommentShape::implied(c.cell));
-        let a = sh.anchor.map(|v| v.to_string()).join(", ");
-        let w = num(sh.stroke_weight);
-        let _ = write!(
-            s,
-            "<v:shape id=\"_x0000_s{}\" type=\"#_x0000_t202\" style=\"position:absolute;visibility:{};z-index:{k}\" o:insetmode=\"auto\" stroked=\"t\" strokecolor=\"{}\" strokeweight=\"{w}pt\" filled=\"t\" fillcolor=\"{}\"><v:stroke weight=\"{w}pt\" color=\"{}\" joinstyle=\"miter\" filltype=\"solid\"/>{}<v:path o:connecttype=\"none\"/><v:textbox style=\"mso-direction-alt:auto\"/><x:ClientData ObjectType=\"Note\">{}{}<x:Anchor>{a}</x:Anchor><x:AutoFill>False</x:AutoFill>{}{}<x:Row>{row}</x:Row><x:Column>{col}</x:Column>{}</x:ClientData></v:shape>",
-            n * 1024 + k + 1,
-            if c.visible { "visible" } else { "hidden" },
-            esc(&sh.stroke_color),
-            esc(&sh.fill_color),
-            esc(&sh.stroke_color),
-            if sh.shadow {
-                "<v:shadow on=\"t\" obscured=\"t\" color=\"#000000\"/>"
-            } else {
-                ""
-            },
-            if sh.move_with_cells {
-                ""
-            } else {
-                "<x:MoveWithCells/>"
-            },
-            if sh.size_with_cells {
-                ""
-            } else {
-                "<x:SizeWithCells/>"
-            },
-            sh.text_halign
-                .as_ref()
-                .map(|v| format!("<x:TextHAlign>{}</x:TextHAlign>", esc(v)))
-                .unwrap_or_default(),
-            sh.text_valign
-                .as_ref()
-                .map(|v| format!("<x:TextVAlign>{}</x:TextVAlign>", esc(v)))
-                .unwrap_or_default(),
-            if c.visible { "<x:Visible/>" } else { "" }
-        );
-    }
-    s.push_str("</xml>");
     s
 }
 
@@ -2460,7 +2407,7 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
                 )?;
                 put(
                     &format!("xl/drawings/vmlDrawing{}.vml", i + 1),
-                    comments_vml(worksheets[i], i + 1, flavor == Flavor::Cell).as_bytes(),
+                    comments_vml(worksheets[i], i + 1).as_bytes(),
                 )?;
             }
             r.push_str("</Relationships>");
@@ -2545,7 +2492,13 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
     if let Some(v) = &vbs_part {
         put("xl/vbsProject.bin", v)?;
     }
-    Ok(z.finish()?.into_inner())
+    let bytes = z.finish()?.into_inner();
+    // 구조 잠금 문서의 .xlsx 는 한셀처럼 기본 암호로 감싼다 (xlsx 대조 실험: 한셀의 .xlsx 저장은 바이너리처럼
+    // EncryptionInfo·EncryptedPackage 복합 문서 — docs/format/other-formats.md)
+    if flavor == Flavor::Xlsx && wb.protection.as_ref().is_some_and(|p| p.lock_structure) {
+        return Ok(crate::binary::encrypt::wrap(&bytes));
+    }
+    Ok(bytes)
 }
 
 /// 표 파트 (`x:table`) — 모델로 쓸 때 (바이너리·레거시 원본, XML 원본은 파트를 그대로 옮긴다)

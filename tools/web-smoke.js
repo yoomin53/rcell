@@ -264,7 +264,8 @@ async function main() {
     }
     if (fs.existsSync(rcell)) {
       const csv = execFileSync(rcell, ["csv", saved, "-s", "0"]).toString("utf8");
-      check("저장한 문서를 rcell 로 다시 읽기", csv.includes("9999"), csv.split("\n")[4]);
+      // rcell csv 는 한셀의 CSV 저장처럼 표시된 글을 쓴다 (#,##0 → "9,999")
+      check("저장한 문서를 rcell 로 다시 읽기", /9,?999/.test(csv), csv.split("\n")[4]);
       const calc = spawnSyncText(rcell, ["calc", saved]);
       check("저장한 값 = rcell 다시 계산", calc.status === 0, calc.out.trim().split("\n").pop());
     }
