@@ -94,7 +94,7 @@ fn col(c: Option<&Color>, theme: &Theme) -> Option<String> {
 }
 
 /// 칸 채우기 → CSS. `origin` 은 칸의 시트 안 위치(px) — 무늬를 시트 원점에 맞춘다
-pub fn fill_css(fill: &Fill, theme: &Theme, origin: (u32, u32)) -> Option<FillPaint> {
+pub fn fill_css(fill: &Fill, theme: &Theme, z: f64) -> Option<FillPaint> {
     if let Some(g) = &fill.gradient {
         return gradient_css(g, theme);
     }
@@ -134,13 +134,16 @@ pub fn fill_css(fill: &Fill, theme: &Theme, origin: (u32, u32)) -> Option<FillPa
         }
     }
     svg.push_str("'/></svg>");
-    let _ = origin;
-    let (ox, oy) = (0, 0);
+    let size = if z == 1.0 || z <= 0.0 {
+        String::new()
+    } else {
+        format!("background-size:{}px {}px;", w as f64 / z, h as f64 / z)
+    };
     // 대표 색: 전경이 반 넘게 차지하면 전경, 아니면 배경
     let rep = if dark * 2 > w * h { fg } else { bg.clone() };
     Some(FillPaint {
         css: format!(
-            "background:{bg} {} -{ox}px -{oy}px repeat;image-rendering:pixelated;",
+            "background:{bg} {} 0px 0px repeat;{size}image-rendering:pixelated;",
             svg_url(&svg)
         ),
         color: Some(rep),
