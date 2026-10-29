@@ -2446,9 +2446,9 @@ pub fn border(
             let rr = (r0..=r1)
                 .find(|&r| (c0..=c1).all(|c| !skip(cr(r, c))))
                 .unwrap_or(r0);
-            // 안쪽 세로: 첫 칸 사이에 선이 있고 그 행의 칸 사이에 있는 선이 모두 같은 색이면 그 색 (선 없는 칸 사이는 보지
-            // 않는다 — H10 오른쪽만 빨강이면 빨강), 아니면 끝 칸 왼쪽 변의 색
-            let lines: Vec<Option<crate::model::BorderEdge>> = (c0..c1)
+            // 안쪽 세로: 첫 칸 사이에 선이 있고 그 행의 칸 사이(끝 칸의 오른쪽 변까지)에 있는 선이 모두 같은 색이면 그 색
+            // (선 없는 칸 사이는 보지 않는다 — H10 오른쪽만 빨강이면 빨강), 아니면 끝 칸 왼쪽 변의 색
+            let lines: Vec<Option<crate::model::BorderEdge>> = (c0..=c1)
                 .map(|c| line_between(sheet, styles, cr(rr, c), Right))
                 .collect();
             let inside_v = match lines.first() {
