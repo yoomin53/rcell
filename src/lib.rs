@@ -40,6 +40,7 @@ pub mod legacy;
 pub mod model;
 pub mod ns;
 pub mod numfmt;
+pub mod ods;
 pub mod package;
 pub mod parser;
 pub mod print;
@@ -113,6 +114,7 @@ pub fn from_bytes_with_password(bytes: Vec<u8>, password: Option<&str>) -> Resul
             }
             legacy::read(&bytes)
         }
+        _ if ods::is_ods(&bytes) => ods::read(&bytes),
         _ => {
             let mut pkg = open_package(bytes)?;
             parser::read_workbook(&mut pkg)
@@ -139,11 +141,15 @@ pub enum SaveFormat {
     Prn,
     /// Excel 97-2003 `.xls` (한셀 FileFormat 56 — BIFF8, [MS-XLS])
     Xls,
+    /// 넥셀 `.nxl` (한셀 FileFormat -2003 — BIFF8 틀 + 한컴 확장)
+    Nxl,
+    /// ODF 스프레드시트 `.ods` (한셀 FileFormat 60 — 값·수식·구조만)
+    Ods,
 }
 
 impl SaveFormat {
     /// 파일 이름으로 고른다: `.xlsx` → Excel, `.xlsb`·`*.bin.cell` → 바이너리, `*.legacy.cell` → 레거시,
-    /// `.xls` → Excel 97-2003, `.csv` → CSV, `.txt`·`.tsv` → 탭 텍스트, `.prn` → 공백 텍스트, 나머지 → XML `.cell`
+    /// `.xls` → Excel 97-2003, `.nxl` → 넥셀, `.ods` → ODF, `.csv` → CSV, `.txt`·`.tsv` → 탭 텍스트, `.prn` → 공백 텍스트, 나머지 → XML `.cell`
     pub fn from_path(path: &Path) -> SaveFormat {
         let name = path
             .file_name()
@@ -158,6 +164,10 @@ impl SaveFormat {
             SaveFormat::Legacy
         } else if name.ends_with(".xls") {
             SaveFormat::Xls
+        } else if name.ends_with(".nxl") {
+            SaveFormat::Nxl
+        } else if name.ends_with(".ods") {
+            SaveFormat::Ods
         } else if name.ends_with(".csv") {
             SaveFormat::Csv
         } else if name.ends_with(".txt") || name.ends_with(".tsv") {
@@ -189,6 +199,8 @@ pub fn save_as(wb: &Workbook, path: impl AsRef<Path>, format: SaveFormat) -> Res
         SaveFormat::Text => csv::write(wb, csv::Delimiter::Tab)?,
         SaveFormat::Prn => csv::write(wb, csv::Delimiter::Space)?,
         SaveFormat::Xls => legacy::write_xls(wb, &legacy::WriteOptions::for_path(path.as_ref()))?.0,
+        SaveFormat::Nxl => legacy::write_nxl(wb, &legacy::WriteOptions::for_path(path.as_ref()))?.0,
+        SaveFormat::Ods => ods::write(wb)?,
     };
     std::fs::write(path, bytes)?;
     Ok(())
