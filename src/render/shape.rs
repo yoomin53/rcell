@@ -83,13 +83,14 @@ impl PathFill {
         }
     }
 
-    /// 채움 위에 덧씌울 반투명 색 (어둡게 = 검정 40%, 덜 어둡게 20%, 밝게 = 흰색 40%, 덜 밝게 20%)
+    /// 채움 위에 덧씌울 반투명 색 (도형 모양 실험의 한셀 화면: 어둡게 = 검정 50%, 덜 어둡게 25%, 밝게 = 흰색 30%,
+    /// 덜 밝게 15% — 6182D6 이 31416B·4962A1·90A7E2·7995DC)
     pub fn overlay(self) -> Option<(&'static str, f64)> {
         match self {
-            PathFill::Darken => Some(("#000000", 0.4)),
-            PathFill::DarkenLess => Some(("#000000", 0.2)),
-            PathFill::Lighten => Some(("#FFFFFF", 0.4)),
-            PathFill::LightenLess => Some(("#FFFFFF", 0.2)),
+            PathFill::Darken => Some(("#000000", 0.5)),
+            PathFill::DarkenLess => Some(("#000000", 0.25)),
+            PathFill::Lighten => Some(("#FFFFFF", 0.3)),
+            PathFill::LightenLess => Some(("#FFFFFF", 0.15)),
             _ => None,
         }
     }
@@ -650,7 +651,16 @@ pub fn preset_paths(
                     PathFill::Norm,
                     false,
                 ),
-                PathSpec::with(ellipse(hc, ry, hc, ry), PathFill::Lighten, false),
+                // 자기 디스크의 윗면은 밝게 칠하지 않는다 (한셀 화면 — 원기둥만)
+                PathSpec::with(
+                    ellipse(hc, ry, hc, ry),
+                    if prst == "can" {
+                        PathFill::Lighten
+                    } else {
+                        PathFill::Norm
+                    },
+                    false,
+                ),
                 PathSpec::with(
                     format!(
                         "M0,{ry}A{},{ry} 0 0 1 {},{ry}A{},{ry} 0 0 1 0,{ry}V{}A{},{ry} 0 0 0 {},{}V{ry}",
