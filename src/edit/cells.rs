@@ -129,6 +129,19 @@ pub fn shift_cells(
                 f.text = refs::shift_formula_band(&f.text, &here, &target, op, band);
             }
         }
+        // 조건부 서식·유효성 수식의 참조도 띠 안이면 옮긴다 (한셀: 목록 원본 `$B$1:$B$5` 에 `B3:C4` 를 아래로 넣으면 `$B$1:$B$7`)
+        for cf in &mut sh.conditional_formats {
+            for r in &mut cf.rules {
+                for f in &mut r.formulas {
+                    *f = refs::shift_formula_band(f, &here, &target, op, band);
+                }
+            }
+        }
+        for dv in &mut sh.data_validations {
+            for f in [&mut dv.formula1, &mut dv.formula2].into_iter().flatten() {
+                *f = refs::shift_formula_band(f, &here, &target, op, band);
+            }
+        }
         super::structure::unshare(sh);
     }
     for d in &mut wb.defined_names {
