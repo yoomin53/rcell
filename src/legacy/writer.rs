@@ -2008,6 +2008,8 @@ pub struct WriteOptions {
     /// 저장할 문서가 있는 드라이브 (`C` …). 외부 연결의 경로가 같은 드라이브면 SUPBOOK 가상 경로에 드라이브 대신
     /// 'U+0002 같은 드라이브의 루트' 를 쓴다 (한셀: 문서 위치 기준 — 서식 파일 9개의 `file:///C:/Hancell…`)
     pub doc_drive: Option<char>,
+    /// .xls 로 바꿀 레거시: 차트 도형도 그리기(OfficeArt + OBJ)에 넣는다 (`legacy::write_xls`)
+    pub xls: bool,
 }
 
 impl WriteOptions {
@@ -2023,7 +2025,10 @@ impl WriteOptions {
             },
             _ => None,
         };
-        WriteOptions { doc_drive }
+        WriteOptions {
+            doc_drive,
+            xls: false,
+        }
     }
 }
 
@@ -2231,7 +2236,7 @@ fn workbook_stream_inner(
     }
 
     // 그림 저장소·시트 그리기 번호 (차트 번호가 시트의 OBJ 수에 기댄다)
-    let mut art = super::art::Art::new(wb);
+    let mut art = super::art::Art::new_with(wb, opts.xls);
     // 시트 수식, 차트 (0x7EF0 — 차트 수식의 XTI 를 만든다)
     let mut encs: Vec<SheetEnc> = Vec::new();
     for (si, sheet) in wb.sheets.iter().enumerate() {

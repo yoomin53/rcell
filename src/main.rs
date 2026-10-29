@@ -826,9 +826,11 @@ fn convert(
         Some("txt" | "tsv" | "text") => rcell::SaveFormat::Text,
         Some("prn") => rcell::SaveFormat::Prn,
         Some("xls") => rcell::SaveFormat::Xls,
+        Some("nxl") => rcell::SaveFormat::Nxl,
+        Some("ods") => rcell::SaveFormat::Ods,
         Some(other) => {
             return Err(rcell::Error::InvalidValue {
-                context: "--format (cell, xlsx, bin, legacy, xls, csv, txt, prn)".into(),
+                context: "--format (cell, xlsx, bin, legacy, xls, nxl, ods, csv, txt, prn)".into(),
                 value: other.into(),
             });
         }
