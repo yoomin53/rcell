@@ -1893,12 +1893,34 @@ fn is_cell(rt: u16) -> bool {
     )
 }
 
-/// 레거시 시트 부분의 레코드들 → BIFF8 레코드들
-/// 레거시에 없는 시트 정보 (모델에서): 요약 행·열 위치 — 한셀의 레거시 저장은 WSBOOL 에 쓰지 않고 .xls 저장은 쓴다
-#[derive(Debug, Clone, Copy, Default)]
+/// 레거시에 없는 시트 정보 (모델에서): 요약 행·열 위치 — 한셀의 레거시 저장은 WSBOOL 에 쓰지 않고 .xls 저장은 쓴다.
+/// 차트 부분 스트림 (차트 도형 차례, OBJ ot 5 뒤에 넣는다 — [`super::xls_chart::write`])
+#[derive(Debug, Clone, Default)]
 pub struct SheetHints {
     pub summary_above: bool,
     pub summary_left: bool,
+    pub charts: Vec<Vec<(u16, Vec<u8>)>>,
+}
+
+/// 레거시 `/Workbook` 의 시트 하나짜리 내부 XTI: 시트 번호 → ixti (내부 SUPBOOK 은 `시트 수, 01 04`)
+pub(crate) fn sheet_xti(stream: &[u8]) -> HashMap<u16, u16> {
+    let recs = biff::records(stream);
+    let internal: Vec<bool> = recs
+        .iter()
+        .filter(|r| r.rtype == 0x01AE)
+        .map(|r| r.data.get(2..4) == Some(&[0x01, 0x04][..]))
+        .collect();
+    let mut out = HashMap::new();
+    if let Some(r) = recs.iter().find(|r| r.rtype == 0x0017) {
+        let (xtis, _) = r.data.get(2..).unwrap_or(&[]).as_chunks::<6>();
+        for (i, x) in xtis.iter().enumerate() {
+            let v = |k: usize| u16::from_le_bytes([x[k], x[k + 1]]);
+            if internal.get(v(0) as usize) == Some(&true) && v(2) == v(4) {
+                out.entry(v(2)).or_insert(i as u16);
+            }
+        }
+    }
+    out
 }
 
 /// 하이퍼링크의 도구 설명 (범위의 왼쪽 위 칸 (행, 열) → 글) — 한셀의 .xls 저장은 HLINK 의 표시 이름 자리에 쓴다
@@ -1914,6 +1936,7 @@ fn sheet_to8(recs: &[Rec], hints: Option<&SheetHints>, tips: Option<&LinkTips>) 
     let mut art_slots: Vec<usize> = Vec::new();
     let mut art_parts: Vec<Vec<u8>> = Vec::new();
     let row_of = |d: &[u8]| -> u32 { u32::from_le_bytes([d[0], d[1], d[2], d[3]]) };
+    let mut chart_k = 0usize;
     for rec in recs {
         let rt = rec.rt;
         let d = &rec.data;
@@ -1981,6 +2004,18 @@ fn sheet_to8(recs: &[Rec], hints: Option<&SheetHints>, tips: Option<&LinkTips>) 
                 art_slots.push(out.len());
                 art_parts.push(d.clone());
                 out.push((rt, Vec::new(), Vec::new()));
+            }
+            0x005D => {
+                if let Some(b) = conv(rt, d, true) {
+                    out.push((rt, b, Vec::new()));
+                }
+                // 차트 도형의 OBJ (ftCmo ot 5) 뒤에 차트 부분 스트림
+                if d.get(4..6) == Some(&[5, 0][..])
+                    && let Some(ch) = hints.and_then(|h| h.charts.get(chart_k))
+                {
+                    out.extend(ch.iter().map(|(rt, d)| (*rt, d.clone(), Vec::new())));
+                    chart_k += 1;
+                }
             }
             0x01B6 => {
                 if let Some((h, c)) = txo_to8(d) {

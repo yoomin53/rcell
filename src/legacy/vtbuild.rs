@@ -535,7 +535,7 @@ fn chart_type(c: &Chart) -> u16 {
 // ---------------------------------------------------------------------------
 
 /// `srgb:RRGGBB` → 0xRRGGBB (변형이 없는 것만)
-fn srgb_value(c: &crate::model::ChartColor) -> Option<u32> {
+pub(crate) fn srgb_value(c: &crate::model::ChartColor) -> Option<u32> {
     let hex = c.value.strip_prefix("srgb:")?;
     if !c.mods.is_empty() {
         return None;

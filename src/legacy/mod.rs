@@ -30,6 +30,7 @@ pub(crate) mod vtchart_map;
 pub(crate) mod vtwrite;
 pub mod writer;
 pub mod xls;
+mod xls_chart;
 
 pub use writer::{Report, WriteOptions, write_with_options, write_with_report};
 
@@ -105,13 +106,35 @@ pub fn chart_dumps_with(bytes: &[u8], offsets: bool) -> Result<Vec<String>> {
 /// 통합 문서를 Excel 97-2003 `.xls` (BIFF8) 로 쓴다: 레거시로 쓴 `/Workbook` 을 [`xls::to_biff8`] 로 바꾸고 문서
 /// 속성과 함께 담는다 (매크로 프로젝트·피벗 캐시는 담지 않는다)
 pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)> {
-    let (bytes, mut report) = write_with_options(wb, opts)?;
+    let mut o = opts.clone();
+    o.xls = true;
+    let (bytes, mut report) = write_with_options(wb, &o)?;
+    // 차트: 레거시가 만든 XTI 로 계열 참조를 쓴다
+    let stream = container::read_entry(&bytes, "/Workbook")?;
+    let xti = xls::sheet_xti(&stream);
     let hints: Vec<xls::SheetHints> = wb
         .sheets
         .iter()
-        .map(|s| xls::SheetHints {
+        .enumerate()
+        .map(|(si, s)| xls::SheetHints {
             summary_above: s.summary_above,
             summary_left: s.summary_left,
+            charts: s
+                .shapes
+                .iter()
+                .filter(|x| x.kind == crate::model::ShapeKind::Chart)
+                .filter_map(|x| x.chart.as_ref())
+                .map(|ch| {
+                    let of = |name: Option<&str>| -> Option<u16> {
+                        let i = match name {
+                            Some(n) => wb.sheets.iter().position(|x| x.name == n)?,
+                            None => si,
+                        };
+                        xti.get(&(i as u16)).copied()
+                    };
+                    xls_chart::write(ch, wb, si, &of)
+                })
+                .collect(),
         })
         .collect();
     let tips: Vec<xls::LinkTips> = wb
@@ -133,10 +156,16 @@ pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)
         s.iter()
             .any(|x| x.chart.is_some() || has_chart(&x.children))
     }
-    if wb.sheets.iter().any(|s| has_chart(&s.shapes)) {
+    if wb.sheets.iter().any(|s| {
+        s.shapes.iter().any(|x| {
+            x.children
+                .iter()
+                .any(|c| has_chart(std::slice::from_ref(c)))
+        })
+    }) {
         report
             .warnings
-            .push(".xls: 차트는 아직 쓰지 않는다 (BIFF8 차트 레코드)".into());
+            .push(".xls: 묶음 안의 차트는 쓰지 않는다".into());
     }
     if wb.raw_parts.iter().any(|p| p.name.contains("pivotTable")) {
         report
