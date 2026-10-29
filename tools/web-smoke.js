@@ -245,6 +245,26 @@ async function main() {
     await sleep(100);
     check("Delete 로 지우기", (await cdp.eval("rcellEditor.cell('L2')")).input === "");
 
+    // 8-1. 정렬 (도구 막대), 채우기 핸들, 찾기·바꾸기
+    await cdp.eval("rcellEditor.select(\"N1\"); rcellEditor.type(\"3\"); rcellEditor.type(\"1\"); rcellEditor.type(\"2\"); rcellEditor.select(\"N1:N3\")");
+    await cdp.eval("document.getElementById(\"sort-asc\").click()");
+    await sleep(100);
+    const n1 = await cdp.eval("[rcellEditor.cell(\"N1\").input, rcellEditor.cell(\"N3\").input]");
+    check("정렬 (오름차순 단추)", n1[0] === "1" && n1[1] === "3", n1);
+    await cdp.eval("rcellEditor.select(\"O1\"); rcellEditor.type(\"월\"); rcellEditor.select(\"O1\")");
+    const hp = await cdp.eval("(() => { const r = document.getElementById(\"ed-handle\").getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()");
+    const o4 = await cellPoint(cdp, "O4");
+    await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: hp.x, y: hp.y, button: "left", clickCount: 1 });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: o4.x, y: o4.y, button: "left" });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: o4.x, y: o4.y, button: "left", clickCount: 1 });
+    await sleep(150);
+    const o4v = await cdp.eval("rcellEditor.cell(\"O4\").input");
+    check("채우기 핸들 (월 → 목)", o4v === "목", o4v);
+    const found = await cdp.eval("rcellEditor.find({ what: \"목\" })");
+    check("찾기", found.length === 1 && found[0][1] === 3 && found[0][2] === 14, found);
+    await cdp.eval("rcellEditor.edit({ op: \"replace\", find: \"목\", replace: \"목요일\" })");
+    check("바꾸기", (await cdp.eval("rcellEditor.cell(\"O4\").input")) === "목요일");
+
     const shot1 = await cdp.send("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(outDir, "smoke-edit.png"), Buffer.from(shot1.data, "base64"));
 

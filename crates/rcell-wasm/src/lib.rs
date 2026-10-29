@@ -411,12 +411,18 @@ pub extern "C" fn rcell_doc_cell(id: u32, sheet: u32, row: u32, col: u32) -> u64
             .iter()
             .find(|m| m.contains(r))
             .map(|m| [m.start.row, m.start.col, m.end.row, m.end.col]);
+        let comment = s
+            .comments
+            .iter()
+            .find(|c| c.cell == r)
+            .map(|c| c.text.text.clone());
         Ok(json!({
             "a1": r.to_string(),
             "input": edit::input_text(&d.wb, si, r),
             "display": shown,
             "style": style_json(&d.wb, style),
             "merge": merge,
+            "comment": comment,
         }))
     }))
 }
@@ -609,6 +615,39 @@ pub extern "C" fn rcell_doc_jump(id: u32, sheet: u32, row: u32, col: u32, dr: i3
                 .ok_or_else(|| err("시트가 없습니다"))?;
         let r = edit::jump(s, CellRef { row, col }, dr.signum(), dc.signum());
         Ok(json!({ "row": r.row, "col": r.col }))
+    }))
+}
+
+/// 찾기: JSON `{"what":…,"matchCase":…,"whole":…,"values":…,"all":…}` → 찾은 칸 `[[시트, 행, 열], …]` (시트 차례, 행 우선)
+///
+/// # Safety
+/// `ptr`/`len` 은 `rcell_alloc` 으로 받은 유효한 범위여야 한다.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rcell_doc_find(id: u32, sheet: u32, ptr: *const u8, len: usize) -> u64 {
+    let bytes = input(ptr, len);
+    run_json(with_doc(id, |d| {
+        let v: Value =
+            serde_json::from_slice(&bytes).map_err(|e| err(format!("찾기 설정: {e}")))?;
+        let b = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+        let o = edit::find::FindOptions {
+            what: v
+                .get("what")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            match_case: b("matchCase"),
+            whole: b("whole"),
+            in_values: b("values"),
+            all_sheets: b("all"),
+            range: None,
+        };
+        let found = edit::find::find_all(&d.wb, sheet as usize, &o);
+        Ok(json!(
+            found
+                .iter()
+                .map(|(s, r)| [*s as u32, r.row, r.col])
+                .collect::<Vec<_>>()
+        ))
     }))
 }
 

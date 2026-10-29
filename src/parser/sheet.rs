@@ -127,8 +127,10 @@ pub fn parse_worksheet(
                 .sml_children("filterColumn")
                 .map(parse_filter_column)
                 .collect(),
+            sort_state: af.sml_child("sortState").map(parse_sort_state),
         });
     }
+    sheet.sort_state = root.sml_child("sortState").map(parse_sort_state);
     // 본 규칙의 x14:id → (서식, 규칙) 위치. x14 확장 구역의 같은 id 규칙이 데이터 막대 확장 등을 담는다
     let mut x14_ids: HashMap<String, (usize, usize)> = HashMap::new();
     sheet.conditional_formats = root
@@ -707,5 +709,22 @@ fn parse_cell(c: &Element, r: CellRef, shared: &[RichText]) -> Cell {
         style,
         value,
         formula,
+    }
+}
+
+/// `sortState`
+pub(crate) fn parse_sort_state(e: &Element) -> crate::model::SortState {
+    crate::model::SortState {
+        range: e.attr("ref").unwrap_or("").to_string(),
+        column_sort: e.attr_bool("columnSort").unwrap_or(false),
+        case_sensitive: e.attr_bool("caseSensitive").unwrap_or(false),
+        conditions: e
+            .sml_children("sortCondition")
+            .map(|c| crate::model::SortCondition {
+                range: c.attr("ref").unwrap_or("").to_string(),
+                descending: c.attr_bool("descending").unwrap_or(false),
+                sort_by: c.attr("sortBy").map(str::to_string),
+            })
+            .collect(),
     }
 }

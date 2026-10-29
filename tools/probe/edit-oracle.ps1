@@ -52,6 +52,9 @@ function Get-ColRange([string]$col, [int]$count) {
     return "$($col.ToUpper())1:$($name)1"
 }
 
+# 편집의 count (없으면 1)
+function Get-Count($e) { if ($null -ne $e.count) { return [int]$e.count } else { return 1 } }
+
 $hAlign = @{ "left" = -4131; "center" = -4108; "right" = -4152; "general" = 1; "justify" = -4130; "distributed" = -4117; "centerContinuous" = 7; "fill" = 5 }
 $vAlign = @{ "top" = -4160; "center" = -4108; "bottom" = -4107; "justify" = -4130; "distributed" = -4117 }
 $lineStyles = @{ "thin" = @(1, 2); "medium" = @(1, -4138); "thick" = @(1, 4); "dashed" = @(-4115, 2); "dotted" = @(-4118, 2); "double" = @(-4119, 4); "hair" = @(1, 1) }
@@ -147,6 +150,167 @@ function Invoke-Edit($wb, $e) {
         }
         "fillDown" { $ws.Range([string]$e.range).FillDown() | Out-Null }
         "fillRight" { $ws.Range([string]$e.range).FillRight() | Out-Null }
+        "sort" {
+            # 정렬 (Range.Sort — 열쇠 3개까지). Sort 개체(Worksheet.Sort)는 여러 열 범위에서 Header=xlNo 를 따르지
+            # 않고 첫 행을 머리글로 둔다 (관측). 왼쪽에서 오른쪽은 Orientation 2
+            $rg = $ws.Range([string]$e.range)
+            $M = [Type]::Missing
+            $keys = @($M, $M, $M); $orders = @(1, 1, 1)
+            $i = 0
+            foreach ($k in $e.keys) {
+                $by = [string]$k.by
+                # 왼쪽에서 오른쪽: 한셀 자동화는 열쇠 칸의 (열 − 범위 첫 열) 을 행 차례로 쓴다 (관측) — 그 자리의 칸을 준다
+                if ($e.leftToRight) { $keys[$i] = $ws.Cells.Item($rg.Row, $rg.Column + [int]$by - $rg.Row) }
+                else { $keys[$i] = $ws.Cells.Item($rg.Row, $ws.Range("$($by)1").Column) }
+                if ($k.desc) { $orders[$i] = 2 }
+                $i++
+            }
+            $hdr = if ($e.header) { 1 } else { 2 }
+            $orient = if ($e.leftToRight) { 2 } else { 1 }
+            $rg.Sort($keys[0], $orders[0], $keys[1], $M, $orders[1], $keys[2], $orders[2], $hdr, $M, [bool]$e.matchCase, $orient) | Out-Null
+        }
+        "autoFill" {
+            # 자동 채우기 (Range.AutoFill, XlAutoFillType)
+            $types = @{ "default" = 0; "copy" = 1; "series" = 2; "formats" = 3; "values" = 4; "days" = 5; "weekdays" = 6; "months" = 7; "years" = 8 }
+            $t = if ($e.type) { $types[[string]$e.type] } else { 0 }
+            $ws.Range([string]$e.range).AutoFill($ws.Range([string]$e.to), $t) | Out-Null
+        }
+        "series" {
+            # 연속 데이터 (Range.DataSeries)
+            $rg = $ws.Range([string]$e.range)
+            $M = [Type]::Missing
+            $rowcol = if ($null -ne $e.rows) { if ($e.rows) { 1 } else { 2 } } elseif ($rg.Columns.Count -gt $rg.Rows.Count) { 1 } else { 2 }
+            $types = @{ "linear" = -4132; "growth" = 2; "date" = 3; "autoFill" = 4 }
+            $dates = @{ "day" = 1; "weekday" = 2; "month" = 3; "year" = 4 }
+            $t = if ($e.type) { $types[[string]$e.type] } else { -4132 }
+            $d = if ($e.date) { $dates[[string]$e.date] } else { 1 }
+            $step = if ($null -ne $e.step) { [double]$e.step } else { 1.0 }
+            $stop = if ($null -ne $e.stop) { [double]$e.stop } else { $M }
+            $rg.DataSeries($rowcol, $t, $d, $step, $stop, [bool]$e.trend) | Out-Null
+        }
+        "replace" {
+            # 바꾸기 (Range.Replace — LookAt 1 = 셀 전체, 2 = 일부). all 이면 모든 시트
+            $look = if ($e.wholeCell) { 1 } else { 2 }
+            $n = if ($e.all) { $wb.Worksheets.Count } else { 1 }
+            for ($k = 1; $k -le $n; $k++) {
+                $s = if ($e.all) { $wb.Worksheets.Item($k) } else { $ws }
+                $rg = if ($e.range) { $s.Range([string]$e.range) } else { $s.UsedRange }
+                [void]$rg.Replace([string]$e.find, [string]$e.replace, $look, 1, [bool]$e.matchCase)
+            }
+        }
+        "pasteSpecial" {
+            # 선택하여 붙이기 (Copy → PasteSpecial). paste: all values formats formulas comments validation
+            # allExceptBorders formulasAndNumberFormats valuesAndNumberFormats, operation: none add subtract multiply divide
+            $kinds = @{ "all" = -4104; "values" = -4163; "formats" = -4122; "formulas" = -4123; "comments" = -4144; "validation" = 6; "allExceptBorders" = 7; "columnWidths" = 8; "formulasAndNumberFormats" = 11; "valuesAndNumberFormats" = 12 }
+            $ops = @{ "none" = -4142; "add" = 2; "subtract" = 3; "multiply" = 4; "divide" = 5 }
+            $dst = Get-Sheet $wb $(if ($e.toSheet) { $e.toSheet } else { $e.sheet })
+            $k = if ($e.paste) { $kinds[[string]$e.paste] } else { -4104 }
+            $o = if ($e.operation) { $ops[[string]$e.operation] } else { -4142 }
+            [void]$ws.Range([string]$e.from).Copy()
+            [void]$dst.Range([string]$e.to).PasteSpecial($k, $o, [bool]$e.skipBlanks, [bool]$e.transpose)
+        }
+        "addComment" { [void]$ws.Range([string]$e.cell).AddComment([string]$e.text) }
+        "editComment" { [void]$ws.Range([string]$e.cell).Comment.Text([string]$e.text) }
+        "deleteComment" { [void]$ws.Range([string]$e.range).ClearComments() }
+        "addHyperlink" {
+            $M = [Type]::Missing
+            $addr = if ($e.address) { [string]$e.address } else { "" }
+            $sub = if ($e.location) { [string]$e.location } else { $M }
+            $tip = if ($e.tooltip) { [string]$e.tooltip } else { $M }
+            $disp = if ($e.display) { [string]$e.display } else { $M }
+            [void]$ws.Hyperlinks.Add($ws.Range([string]$e.cell), $addr, $sub, $tip, $disp)
+        }
+        "removeHyperlink" { [void]$ws.Range([string]$e.range).ClearHyperlinks() }
+        "addName" {
+            if ($null -ne $e.local) { [void]$ws.Names.Add([string]$e.name, "=" + [string]$e.refersTo) }
+            else { [void]$wb.Names.Add([string]$e.name, "=" + [string]$e.refersTo) }
+        }
+        "deleteName" {
+            $n = $null
+            foreach ($x in @($wb.Names)) { if ($x.Name -eq [string]$e.name -or $x.Name -like "*!$([string]$e.name)") { $n = $x; break } }
+            if ($n) { $n.Delete() } else { throw "이름 없음" }
+        }
+        "addValidation" {
+            # Validation.Add 는 선택한 칸에 적용된다 (관측) — 범위를 먼저 고른다
+            $types = @{ "whole" = 1; "decimal" = 2; "list" = 3; "date" = 4; "time" = 5; "textLength" = 6; "custom" = 7 }
+            $opsV = @{ "between" = 1; "notBetween" = 2; "equal" = 3; "notEqual" = 4; "greaterThan" = 5; "lessThan" = 6; "greaterThanOrEqual" = 7; "lessThanOrEqual" = 8 }
+            $M = [Type]::Missing
+            $rg = $ws.Range([string]$e.range)
+            $ws.Activate(); [void]$rg.Select()
+            $f2 = if ($e.formula2) { [string]$e.formula2 } else { $M }
+            $op = if ($e.operator) { $opsV[[string]$e.operator] } else { 1 }
+            $rg.Validation.Delete()
+            $rg.Validation.Add($types[[string]$e.type], 1, $op, [string]$e.formula1, $f2)
+        }
+        "deleteValidation" { $ws.Range([string]$e.range).Validation.Delete() }
+        "addCf" {
+            $types = @{ "cellIs" = 1; "expression" = 2 }
+            $opsC = @{ "between" = 1; "notBetween" = 2; "equal" = 3; "notEqual" = 4; "greaterThan" = 5; "lessThan" = 6; "greaterThanOrEqual" = 7; "lessThanOrEqual" = 8 }
+            $M = [Type]::Missing
+            $op = if ($e.operator) { $opsC[[string]$e.operator] } else { $M }
+            $f2 = if ($e.formula2) { [string]$e.formula2 } else { $M }
+            $f1 = if ([string]$e.type -eq "expression" -and -not ([string]$e.formula1).StartsWith("=")) { "=" + [string]$e.formula1 } else { [string]$e.formula1 }
+            $fc = $ws.Range([string]$e.range).FormatConditions.Add($types[[string]$e.type], $op, $f1, $f2)
+            if ($e.fill) { $fc.Interior.Color = (Get-Bgr $e.fill) }
+            if ($e.fontColor) { $fc.Font.Color = (Get-Bgr $e.fontColor) }
+            if ($e.bold) { $fc.Font.Bold = $true }
+        }
+        "deleteCf" { $ws.Range([string]$e.range).FormatConditions.Delete() }
+        "autoFitCols" { [void]$ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.AutoFit() }
+        "autoFitRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.AutoFit() }
+        "insertCells" {
+            # 셀 삽입 (아래로 -4121, 오른쪽으로 -4161)
+            $sh = if ([string]$e.shift -eq "right") { -4161 } else { -4121 }
+            [void]$ws.Range([string]$e.range).Insert($sh)
+        }
+        "deleteCells" {
+            # 셀 삭제 (위로 -4162, 왼쪽으로 -4159)
+            $sh = if ([string]$e.shift -eq "left") { -4159 } else { -4162 }
+            [void]$ws.Range([string]$e.range).Delete($sh)
+        }
+        "hideRows" { $ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.Hidden = $true }
+        "unhideRows" { $ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.Hidden = $false }
+        "hideCols" { $ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.Hidden = $true }
+        "unhideCols" { $ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.Hidden = $false }
+        "hideSheet" { $ws.Visible = 0 }
+        "unhideSheet" { $ws.Visible = -1 }
+        "groupRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.Group() }
+        "ungroupRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.Ungroup() }
+        "groupCols" { [void]$ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.Group() }
+        "ungroupCols" { [void]$ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.Ungroup() }
+        "freeze" {
+            # 틀 고정은 창이 보여야 적용된다 (관측) — 이 인스턴스의 창을 잠깐 보인다
+            $a = $wb.Application
+            $a.Visible = $true
+            $ws.Activate()
+            $w = $a.ActiveWindow
+            if ($w.FreezePanes) { $w.FreezePanes = $false }
+            [void]$ws.Range([string]$e.cell).Select()
+            $w.FreezePanes = $true
+            $a.Visible = $false
+        }
+        "unfreeze" {
+            $a = $wb.Application
+            $a.Visible = $true
+            $ws.Activate()
+            $a.ActiveWindow.FreezePanes = $false
+            $a.Visible = $false
+        }
+        "tabColor" { if ($e.color) { $ws.Tab.Color = (Get-Bgr $e.color) } else { $ws.Tab.ColorIndex = -4142 } }
+        "sortFilter" {
+            # 자동 필터의 정렬 (AutoFilter.Sort): 필터 범위의 그 열
+            $af = $ws.AutoFilter
+            $rg = $af.Range
+            $c = $ws.Range("$([string]$e.col)1").Column
+            $key = $ws.Range($ws.Cells.Item($rg.Row, $c), $ws.Cells.Item($rg.Row + $rg.Rows.Count - 1, $c))
+            $s = $af.Sort
+            $s.SortFields.Clear()
+            $order = if ($e.desc) { 2 } else { 1 }
+            $s.SortFields.Add($key, 0, $order) | Out-Null
+            $s.Header = 1
+            $s.MatchCase = [bool]$e.matchCase
+            $s.Apply()
+        }
         default { throw "모르는 편집 $($e.op)" }
     }
 }
