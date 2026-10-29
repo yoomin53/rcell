@@ -221,7 +221,6 @@ enum Cmd {
     },
     /// 암호화된 문서(OLE2 EncryptionInfo + EncryptedPackage)를 풀어 ZIP 패키지로 저장 — 리버스 엔지니어링용
     Decrypt { input: PathBuf, output: PathBuf },
-    /// 컨테이너 항목 하나를 16진수로 출력 — 리버스 엔지니어링용
     /// 인쇄 페이지: 시트마다 페이지 수, 페이지 나누기(새 페이지의 첫 행·열, m = 수동), 배율 — 한셀 COM 과 같은 꼴
     Pages { file: PathBuf },
     /// PDF 로 인쇄 (한셀 PDF 저장처럼 보이는 시트 모두, 시스템 글꼴을 부분 집합으로 넣는다)
@@ -235,6 +234,7 @@ enum Cmd {
         #[arg(long)]
         font: Vec<PathBuf>,
     },
+    /// 컨테이너 항목 하나를 16진수로 출력 — 리버스 엔지니어링용
     Hexdump {
         file: PathBuf,
         /// ZIP 파트 이름 또는 OLE2 스트림 경로 (예: /Workbook)
