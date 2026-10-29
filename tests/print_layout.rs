@@ -428,6 +428,23 @@ fn cases() -> Vec<Case> {
     });
     add("header_big", wb, 5, "48,95,142,189", "", 0);
 
+    // 첫 페이지·짝수 페이지 머리글 (PDF 비교용 — 나누기는 그대로)
+    let mut wb = base();
+    fill(&mut wb, "A1:D150");
+    wb.sheets[0].page.header_footer = Some(rcell::model::HeaderFooter {
+        different_first: true,
+        different_odd_even: true,
+        scale_with_doc: true,
+        align_with_margins: true,
+        first_header: Some("&C첫 쪽 &P".into()),
+        odd_header: Some("&L홀수 &P&R&\"함초롬바탕,굵게\"&14&A".into()),
+        even_header: Some("&R짝수 &P".into()),
+        odd_footer: Some("&C&P / &N".into()),
+        even_footer: Some("&C&8&K0000FF&P / &N".into()),
+        ..Default::default()
+    });
+    add("hf_first_even", wb, 4, "45,89,133", "", 97);
+
     // 빈 시트
     add("empty", base(), 1, "", "", 0);
 

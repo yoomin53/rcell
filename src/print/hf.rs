@@ -106,6 +106,19 @@ pub fn parse(src: &str, f: &HfFields) -> HfSections {
                     'C' => 1,
                     _ => 2,
                 };
+                // 구역마다 서식은 처음부터 (한셀: 왼쪽 구역의 &"Arial,Bold"&14 가 가운데 구역에 이어지지 않는다)
+                cur = HfRun {
+                    text: String::new(),
+                    font: None,
+                    bold: false,
+                    italic: false,
+                    size: None,
+                    underline: false,
+                    strike: false,
+                    superscript: false,
+                    subscript: false,
+                    color: None,
+                };
             }
             'P' => {
                 // &P+n / &P-n
@@ -254,6 +267,10 @@ mod tests {
         let s = parse("&\"Arial,Bold\"&14Big &Z", &fields());
         assert!(s.center[0].bold);
         assert_eq!(s.center[0].text, "Big C:\\문서\\");
+        // 구역이 바뀌면 서식은 처음부터
+        let s = parse("&L&\"Arial,Bold\"&14Big&C쪽 &P", &fields());
+        assert!(s.left[0].bold && s.left[0].size == Some(14.0));
+        assert!(!s.center[0].bold && s.center[0].size.is_none() && s.center[0].font.is_none());
         let s = parse("&8작게 &B굵게&B a&&b", &fields());
         assert_eq!(s.center.len(), 3);
         assert!(s.center[1].bold && !s.center[2].bold);

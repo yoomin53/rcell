@@ -264,12 +264,28 @@ fn hf_ops(
             1 => (left + right) / 2.0 - total / 2.0,
             _ => right - total,
         };
-        // 기준선: 머리글은 여백 + 가장 큰 글꼴의 오름, 바닥글은 여백 − 내림
-        let (asc, desc) = items.iter().fold((0.0f64, 0.0f64), |(a, d), (key, sz, _)| {
-            let (fa, fd) = fonts.ascent_descent(key);
-            (a.max(fa * sz / 1000.0), d.max(fd * sz / 1000.0))
-        });
-        let y = if header { edge + asc } else { edge - desc };
+        // 기준선: 머리글은 여백 + 가장 큰 글꼴의 오름, 바닥글은 여백 − 내림 − 줄 높이표의 남는 반 (맑은 고딕 11pt
+        // 바닥글이 내림보다 장치 8 위, 8pt 는 0 — 첫·짝수 머리글 실험)
+        let (asc, desc, lead) =
+            items
+                .iter()
+                .fold((0.0f64, 0.0f64, 0.0f64), |(a, d, l), (key, sz, r)| {
+                    let (fa, fd) = fonts.ascent_descent(key);
+                    let (fa, fd) = (fa * sz / 1000.0, fd * sz / 1000.0);
+                    let line = crate::render::FontMetrics::new(
+                        Some(&key.name),
+                        Some(r.size.unwrap_or(default_font.1)),
+                        key.bold,
+                    )
+                    .row_pt
+                        * DEV_PT;
+                    (a.max(fa), d.max(fd), l.max((line - fa - fd) / 2.0))
+                });
+        let y = if header {
+            edge + asc
+        } else {
+            edge - desc - lead.max(0.0)
+        };
         for ((key, sz, r), w) in items.iter().zip(&widths) {
             let c = r
                 .color
