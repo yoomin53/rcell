@@ -91,6 +91,8 @@ $tsv = Get-Content (Join-Path $Captures "captures.tsv") -Encoding UTF8
 $dir = ($tsv | Where-Object { $_ -like "#dir*" } | Select-Object -First 1) -replace "^#dir`t", ""
 $out = New-Object System.Collections.Generic.List[string]
 $jobs = New-Object System.Collections.Generic.List[object]
+# --zoom 이 있는 rcell 이면 확대율을 넘긴다 (옛 rcell 은 아래 CSS 로 확대율만 100 으로 — 열 폭 맞춤은 남는다)
+$hasZoom = -not $OldCli -and ((& $Rcell html --help 2>&1 | Out-String) -match "--zoom")
 $tot = @(0.0, 0.0, 0.0, 0.0, 0.0)
 foreach ($line in $tsv) {
     if ($line -like "#*" -or -not $line) { continue }
@@ -106,7 +108,9 @@ foreach ($line in $tsv) {
     } else {
         # 확대율이 작으면 그만큼 더 많은 칸을 채운다
         $fw = [int][math]::Ceiling($gw * 100 / $zoom); $fh = [int][math]::Ceiling($gh * 100 / $zoom)
-        & $Rcell html (Join-Path $dir $file) --sheet ($k - 1) --no-headers --fill ("{0}x{1}" -f $fw, $fh) -o $html
+        # 갈무리의 확대율로 그린다 (확대율 열이 없으면 갈무리 도구가 100 으로 맞춘 화면이다)
+        $za = if ($hasZoom) { @("--zoom", $zoom) } else { @() }
+        & $Rcell html (Join-Path $dir $file) --sheet ($k - 1) --no-headers --fill ("{0}x{1}" -f $fw, $fh) @za -o $html
     }
     if ($LASTEXITCODE -ne 0) { Write-Host "FAIL rcell $stem"; continue }
     # 탭·테두리(·확대율 100 이면 확대율)를 빼고 A1(본문 첫 칸)의 왼쪽 위를 그림 왼쪽 위로 민다
