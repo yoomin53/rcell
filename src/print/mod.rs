@@ -322,6 +322,22 @@ fn hf_ops(
 
 /// 통합 문서를 PDF 로 (보이는 시트들, 페이지 순서대로)
 pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
+    // 값을 저장하지 않은 수식이 있으면 계산해서 찍는다 (한셀은 열 때 계산한 값을 인쇄한다 — 말뭉치 probe_fn*:
+    // 값 없는 수식 32 개). 저장된 값이 있으면 그 값 (한셀이 저장한 문서의 값은 한셀이 계산한 것)
+    let missing = wb.sheets.iter().any(|s| {
+        s.cells
+            .iter()
+            .any(|c| c.formula.is_some() && c.value == crate::model::CellValue::Empty)
+    });
+    let calculated;
+    let wb = if missing {
+        let mut w = wb.clone();
+        crate::calc::recalculate(&mut w);
+        calculated = w;
+        &calculated
+    } else {
+        wb
+    };
     let fonts = FontSet::new(db);
     let sheets: Vec<usize> = opts.sheets.clone().unwrap_or_else(|| {
         wb.sheets
