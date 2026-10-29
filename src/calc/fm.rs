@@ -3,11 +3,13 @@
 //
 // rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
 
-//! 부동소수 초월 함수 (`libm` 크레이트, 순수 Rust).
+//! 부동소수 초월 함수 (순수 Rust: [`hcmath`] — 한셀이 부르는 32비트 윈도 C 런타임과 같은 값, 나머지는 `libm`).
 //!
 //! 표준 라이브러리의 `f64::sin` 같은 메서드는 플랫폼 C 라이브러리를 부른다. windows-gnu 의 것은 x87
 //! 명령(fsin …)이라 π 근처에서 틀린다: SIN(PI()) = 1.2246063538e-16, 한셀(MSVC 런타임)은
 //! 1.2246467991e-16 (함수 대조 실험). 계산 엔진은 이 트레이트의 메서드만 쓴다.
+
+use super::hcmath;
 
 pub trait Fm: Copy {
     fn msin(self) -> f64;
@@ -33,49 +35,49 @@ pub trait Fm: Copy {
 
 impl Fm for f64 {
     fn msin(self) -> f64 {
-        libm::sin(self)
+        hcmath::sin(self)
     }
     fn mcos(self) -> f64 {
-        libm::cos(self)
+        hcmath::cos(self)
     }
     fn mtan(self) -> f64 {
-        libm::tan(self)
+        hcmath::tan(self)
     }
     fn masin(self) -> f64 {
-        libm::asin(self)
+        hcmath::asin(self)
     }
     fn macos(self) -> f64 {
-        libm::acos(self)
+        hcmath::acos(self)
     }
     fn matan(self) -> f64 {
-        libm::atan(self)
+        hcmath::atan(self)
     }
     fn matan2(self, x: f64) -> f64 {
-        libm::atan2(self, x)
+        hcmath::atan2(self, x)
     }
     fn mexp(self) -> f64 {
-        libm::exp(self)
+        hcmath::exp(self)
     }
     fn mln(self) -> f64 {
-        libm::log(self)
+        hcmath::ln(self)
     }
     fn mlog10(self) -> f64 {
-        libm::log10(self)
+        hcmath::log10(self)
     }
     fn mpow(self, y: f64) -> f64 {
-        libm::pow(self, y)
+        hcmath::pow(self, y)
     }
     fn mpowi(self, n: i32) -> f64 {
-        libm::pow(self, n as f64)
+        hcmath::pow(self, n as f64)
     }
     fn msinh(self) -> f64 {
-        libm::sinh(self)
+        hcmath::sinh(self)
     }
     fn mcosh(self) -> f64 {
-        libm::cosh(self)
+        hcmath::cosh(self)
     }
     fn mtanh(self) -> f64 {
-        libm::tanh(self)
+        hcmath::tanh(self)
     }
     fn masinh(self) -> f64 {
         libm::asinh(self)

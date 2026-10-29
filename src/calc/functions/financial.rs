@@ -395,7 +395,16 @@ pub fn ipmt(r: f64, per: f64, n: f64, pv: f64, fv_: f64, t: f64) -> Result<f64, 
     if per == 1.0 && t == 1.0 {
         return Ok(0.0);
     }
-    let mut i = fv(r, per - 1.0, p, pv, t) * r;
+    // 미래 가치를 −(pv·g + 지급·(1+rt)·((g−1)/r)) 차례로 (FV 와 다른 괄호 — 기간이 횟수를 넘을 때의 잔차
+    // IPMT(0.05,11,10,1000) = −1.1368683772161604E-14 가 이 차례로 같다, 대조 실험 cfin·cmisc)
+    let n1 = per - 1.0;
+    let base = if r == 0.0 {
+        fv(r, n1, p, pv, t)
+    } else {
+        let g = (1.0 + r).mpow(n1);
+        -(pv * g + p * (1.0 + r * t) * ((g - 1.0) / r))
+    };
+    let mut i = base * r;
     if t == 1.0 {
         i /= 1.0 + r;
     }
@@ -1194,6 +1203,25 @@ fn accrint(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let d1904 = ctx.date1904();
+    // 계산 방법(여덟째 인수)을 주면 기준과 관계없이 30/360(US) 일수: 참이면 발행일부터, 거짓이면 발행일과
+    // (첫 이자일 − 이자 기간) 가운데 늦은 날부터 결산일까지 (결산일이 앞이면 음수). 주지 않으면 기준대로
+    // (ACCRINT(39508,39691,39569,0.1,1000,4,1) = 16.576, …,4,1,TRUE) = 16.667, …,4,1,FALSE) = −8.056, 대조 실험 c3)
+    if a.len() >= 8 {
+        let by_issue = try_v!(super::bool_or(ctx, a, 7, true));
+        let start = if by_issue {
+            iss
+        } else {
+            let (y, m, d) = ymd_from_serial(first, d1904).unwrap_or((1900, 1, 1));
+            let total = y * 12 + m as i64 - 1 - (12.0 / fr) as i64;
+            let (ny, nm) = (total.div_euclid(12), (total.rem_euclid(12) + 1) as u32);
+            let nd = d.min(days_in_month(ny, nm));
+            serial_from_ymd(ny, nm as i64, nd as i64, d1904)
+                .unwrap_or(iss)
+                .max(iss)
+        };
+        let days = try_v!(days_30_360(start, set, true, d1904).ok_or(ErrorKind::Num));
+        return num(par * rate * days / 360.0);
+    }
     if b == 1 {
         return num(par * rate / fr * accrint_periods(iss, first, set, fr, d1904));
     }
@@ -1264,22 +1292,26 @@ fn amor(ctx: &mut Ctx, a: &[Value], degressive: bool) -> Value {
     if period == 0.0 {
         return num(dep);
     }
+    // 마지막 기간은 floor(수명) − 1: 그 앞 기간에 남은 장부가의 절반, 마지막 기간에 남은 장부가 전부, 그 뒤는 0.
+    // 마지막 기간 앞까지는 잔존가 아래로 내려가면 그 기간부터 0 (AMORDEGRC(1000,…,100,2,0.3,1) = 438,
+    // (…,3,0.25,1) = 280, (2400,…,300,5,0.15,1) = 0, 대조 실험 financial·cmisc)
+    let last = life.floor() - 1.0;
     let mut p = 1.0;
-    let n = life.ceil();
     while p <= period {
-        let remaining = n - p;
-        if remaining < 0.0 {
-            dep = 0.0;
-        } else if remaining == 1.0 {
-            dep = round(book * 0.5);
-        } else if remaining == 0.0 {
-            dep = book - salv;
-        } else {
-            dep = round(book * r);
-        }
-        // 잔존가 아래로 내려가면 그 기간부터 0 (AMORDEGRC(…,5,0.15,1) = 0, 대조 실험 financial)
-        if book - dep < salv {
+        if p > last {
             return Value::Number(0.0);
+        }
+        if p == last {
+            dep = book;
+        } else {
+            dep = if p == last - 1.0 {
+                round(book * 0.5)
+            } else {
+                round(book * r)
+            };
+            if book - dep < salv {
+                return Value::Number(0.0);
+            }
         }
         book -= dep;
         p += 1.0;

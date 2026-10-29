@@ -17,7 +17,7 @@ use crate::calc::value::{self, Area, Array, ErrorKind, MAX_COLS, MAX_ROWS, Value
 const RAV: &[Arg] = &[Arg::RA, Arg::V, Arg::V, Arg::V];
 const VRAV: &[Arg] = &[Arg::V, Arg::RA, Arg::V, Arg::V];
 const VRARA: &[Arg] = &[Arg::V, Arg::RA, Arg::RA];
-const VRARAV: &[Arg] = &[Arg::V, Arg::RA, Arg::RA, Arg::V, Arg::V, Arg::V];
+const VRARAV: &[Arg] = &[Arg::RA, Arg::RA, Arg::RA, Arg::V, Arg::V, Arg::V];
 const RVVVV: &[Arg] = &[Arg::R, Arg::V, Arg::V, Arg::V, Arg::V];
 
 pub const FNS: &[FnSpec] = &[
@@ -421,6 +421,14 @@ fn lookup(ctx: &mut Ctx, a: &[Value]) -> Value {
 }
 
 fn xlookup(ctx: &mut Ctx, a: &[Value]) -> Value {
+    // 찾을 값은 원소마다 계산하지 않는다: 배열은 첫 원소, 배열 수식 안의 여러 칸 범위는 #VALUE!
+    // ({XLOOKUP({1;5;9},…)} 의 세 칸이 모두 1 의 결과, 대조 실험 carr·cmisc)
+    if ctx.array_mode
+        && let Value::Ref(r) = &a[0]
+        && (r.len() > 1 || r.iter().any(|x| !x.is_cell()))
+    {
+        return Value::Error(ErrorKind::Value);
+    }
     let x = try_v!(scalar_key(ctx, &a[0]));
     let la = try_v!(lookup_array(ctx, &a[1]));
     let vals = try_v!(vector(&la));
@@ -539,11 +547,12 @@ fn offset(ctx: &mut Ctx, a: &[Value]) -> Value {
     };
     let dr = try_v!(num_arg(ctx, a, 1)).trunc();
     let dc = try_v!(num_arg(ctx, a, 2)).trunc();
-    let h = match opt(a, 3) {
+    // 비운 높이·너비는 생략과 같다 (SUM(OFFSET(Data!A1:A3,1,0,,2)) = A2:B4 의 합, 대조 실험 lookup)
+    let h = match super::given(a, 3) {
         Some(v) => try_v!(ctx.num(v)).trunc(),
         None => area.rows() as f64,
     };
-    let w = match opt(a, 4) {
+    let w = match super::given(a, 4) {
         Some(v) => try_v!(ctx.num(v)).trunc(),
         None => area.cols() as f64,
     };
