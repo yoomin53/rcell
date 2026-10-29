@@ -102,6 +102,35 @@ pub struct Geometry {
     pub row_pt: Vec<f64>,
 }
 
+/// 행 0..=`max_r` 의 넘치는 글자가 닿는 가장 오른쪽 열 (넘치는 글자가 없으면 None).
+/// 한셀 인쇄 범위는 넘친 글자까지 넣는다 (긴 문자열 하나가 A 열에서 117 열까지 넘친 문서: 130 페이지)
+pub fn overflow_end_col(wb: &Workbook, sheet: &Sheet, max_r: u32) -> Option<u32> {
+    if !sheet
+        .cells
+        .iter()
+        .any(|c| c.r.row <= max_r && matches!(c.value, CellValue::Text(_)))
+    {
+        return None;
+    }
+    let (lay_r, lay_c) = (max_r + 1, 16_384);
+    let ctx = Views::new(wb, sheet, lay_r, lay_c);
+    let mut views = HashMap::new();
+    for c in sheet.cells.iter().filter(|c| c.r.row < lay_r) {
+        if let Some(v) = ctx.view(c.r.row, c.r.col) {
+            views.insert((c.r.row, c.r.col), v);
+        }
+    }
+    let lay = &ctx.lay;
+    let blocked = |r: u32, c: u32| -> bool {
+        lay.covered.contains(&(r, c))
+            || lay.span.contains_key(&(r, c))
+            || views.get(&(r, c)).is_some_and(|v| v.has_value())
+            || ctx.cells.get(&(r, c)).is_some_and(|x| x.formula.is_some())
+    };
+    let ov = overflow_spans(lay, &views, &blocked, lay_c);
+    (!ov.span.is_empty()).then_some(ov.max_col)
+}
+
 /// 시트의 화면 배치 (행 `max_rows`, 열 `max_cols` 개). 한셀 화면과 같은 규칙으로 계산한다
 pub fn sheet_geometry(wb: &Workbook, sheet: &Sheet, max_rows: u32, max_cols: u32) -> Geometry {
     let lay = layout::layout(wb, sheet, max_rows, max_cols);

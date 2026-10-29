@@ -42,8 +42,8 @@ $count = 0
 function Emit([string]$line) { $script:writer.WriteLine($line); $script:count++ }
 Emit "#dir`t$((Resolve-Path $InDir).Path)"
 $files = Get-ChildItem $InDir -File -Filter $Filter |
-    Where-Object { $_.Name -notmatch '\.(as|rcell|bin)\.' -and (-not $Only -or $_.Name -match $Only) } | Sort-Object Name
-# 바이너리 판은 한셀 COM 이 다시 열지 못한다 (.bin. 은 뺀다)
+    Where-Object { $_.Name -notmatch '\.(as|rcell|bin)\.' -and -not $_.Name.StartsWith('~$') -and (-not $Only -or $_.Name -match $Only) } | Sort-Object Name
+# 바이너리 판은 한셀 COM 이 다시 열지 못한다 (.bin. 은 뺀다). ~$ 로 시작하는 것은 한셀 잠금 파일
 function NewApp {
     $a = New-Object -ComObject HCell.Application
     try { $a.Visible = $false } catch {}

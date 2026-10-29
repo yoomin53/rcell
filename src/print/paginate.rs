@@ -225,7 +225,7 @@ fn visible_style(wb: &Workbook, style: u32) -> bool {
     fill || border
 }
 
-/// 인쇄 범위의 끝 (행, 열 — 0부터): 값이 있거나 테두리·채우기가 있는 칸, 그리기 개체. 없으면 None.
+/// 인쇄 범위의 끝 (행, 열 — 0부터): 값이 있거나 테두리·채우기가 있는 칸, 그리기 개체, 넘친 글자. 없으면 None.
 /// 한셀의 인쇄 범위는 늘 A1 에서 시작하고, 보이지 않는 서식(글꼴·표시 형식만)의 빈 칸은 넣지 않는다
 /// (서식 파일 Basic_Invoice 의 P15 — 쓰는 범위 B2:P49 이지만 인쇄는 A:I)
 pub fn used_end(wb: &Workbook, sheet: &Sheet) -> Option<(u32, u32)> {
@@ -245,7 +245,10 @@ pub fn used_end(wb: &Workbook, sheet: &Sheet) -> Option<(u32, u32)> {
         let to = s.anchor.to.unwrap_or(s.anchor.from);
         add(to.row, to.col);
     }
-    end
+    // 넘친 글자가 닿는 열까지
+    let (r, c) = end?;
+    let c = render::overflow_end_col(wb, sheet, r).map_or(c, |o| o.max(c));
+    Some((r, c))
 }
 
 /// 시트의 인쇄 설정 (없는 값은 한셀 기본: A4, 여백 왼쪽·오른쪽 19mm·위·아래 25mm·머리글 13mm)
@@ -473,7 +476,11 @@ pub fn sheet_print(wb: &Workbook, sheet_index: usize) -> SheetPrint {
         .unwrap_or(0)
         .min(16_383);
     // 전체 행·열을 가리키는 영역은 쓰는 범위로 줄인다
-    let (ur, uc) = used_end(wb, sheet).unwrap_or((0, 0));
+    let (ur, uc) = if max_r >= 1_048_575 || max_c >= 16_383 {
+        used_end(wb, sheet).unwrap_or((0, 0))
+    } else {
+        (0, 0)
+    };
     let max_r = if max_r >= 1_048_575 { ur } else { max_r };
     let max_c = if max_c >= 16_383 { uc } else { max_c };
     let mut s = s;

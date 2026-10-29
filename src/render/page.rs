@@ -470,6 +470,32 @@ fn page_body(
             }
         }
     }
+    // 페이지 밖 칸에서 넘쳐 들어오는 글자 (한셀은 넘친 글자를 옆 페이지에 이어 찍는다)
+    let mut spill: Vec<(u32, u32)> = Vec::new();
+    for (&(r, c), &(ol, or)) in &ov.span {
+        if !rows_set.contains(&r) || cols_set.contains(&c) {
+            continue;
+        }
+        let reach = |forward: bool, want: u32| -> bool {
+            let (mut acc, mut k) = (0, c);
+            while acc < want {
+                k = match (forward, k.checked_sub(1)) {
+                    (true, _) if k + 1 < lay_c => k + 1,
+                    (false, Some(p)) => p,
+                    _ => break,
+                };
+                if cols_set.contains(&k) {
+                    return true;
+                }
+                acc += lay.col_w(k);
+            }
+            false
+        };
+        if reach(true, or) || reach(false, ol) {
+            spill.push((r, c));
+        }
+    }
+    spill.sort_unstable();
     for m in merge_starts {
         if !draw.contains(&m) {
             draw.push(m);
@@ -555,7 +581,7 @@ fn page_body(
     }
     // 3. 글자
     let theme = &ctx.theme;
-    for &(r, c) in &draw {
+    for &(r, c) in draw.iter().chain(&spill) {
         let Some(v) = views.get(&(r, c)) else {
             continue;
         };
@@ -613,7 +639,18 @@ fn page_body(
         let px = frame.px;
         let pad_l = (px + 0.5).floor();
         // 왼쪽 맞춤 글자 자리: round_half_even((화면 왼쪽 + 2px + 들여쓰기) × z) − 1 px (장치 단위로)
-        let x100 = |col: u32| frame.col_x100.iter().find(|c| c.0 == col).map(|c| c.1);
+        let x100 = |col: u32| -> Option<f64> {
+            if let Some(c) = frame.col_x100.iter().find(|c| c.0 == col) {
+                return Some(c.1);
+            }
+            // 페이지 밖 열 (넘쳐 들어오는 글자): 가장 가까운 뒤쪽 열에서 화면 폭을 뺀다
+            let &(j, at) = frame
+                .col_x100
+                .iter()
+                .filter(|c| c.0 > col)
+                .min_by_key(|c| c.0)?;
+            Some(at - (col..j).map(|k| lay.col_w(k) as f64).sum::<f64>())
+        };
         let left_at = |col: u32, extra: f64| -> Option<f64> {
             let v = (x100(col)? + 2.0 + extra) * frame.zoom as f64 / 100.0;
             let r = v.round();
@@ -682,7 +719,14 @@ fn page_body(
             }
         };
         let need_clip = !(v.wrap || ol > 0 || or > 0);
-        if need_clip {
+        // 페이지 안 칸의 넘친 글자는 페이지 영역 밖(여백)까지 넘친 범위만큼 찍힌다 — 한셀: B1 의 긴 글자가 1 페이지
+        // 오른쪽 여백을 지나 종이 끝까지. 옆 페이지로 넘쳐 들어온 글자는 페이지 영역에서 자른다
+        let escape =
+            !need_clip && cols_set.contains(&c) && (bx1 - SHIFT > area.2 || bx0 - SHIFT < area.0);
+        if escape {
+            ops.push(Op::Unclip);
+        }
+        if need_clip || escape {
             ops.push(Op::Clip {
                 x0: bx0 - SHIFT,
                 y0: y0 - SHIFT,
@@ -719,8 +763,16 @@ fn page_body(
                 angle: 0.0,
             });
         }
-        if need_clip {
+        if need_clip || escape {
             ops.push(Op::Unclip);
+        }
+        if escape {
+            ops.push(Op::Clip {
+                x0: area.0,
+                y0: area.1,
+                x1: area.2,
+                y1: area.3,
+            });
         }
     }
     // 4. 테두리 (병합은 가장자리 칸들의 테두리, 넘친 글자가 지나가는 세로 경계는 지운다)

@@ -458,6 +458,27 @@ fn cases() -> Vec<Case> {
         headings: false,
     });
     add("centered", wb, 5, "45,89,133,177", "", 0);
+
+    // 넘친 글자까지 인쇄 범위 (값이 있는 칸에서 멈춘다)
+    for (n, stop, pages, v) in [
+        ("overflow", false, 4, "10,19,28"),
+        ("overflow_stop", true, 1, ""),
+    ] {
+        let mut wb = base();
+        fill(&mut wb, "A3:B20");
+        let s = &mut wb.sheets[0];
+        s.cells.push(rcell::model::Cell {
+            r: CellRef { row: 0, col: 1 },
+            style: 0,
+            value: CellValue::Text("가나다라마바사아자차카타파하".repeat(11)),
+            formula: None,
+        });
+        s.cells.sort_by_key(|c| (c.r.row, c.r.col));
+        if stop {
+            fill(&mut wb, "H1:H1");
+        }
+        add(n, wb, pages, "", v, 0);
+    }
     out
 }
 
@@ -520,6 +541,10 @@ fn oracle() {
             continue;
         }
         let (file, k, pages, h, v) = (p[0], p[1].parse::<usize>().unwrap(), p[3], p[4], p[5]);
+        // 한셀이 열어 둔 문서의 잠금 파일
+        if file.starts_with("~$") {
+            continue;
+        }
         if cache.as_ref().is_none_or(|c| c.0 != file) {
             match rcell::open(dir.join(file)) {
                 Ok(wb) => cache = Some((file.to_string(), wb)),
@@ -537,7 +562,13 @@ fn oracle() {
             list(&sp.h_breaks),
             list(&sp.v_breaks),
         );
-        if got != (pages.to_string(), h.to_string(), v.to_string()) {
+        // 한셀 COM 은 나누기 위치를 빈 값으로 줄 때가 있다 (열 A 하나가 한 페이지일 때 첫 VPageBreak) — 그 자리는 묻지 않는다
+        let same_list = |ours: &str, theirs: &str| {
+            let (a, b): (Vec<&str>, Vec<&str>) =
+                (ours.split(',').collect(), theirs.split(',').collect());
+            a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| y.is_empty() || x == y)
+        };
+        if got.0 != pages || !same_list(&got.1, h) || !same_list(&got.2, v) {
             bad.push(format!(
                 "{file} {k}: rcell {got:?} 한셀 ({pages}, {h}, {v})"
             ));
