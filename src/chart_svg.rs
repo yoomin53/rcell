@@ -341,8 +341,7 @@ impl Font {
         if let Some(f) = &self.family {
             let _ = write!(
                 a,
-                " font-family=\"'{}','맑은 고딕','Malgun Gothic',sans-serif\"",
-                f.replace(['\'', '"', '<', '>', '&'], "")
+                " font-family=\"{f},'맑은 고딕','Malgun Gothic',sans-serif\""
             );
         }
         a
@@ -500,13 +499,23 @@ impl Ctx<'_> {
         if let Some(c) = cf.fill.as_ref().and_then(|x| self.fill(x)).flatten() {
             f.color = c.0;
         }
-        if let Some(n) = cf
-            .ea
-            .as_ref()
-            .or(cf.latin.as_ref())
+        // 라틴 글자는 latin 글꼴, 한글은 ea 글꼴 (한셀이 COM 으로 만든 차트: latin Calibri·ea 맑은 고딕 — 숫자가 Calibri)
+        let mut list = String::new();
+        for n in [cf.latin.as_ref(), cf.ea.as_ref()]
+            .into_iter()
+            .flatten()
             .filter(|n| !n.is_empty() && !n.starts_with('+'))
         {
-            f.family = Some(n.clone());
+            let n = n.replace(['\'', '"', '<', '>', '&'], "");
+            if !list.contains(&format!("'{n}'")) {
+                if !list.is_empty() {
+                    list.push(',');
+                }
+                let _ = write!(list, "'{n}'");
+            }
+        }
+        if !list.is_empty() {
+            f.family = Some(list);
         }
     }
 
@@ -2550,7 +2559,6 @@ fn cat_text(c: &str, fmt: Option<&str>) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// 묶은 막대 하나의 가운데 (항목 축 좌표 — draw_bars 와 같은 자리)
 fn bar_center(
     g: &Group,
@@ -2583,6 +2591,7 @@ fn bar_center(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_bars(
     out: &mut Svg,
     g: &Group,
@@ -3299,11 +3308,11 @@ fn poly_fit(xs: &[f64], ys: &[f64], d: usize, intercept: Option<f64>) -> Option<
     let mut a = vec![vec![0.0; n + 1]; n];
     for (x, y) in xs.iter().zip(ys) {
         let y = y - intercept.unwrap_or(0.0);
-        for r in 0..n {
-            for c in 0..n {
-                a[r][c] += x.powi((r + start + c + start) as i32);
+        for (r, row) in a.iter_mut().enumerate() {
+            for (c, v) in row.iter_mut().take(n).enumerate() {
+                *v += x.powi((r + start + c + start) as i32);
             }
-            a[r][n] += y * x.powi((r + start) as i32);
+            row[n] += y * x.powi((r + start) as i32);
         }
     }
     for i in 0..n {
@@ -3312,11 +3321,12 @@ fn poly_fit(xs: &[f64], ys: &[f64], d: usize, intercept: Option<f64>) -> Option<
         if a[i][i].abs() < 1e-12 {
             return None;
         }
-        for r in 0..n {
+        let pivot = a[i].clone();
+        for (r, row) in a.iter_mut().enumerate() {
             if r != i {
-                let f = a[r][i] / a[i][i];
-                for c in i..=n {
-                    a[r][c] -= f * a[i][c];
+                let f = row[i] / pivot[i];
+                for (v, pv) in row.iter_mut().zip(&pivot).skip(i) {
+                    *v -= f * pv;
                 }
             }
         }
@@ -3436,6 +3446,7 @@ fn signed(v: f64) -> String {
 }
 
 /// 계열의 추세선. `xs`·`ys` 는 맞출 점 (항목 차트는 x = 1, 2, …), `to_screen` 은 (x, 값) → 화면
+#[allow(clippy::too_many_arguments)]
 fn draw_trendlines(
     out: &mut Svg,
     s: &ChartSeries,
