@@ -1630,16 +1630,17 @@ fn draw_axis_chart(
     } else {
         0.0
     };
-    // 원근 3차원 (rAngAx 0): 상자를 돌려 그린다
-    if !legacy
-        && first.three_d
+    // 원근 3차원 (rAngAx 0): 상자를 돌려 그린다. 레거시 3차원(VtChart)도 원근 상자로 (회전·높이는 VtChartPlot)
+    if first.three_d
         && !horizontal
         && !xy
         && matches!(first.kind, "bar" | "line" | "area")
-        && ch
-            .view3d
-            .as_ref()
-            .is_some_and(|v| v.r_ang_ax == Some(false))
+        && ((legacy && !matches!(first.grouping, "stacked" | "percentStacked"))
+            || (!legacy
+                && ch
+                    .view3d
+                    .as_ref()
+                    .is_some_and(|v| v.r_ang_ax == Some(false))))
         && ch
             .plot_layout
             .as_ref()
@@ -2794,8 +2795,12 @@ struct Persp<'a> {
 /// 맞춘 값 — 평균 오차 2.5px): 가로 1 × 높이 0.675 × 깊이 0.163 상자를 세로축으로 rotY, 가로축으로 rotX 돌리고 가로의
 /// 2.46 배 거리에서 원근으로 본다. 원근값·깊이 비율은 두 표본에서 상자를 바꾸지 않는다
 const BOX3D: (f64, f64, f64) = (0.675, 0.163, 2.458);
+/// 레거시(VtChart) 3차원 상자: 높이가 가로와 같다 (차트 종류 실험의 3차원 세로 막대)
+const LEGACY_BOX3D: (f64, f64, f64) = (1.0, 0.163, 2.458);
 
 struct View3 {
+    /// 상자 (높이, 깊이, 보는 거리) — 가로 1 기준
+    bx: (f64, f64, f64),
     sa: f64,
     ca: f64,
     sb: f64,
@@ -2808,7 +2813,7 @@ struct View3 {
 impl View3 {
     /// 상자 좌표 (x 0..1 항목, y 0..높이 값, z 0..깊이 앞 → 뒤) → 크기를 맞추기 전 화면 좌표 (y 위로)
     fn raw(&self, x: f64, y: f64, z: f64) -> (f64, f64) {
-        let (hh, dd, l) = BOX3D;
+        let (hh, dd, l) = self.bx;
         let (x, y, z) = (x - 0.5, y - hh / 2.0, z - dd / 2.0);
         let xx = x * self.cb + z * self.sb;
         let zz = -x * self.sb + z * self.cb;
@@ -2837,10 +2842,22 @@ impl View3 {
 /// 모서리에 항목 축을 그린다. 막대는 앞면(계열 색)·윗면(× 0.97)·옆면(× 0.65), 깊이는 상자 깊이 / (1 + 깊이 간격)
 fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &Persp) {
     let v3 = ch.view3d.as_ref();
-    let rx = f64::from(v3.and_then(|v| v.rot_x).unwrap_or(15)).to_radians();
-    let ry = f64::from(v3.and_then(|v| v.rot_y).unwrap_or(20)).to_radians();
-    let (hh, dd, _) = BOX3D;
+    // 레거시: VtChart 회전은 정면이 90 (70 → 오른쪽에서 20도), 높이는 그대로
+    let (rx, ry) = match &ch.legacy {
+        Some(l) => (l.elevation.to_radians(), (90.0 - l.rotation).to_radians()),
+        None => (
+            f64::from(v3.and_then(|v| v.rot_x).unwrap_or(15)).to_radians(),
+            f64::from(v3.and_then(|v| v.rot_y).unwrap_or(20)).to_radians(),
+        ),
+    };
+    let bx = if ch.legacy.is_some() {
+        LEGACY_BOX3D
+    } else {
+        BOX3D
+    };
+    let (hh, dd, _) = bx;
     let mut v = View3 {
+        bx,
         sa: rx.sin(),
         ca: rx.cos(),
         sb: ry.sin(),
@@ -2879,7 +2896,11 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
         p.val_ax,
         (a0 - a1).abs(),
         true,
-        TickRule::Xml { room: false },
+        if ch.legacy.is_some() {
+            TickRule::Legacy { room: false }
+        } else {
+            TickRule::Xml { room: false }
+        },
     );
     let yv = |val: f64| sc.t(val).clamp(0.0, 1.0) * hh;
     let gray = |sp: Option<&ChartShapeProps>| cx.line_of(sp, Some((AXIS_GRAY, 1.0)));
