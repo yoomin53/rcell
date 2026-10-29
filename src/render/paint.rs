@@ -6,7 +6,8 @@
 //! 칸 채우기(무늬 18종, 그라데이션)와 테두리를 한셀 화면과 같은 픽셀로 그린다
 //! (화면 갈무리 대조 실험, docs/format/screen.md).
 //!
-//! - 무늬는 시트 원점(A1 왼쪽 위)에 맞춘 4×4·8×4 타일이다. 색을 생략하면 전경 검정, 배경 흰색
+//! - 무늬는 칸마다 그 칸의 왼쪽 위(위·왼쪽 격자선 다음 픽셀)에 맞춘 4×4·8×4 타일이다 (테두리 확대 실험: 32px 행의
+//!   가로줄 무늬가 행 위에서 2·3 번째 줄). 색을 생략하면 전경 검정, 배경 흰색
 //!   (단, 단색 채우기에 전경색이 없으면 흰색).
 //! - 그라데이션: 직선은 칸을 단위 정사각형으로 본 각도(45° = 왼쪽 위 → 오른쪽 아래 꼭짓점),
 //!   경로는 안쪽 사각형(left/right/top/bottom)에서 바깥으로 퍼지는 사각 그라데이션.
@@ -60,20 +61,21 @@ fn pattern_tile(kind: &str) -> Option<Tile> {
     Some(t)
 }
 
-/// SVG 를 CSS url() 로 (# 등 몇 글자만 바꾼다)
+/// SVG 를 CSS url() 로 (# 등 몇 글자만 바꾼다). 따옴표는 모두 %27 로 — 결과를 `style="…"` 속성에
+/// 그대로 넣으므로 큰따옴표가 있으면 속성이 끊긴다
 pub fn svg_url(svg: &str) -> String {
     let mut s = String::with_capacity(svg.len() + 32);
     for c in svg.chars() {
         match c {
             '#' => s.push_str("%23"),
-            '"' => s.push('\''),
+            '"' | '\'' => s.push_str("%27"),
             '<' => s.push_str("%3C"),
             '>' => s.push_str("%3E"),
             '\n' => {}
             c => s.push(c),
         }
     }
-    format!("url(\"data:image/svg+xml,{s}\")")
+    format!("url('data:image/svg+xml,{s}')")
 }
 
 /// 채우기를 그린 결과
@@ -83,6 +85,8 @@ pub struct FillPaint {
     pub css: String,
     /// 이웃 격자선 자리를 덮을 대표 색 (#RRGGBB)
     pub color: Option<String>,
+    /// 무늬·그라데이션: 칸 자신의 오른쪽·아래 격자선 자리도 같은 무늬로 (한셀 화면 — 무늬가 격자선 자리를 지나간다)
+    pub tiled: bool,
 }
 
 fn col(c: Option<&Color>, theme: &Theme) -> Option<String> {
@@ -105,6 +109,7 @@ pub fn fill_css(fill: &Fill, theme: &Theme, origin: (u32, u32)) -> Option<FillPa
         return Some(FillPaint {
             css: format!("background:{c};"),
             color: Some(c),
+            tiled: false,
         });
     }
     let fg = fg.unwrap_or_else(|| "#000000".into());
@@ -113,6 +118,7 @@ pub fn fill_css(fill: &Fill, theme: &Theme, origin: (u32, u32)) -> Option<FillPa
         return Some(FillPaint {
             css: format!("background:{fg};"),
             color: Some(fg),
+            tiled: false,
         });
     };
     let mut svg = format!(
@@ -128,7 +134,8 @@ pub fn fill_css(fill: &Fill, theme: &Theme, origin: (u32, u32)) -> Option<FillPa
         }
     }
     svg.push_str("'/></svg>");
-    let (ox, oy) = (origin.0 % w, origin.1 % h);
+    let _ = origin;
+    let (ox, oy) = (0, 0);
     // 대표 색: 전경이 반 넘게 차지하면 전경, 아니면 배경
     let rep = if dark * 2 > w * h { fg } else { bg.clone() };
     Some(FillPaint {
@@ -137,6 +144,7 @@ pub fn fill_css(fill: &Fill, theme: &Theme, origin: (u32, u32)) -> Option<FillPa
             svg_url(&svg)
         ),
         color: Some(rep),
+        tiled: true,
     })
 }
 
@@ -215,6 +223,7 @@ fn gradient_css(g: &GradientFill, theme: &Theme) -> Option<FillPaint> {
             svg_url(&svg)
         ),
         color: rep,
+        tiled: true,
     })
 }
 
@@ -348,31 +357,45 @@ fn offsets(e: &Edge) -> (&'static [i64], &'static [u32]) {
 
 /// 칸의 테두리를 그리는 SVG. 칸 박스는 w×h px(오른쪽·아래 끝 픽셀이 격자선 자리),
 /// SVG 는 칸 왼쪽 위에서 (-2,-2) 만큼 밖으로 나가 (w+3)×(h+3) 을 덮는다.
-pub fn borders_svg(b: &CellBorders, w: u32, h: u32) -> String {
+/// 이중선의 가운데 틈(경계 픽셀)은 `gap` 색으로 칠한다 (위·아래·왼쪽·오른쪽 차례) — 그 자리를 덮는 칸 채우기, 없으면
+/// 흰색 (한셀 화면: 격자선이 보이지 않는다, 표 스타일 실험의 요약 행 위 이중선)
+pub fn borders_svg(b: &CellBorders, w: u32, h: u32, gap: &[String; 4]) -> String {
     let (w, h) = (w as i64, h as i64);
     // SVG 좌표의 경계 픽셀: 왼쪽 = 이전 칸의 격자선, 오른쪽 = 이 칸의 마지막 픽셀
     let (bl, br, bt, bb) = (1i64, w + 1, 1i64, h + 1);
     let mut s = String::new();
     if let Some(e) = &b.top {
         let (o, d) = offsets(e);
+        if o.len() == 2 && o[0] == -1 && o[1] == 1 {
+            hline(&mut s, bt, bl, br, &[], &gap[0]);
+        }
         for &k in o {
             hline(&mut s, bt + k, bl, br, d, &e.color);
         }
     }
     if let Some(e) = &b.bottom {
         let (o, d) = offsets(e);
+        if o.len() == 2 && o[0] == -1 && o[1] == 1 {
+            hline(&mut s, bb, bl, br, &[], &gap[1]);
+        }
         for &k in o {
             hline(&mut s, bb + k, bl, br, d, &e.color);
         }
     }
     if let Some(e) = &b.left {
         let (o, d) = offsets(e);
+        if o.len() == 2 && o[0] == -1 && o[1] == 1 {
+            vline(&mut s, bl, bt, bb, &[], &gap[2]);
+        }
         for &k in o {
             vline(&mut s, bl + k, bt, bb, d, &e.color);
         }
     }
     if let Some(e) = &b.right {
         let (o, d) = offsets(e);
+        if o.len() == 2 && o[0] == -1 && o[1] == 1 {
+            vline(&mut s, br, bt, bb, &[], &gap[3]);
+        }
         for &k in o {
             vline(&mut s, br + k, bt, bb, d, &e.color);
         }
@@ -452,7 +475,13 @@ mod tests {
             ..Default::default()
         };
         // 72×22 칸의 아래 굵은 선: 경계(y=23) ±1, 왼쪽 경계(x=1)부터 오른쪽 경계(x=73)까지
-        let s = borders_svg(&b, 72, 22);
+        let white = "#FFFFFF".to_string();
+        let s = borders_svg(
+            &b,
+            72,
+            22,
+            &[white.clone(), white.clone(), white.clone(), white],
+        );
         assert!(s.contains("<rect x='1' y='22' width='73' height='1'"));
         assert!(s.contains("<rect x='1' y='24' width='73' height='1'"));
     }

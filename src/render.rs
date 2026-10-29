@@ -82,6 +82,23 @@ impl Default for Options {
 /// 들여쓰기 한 단계 (px): 한셀 1134 HWPUNIT = 4mm (hs:parashape leftMargin)
 pub(crate) const INDENT_PX: f64 = 1134.0 / 7200.0 * 96.0;
 
+/// 들여쓰기 단계: `indent` 가 없으면 문단 모양 여백 (한셀은 균등 분할의 들여쓰기를 `hs:parashape` 의
+/// leftMargin·rightMargin 에만 적는다 — 들여쓰기 실험)
+pub(crate) fn indent_level(xf: Option<&Xf>) -> u32 {
+    let a = xf.and_then(|x| x.alignment.as_ref());
+    if let Some(i) = a.and_then(|a| a.indent) {
+        return i;
+    }
+    if a.and_then(|a| a.horizontal.as_deref()) != Some("distributed") {
+        return 0;
+    }
+    xf.and_then(|x| x.hancom.as_ref())
+        .and_then(|h| h.parashape.as_ref())
+        .and_then(|p| p.left_margin)
+        .filter(|&m| m > 0)
+        .map_or(0, |m| (m as f64 / 1134.0).round() as u32)
+}
+
 /// 칸에 들어가는 숫자의 폭 (px): 칸 너비 − 4 (좁은 칸 숫자 대조 실험)
 const NUM_SLACK: f64 = 4.0;
 
@@ -177,6 +194,15 @@ fn h_align(a: Option<&Alignment>, v: &CellValue) -> HAlign {
         "distributed" => HAlign::Distributed,
         "fill" => HAlign::Fill,
         "centerContinuous" => HAlign::CenterContinuous,
+        // 일반 + 돌린 글자 (한셀 화면, 회전 실험): 반시계 1–89 는 왼쪽, 90 은 오른쪽, 시계(91–179)는 오른쪽,
+        // 시계 90(180)은 왼쪽, 세로 쓰기는 가운데 — 글·숫자 모두
+        _ if a.and_then(|a| a.text_rotation).is_some_and(|r| r != 0) => {
+            match a.and_then(|a| a.text_rotation).unwrap_or(0) {
+                1..=89 | 180 => HAlign::Left,
+                255 => HAlign::Center,
+                _ => HAlign::Right,
+            }
+        }
         // 일반: 숫자는 오른쪽, 논리값·오류는 가운데, 글은 왼쪽
         _ => match v {
             CellValue::Number(_) | CellValue::Date(_) => HAlign::Right,
@@ -410,13 +436,30 @@ impl<'a> Views<'a> {
         let code = xf
             .map(|x| crate::numfmt::code_for(st, x.num_fmt_id))
             .unwrap_or_else(|| "General".into());
-        let shown = crate::numfmt::format(&value, &code, wb.date1904);
+        let shown = crate::numfmt::format_layout(&value, &code, wb.date1904);
+        let (shown_text, shown_pads, shown_fill) =
+            (shown.text.clone(), shown.pads.clone(), shown.fill);
+        // 글 구역(@)으로 보인 숫자는 일반 맞춤에서 글처럼 왼쪽
+        let h = if shown.as_text
+            && h == HAlign::Right
+            && align
+                .and_then(|a| a.horizontal.as_deref())
+                .is_none_or(|x| x == "general")
+            && align.and_then(|a| a.text_rotation).unwrap_or(0) == 0
+        {
+            HAlign::Left
+        } else {
+            h
+        };
         // 양쪽 맞춤·균등 분할은 줄을 바꾼다
         let wrap = align.is_some_and(|a| a.wrap_text)
-            || (matches!(h, HAlign::Justify | HAlign::Distributed)
+            || ((matches!(h, HAlign::Justify | HAlign::Distributed)
+                || align.is_some_and(|a| {
+                    matches!(a.vertical.as_deref(), Some("justify" | "distributed"))
+                }))
                 && matches!(value, CellValue::Text(_)));
         let shrink = align.is_some_and(|a| a.shrink_to_fit);
-        let indent = align.and_then(|a| a.indent).unwrap_or(0);
+        let indent = indent_level(xf);
         // 숫자: 일반 서식은 칸에 맞춰 줄이고, 다른 서식은 넘치면 # 로 채운다
         let avail = w_px as f64 - NUM_SLACK - indent as f64 * INDENT_PX;
         let text = if shown.overflow {
@@ -439,6 +482,12 @@ impl<'a> Views<'a> {
         } else {
             shown.text
         };
+        // 서식의 빈 자리·채움은 글을 그대로 쓸 때만
+        let (pads, fill_char) = if text == shown_text {
+            (shown_pads, shown_fill)
+        } else {
+            (Vec::new(), None)
+        };
         let hashed = !text.is_empty()
             && text.bytes().all(|b| b == b'#')
             && !matches!(value, CellValue::Text(_));
@@ -456,12 +505,14 @@ impl<'a> Views<'a> {
             .map(|c| paint::FillPaint {
                 css: format!("background:{c};"),
                 color: Some(c),
+                tiled: false,
             })
             .or(fill)
             .or_else(|| {
                 tl.and_then(|t| t.fill.clone()).map(|c| paint::FillPaint {
                     css: format!("background:{c};"),
                     color: Some(c),
+                    tiled: false,
                 })
             });
         // 표 스타일 테두리는 칸 자체의 테두리가 없는 변에만
@@ -490,6 +541,8 @@ impl<'a> Views<'a> {
             wrap,
             shrink,
             rotation: align.and_then(|a| a.text_rotation).unwrap_or(0),
+            pads,
+            fill_char,
             indent,
             fill,
             borders,
@@ -665,6 +718,10 @@ pub fn sheet_table_grid(
         } else {
             next_row.get(&r).map(|&n| (n, c))
         };
+        // 무늬·그라데이션 칸은 자기 격자선 자리까지 무늬를 잇는다 (테두리를 비워 배경이 보이게)
+        if me.and_then(|v| v.fill.as_ref()).is_some_and(|f| f.tiled) {
+            return Some("transparent".into());
+        }
         if let Some(nb) = n.and_then(|k| views.get(&k)).and_then(|v| v.fill.as_ref()) {
             return nb.color.clone().or(Some("transparent".into()));
         }
@@ -750,19 +807,58 @@ pub fn sheet_table_grid(
         .filter(|&z| z != 100 && (10..=400).contains(&z))
         .map(|z| format!("zoom:{z}%"))
         .unwrap_or_default();
+    // 확대율 (한셀 화면 — 테두리 확대 실험의 50·75·125·150·200%): 열·행마다 100% 의 px 에 확대율을 곱해 반올림한 폭
+    // (54px → 75% 41, 125% 68; 행 22px → 75% 17), 격자선은 늘 1px. CSS zoom 아래에서 그렇게 보이도록 폭·높이는
+    // 반올림한 px ÷ 확대율, 격자선 굵기는 1 ÷ 확대율로 쓴다
+    let zf = zoom_pct as f64 / 100.0;
+    let zpx = |v: u32| -> String {
+        if zoom_pct == 100 {
+            format!("{v}")
+        } else {
+            format!("{:.4}", (v as f64 * zf).round() / zf)
+        }
+    };
     // 표와 그리기 개체를 같은 좌표계(왼쪽 위 = 머리글 모서리)에 둔다
     let _ = write!(s, "<div class=\"rc-canvas\" style=\"{zoom}\">");
+    // 눈금선 색 (보기의 colorId — 색 목록 번호, 보기 실험: 10 → FF0000)
+    let grid_color = view
+        .grid_color
+        .and_then(|i| crate::theme::INDEXED.get(i as usize))
+        .map(|v| format!("#{:06X}", v & 0xFF_FFFF));
+    if let Some(c) = &grid_color {
+        let _ = write!(
+            s,
+            "<style>table.rc-grid.rc-gc td{{border-right-color:{c};border-bottom-color:{c}}}</style>"
+        );
+    }
+    if zoom_pct != 100 {
+        let _ = write!(
+            s,
+            "<style>table.rc-sheet.rc-z{zoom_pct} td{{border-right-width:{w:.4}px;border-bottom-width:{w:.4}px}}</style>",
+            w = 1.0 / zf
+        );
+    }
     let _ = write!(
         s,
-        "<table class=\"rc-sheet{}\">",
-        if grid { " rc-grid" } else { "" }
+        "<table class=\"rc-sheet{}{}{}\">",
+        if grid { " rc-grid" } else { "" },
+        if grid_color.is_some() { " rc-gc" } else { "" },
+        if zoom_pct != 100 {
+            format!(" rc-z{zoom_pct}")
+        } else {
+            String::new()
+        }
     );
     s.push_str("<colgroup>");
     if headers {
         let _ = write!(s, "<col style=\"width:{header_w}px\">");
     }
     for &c in &cols {
-        let _ = write!(s, "<col data-c=\"{c}\" style=\"width:{}px\">", lay.col_w(c));
+        let _ = write!(
+            s,
+            "<col data-c=\"{c}\" style=\"width:{}px\">",
+            zpx(lay.col_w(c))
+        );
     }
     s.push_str("</colgroup>");
     if headers {
@@ -821,6 +917,15 @@ pub fn sheet_table_grid(
             if let Some(col) = edge_color(er, c, false) {
                 let _ = write!(css, "border-bottom-color:{col};");
             }
+            // 틀 고정 선: 고정한 마지막 행의 아래·마지막 열의 오른쪽 격자선 자리 (한셀 화면 D25140 — 틀 고정 실험)
+            if let Some(f) = freeze {
+                if f.row > 0 && er + 1 == f.row {
+                    css.push_str("border-bottom-color:#D25140;");
+                }
+                if f.col > 0 && ec + 1 == f.col {
+                    css.push_str("border-right-color:#D25140;");
+                }
+            }
             let mut inner = String::new();
             if let Some(v) = views.get(&(r, c)) {
                 if let Some(f) = &v.fill {
@@ -846,6 +951,9 @@ pub fn sheet_table_grid(
                     });
                 let span = ov.span.get(&(r, c)).copied().unwrap_or((0, 0));
                 inner = cell::cell_content(v, merged.as_ref().or(cf), theme, w, h, span);
+            }
+            if tlooks.get(&(r, c)).is_some_and(|t| t.handle) {
+                inner.push_str(&table::handle_svg(w, h));
             }
             if tlooks.get(&(r, c)).is_some_and(|t| t.button) {
                 inner.push_str(&table::button_svg(w, h));
@@ -886,7 +994,24 @@ pub fn sheet_table_grid(
                 b.left = None;
             }
             if !b.is_empty() {
-                inner.push_str(&paint::borders_svg(&b, w, h));
+                let own = views
+                    .get(&(r, c))
+                    .and_then(|v| v.fill.as_ref())
+                    .and_then(|f| f.color.clone())
+                    .unwrap_or_else(|| "#FFFFFF".into());
+                // 아래·오른쪽 틈은 그 격자선 자리를 덮는 채우기 (아래 칸이 채워져 있으면 그 색 — 대출 계산기의
+                // 머리글 아래 이중선), 위·왼쪽은 칸 채우기
+                let edge = |right: bool| {
+                    edge_color(
+                        if right { r } else { er },
+                        if right { ec } else { c },
+                        right,
+                    )
+                    .filter(|v| v.starts_with('#'))
+                    .unwrap_or_else(|| own.clone())
+                };
+                let gaps = [own.clone(), edge(false), own.clone(), edge(true)];
+                inner.push_str(&paint::borders_svg(&b, w, h, &gaps));
             }
             if let Some((gi, vals)) = sparks.get(&(r, c))
                 && let Some(g) = spark_groups.get(*gi)
@@ -932,12 +1057,13 @@ table.rc-sheet th{box-sizing:border-box;background:#F5F5F5;border:0 solid #CCCCC
 table.rc-sheet thead th.rc-corner{left:0;z-index:5}\
 table.rc-sheet tbody th{position:sticky;left:0;text-align:center}\
 .rc-t{position:absolute;left:0;top:0;overflow:hidden;box-sizing:border-box;white-space:pre;z-index:1}\
-.rc-t>span{position:absolute;white-space:pre}\
+.rc-t>span{position:absolute;white-space:pre;text-decoration:inherit}\
 .rc-w,.rc-flex{display:flex;flex-direction:column;padding:0 2px}\
 .rc-w>span,.rc-flex>span{position:static}\
 .rc-ov{z-index:2}\
 .rc-rot{position:absolute;white-space:pre}\
-.rc-vert{writing-mode:vertical-lr;text-orientation:upright;white-space:pre}\
+.rc-vert{position:absolute;display:flex;flex-direction:column;align-items:center;white-space:pre}\
+.rc-vert>span{display:block}\
 .rc-bd{position:absolute;left:-2px;top:-2px;pointer-events:none;overflow:visible;z-index:3}\
 .rc-spark{position:absolute;left:0;top:0;pointer-events:none}\
 .rc-bar{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}\

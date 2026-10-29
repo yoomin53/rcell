@@ -197,39 +197,94 @@ fn display_plain(wb: &Workbook, style: u32, v: &CellValue) -> String {
 
 /// 글자 줄 수 (줄 바꿈 칸): 너비 `avail` px 에 맞춰 한글은 아무 데서나, 영문은 단어 단위로 끊는다
 pub(super) fn wrap_lines(text: &str, avail: f64, m: &FontMetrics) -> u32 {
-    let avail = avail.max(m.px);
-    let mut lines = 0;
+    wrap_split(text, avail, m).len().max(1) as u32
+}
+
+/// [`wrap_lines`] 의 줄들 (균등 분할을 줄마다 벌려 그릴 때). 줄 끝 공백은 뺀다
+pub(super) fn wrap_split(text: &str, avail: f64, m: &FontMetrics) -> Vec<String> {
+    // 들여쓰기가 칸보다 넓으면 공백이 아닌 글자마다 한 줄 (균등 분할 들여쓰기 실험: 15 글자 → 15 줄)
+    if avail < 1.0 {
+        return text
+            .split('\n')
+            .flat_map(|p| {
+                let v: Vec<String> = p
+                    .chars()
+                    .filter(|c| *c != ' ')
+                    .map(|c| c.to_string())
+                    .collect();
+                if v.is_empty() { vec![String::new()] } else { v }
+            })
+            .collect();
+    }
+    // 글자보다 좁은 칸은 긴 단어를 실제로 자른 폭만큼 줄인다 (그 밖은 칸 폭씩 — 자동 높이 대조)
+    let narrow = avail < m.px;
+    let avail = avail.max(1.0);
+    let mut out = Vec::new();
     for para in text.split('\n') {
-        lines += 1;
+        let start = out.len();
         // x: 줄에 놓인 폭, word: 끊지 않은 영문 단어 폭
         let mut x = 0.0;
         let mut word = 0.0;
+        let mut cur = String::new();
+        let mut wtxt = String::new();
         for ch in para.chars() {
             let w = m.char_width(ch);
             if ch == ' ' || metrics::is_wide(ch) {
                 if x + word + w > avail && x + word > 0.0 {
-                    lines += 1;
                     // 공백은 줄 끝에 남기고, 한글은 다음 줄 첫 글자
+                    cur.push_str(&wtxt);
+                    out.push(std::mem::take(&mut cur));
+                    wtxt.clear();
                     x = if ch == ' ' { 0.0 } else { w };
+                    if ch != ' ' {
+                        cur.push(ch);
+                    }
                     word = 0.0;
                     continue;
                 }
                 x += word + w;
                 word = 0.0;
+                cur.push_str(&wtxt);
+                cur.push(ch);
+                wtxt.clear();
             } else {
                 word += w;
+                wtxt.push(ch);
                 if x + word > avail && x > 0.0 {
-                    lines += 1;
+                    out.push(std::mem::take(&mut cur));
                     x = 0.0;
                 }
                 while word > avail {
-                    lines += 1;
-                    word -= avail;
+                    // 긴 단어는 칸 폭마다 자른다
+                    let mut acc = 0.0;
+                    let mut cut = 0;
+                    for (i, c) in wtxt.char_indices() {
+                        acc += m.char_width(c);
+                        if acc > avail {
+                            break;
+                        }
+                        cut = i + c.len_utf8();
+                    }
+                    let cut = cut.max(wtxt.chars().next().map_or(0, char::len_utf8));
+                    let cut_w: f64 = wtxt[..cut].chars().map(|c| m.char_width(c)).sum();
+                    cur.push_str(&wtxt[..cut]);
+                    out.push(std::mem::take(&mut cur));
+                    wtxt.drain(..cut);
+                    word -= if narrow { cut_w.max(0.01) } else { avail };
                 }
             }
         }
+        cur.push_str(&wtxt);
+        // 좁은 칸에서 마지막 글자를 잘라 낸 뒤의 빈 줄은 없다
+        if !(narrow && cur.is_empty() && out.len() > start) {
+            out.push(cur);
+        }
     }
-    lines.max(1)
+    for l in &mut out {
+        let t = l.trim_end_matches(' ').len();
+        l.truncate(t);
+    }
+    out
 }
 
 /// n 줄 글의 높이 (pt): 1/20 pt 로 반올림한 (1줄 + (n−1)·한 줄) — 자동 높이 대조: 맑은 고딕 11 의
@@ -347,9 +402,17 @@ fn cell_text_pt(wb: &Workbook, cell: &Cell, col_w_px: u32) -> f64 {
         // 돌린 글자는 글꼴 기본 높이를 최솟값으로 두지 않는다 (20pt 90도 "0" → 19.5pt)
         return rotated_base_pt(deg, size) + tw * 0.75 * deg.to_radians().sin();
     } else if al.is_some_and(|a| {
-        a.wrap_text || matches!(a.horizontal.as_deref(), Some("justify" | "distributed"))
+        a.wrap_text
+            || matches!(a.horizontal.as_deref(), Some("justify" | "distributed"))
+            || matches!(a.vertical.as_deref(), Some("justify" | "distributed"))
     }) {
-        let indent = al.and_then(|a| a.indent).unwrap_or(0) as f64 * super::INDENT_PX;
+        // 균등 분할의 들여쓰기는 양쪽에 (한셀 화면 — 들여쓰기 실험)
+        let sides = if al.is_some_and(|a| a.horizontal.as_deref() == Some("distributed")) {
+            2.0
+        } else {
+            1.0
+        };
+        let indent = super::indent_level(st.xf(cell.style)) as f64 * super::INDENT_PX * sides;
         let avail = col_w_px as f64 - PAD - PAD_R - 1.0 - indent;
         lines_pt(wrap_lines(&text, avail, &m), &m)
     } else {
@@ -584,5 +647,12 @@ mod tests {
             5
         );
         assert_eq!(wrap_lines("가\n가", 65.0, &m), 2);
+        // 들여쓰기가 칸보다 넓은 균등 분할: 공백이 아닌 글자마다 한 줄 (한셀 245.55pt = 15줄)
+        assert_eq!(wrap_lines("균등 분할 Distributed", -9.0, &m), 15);
+        assert_eq!(wrap_lines("균등 분할 Distributed", 8.04, &m), 15);
+        assert_eq!(
+            wrap_split("균등 분할 Distributed", 112.0, &m),
+            vec!["균등 분할".to_string(), "Distributed".to_string()]
+        );
     }
 }

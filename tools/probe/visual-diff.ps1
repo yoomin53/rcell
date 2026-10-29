@@ -15,15 +15,20 @@
 # 사용: powershell -File visual-diff.ps1 -Captures <갈무리 폴더> -Rcell <rcell.exe> -OutDir <출력 폴더>
 #   -Edge : msedge.exe 경로 (기본 Program Files (x86))
 #   -Only : 파일 이름 정규식
+#   -Skip : 뺄 갈무리 정규식 ("파일|시트이름" 에 맞춘다 — 한셀이 그리지 않은 빈 화면 등)
 #   -OldCli : --no-headers/--fill 이 없는 옛 rcell (머리글은 그림 안에서 A1 을 찾아 밀어낸다)
+#   -PerShot : 갈무리마다 Edge 를 띄워 그린다 (기본은 node cdp-shot.js 로 Edge 하나에서 — 그림은 같다)
+# 갈무리에 확대율 열(screen-capture.ps1 -KeepZoom)이 있고 100 이 아니면 rcell 그림도 그 확대율로 그린다.
 param(
     [Parameter(Mandatory = $true)][string]$Captures,
     [Parameter(Mandatory = $true)][string]$Rcell,
     [Parameter(Mandatory = $true)][string]$OutDir,
     [string]$Edge = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     [string]$Only = "",
+    [string]$Skip = "",
     [int]$Tol = 48,
-    [switch]$OldCli
+    [switch]$OldCli,
+    [switch]$PerShot
 )
 $ErrorActionPreference = "Stop"
 Add-Type -ReferencedAssemblies System.Drawing @"
@@ -85,38 +90,63 @@ $profile = Join-Path $OutDir "edge-profile"
 $tsv = Get-Content (Join-Path $Captures "captures.tsv") -Encoding UTF8
 $dir = ($tsv | Where-Object { $_ -like "#dir*" } | Select-Object -First 1) -replace "^#dir`t", ""
 $out = New-Object System.Collections.Generic.List[string]
+$jobs = New-Object System.Collections.Generic.List[object]
+# --zoom 이 있는 rcell 이면 확대율을 넘긴다 (옛 rcell 은 아래 CSS 로 확대율만 100 으로 — 열 폭 맞춤은 남는다)
+$hasZoom = -not $OldCli -and ((& $Rcell html --help 2>&1 | Out-String) -match "--zoom")
 $tot = @(0.0, 0.0, 0.0, 0.0, 0.0)
 foreach ($line in $tsv) {
     if ($line -like "#*" -or -not $line) { continue }
     $p = $line -split "`t"
     if ($Only -and $p[0] -notmatch $Only) { continue }
+    if ($Skip -and ("{0}|{1}" -f $p[0], $p[2]) -match $Skip) { continue }
     $file, $k, $name, $png, $ax, $ay, $gw, $gh = $p[0], [int]$p[1], $p[2], $p[3], [int]$p[4], [int]$p[5], [int]$p[6], [int]$p[7]
+    $zoom = if ($p.Count -gt 11 -and $p[11]) { [int]$p[11] } else { 100 }
     $stem = "{0}.{1}" -f $file, $k
     $html = Join-Path $OutDir "$stem.html"
     if ($OldCli) {
         & $Rcell html (Join-Path $dir $file) --sheet ($k - 1) -o $html
     } else {
-        & $Rcell html (Join-Path $dir $file) --sheet ($k - 1) --no-headers --fill ("{0}x{1}" -f $gw, $gh) -o $html
+        # 확대율이 작으면 그만큼 더 많은 칸을 채운다
+        $fw = [int][math]::Ceiling($gw * 100 / $zoom); $fh = [int][math]::Ceiling($gh * 100 / $zoom)
+        # 갈무리의 확대율로 그린다 (확대율 열이 없으면 갈무리 도구가 100 으로 맞춘 화면이다)
+        $za = if ($hasZoom) { @("--zoom", $zoom) } else { @() }
+        & $Rcell html (Join-Path $dir $file) --sheet ($k - 1) --no-headers --fill ("{0}x{1}" -f $fw, $fh) @za -o $html
     }
     if ($LASTEXITCODE -ne 0) { Write-Host "FAIL rcell $stem"; continue }
-    # 탭·테두리·확대율을 빼고 A1(본문 첫 칸)의 왼쪽 위를 그림 왼쪽 위로 민다
+    # 탭·테두리(·확대율 100 이면 확대율)를 빼고 A1(본문 첫 칸)의 왼쪽 위를 그림 왼쪽 위로 민다
     $t = [IO.File]::ReadAllText($html, [Text.Encoding]::UTF8)
-    $t = $t.Replace("<style>body{margin:16px;background:#fafafa}", "<style>body{margin:0;background:#fff;overflow:hidden}.rc-tabs{display:none}.rc-wrap{border:0!important;max-height:none!important;overflow:visible!important}.rc-canvas{zoom:100%!important}")
-    $t = $t.Replace("</body>", "<script>(function(){var w=document.querySelector('.rc-wrap:not(.rc-hidden)');var td=w&&w.querySelector('tbody td');if(!td)return;var r=td.getBoundingClientRect();var c=w.querySelector('.rc-canvas');c.style.position='relative';c.style.left=(-r.left)+'px';c.style.top=(-r.top)+'px';})();</script></body>")
+    $zcss = if ($zoom -eq 100) { ".rc-canvas{zoom:100%!important}" } else { "" }
+    $t = $t.Replace("<style>body{margin:16px;background:#fafafa}", "<style>body{margin:0;background:#fff;overflow:hidden}.rc-tabs{display:none}.rc-wrap{border:0!important;max-height:none!important;overflow:visible!important}$zcss")
+    $t = $t.Replace("</body>", "<script>(function(){var w=document.querySelector('.rc-wrap:not(.rc-hidden)');var td=w&&w.querySelector('tbody td');if(!td)return;var c=w.querySelector('.rc-canvas');c.style.position='relative';var z=parseFloat(getComputedStyle(c).zoom)||1;var r=td.getBoundingClientRect();var dx=-r.left/z,dy=-r.top/z;c.style.left=dx+'px';c.style.top=dy+'px';var q=td.getBoundingClientRect();var kx=dx?(q.left-r.left)/dx:1,ky=dy?(q.top-r.top)/dy:1;if(kx&&ky){c.style.left=(dx-q.left/kx)+'px';c.style.top=(dy-q.top/ky)+'px';}})();</script></body>")
     [IO.File]::WriteAllText($html, $t, (New-Object Text.UTF8Encoding $false))
     $shot = Join-Path $OutDir "$stem.rcell.png"
-    # Edge 는 진행 메시지를 표준 오류로 쓴다 — 오류로 보지 않게
+    if (Test-Path $shot) { Remove-Item $shot }
+    $jobs.Add([pscustomobject]@{ File = $file; Name = $name; Png = $png; Ax = $ax; Ay = $ay; W = $gw; H = $gh; Stem = $stem; Html = $html; Shot = $shot })
+    if ($PerShot) {
+        # Edge 는 진행 메시지를 표준 오류로 쓴다 — 오류로 보지 않게. 네트워크 서비스를 따로 띄우면 그것이 죽었다 다시 뜨기를
+        # 기다리느라 한 장에 2~11분 걸릴 때가 있다 — 같은 프로세스에서, 배경 네트워크·구성 요소 갱신 없이
+        $ErrorActionPreference = "Continue"
+        & $Edge --headless=new --disable-gpu --hide-scrollbars --no-first-run --disable-background-networking --disable-component-update --disable-sync --disable-extensions --enable-features=NetworkServiceInProcess2,NetworkServiceInProcess --force-device-scale-factor=1 "--user-data-dir=$profile" "--window-size=$gw,$gh" "--screenshot=$shot" ("file:///" + $html.Replace("\", "/")) 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+        for ($i = 0; $i -lt 50 -and -not (Test-Path $shot); $i++) { Start-Sleep -Milliseconds 200 }
+    }
+}
+if (-not $PerShot -and $jobs.Count -gt 0) {
+    # Edge 하나로 모두 그린다 (cdp-shot.js — 장마다 Edge 를 띄우고 끄는 데 몇 분씩 걸릴 때가 있다. 그림은 같다)
+    $list = Join-Path $OutDir "shots.tsv"
+    [IO.File]::WriteAllLines($list, [string[]]($jobs | ForEach-Object { "{0}`t{1}`t{2}`t{3}" -f $_.Html, $_.Shot, $_.W, $_.H }), (New-Object Text.UTF8Encoding $false))
     $ErrorActionPreference = "Continue"
-    & $Edge --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1 "--user-data-dir=$profile" "--window-size=$gw,$gh" "--screenshot=$shot" ("file:///" + $html.Replace("\", "/")) 2>&1 | Out-Null
+    & node (Join-Path $PSScriptRoot "cdp-shot.js") $Edge $profile $list 2>&1 | Out-Null
     $ErrorActionPreference = "Stop"
-    for ($i = 0; $i -lt 50 -and -not (Test-Path $shot); $i++) { Start-Sleep -Milliseconds 200 }
-    if (-not (Test-Path $shot)) { Write-Host "FAIL edge $stem"; continue }
-    $hcell = Join-Path $Captures $png
-    [RcDiff]::Crop($hcell, $ax, $ay, $gw, $gh, (Join-Path $OutDir "$stem.hcell.png"))
-    $r = [RcDiff]::Compare($hcell, $ax, $ay, $shot, $gw, $gh, $Tol, (Join-Path $OutDir "$stem.diff.png"))
+}
+foreach ($j in $jobs) {
+    if (-not (Test-Path $j.Shot)) { Write-Host "FAIL edge $($j.Stem)"; continue }
+    $hcell = Join-Path $Captures $j.Png
+    [RcDiff]::Crop($hcell, $j.Ax, $j.Ay, $j.W, $j.H, (Join-Path $OutDir "$($j.Stem).hcell.png"))
+    $r = [RcDiff]::Compare($hcell, $j.Ax, $j.Ay, $j.Shot, $j.W, $j.H, $Tol, (Join-Path $OutDir "$($j.Stem).diff.png"))
     for ($i = 0; $i -lt 5; $i++) { $tot[$i] += $r[$i] }
     $inkp = if ($r[3] -gt 0) { 100 * $r[4] / $r[3] } else { 100 }
-    $out.Add(("{0}`t{1}`t{2}`t{3:F2}`t{4:F2}`t{5:F1}" -f $file, $name, [int]$r[0], (100 * $r[1] / $r[0]), ($r[2] / $r[0]), $inkp))
+    $out.Add(("{0}`t{1}`t{2}`t{3:F2}`t{4:F2}`t{5:F1}" -f $j.File, $j.Name, [int]$r[0], (100 * $r[1] / $r[0]), ($r[2] / $r[0]), $inkp))
 }
 $inkAll = if ($tot[3] -gt 0) { 100 * $tot[4] / $tot[3] } else { 100 }
 $out.Add(("전체`t-`t{0}`t{1:F2}`t{2:F2}`t{3:F1}" -f [long]$tot[0], (100 * $tot[1] / [math]::Max(1, $tot[0])), ($tot[2] / [math]::Max(1, $tot[0])), $inkAll))
