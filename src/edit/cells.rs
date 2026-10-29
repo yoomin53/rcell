@@ -185,8 +185,8 @@ pub fn shift_cells(
         Vec::new()
     };
     let boxes_before = super::structure::comment_geometry(wb, si, 0);
-    // 셀 기록 없이 행·열 서식으로만 보이던 띠 안의 칸: 옮긴 자리에 그 서식의 셀을 만든다 (한셀 — 열 서식이 있는 행에
-    // 셀을 오른쪽으로 밀면 옮겨진 칸이 원래 열의 서식을 지닌다)
+    // 셀 기록 없이 행·열 서식으로만 보이던 띠 안의 칸: 옮긴 자리의 서식이 달라지면 셀을 만든다 (한셀 — 열 서식이
+    // 있는 열의 칸을 오른쪽으로 밀면 옮겨진 칸이 원래 열의 서식을 지닌다)
     let carried: Vec<(CellRef, u32)> = {
         let sheet = &wb.sheets[si];
         let last = if rows {
@@ -209,7 +209,15 @@ pub fn shift_cells(
             && last >= at
             && (last - at) as u64 * (band.1 - band.0 + 1) as u64 <= 200_000
         {
-            for m in at..=last {
+            // 지울 때는 행(열) 서식이 있는 줄 아래에서 올라오는 칸도
+            let n = if rows {
+                area.end.row - area.start.row + 1
+            } else {
+                area.end.col - area.start.col + 1
+            };
+            let max = if rows { refs::MAX_ROWS } else { refs::MAX_COLS } - 1;
+            let end = if insert { last } else { (last + n).min(max) };
+            for m in at..=end {
                 for x in band.0..=band.1 {
                     let r = if rows {
                         CellRef { row: m, col: x }
@@ -227,8 +235,34 @@ pub fn shift_cells(
                     } else {
                         CellRef { row: x, col: nm }
                     };
-                    let st = sheet.effective_style(r.row, r.col);
-                    if st != sheet.effective_style(to.row, to.col) {
+                    // 옮겨지는 칸의 서식은 원래 행(오른쪽·왼쪽이면 열)의 서식 — 없으면 기본 (한셀: 열 서식만 있던 칸은
+                    // 행 서식이 있는 행으로 내려가면 기본 서식이 된다)
+                    let st = if rows {
+                        sheet
+                            .rows
+                            .iter()
+                            .find(|x| x.index == m + 1)
+                            .and_then(|x| x.style)
+                            .unwrap_or(0)
+                    } else {
+                        sheet
+                            .cols
+                            .iter()
+                            .find(|x| (x.min..=x.max).contains(&(m + 1)))
+                            .and_then(|x| x.style)
+                            .unwrap_or(0)
+                    };
+                    // 옮긴 자리의 행(열) 서식과 다를 때만 (그 서식이 덮지 않으면 셀이 없어도 같다)
+                    let dest_line = if rows {
+                        sheet.rows.iter().find(|x| x.index == nm + 1).and_then(|x| x.style)
+                    } else {
+                        sheet
+                            .cols
+                            .iter()
+                            .find(|x| (x.min..=x.max).contains(&(nm + 1)))
+                            .and_then(|x| x.style)
+                    };
+                    if st != dest_line.unwrap_or(0) {
                         v.push((to, st));
                     }
                 }
