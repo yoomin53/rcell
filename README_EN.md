@@ -81,6 +81,7 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 - **Legacy `.cell`** — Hancom Cell 2010 and earlier (OLE2 compound file + a BIFF8 variant: 32-bit row numbers, UTF-16 strings, Hancom-specific records)
 - **Encrypted documents** — ECMA-376 standard encryption (AES-128); the default password Hancom Cell uses for protected documents is handled automatically, user passwords via `--password`
 - `.xlsx` / `.xlsb` are read too
+- Excel 97-2003 `.xls`, Nexcel `.nxl`, CSV and text (`.csv` `.txt` `.prn` — opened with Hancom Cell's rules) — [other formats](docs/format/other-formats.md)
 
 ### Document model
 
@@ -104,7 +105,8 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 - XML `.cell` / `.xlsx` — converts legacy and binary documents to modern `.cell`
 - Binary `.cell` (`xlCellb`) — written the way Hancom Cell saves it (98.9% of records byte-identical)
 - Legacy `.cell` (`xlCell8`) — written the way Hancom Cell saves it with -2005 (97.7% of records identical to Hancom Cell opening the XML and saving legacy, ignoring per-save values such as the SST order; charts and tables not yet)
-- CSV, document-model JSON
+- Excel 97-2003 `.xls` — legacy records transcoded to BIFF8 (Hancom Cell opens all 61 test files, 42 identical to its own `.xls`; charts not yet)
+- CSV, text and PRN — byte-identical to Hancom Cell's save (code page 949, 216/216), document-model JSON
 
 ### Editing
 
@@ -211,6 +213,9 @@ rcell convert old.cell new.cell          # legacy/binary → modern XML .cell
 rcell convert book.cell book.xlsx        # to Excel format
 rcell convert book.cell book.bin.cell    # to binary .cell (--format bin; --exact loses what Hancom Cell loses)
 rcell convert book.cell book.legacy.cell # to legacy .cell (--format legacy)
+rcell convert book.cell book.xls          # to Excel 97-2003 .xls (--format xls)
+rcell convert book.cell book.csv          # active sheet as CSV (code page 949 like Hancom Cell; .txt tab, .prn space)
+rcell convert data.csv  data.cell         # open CSV/text the way Hancom Cell does
 rcell dump    book.cell --no-cells       # document model as JSON
 rcell info    locked.cell --password pw  # documents with a user password
 ```
@@ -268,8 +273,10 @@ src/
 │   ├── reader.rs              # BIFF8-variant records
 │   ├── formula.rs ftab.rs     # formula tokens (Ptg), function numbers
 │   ├── escher.rs              # OfficeArt shapes, picture store
+│   ├── xls.rs                 # Excel 97-2003 .xls (BIFF8) ↔ legacy records
 │   └── props.rs               # document properties (SummaryInformation)
 ├── writer.rs                  # XML .cell / .xlsx writer
+├── csv.rs                     # CSV/text/PRN reader and writer (Hancom Cell rules)
 ├── edit/                      # editing (input rules, reference adjustment, formats/borders/merges, clipboard, sheets)
 ├── numfmt.rs                  # number-format engine
 ├── render.rs cf_eval.rs chart_svg.rs theme.rs units.rs image.rs   # rendering
@@ -334,6 +341,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full procedure.
 - [XML `.cell` format](docs/format/cell-2024.md) — `hs:` extensions, `mc:AlternateContent`, enumerations, what Hancom Cell changes on re-save
 - [Legacy `.cell` format](docs/format/cell-legacy.md) — differences from BIFF8, Hancom records, OfficeArt and the picture store, conditional formatting, filters and protection, document properties
 - [Binary `.cell` format](docs/format/cell-binary.md) — relation to XLSB, what Hancom Cell's binary writer loses
+- [Other formats](docs/format/other-formats.md) — formats Hancom Cell opens and saves, CSV/text rules, `.xlsx`, `.xls`, Nexcel (Korean)
 - [Reverse-engineering method](docs/reverse-engineering.md) — clean-room rules, differential analysis with Hancom Cell as the oracle
 - [Editing rules](docs/editing.md) — input rules, reference adjustment, borders and merges, clipboard, results against Hancom Cell
 - [Roadmap](docs/ROADMAP.md)

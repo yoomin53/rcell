@@ -1595,7 +1595,7 @@ impl SheetCtx<'_, '_> {
             ));
             o.p(551, P::new().wstr(&id));
             comments = Some(self.comments(&sheet.comments));
-            vml = Some(crate::writer::comments_vml(sheet, comments_number, true));
+            vml = Some(crate::writer::comments_vml(sheet, comments_number));
         }
         // 한셀이 늘 쓰는 ActiveX 컨트롤 묶음(643, 645, 비어 있음)과 표 목록(660 개수, 661 관계 ID, 662)
         o.e(643);

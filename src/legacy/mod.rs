@@ -29,6 +29,7 @@ pub(crate) mod vtchart;
 pub(crate) mod vtchart_map;
 pub(crate) mod vtwrite;
 pub mod writer;
+pub mod xls;
 
 pub use writer::{Report, WriteOptions, write_with_options, write_with_report};
 
@@ -101,6 +102,90 @@ pub fn chart_dumps_with(bytes: &[u8], offsets: bool) -> Result<Vec<String>> {
         .collect())
 }
 
+/// 통합 문서를 Excel 97-2003 `.xls` (BIFF8) 로 쓴다: 레거시로 쓴 `/Workbook` 을 [`xls::to_biff8`] 로 바꾸고 문서
+/// 속성과 함께 담는다 (매크로 프로젝트·피벗 캐시는 담지 않는다)
+pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)> {
+    let (bytes, mut report) = write_with_options(wb, opts)?;
+    let hints: Vec<xls::SheetHints> = wb
+        .sheets
+        .iter()
+        .map(|s| xls::SheetHints {
+            summary_above: s.summary_above,
+            summary_left: s.summary_left,
+        })
+        .collect();
+    let tips: Vec<xls::LinkTips> = wb
+        .sheets
+        .iter()
+        .map(|s| {
+            s.hyperlinks
+                .iter()
+                .filter_map(|h| {
+                    let tip = h.tooltip.clone()?;
+                    let r = crate::model::CellRange::parse(&h.range)?;
+                    Some(((r.start.row, r.start.col), tip))
+                })
+                .collect()
+        })
+        .collect();
+    let out = xls_file(&bytes, &hints, &tips)?;
+    fn has_chart(s: &[crate::model::Shape]) -> bool {
+        s.iter()
+            .any(|x| x.chart.is_some() || has_chart(&x.children))
+    }
+    if wb.sheets.iter().any(|s| has_chart(&s.shapes)) {
+        report
+            .warnings
+            .push(".xls: 차트는 아직 쓰지 않는다 (BIFF8 차트 레코드)".into());
+    }
+    if wb.raw_parts.iter().any(|p| p.name.contains("pivotTable")) {
+        report
+            .warnings
+            .push(".xls: 피벗 표는 아직 쓰지 않는다".into());
+    }
+    Ok((out, report))
+}
+
+/// 레거시 `.cell` 파일 바이트 → `.xls` 파일 바이트 (`/Workbook` 을 BIFF8 로, 문서 속성은 그대로)
+pub fn xls_from_legacy_file(bytes: &[u8]) -> Result<Vec<u8>> {
+    xls_file(bytes, &[], &[])
+}
+
+fn xls_file(bytes: &[u8], hints: &[xls::SheetHints], tips: &[xls::LinkTips]) -> Result<Vec<u8>> {
+    let stream = container::read_entry(bytes, "/Workbook")?;
+    let wbs = xls::to_biff8_with(&stream, hints, tips)?;
+    let summary = container::read_entry(bytes, "/\u{5}SummaryInformation").ok();
+    let mut streams = vec![crate::cfb_write::Stream {
+        name: "Workbook",
+        data: &wbs,
+    }];
+    if let Some(s) = &summary {
+        streams.push(crate::cfb_write::Stream {
+            name: "\u{5}SummaryInformation",
+            data: s,
+        });
+    }
+    Ok(crate::cfb_write::write_with_storages(&streams, &[], 0))
+}
+
+/// `.xls` 파일 바이트 → 레거시 `.cell` 파일 바이트 (`/Workbook` 을 레거시 레코드로 — 분석용)
+pub fn legacy_from_xls_file(bytes: &[u8]) -> Result<Vec<u8>> {
+    let stream = container::read_entry(bytes, "/Workbook")?;
+    let h = xls::to_hancom(&stream)?;
+    let summary = container::read_entry(bytes, "/SummaryInformation").ok();
+    let mut streams = vec![crate::cfb_write::Stream {
+        name: "Workbook",
+        data: &h,
+    }];
+    if let Some(s) = &summary {
+        streams.push(crate::cfb_write::Stream {
+            name: "SummaryInformation",
+            data: s,
+        });
+    }
+    Ok(crate::cfb_write::write_with_storages(&streams, &[], 0))
+}
+
 /// OLE2 바이트에서 레거시 통합 문서를 읽는다.
 pub fn read(bytes: &[u8]) -> Result<Workbook> {
     let entries = container::list_entries(bytes)?;
@@ -111,8 +196,24 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
     if !has("/Workbook") {
         return Err(Error::MissingPart("/Workbook".into()));
     }
-    let stream = container::read_entry(bytes, "/Workbook")?;
+    let mut stream = container::read_entry(bytes, "/Workbook")?;
+    // Excel 97-2003 `.xls` (BIFF8): 레거시 레코드로 바꿔 같은 리더로 읽는다
+    let xls = xls::is_biff8(&stream);
+    if xls {
+        stream = xls::to_hancom(&stream)?;
+    }
     let mut wb = reader::read_workbook_stream(&stream)?;
+    if xls {
+        wb.application = Some("Excel".into());
+        // 표 스타일 표(TABLESTYLES)가 없는 파일 (넥셀 .nxl 등): 한셀은 새 문서의 기본 표·피벗 스타일을 쓴다
+        if wb.styles.table_styles.is_none() {
+            wb.styles.table_styles = Some(crate::model::TableStyles {
+                default_table_style: Some("TableStyleMedium2".into()),
+                default_pivot_style: Some("PivotStyleLight16".into()),
+                styles: Vec::new(),
+            });
+        }
+    }
     // 피벗: 캐시 스트림(_SX_DB_CUR)과 시트의 피벗 레코드 → XML 피벗 파트
     pivot::read(bytes, &stream, &mut wb);
     // 문서 속성: 목록은 이름의 제어 문자를  로 표기한다 (container::display_path)

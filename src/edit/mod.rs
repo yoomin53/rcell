@@ -796,10 +796,25 @@ pub fn jump(sheet: &Sheet, r: CellRef, dr: i32, dc: i32) -> CellRef {
 
 /// 입력한 수식을 한셀이 저장하는 꼴로 고르고 문법을 확인한다 (`=` 없이)
 pub fn normalize_formula(wb: &Workbook, text: &str) -> crate::Result<String> {
+    // `==1` 은 수식이 아니다 (한셀: 입력은 오류, CSV 열기는 글)
+    if text.trim_start().starts_with('=') {
+        return Err(err(format!("수식 오류: ={text}")));
+    }
     let canon = canon_name(wb);
-    let f = refs::normalize(text, &canon);
-    crate::calc::parse(&f).map_err(|e| err(format!("수식 오류: {e}")))?;
-    Ok(f)
+    let n = refs::normalize_checked(text, &canon);
+    if n.invalid {
+        return Err(err(format!("수식 오류: ={text}")));
+    }
+    crate::calc::parse(&n.text).map_err(|e| err(format!("수식 오류: {e}")))?;
+    Ok(n.text)
+}
+
+/// [`normalize_formula`] 과 같고 닫지 않은 괄호도 오류 (한셀의 CSV 열기: `=SUM(` 은 글)
+pub fn normalize_formula_strict(wb: &Workbook, text: &str) -> crate::Result<String> {
+    if refs::normalize_checked(text, &canon_name(wb)).unclosed {
+        return Err(err(format!("수식 오류: ={text}")));
+    }
+    normalize_formula(wb, text)
 }
 
 /// 셀에 입력한다 (한셀 입력 규칙). 빈 글이면 내용을 지운다
@@ -2220,6 +2235,65 @@ fn ensure_code_names(wb: &mut Workbook) {
 }
 
 /// 시트를 더한다 (`at` 자리에). 이름이 없으면 한셀처럼 쓰지 않은 가장 작은 `SheetN`
+/// 한셀의 새 통합 문서 (시트 하나 `Sheet1`, 기본 글꼴 맑은 고딕 11, 표준 스타일, 세로 가운데 맞춤)
+pub fn new_workbook() -> Workbook {
+    use crate::model::{Alignment, Fill, Font, NamedStyle, Styles, Xf};
+    let mut wb = Workbook {
+        application: Some("rcell".into()),
+        styles: Styles {
+            fonts: vec![Font {
+                name: Some("맑은 고딕".into()),
+                size: Some(11.0),
+                ..Default::default()
+            }],
+            fills: vec![
+                Fill {
+                    pattern_type: Some("none".into()),
+                    ..Default::default()
+                },
+                Fill {
+                    pattern_type: Some("gray125".into()),
+                    ..Default::default()
+                },
+            ],
+            borders: vec![Default::default()],
+            cell_style_xfs: vec![Default::default()],
+            cell_xfs: vec![Xf {
+                xf_id: Some(0),
+                alignment: Some(Alignment {
+                    vertical: Some("center".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            cell_styles: vec![NamedStyle {
+                name: "표준".into(),
+                xf_id: 0,
+                builtin_id: Some(0),
+                i_level: None,
+            }],
+            table_styles: Some(crate::model::TableStyles {
+                default_table_style: Some("TableStyleMedium2".into()),
+                default_pivot_style: Some("PivotStyleLight16".into()),
+                styles: Vec::new(),
+            }),
+            ..Default::default()
+        },
+        // 한셀의 새 문서는 탭 영역 비율 500
+        view: Some(crate::model::WorkbookView {
+            tab_ratio: 500,
+            ..Default::default()
+        }),
+        code_name: Some("ThisWorkbook".into()),
+        ..Default::default()
+    };
+    let _ = add_sheet(&mut wb, Some("Sheet1"), 0);
+    wb.sheets[0].view.tab_selected = true;
+    wb.sheets[0].default_col_width = Some(9.00390625);
+    wb.sheets[0].default_row_height = Some(16.5);
+    wb
+}
+
 pub fn add_sheet(wb: &mut Workbook, name: Option<&str>, at: usize) -> crate::Result<usize> {
     // 구조가 보호된 통합 문서: 한셀 자동화는 시트를 더한다 — 화면에서는 막힌다 (`check_ui`)
     ensure_code_names(wb);

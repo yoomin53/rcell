@@ -79,6 +79,7 @@ XML, 바이너리, 한셀 2010 이하의 레거시 — 을 모두 읽고, 한셀
 - **레거시 `.cell`** — 한셀 2010 이하 계열 (OLE2 복합 문서 + BIFF8 변형: 32비트 행 번호, UTF-16 문자열, 한컴 전용 레코드)
 - **암호화 문서** — ECMA-376 표준 암호화(AES-128). 한셀이 보호 문서에 거는 기본 암호는 자동으로 풀고, 사용자 암호는 `--password` 로 받습니다
 - `.xlsx` / `.xlsb` 도 읽습니다
+- Excel 97-2003 `.xls`, 넥셀 `.nxl`, CSV·텍스트 (`.csv` `.txt` `.prn` — 한셀이 여는 규칙 그대로) — [그 밖의 형식](docs/format/other-formats.md)
 
 ### Document Model (문서 모델)
 
@@ -102,7 +103,8 @@ XML, 바이너리, 한셀 2010 이하의 레거시 — 을 모두 읽고, 한셀
 - XML `.cell` / `.xlsx` 저장 — 레거시·바이너리 문서를 최신 `.cell` 로 바꿉니다
 - 바이너리 `.cell`(`xlCellb`) 저장 — 한셀이 바이너리로 저장하는 꼴 그대로 (레코드 98.9% 가 바이트까지 같다)
 - 레거시 `.cell`(`xlCell8`) 저장 — 한셀이 -2005 로 저장하는 꼴 그대로 (한셀이 XML 을 열어 저장한 것과 레코드 97.7% 가 같다 — 저장마다 달라지는 SST 차례 등은 빼고, 차트·표는 아직)
-- CSV, 문서 모델 JSON
+- Excel 97-2003 `.xls` 저장 — 레거시 레코드를 BIFF8 로 바꿔 쓴다 (한셀이 61개를 모두 열고 42개가 한셀 자기 `.xls` 와 같다, 차트는 아직)
+- CSV·텍스트·PRN 저장 — 한셀 저장과 바이트까지 같다 (코드 페이지 949, 216/216), 문서 모델 JSON
 
 ### Editing (편집)
 
@@ -208,6 +210,9 @@ rcell convert 옛문서.cell 새문서.cell    # 레거시/바이너리 → 최�
 rcell convert 문서.cell 문서.xlsx        # Excel 형식으로
 rcell convert 문서.cell 문서.bin.cell    # 바이너리 .cell 로 (--format bin, 한셀처럼 잃으려면 --exact)
 rcell convert 문서.cell 문서.legacy.cell # 레거시 .cell 로 (--format legacy)
+rcell convert 문서.cell 문서.xls          # Excel 97-2003 .xls 로 (--format xls)
+rcell convert 문서.cell 문서.csv          # 활성 시트를 CSV 로 (한셀처럼 949, .txt 는 탭, .prn 은 공백)
+rcell convert 자료.csv  자료.cell         # 한셀처럼 CSV·텍스트 파일 열기
 rcell dump    문서.cell --no-cells       # 문서 모델 JSON
 rcell info    잠긴문서.cell --password 암호   # 사용자 암호가 걸린 문서
 ```
@@ -265,8 +270,10 @@ src/
 │   ├── reader.rs              # BIFF8 변형 레코드
 │   ├── formula.rs ftab.rs     # 수식 토큰(Ptg) 해석, 함수 번호
 │   ├── escher.rs              # OfficeArt 도형, 그림 저장소
+│   ├── xls.rs                 # Excel 97-2003 .xls (BIFF8) ↔ 레거시 레코드
 │   └── props.rs               # 문서 속성 (SummaryInformation)
 ├── writer.rs                  # XML .cell / .xlsx 저장
+├── csv.rs                     # CSV·텍스트·PRN 읽기·쓰기 (한셀 규칙)
 ├── edit/                      # 편집 (입력 규칙, 참조 조정, 서식·테두리·병합, 복사·붙여넣기, 시트)
 ├── numfmt.rs                  # 표시 형식 엔진
 ├── render.rs cf_eval.rs chart_svg.rs theme.rs units.rs image.rs   # 그리기
@@ -331,6 +338,7 @@ graph TB
 - [XML `.cell` 형식](docs/format/cell-2024.md) — `hs:` 한컴 확장, `mc:AlternateContent`, 열거형 값, 한셀이 다시 저장할 때 바꾸는 것
 - [레거시 `.cell` 형식](docs/format/cell-legacy.md) — BIFF8 과의 차이, 한컴 레코드, OfficeArt·그림 저장소, 조건부 서식, 필터·보호, 문서 속성
 - [바이너리 `.cell` 형식](docs/format/cell-binary.md) — XLSB 와의 관계, 한셀의 바이너리 저장이 잃는 것
+- [그 밖의 형식](docs/format/other-formats.md) — 한셀이 여닫는 형식 표, CSV·텍스트 규칙, `.xlsx`, `.xls`, 넥셀
 - [리버스 엔지니어링 방법](docs/reverse-engineering.md) — 클린룸 원칙, 한셀을 정답으로 쓰는 차분 분석, 판정 기준
 - [편집 규칙](docs/editing.md) — 입력 규칙, 참조 조정, 테두리·병합, 복사·붙여넣기, 한셀 대조 결과
 - [로드맵](docs/ROADMAP.md)

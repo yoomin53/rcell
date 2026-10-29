@@ -890,6 +890,22 @@ pub fn move_formula(f: &str, here: &str, m: &Move) -> String {
 /// 있는 이름의 대소문자, 숫자는 다시 쓴 꼴(`1E3` → `1000`, `1.50` → `1.5`), 연산자 둘레의 공백은 지우고
 /// (교차 연산자 공백은 하나), 닫지 않은 괄호는 닫는다. `canon` 은 시트·이름의 문서 표기를 돌려준다
 pub fn normalize(input: &str, canon: &dyn Fn(&str) -> Option<String>) -> String {
+    normalize_checked(input, canon).text
+}
+
+/// [`normalize`] 의 결과와 문법 검사
+#[derive(Debug, Clone, PartialEq)]
+pub struct Normalized {
+    pub text: String,
+    /// 닫지 않은 괄호가 있었다 (입력은 닫아 주고, CSV 열기는 글로 둔다)
+    pub unclosed: bool,
+    /// 수식 문법에 맞지 않는다: 참조가 아닌 피연산자 사이의 공백(`1 2`), 범위 연산자 `:` 옆의 숫자·글
+    /// (`1:2.5`), 지수가 -309 보다 작거나 넘치는 수 (`-1E-400`) — 한셀은 이런 CSV 필드를 글로 둔다
+    pub invalid: bool,
+}
+
+/// [`normalize`] + 문법 검사
+pub fn normalize_checked(input: &str, canon: &dyn Fn(&str) -> Option<String>) -> Normalized {
     #[derive(Debug, Clone, PartialEq)]
     enum T {
         /// 그대로 쓸 글 (문자열·구조적 참조·연산자)
@@ -900,6 +916,7 @@ pub fn normalize(input: &str, canon: &dyn Fn(&str) -> Option<String>) -> String 
         Open(String),
     }
     let mut toks: Vec<T> = Vec::new();
+    let mut invalid = false;
     for seg in segments(input) {
         match seg {
             Seg::Ref(r) => {
@@ -1010,6 +1027,14 @@ pub fn normalize(input: &str, canon: &dyn Fn(&str) -> Option<String>) -> String 
                             continue;
                         }
                         let tok = if w.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
+                            let exp = w
+                                .find(['e', 'E'])
+                                .and_then(|p| w[p + 1..].parse::<i32>().ok());
+                            if exp.is_some_and(|e| e < -309)
+                                || w.parse::<f64>().is_ok_and(|v| !v.is_finite())
+                            {
+                                invalid = true;
+                            }
                             match w.parse::<f64>() {
                                 Ok(v) if v.is_finite() => {
                                     T::Operand(crate::legacy::formula::number_text(v), false)
@@ -1038,6 +1063,47 @@ pub fn normalize(input: &str, canon: &dyn Fn(&str) -> Option<String>) -> String 
             }
         }
     }
+    // 앞이 없거나 여는 괄호·연산자(`%` 제외)이고 뒤가 숫자인 `+`
+    let unary_before_number = |before: &[T], after: &[T]| {
+        let prev = before.iter().rev().find(|x| **x != T::Space);
+        let next = after.iter().find(|x| **x != T::Space);
+        let unary = match prev {
+            None | Some(T::Open(_)) => true,
+            Some(T::Raw(p)) => p != "%",
+            _ => false,
+        };
+        unary
+            && matches!(next, Some(T::Operand(n, false))
+                if n.starts_with(|c: char| c.is_ascii_digit() || c == '.'))
+    };
+    // 피연산자가 연산자 없이 이어지면 문법 오류: 공백 사이(교차 연산자)는 둘 다 참조일 때만, 붙어 있으면 늘
+    // (`1 2`, `-1 1/2`, `1:2.5` 의 `1:2` 와 `.5`). 범위 연산자 `:` 옆에 참조가 아닌 피연산자도 오류
+    for (k, t) in toks.iter().enumerate() {
+        let is_operand_start =
+            |x: &T| matches!(x, T::Operand(s, _) if s != ")") || matches!(x, T::Open(_));
+        if !is_operand_start(t) || k == 0 {
+            continue;
+        }
+        let spaced = toks[k - 1] == T::Space;
+        let prev = toks[..k].iter().rev().find(|x| **x != T::Space);
+        if let Some(T::Operand(_, prev_ref)) = prev {
+            let cur_ref = matches!(t, T::Operand(_, true) | T::Open(_));
+            if !spaced || !(*prev_ref && cur_ref) {
+                invalid = true;
+            }
+        }
+    }
+    for (k, t) in toks.iter().enumerate() {
+        if *t == T::Raw(":".into()) {
+            let prev = toks[..k].iter().rev().find(|x| **x != T::Space);
+            let next = toks[k + 1..].iter().find(|x| **x != T::Space);
+            if matches!(prev, Some(T::Operand(_, false)))
+                || matches!(next, Some(T::Operand(_, false)))
+            {
+                invalid = true;
+            }
+        }
+    }
     let mut out = String::with_capacity(input.len());
     let mut depth: i32 = 0;
     for (k, t) in toks.iter().enumerate() {
@@ -1053,6 +1119,9 @@ pub fn normalize(input: &str, canon: &dyn Fn(&str) -> Option<String>) -> String 
                     out.push(' ');
                 }
             }
+            // 숫자 바로 앞의 단항 `+` 는 버린다 (한셀: `=+1+2` → `=1+2`, `=-+1` → `=-1`, `=++1` → `=+1`,
+            // `=+A1`·`=+(1)`·`=+-1` 은 그대로 — CSV 열기 대조 실험)
+            T::Raw(s) if s == "+" && unary_before_number(&toks[..k], &toks[k + 1..]) => {}
             T::Raw(s) => out.push_str(s),
             T::Operand(s, _) => {
                 if s == ")" {
@@ -1069,12 +1138,42 @@ pub fn normalize(input: &str, canon: &dyn Fn(&str) -> Option<String>) -> String 
     for _ in 0..depth.max(0) {
         out.push(')');
     }
-    out
+    Normalized {
+        text: out,
+        unclosed: depth > 0,
+        invalid,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_checks() {
+        let none = |_: &str| None;
+        assert_eq!(normalize("+1+2", &none), "1+2");
+        assert_eq!(normalize("-+1", &none), "-1");
+        assert_eq!(normalize("++1", &none), "+1");
+        assert_eq!(normalize("+A1", &none), "+A1");
+        assert_eq!(normalize("+(1)", &none), "+(1)");
+        assert_eq!(normalize("+-1", &none), "+-1");
+        assert_eq!(normalize("5%+1", &none), "5%+1");
+        for bad in ["1 2", "-1 1/2", "-1:2.5", "-1E-400", "1 SUM(1)"] {
+            assert!(normalize_checked(bad, &none).invalid, "{bad}");
+        }
+        for good in [
+            "A1 B1",
+            "SUM(A1:B2)",
+            "(A1) (B1)",
+            "1+ 2",
+            "SUM( 1 )",
+            "-A1:B2",
+        ] {
+            assert!(!normalize_checked(good, &none).invalid, "{good}");
+        }
+        assert!(normalize_checked("SUM(", &none).unclosed);
+    }
 
     fn ins_rows(at: u32, n: u32) -> Shift {
         Shift::InsRows { at, n }
