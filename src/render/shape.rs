@@ -1012,6 +1012,56 @@ pub fn preset_paths(
                 )),
             }
         }
+        // 선 설명선: 사각형 + 꺾인 지시선 (adj 홀수 = y, 짝수 = x — 상자 기준 비율). border 는 사각형 테두리,
+        // accent 는 첫 점 x 의 세로 강조선 (도형 모양 실험)
+        "callout1"
+        | "callout2"
+        | "callout3"
+        | "borderCallout1"
+        | "borderCallout2"
+        | "borderCallout3"
+        | "accentCallout1"
+        | "accentCallout2"
+        | "accentCallout3"
+        | "accentBorderCallout1"
+        | "accentBorderCallout2"
+        | "accentBorderCallout3" => {
+            let def: &[f64] = match prst.as_bytes().last() {
+                Some(b'1') => &[18750.0, -8333.0, 112500.0, -38333.0],
+                Some(b'2') => &[18750.0, -8333.0, 18750.0, -16667.0, 112500.0, -46667.0],
+                _ => &[
+                    18750.0, -8333.0, 18750.0, -16667.0, 100000.0, -16667.0, 112963.0, -8333.0,
+                ],
+            };
+            let pts: Vec<(f64, f64)> = def
+                .chunks(2)
+                .enumerate()
+                .map(|(k, d)| {
+                    let y = h * a(&format!("adj{}", 2 * k + 1), d[0]);
+                    let x = w * a(&format!("adj{}", 2 * k + 2), d[1]);
+                    (x, y)
+                })
+                .collect();
+            let border = prst.contains("order");
+            let mut v = vec![PathSpec::with(
+                poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]),
+                PathFill::Norm,
+                border,
+            )];
+            if prst.starts_with("accent") {
+                v.push(PathSpec::with(
+                    format!("M{},0V{}", f(pts[0].0), f(h)),
+                    PathFill::None,
+                    true,
+                ));
+            }
+            let mut d = String::new();
+            for (i, (x, y)) in pts.iter().enumerate() {
+                let _ = write!(d, "{}{},{}", if i == 0 { 'M' } else { 'L' }, f(*x), f(*y));
+            }
+            v.push(PathSpec::with(d, PathFill::None, true));
+            Some(v)
+        }
         "wedgeRectCallout" | "wedgeRoundRectCallout" | "wedgeEllipseCallout" => {
             let tx = hc + w * a("adj1", -20833.0);
             let ty = vc + h * a("adj2", 62500.0);
