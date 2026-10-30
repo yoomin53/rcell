@@ -648,10 +648,24 @@ pub fn sheet_print_with(wb: &Workbook, sheet_index: usize, first_untall: bool) -
             .map(|&i| scaled(px.get(i as usize).copied().unwrap_or(0), z))
             .sum()
     };
+    // 열은 한셀 안의 소수 px × 배율을 반올림한 px (그릴 때의 열 너비와 같다)
+    let col_sum = |list: &[u32], z: u32| -> u32 {
+        list.iter()
+            .map(|&i| {
+                let px = col_px.get(i as usize).copied().unwrap_or(0);
+                let ex = col_exact.get(i as usize).copied().unwrap_or(px as f64);
+                if px == 0 {
+                    0
+                } else {
+                    (ex * z as f64 / 100.0 + 0.5).floor() as u32
+                }
+            })
+            .sum()
+    };
     let fits = |z: u32| {
         pages.iter().all(|p| {
             let h = sum(&p.title_rows, &row_px, z) + sum(&p.rows, &row_px, z);
-            let w = sum(&p.title_cols, &col_px, z) + sum(&p.cols, &col_px, z);
+            let w = col_sum(&p.title_cols, z) + col_sum(&p.cols, z);
             h as f64 <= avail75.1 + 1e-9 && w as f64 <= avail75.0 + 1e-9
         })
     };

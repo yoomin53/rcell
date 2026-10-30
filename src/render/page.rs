@@ -767,9 +767,8 @@ fn page_body(
                 continue;
             }
             let tw = w(ln, size);
-            let fits_cell = ol == 0 && or == 0;
             let x = match (v.h, cell_w100) {
-                (HAlign::Right | HAlign::Center, Some(cw)) if fits_cell => to_dev(aligned_px(
+                (HAlign::Right | HAlign::Center, Some(cw)) => to_dev(aligned_px(
                     v.h == HAlign::Right,
                     cw,
                     scr_w(ln),
