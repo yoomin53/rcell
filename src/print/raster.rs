@@ -14,6 +14,10 @@ use super::pdf::FontSet;
 use super::pdfimage::PdfImage;
 use crate::render::page::{Op, Seg};
 
+/// 글자 윤곽의 덮임 정도(0..1)를 이 거듭제곱으로 짙게 한다 — 한셀 비트맵의 글자는 같은 윤곽을 안티앨리어싱만 한 것보다 짙다
+/// (craft-charts barh 의 축 글자 영역 잉크 합: 한셀 23.8k, 그대로 20.1k, 0.5 승 21.5k. 다른 픽셀 %는 거의 같고 잉크 겹침이 조금 는다)
+const TEXT_GAMMA: f32 = 0.5;
+
 /// 그림 한 장의 최대 픽셀 수 (넘으면 벡터로)
 const MAX_PIXELS: i64 = 64_000_000;
 
@@ -52,6 +56,19 @@ impl Canvas {
                 self.px[i + 3] = ((255 * a + self.px[i + 3] as u32 * ia + 127) / 255) as u8;
             }
         }
+    }
+
+    /// 글자 윤곽 채우기 (덮임 정도를 [`TEXT_GAMMA`] 로 짙게)
+    fn fill_text(&mut self, cmds: &[Command], color: [u8; 3]) {
+        let (mut m, pl) = Mask::new(cmds).style(Fill::NonZero).render();
+        for a in m.iter_mut() {
+            *a = (255.0 * (*a as f32 / 255.0).powf(TEXT_GAMMA) + 0.5) as u8;
+        }
+        self.blend(
+            &m,
+            (pl.left, pl.top, pl.width as i32, pl.height as i32),
+            color,
+        );
     }
 
     fn fill(&mut self, cmds: &[Command], color: [u8; 3], even_odd: bool) {
@@ -205,7 +222,7 @@ pub fn render(
                 for g in &glyphs {
                     if !g.is_empty() {
                         // 글리프 겹침은 비영 규칙 (TrueType)
-                        cv.fill(&commands(g, map), *color, false);
+                        cv.fill_text(&commands(g, map), *color);
                     }
                 }
             }

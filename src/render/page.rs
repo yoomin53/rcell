@@ -1651,7 +1651,8 @@ fn object_ops(
                     super::draw::draw_color(c, theme)
                 });
                 let m = box_matrix(x, y, w, h, 6.25, rot, fh, fv);
-                if rot == 0.0 && !fh && !fv {
+                // 한셀은 레거시 차트(VtChart 에서 읽은 것)는 벡터로, 새 차트만 비트맵으로 찍는다 (레거시 판 PDF 에 글자 `Tf` 가 있다)
+                if rot == 0.0 && !fh && !fv && ch.legacy.is_none() {
                     let mut sub = Vec::new();
                     super::svgops::svg_ops(&svg, m, &mw, &mut sub);
                     ops.push(Op::Raster {
