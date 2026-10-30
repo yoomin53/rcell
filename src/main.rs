@@ -828,9 +828,13 @@ fn convert(
         Some("xls") => rcell::SaveFormat::Xls,
         Some("nxl") => rcell::SaveFormat::Nxl,
         Some("ods") => rcell::SaveFormat::Ods,
+        Some("htm" | "html") => rcell::SaveFormat::Htm,
+        Some("mht" | "mhtml") => rcell::SaveFormat::Mht,
         Some(other) => {
             return Err(rcell::Error::InvalidValue {
-                context: "--format (cell, xlsx, bin, legacy, xls, nxl, ods, csv, txt, prn)".into(),
+                context:
+                    "--format (cell, xlsx, bin, legacy, xls, nxl, ods, htm, mht, csv, txt, prn)"
+                        .into(),
                 value: other.into(),
             });
         }

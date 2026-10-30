@@ -84,7 +84,6 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
         w: w - PAD.0 - PAD.1,
         h: h - PAD.2 - PAD.3,
     };
-
     // 제목: 위 가운데 (한셀 화면: 14pt, 굵게 — 글(c:tx)이 있으면 b="0" 이어도 굵다, 글자 윗변이 틀에서 14px, 그림
     // 영역은 제목 줄 아래 20px 뒤 — c2_e2_title_*: 맨 위 눈금선이 틀 + 60.5, 18pt 는 + 66.5). 자동 제목("차트 제목",
     // 한셀이 COM 으로 만든 차트)은 c:txPr 의 b 를 따른다 (차트 종류 실험: b="0" → 보통 굵기). 범례는 제목 아래 자리의 가운데
@@ -115,7 +114,9 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
             );
         }
         if ch.title_full.as_ref().and_then(|t| t.overlay) != Some(true) {
-            let bottom = ty + lh * lines.len() as f64 + 20.0;
+            // 자동 제목(글을 적지 않은 "차트 제목" — 한셀이 COM 으로 만든 차트)은 1px 위에서 끝난다 (차트 종류 실험)
+            let auto = ch.title_full.as_ref().is_some_and(|t| t.tx.is_none());
+            let bottom = ty + lh * lines.len() as f64 + if auto { 19.0 } else { 20.0 };
             inner.h -= bottom - inner.y;
             inner.y = bottom;
         } else {
@@ -362,8 +363,15 @@ impl Font {
     /// 글자열 폭 어림 (px): 한글·한자 1em, 숫자 0.5em (한셀 축 배치: 9pt 숫자 하나가 6px — chart_range12 의 100 이 70 보다 6px 넓다), 그 밖 0.5em
     fn width(&self, t: &str) -> f64 {
         let em = self.px() * if self.bold { 1.05 } else { 1.0 };
+        let calibri = self
+            .family
+            .as_deref()
+            .is_some_and(|f| f.starts_with("'Calibri'"));
         t.chars()
             .map(|c| {
+                if calibri && let Some(w) = calibri_em(c) {
+                    return w;
+                }
                 if crate::render::is_wide(c) {
                     1.0
                 } else if c.is_ascii_digit() {
@@ -382,6 +390,70 @@ impl Font {
             .sum::<f64>()
             * em
     }
+}
+
+/// Calibri 글자 폭 (em) — 한셀이 COM 으로 만든 차트의 latin 글꼴 (차트 종류 실험: 100% 축 레이블 "100%" 가 29.8px)
+fn calibri_em(c: char) -> Option<f64> {
+    // 2048 단위 → em
+    let u: f64 = match c {
+        ' ' => 463.0,
+        '0'..='9' => 1038.0,
+        '%' => 1464.0,
+        '.' => 517.0,
+        ',' => 511.0,
+        '-' => 627.0,
+        '+' => 1020.0,
+        ':' => 548.0,
+        '/' => 791.0,
+        '(' | ')' => 621.0,
+        'a' => 981.0,
+        'b' | 'd' | 'h' | 'n' | 'p' | 'q' | 'u' => 1076.0,
+        'c' => 866.0,
+        'e' => 1019.0,
+        'f' => 625.0,
+        'g' => 964.0,
+        'i' | 'l' => 470.0,
+        'j' => 490.0,
+        'k' => 931.0,
+        'm' => 1636.0,
+        'o' => 1080.0,
+        'r' => 714.0,
+        's' => 801.0,
+        't' => 686.0,
+        'v' => 925.0,
+        'w' => 1464.0,
+        'x' => 887.0,
+        'y' => 927.0,
+        'z' => 809.0,
+        'A' => 1185.0,
+        'B' => 1114.0,
+        'C' => 1092.0,
+        'D' => 1260.0,
+        'E' => 1000.0,
+        'F' => 941.0,
+        'G' => 1292.0,
+        'H' => 1276.0,
+        'I' => 516.0,
+        'J' => 653.0,
+        'K' => 1064.0,
+        'L' => 861.0,
+        'M' => 1751.0,
+        'N' => 1322.0,
+        'O' => 1356.0,
+        'P' => 1058.0,
+        'Q' => 1378.0,
+        'R' => 1112.0,
+        'S' => 941.0,
+        'T' => 998.0,
+        'U' => 1314.0,
+        'V' => 1162.0,
+        'W' => 1822.0,
+        'X' => 1063.0,
+        'Y' => 998.0,
+        'Z' => 959.0,
+        _ => return None,
+    };
+    Some(u / 2048.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1635,7 +1707,8 @@ fn draw_axis_chart(
         && !horizontal
         && !xy
         && matches!(first.kind, "bar" | "line" | "area")
-        && ((legacy && !matches!(first.grouping, "stacked" | "percentStacked"))
+        && ((legacy
+            && (first.kind == "bar" || !matches!(first.grouping, "stacked" | "percentStacked")))
             || (!legacy
                 && ch
                     .view3d
@@ -2985,8 +3058,20 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
         match g.kind {
             "bar" => {
                 let gap = g.props.gap_width.unwrap_or(150) as f64 / 100.0;
-                let slot = (1.0 / n as f64) / (ns as f64 + gap);
+                let stacked = matches!(g.grouping, "stacked" | "percentStacked");
+                // 누적: 항목마다 기둥 하나 (폭 = 띠 / (1 + 간격)), 조각을 아래부터 쌓는다
+                let slot = if stacked {
+                    (1.0 / n as f64) / (1.0 + gap)
+                } else {
+                    (1.0 / n as f64) / (ns as f64 + gap)
+                };
                 for k in 0..n {
+                    let total: f64 = g
+                        .series
+                        .iter()
+                        .map(|s| s.values.get(k).copied().flatten().unwrap_or(0.0).abs())
+                        .sum();
+                    let mut cum = 0.0;
                     for (i, s) in g.series.iter().enumerate() {
                         let Some(val) = s.values.get(k).copied().flatten() else {
                             continue;
@@ -2994,9 +3079,23 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
                         let color = series_color(s, g.offset + i, cx);
                         let st = point_style(s, i, k, cx, &color);
                         let front = st.fill.as_ref().map_or(color.as_str(), |f| f.0.as_str());
-                        let bx0 = k as f64 / n as f64 + slot * (gap / 2.0 + i as f64);
+                        let (bx0, ya, yb) = if stacked {
+                            let d = if g.grouping == "percentStacked" && total > 0.0 {
+                                val / total
+                            } else {
+                                val
+                            };
+                            let (a, b) = (yv(cum), yv(cum + d));
+                            cum += d;
+                            (k as f64 / n as f64 + (1.0 / n as f64 - slot) / 2.0, a, b)
+                        } else {
+                            (
+                                k as f64 / n as f64 + slot * (gap / 2.0 + i as f64),
+                                base,
+                                yv(val),
+                            )
+                        };
                         let bx1 = bx0 + slot;
-                        let (ya, yb) = (base, yv(val));
                         let sx = if v.sb >= 0.0 { bx1 } else { bx0 };
                         out.path(
                             &v.path(&[(sx, ya, z0), (sx, yb, z0), (sx, yb, z1), (sx, ya, z1)]),

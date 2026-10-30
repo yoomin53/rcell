@@ -2044,6 +2044,9 @@ pub fn write_with_report(wb: &Workbook) -> Result<(Vec<u8>, Report)> {
 
 /// 설정을 주어 쓴다 ([`WriteOptions`]), 경고 목록을 함께 돌려준다
 pub fn write_with_options(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)> {
+    // 캐시가 없는 차트는 칸 값으로 채운 사본으로 쓴다 (한셀처럼 — 데이터 표와 계열 이름)
+    let filled = super::xls_chart::fill_caches(wb);
+    let wb = filled.as_ref().unwrap_or(wb);
     let mut report = Report::default();
     let (stream, caches) = workbook_stream_and_caches(wb, opts, &mut report)?;
     let summary = super::props::write_summary(&wb.properties, wb.total_time);

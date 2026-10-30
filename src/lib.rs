@@ -50,6 +50,7 @@ pub mod text;
 pub mod theme;
 pub mod units;
 pub mod vocab;
+pub mod webpage;
 pub mod writer;
 pub mod xml;
 
@@ -143,8 +144,12 @@ pub enum SaveFormat {
     Xls,
     /// 넥셀 `.nxl` (한셀 FileFormat -2003 — BIFF8 틀 + 한컴 확장)
     Nxl,
-    /// ODF 스프레드시트 `.ods` (한셀 FileFormat 60 — 값·수식·구조만)
+    /// ODF 스프레드시트 `.ods` (한셀 FileFormat 60)
     Ods,
+    /// 웹 페이지 `.htm` (한셀 FileFormat 44 — `이름.htm` 과 `이름.files/` 폴더)
+    Htm,
+    /// 웹 보관 파일 `.mht` (한셀 FileFormat 45 — MIME 한 덩이)
+    Mht,
 }
 
 impl SaveFormat {
@@ -168,6 +173,10 @@ impl SaveFormat {
             SaveFormat::Nxl
         } else if name.ends_with(".ods") {
             SaveFormat::Ods
+        } else if name.ends_with(".htm") || name.ends_with(".html") {
+            SaveFormat::Htm
+        } else if name.ends_with(".mht") || name.ends_with(".mhtml") {
+            SaveFormat::Mht
         } else if name.ends_with(".csv") {
             SaveFormat::Csv
         } else if name.ends_with(".txt") || name.ends_with(".tsv") {
@@ -188,6 +197,9 @@ pub fn save(wb: &Workbook, path: impl AsRef<Path>) -> Result<()> {
 
 /// 통합 문서를 주어진 형식으로 저장한다.
 pub fn save_as(wb: &Workbook, path: impl AsRef<Path>, format: SaveFormat) -> Result<()> {
+    if format == SaveFormat::Htm {
+        return webpage::save_htm(wb, path.as_ref());
+    }
     let bytes = match format {
         SaveFormat::Cell => writer::write(wb, writer::Flavor::Cell)?,
         SaveFormat::Xlsx => writer::write(wb, writer::Flavor::Xlsx)?,
@@ -201,6 +213,8 @@ pub fn save_as(wb: &Workbook, path: impl AsRef<Path>, format: SaveFormat) -> Res
         SaveFormat::Xls => legacy::write_xls(wb, &legacy::WriteOptions::for_path(path.as_ref()))?.0,
         SaveFormat::Nxl => legacy::write_nxl(wb, &legacy::WriteOptions::for_path(path.as_ref()))?.0,
         SaveFormat::Ods => ods::write(wb)?,
+        SaveFormat::Mht => webpage::write_mht(wb),
+        SaveFormat::Htm => unreachable!("위에서 처리"),
     };
     std::fs::write(path, bytes)?;
     Ok(())

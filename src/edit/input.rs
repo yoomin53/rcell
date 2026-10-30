@@ -39,9 +39,14 @@ pub enum Cat {
 
 /// 표시 형식 코드의 종류 (첫 구역 기준)
 pub fn category(code: &str) -> Cat {
+    classify(code).0
+}
+
+/// 종류와 날짜 부분(`y` `d` …)·시각 부분(`h` `s` AM/PM `[h]`) 이 있는지 (날짜·시각 종류일 때만 뜻이 있다)
+pub fn classify(code: &str) -> (Cat, bool, bool) {
     let c = code.trim();
     if c.is_empty() || c.eq_ignore_ascii_case("general") || c == "G/표준" {
-        return Cat::General;
+        return (Cat::General, false, false);
     }
     // 첫 구역에서 따옴표 글·\ 다음 글자·[색/조건] 을 뺀다 ([h] [m] [s] 는 경과 시간)
     let mut plain = String::new();
@@ -74,28 +79,28 @@ pub fn category(code: &str) -> Cat {
         i += 1;
     }
     if plain.trim() == "@" {
-        return Cat::Text;
+        return (Cat::Text, false, false);
     }
     let has = |x: char| plain.contains(x);
     if plain.contains("e+") || plain.contains("e-") {
-        return Cat::Scientific;
+        return (Cat::Scientific, false, false);
     }
     let ampm = plain.contains("am/pm") || plain.contains("a/p");
     let dated = has('y') || has('d') || has('e') || has('g');
     let timed = elapsed || has('h') || has('s') || ampm;
     if dated || (has('m') && !timed) {
-        return Cat::Date;
+        return (Cat::Date, true, timed);
     }
     if timed {
-        return Cat::Time;
+        return (Cat::Time, false, true);
     }
     if has('%') {
-        return Cat::Percent;
+        return (Cat::Percent, false, false);
     }
     if has('/') {
-        return Cat::Fraction;
+        return (Cat::Fraction, false, false);
     }
-    Cat::Number
+    (Cat::Number, false, false)
 }
 
 /// 입력을 읽은 결과

@@ -550,6 +550,8 @@ fn sorted_cf(
     // 처음 넓힌 때 규칙마다 받은 차례 번호, 넓힌 줄 (목록 차례)
     let mut new_prio: Vec<Option<Vec<u32>>> = vec![None; list.len()];
     let mut groups: Vec<Vec<usize>> = Vec::new();
+    // 데이터 막대가 든 묶음: 줄마다 옮긴 몫을 새 묶음으로 (그 줄에서 센 차례 번호)
+    let mut bars: Vec<ConditionalFormat> = Vec::new();
     let mut k = 0u32;
     for d in (0..order.len()).rev() {
         let s = lines[order[d]];
@@ -570,9 +572,6 @@ fn sorted_cf(
                 k += 1;
                 ks[i] = k;
             }
-            if super::cfpaste::has_databar(cf) {
-                continue;
-            }
             let moved: Vec<(u32, u32, u32, u32)> = cut
                 .iter()
                 .map(|&(a, bcol, c, e)| {
@@ -583,6 +582,21 @@ fn sorted_cf(
                     }
                 })
                 .collect();
+            if super::cfpaste::has_databar(cf) {
+                // 한셀: 원래 묶음은 그대로 두고 옮긴 줄마다 같은 규칙의 묶음을 하나씩 만든다 (정렬 대조 실험 —
+                // 같은 자리에 머문 줄도). 앞 줄에서 만든 묶음에 붙는 경우가 있지만 그 규칙은 아직 모른다
+                let mut m = cf.clone();
+                for (r, &p) in m.rules.iter_mut().zip(&ks) {
+                    r.priority = p;
+                }
+                let text: Vec<Area> = moved
+                    .iter()
+                    .map(|&(a, b, c, d)| Area::rect(a, b, c, d))
+                    .collect();
+                m.sqref = refs::sqref_text(&text);
+                bars.push(m);
+                continue;
+            }
             let all: Vec<(u32, u32, u32, u32)> =
                 areas[b].iter().chain(&pieces[b]).copied().collect();
             let mut changed = false;
@@ -634,6 +648,7 @@ fn sorted_cf(
             out.push(m);
         }
     }
+    out.extend(bars.into_iter().rev());
     out
 }
 
