@@ -100,13 +100,74 @@ fn renumber(rules: Vec<&mut CfRule>, first: u32) -> u32 {
     p
 }
 
-/// 붙여넣기: 붙인 묶음들을 시트에 넣는다 (`blocks` 의 규칙은 원래 우선순위)
-pub(crate) fn place_pasted(sheet: &mut Sheet, mut blocks: Vec<ConditionalFormat>) {
+/// 서식(dxf) 없는 고유 값·중복 값 규칙 (한셀은 붙일 때 빈 서식을 만들어 준다)
+fn bare_unique(r: &CfRule) -> bool {
+    matches!(r.kind.as_str(), "uniqueValues" | "duplicateValues") && r.dxf_id.is_none()
+}
+
+/// 붙여넣기: 붙인 묶음들을 시트에 넣는다 (`blocks` 의 규칙은 원래 우선순위).
+///
+/// 데이터 막대가 든 묶음과 서식 없는 고유·중복 값 규칙이 든 묶음은 한 번 더 붙는다 (둘째 묶음들은 첫 묶음들 다음
+/// 우선순위). 한셀은 붙이기마다 시트의 서식 없는 고유·중복 값 규칙에 빈 서식을 만들어 주고, 둘째 묶음도 그 서식을
+/// 받는다 — 첫 묶음은 원본 그대로 (조건부 서식 대조 실험: 복사·서식 붙이기 11가지)
+pub(crate) fn place_pasted(
+    sheet: &mut Sheet,
+    dxfs: &mut Vec<crate::model::Dxf>,
+    blocks: Vec<ConditionalFormat>,
+) {
     if blocks.is_empty() {
         return;
     }
-    let mut dups: Vec<ConditionalFormat> =
-        blocks.iter().filter(|b| has_databar(b)).cloned().collect();
+    fix_bare(sheet, dxfs);
+    let mut dups: Vec<ConditionalFormat> = blocks
+        .iter()
+        .filter(|b| has_databar(b) || b.rules.iter().any(bare_unique))
+        .cloned()
+        .collect();
+    for b in &mut dups {
+        for r in &mut b.rules {
+            if bare_unique(r) {
+                dxfs.push(crate::model::Dxf::default());
+                r.dxf_id = Some((dxfs.len() - 1) as u32);
+            }
+        }
+    }
+    place_with_dups(sheet, blocks, dups);
+}
+
+/// 붙이기(값만 붙이기도)를 하면 한셀은 시트의 서식 없는 고유·중복 값 규칙에 빈 서식을 만든다
+pub(crate) fn fix_bare(sheet: &mut Sheet, dxfs: &mut Vec<crate::model::Dxf>) {
+    // 앞선 붙이기에서 붙은 첫 묶음(같은 자리·같은 규칙의 둘째 묶음이 곁에 있다)은 그대로 둔다 (한셀: 두 번째 복사는
+    // 첫 복사로 붙은 서식 없는 묶음을 고치지 않는다)
+    let twin = |i: usize, list: &[ConditionalFormat]| {
+        list.iter().enumerate().any(|(j, o)| {
+            j != i
+                && o.sqref == list[i].sqref
+                && o.rules.len() == list[i].rules.len()
+                && o.rules
+                    .iter()
+                    .zip(&list[i].rules)
+                    .all(|(x, y)| x.kind == y.kind)
+        })
+    };
+    let fix: Vec<usize> = (0..sheet.conditional_formats.len())
+        .filter(|&i| !twin(i, &sheet.conditional_formats))
+        .collect();
+    for i in fix {
+        for r in &mut sheet.conditional_formats[i].rules {
+            if bare_unique(r) {
+                dxfs.push(crate::model::Dxf::default());
+                r.dxf_id = Some((dxfs.len() - 1) as u32);
+            }
+        }
+    }
+}
+
+fn place_with_dups(
+    sheet: &mut Sheet,
+    mut blocks: Vec<ConditionalFormat>,
+    mut dups: Vec<ConditionalFormat>,
+) {
     let k: usize = blocks.iter().chain(&dups).map(|b| b.rules.len()).sum();
     shift(sheet, k as u32);
     let next = renumber(
