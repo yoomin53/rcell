@@ -161,7 +161,8 @@ rcell 의 `hcmath::lgamma` 는 반정수 k/2 (k ≤ 400) 는 한셀에서 잰 �
 | CRITBINOM / BINOM.INV | 누적 확률이 기준을 넘는(>)·이상인(≥) 가장 작은 수. 확률·기준이 0 이나 1 이면 #NUM! |
 | TTEST·T.TEST 형식 3 | 꼬리 수와 관계없이 한쪽 값 |
 | POISSON·POISSON.DIST | 확률 질량 e^{k·ln λ − λ − Σ_{j=2}^{k} ln j} (ln Γ 가 아니다), 누적은 그것을 0 부터 차례로 더한다 (`POISSON.DIST(1000,1000,FALSE)` = 0.012614611348616408) |
-| BINOM.DIST·BINOMDIST 확률 질량 | 조합 수가 넘치면 #NUM! (`BINOM.DIST(1000,2000,0.5,FALSE)`) |
+| BINOM.DIST·BINOMDIST 확률 질량 | e^{lnΓ(n+1) − lnΓ(k+1) − lnΓ(n−k+1)} · p^k · q^{n−k} (lnΓ 는 한셀 GAMMALN = C 런타임 lgamma, 2장; 조합 수를 정수 곱으로 구한 값이 아니다 — `BINOM.DIST(10,20,0.5,FALSE)` = 0.17619705200195324, 정수 곱은 …313). n = 2–1000 의 확률 질량 16 경우가 끝자리까지 같다. 조합 수가 넘치면 #NUM! (`BINOM.DIST(1000,2000,0.5,FALSE)`) |
+| BINOM.DIST 누적 | k > n·p 이면 1 − Σ_{i=k+1…n} 질량 (끝자리까지 같다: `BINOM.DIST(50,100,0.3,TRUE)` = 0.9999909653138043, (5,10,0.1)·(170,171,0.9) 도 같다). k ≤ n·p 이면 한셀이 정확한 값에 더 가까운 다른 계산을 하는 듯하다 (아래 6장) |
 | NEGBINOMDIST·NEGBINOM.DIST | 확률 1 은 누적만 된다 (`NEGBINOMDIST(0,1,1)` = #NUM!, `NEGBINOM.DIST(10,5,1,TRUE)` = 1) |
 | T.INV | 확률이 1E-6 보다 작으면 자유도와 관계없이 −1 (`T.INV(9E-7,2)` = −1, `T.INV(1E-6,2)` = −523.29). T.INV.2T 는 아니다 |
 | CHISQ.TEST | 자유도를 늘 칸 수 − 1 로 (2차원 표에서도), 소수 9자리. CHITEST 는 (행−1)(열−1) |
@@ -327,7 +328,7 @@ VALUETOTEXT, VSTACK, WON, XMATCH. rcell 은 `CalcOptions::excel_functions` 를 �
 | T.INV 먼 꼬리 | p < 1E-4 이나 1 − p < 1E-6 처럼 반복을 여러 번 하는 곳에서 상대 1E-11 쯤 (`T.INV(0.00001,2)`, 대조 실험 out8 의 7 경우) |
 | CHISQ.INV·F.INV | CHISQ.INV 는 반복한 값의 2.7% 가 끝자리 1E-9 (위 시작 값 표: 시작 값이 상대 1E-11 쯤 다르다). `F.INV(p,1,1)` 은 11% 가 1E-9 쯤 작다 (반올림한 tan 의 제곱보다; 계산 꼴을 모른다) |
 | T.DIST.2T 의 먼 꼬리 | `T.DIST.2T(9,100)` 이 상대 4E-9 다르다 (적분 칸 수가 바뀌는 곳으로 보인다) |
-| BINOM.DIST 누적 (n > 1029) | 상대 3E-12 차이. Σ ln 꼴 확률 질량의 합(POISSON 꼴)도 아니다 |
+| BINOM.DIST 누적 (k ≤ n·p) | 상대 1E-13 (n = 1000) – 3E-12 (n = 2000). 한셀 값이 정확한 값에 더 가깝다 (n = 1000 에서 2E-14, n = 2000 에서 2E-12; rcell 의 질량 합은 1.6E-13·1.1E-11) — e^{lnΓ…} 질량의 오름·내림차순 합, 점화식 합(질량(k) 에서 위·아래로), 1 − 위쪽 꼬리, 로그 꼴 질량 어느 것도 아니다 |
 | C 런타임 함수의 정확하지 않은 반올림 | sin·pow·atan… 가 정확한 반올림에서 벗어나는 0.1–0.4% (`SIN(2.5)`) — IMEXP·IMSINH·SKEW 각 1 경우 |
 | FV·PMT 잔차 | `FV(0.1,5,PMT(0.1,5,100),100)` = 2.842E-14 (rcell −2.842E-14), IPMT 의 같은 잔차 3 경우. FV 를 −(pv·g + 지급·((g−1)/r)), PMT 를 −pv·r·g/(g−1) 차례로 하면 FV 두 경우는 같아지지만 그 PMT 는 `PMT(1E-10,10,1000)` 과 fv 가 있는 경우의 끝자리가 달라진다 — PMT 의 계산 꼴을 아직 모른다 (PMT 자체는 상대 2E-15 안) |
 | 1904 체계의 음수 일련 번호 | `NETWORKDAYS(-5,5)` = 5, `WORKDAY(-5,3)` = 0. 날짜 부분은 절댓값의 날짜다 (`DAY(-5)` = DAY(5) = 6, `WEEKDAY(-1)` = 7 — rcell 도 같다). NETWORKDAYS(k,5) 는 k = −1…−7 에서 5, −8…−12 에서 6 (주마다 하루만 느는 꼴), WORKDAY 는 음수 결과를 낸다 (`WORKDAY(5,-5)` = −2, `WORKDAY(-10,0)` = −10) — 대조 실험 c1904neg 110 경우 가운데 17 만 같다. 규칙을 모른다 |
@@ -338,7 +339,7 @@ VALUETOTEXT, VSTACK, WON, XMATCH. rcell 은 `CalcOptions::excel_functions` 를 �
 | RATE·XIRR | RATE 는 해가 0 이면 반복의 잡음이 그대로 남는다 (`RATE(10,-100,1000,0,1)` = 2.4E-9, 추정값 0.1·0.2 는 #NUM!). XIRR 은 추정값에 따라 1E-10 안에서 달라진다 — 뉴턴·할선·이분 어느 것과도 반복값이 맞지 않는다 |
 | YIELD (남은 지급 4 번 이하·41 번 이상) | 다른 반복으로 1E-10 안에서 다르다 |
 | IRR (겹근·0 근) | 잡음 속의 부호 바뀜이 여럿이라 이분법의 구간에 따라 끝자리가 다르다 (`IRR({-1,1})` = −5.55E-17) |
-| BINOM.DIST 큰 n | 누적은 ln Γ 끝자리에 따라 상대 1E-12 차이. 확률 질량(FALSE)은 조합 수가 넘치면 #NUM! (`BINOM.DIST(1500,2000,0.75,FALSE)`) |
+| BINOM.DIST 큰 n | 확률 질량(FALSE)은 조합 수가 넘치면 #NUM! (`BINOM.DIST(1500,2000,0.75,FALSE)`). 누적은 위 6장 |
 | IMSIN·IMSINH 의 15자리 | sinh 의 마지막 비트 (`IMSIN("4j")` 의 27.2899171971278, libm sinh 는 1ulp 작다) |
 | ODDFPRICE (만기가 첫 이자일의 이자 일정에 맞지 않을 때) | `ODDFPRICE(39763,40056,…)` 처럼 만기가 첫 이자일 + 6개월보다 하루 이르면 0.004 다르다 |
 | XLOOKUP | 넷째 인수 없이 못 찾으면 0 이 아니라 앞서 계산한 다른 XLOOKUP 의 값(`"nf"`)이나 엉뚱한 칸 값이 나온다 — 한셀의 오류로 보고 따르지 않는다 |
