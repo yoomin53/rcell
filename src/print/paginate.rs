@@ -93,6 +93,8 @@ pub struct SheetPrint {
     /// 행·열의 화면 px (0부터, 숨김은 0)
     pub row_px: Vec<u32>,
     pub col_px: Vec<u32>,
+    /// 열의 한셀 안 너비 (px 소수 — COM `Range.Width` × 4/3). 그릴 때의 열 너비는 이 값에 배율을 곱해 반올림한다
+    pub col_exact: Vec<f64>,
 }
 
 impl SheetPrint {
@@ -111,7 +113,14 @@ impl SheetPrint {
         if self.tall {
             px as f64
         } else {
-            scaled(px, self.print_scale) as f64
+            // 한셀 PDF (열 너비 3.3·5·8.43·2·1.5 글자, 배율 50–200): 열 하나의 인쇄 너비는 한셀 안의 너비(소수 px)에
+            // 배율을 곱해 반올림한 px (너비 3.3 글자 = 32.6px, 배율 99 → 32px)
+            let ex = self.col_exact.get(c as usize).copied().unwrap_or(px as f64);
+            if px == 0 {
+                0.0
+            } else {
+                (ex * self.print_scale as f64 / 100.0 + 0.5).floor()
+            }
         }
     }
 }
@@ -682,6 +691,7 @@ pub fn sheet_print_with(wb: &Workbook, sheet_index: usize, first_untall: bool) -
         v_breaks,
         row_px,
         col_px,
+        col_exact: geo.col_px.clone(),
     }
 }
 

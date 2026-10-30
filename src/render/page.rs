@@ -663,33 +663,17 @@ fn page_body(
         let mut size = frame.font_size(pt);
         let px = frame.px;
         let pad_l = (px + 0.5).floor();
-        // 왼쪽 맞춤 글자 자리: round_half_even((화면 왼쪽 + 2px + 들여쓰기) × z) − 1 px (장치 단위로)
-        let x100 = |col: u32| -> Option<f64> {
-            if let Some(c) = frame.col_x100.iter().find(|c| c.0 == col) {
-                return Some(c.1);
-            }
-            // 페이지 밖 열 (넘쳐 들어오는 글자): 가장 가까운 뒤쪽 열에서 화면 폭을 뺀다
-            let &(j, at) = frame
-                .col_x100
-                .iter()
-                .filter(|c| c.0 > col)
-                .min_by_key(|c| c.0)?;
-            Some(at - (col..j).map(|k| lay.col_w(k) as f64).sum::<f64>())
-        };
+        // 왼쪽 맞춤 글자 자리: 열의 인쇄 왼쪽 경계 + pad px (한셀 PDF 열 너비 3.3·5·8.43 글자 × 배율 50–200 실험)
         let left_at = |col: u32, extra: f64| -> Option<f64> {
-            // 배율 100 은 화면 자리 그대로 (왼쪽 + 2px)
-            if frame.zoom == 100 {
-                return Some((frame.origin_x + (x100(col)? + 2.0 + extra) * 6.25).round());
-            }
-            let v = (x100(col)? + 2.0 + extra) * frame.zoom as f64 / 100.0;
-            let r = v.round();
-            // 반은 짝수 쪽 (75% 의 1.5 → 75 + 0)
-            let r = if (v - v.trunc() - 0.5).abs() < 1e-9 && r % 2.0 != 0.0 {
-                r - 1.0
+            // 열의 인쇄 왼쪽 경계에서 pad 만큼 (배율 100 = 키 큰 모드 또는 1:1 은 2px 그대로)
+            let b = ax.start(col)?;
+            let pad = if frame.zoom == 100 {
+                2.0 + extra
             } else {
-                r
+                // 반은 내림 (75% 의 1.5 → 1): 배율 50·75·99·125·150·200 의 첫 열 자리 0·0·1·1·2·3px
+                ((2.0 + extra) * frame.zoom as f64 / 100.0 - 0.5).ceil() - 1.0
             };
-            Some((frame.origin_x + (r - 1.0) * 6.25).round())
+            Some((b + pad * 6.25).round())
         };
         let indent = v.indent as f64 * INDENT_PX * px;
         let w = |s: &str, sz: f64| measure.width(&key, sz, s) * stretch;
