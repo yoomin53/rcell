@@ -634,6 +634,9 @@ fn window(out: &mut Out, ctx: &SheetCtx) {
     if v.show_zeros {
         g |= 0x0010;
     }
+    if v.right_to_left {
+        g |= 0x0040;
+    }
     if no_split {
         g |= 0x0100;
     }

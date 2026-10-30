@@ -19,6 +19,7 @@
 
 mod advance;
 mod advance_data;
+mod advance_hint;
 mod cell;
 mod draw;
 mod icons;

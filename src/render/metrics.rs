@@ -193,7 +193,7 @@ pub struct FontMetrics {
     w: [f64; 6],
     bold: bool,
     /// 정수 폭 표가 있는 글꼴 (advance.rs) — 글자 폭이 한셀 화면과 같다
-    em: Option<&'static super::advance_data::FontEm>,
+    adv: Option<super::advance::AdvFont>,
     size_pt: f64,
 }
 
@@ -229,7 +229,7 @@ impl FontMetrics {
             px: size * 96.0 / 72.0,
             w: row.w.map(|v| v as f64 / 1000.0),
             bold,
-            em: super::advance::table(name),
+            adv: super::advance::font(name),
             size_pt: size,
         }
     }
@@ -238,8 +238,8 @@ impl FontMetrics {
     /// 글꼴의 비례, 알파벳 평균 1)을 곱한다. 고정폭 글꼴(소문자·대문자 평균이 같다)은 비율을 쓰지 않는다
     pub fn char_width(&self, c: char) -> f64 {
         // 정수 폭 표가 있으면 한셀의 폭 그대로 (round(설계 폭 × ppem))
-        if let Some(t) = self.em
-            && let Some(w) = super::advance::hcell_px(t, self.bold, self.size_pt, c)
+        if let Some(a) = self.adv
+            && let Some((w, _)) = a.widths(self.size_pt, self.bold, c)
         {
             return w;
         }

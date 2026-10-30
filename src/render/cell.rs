@@ -301,6 +301,12 @@ fn rich_html(v: &CellView, text: &str, theme: &Theme, cf_bold: bool) -> String {
                         .or_else(|| v.font.and_then(|c| c.name.as_deref()));
                     let size = f.and_then(|f| f.size).unwrap_or_else(|| v.m.size_pt());
                     let bold = f.map_or_else(|| v.font.is_some_and(|c| c.bold), |f| f.bold);
+                    // 줄 높이는 조각 글꼴의 한 줄 높이 — 크기가 다른 조각이 섞인 줄은 가장 큰 조각의 높이가 줄 높이가 된다
+                    // (한셀 화면: 20pt 조각이 낀 칸의 글 기준선이 가운데 맞춤에서 행 아래 − 글꼴 아래 폭)
+                    if f.is_some() {
+                        let m = metrics::FontMetrics::new(name, Some(size), bold);
+                        let _ = write!(css, "line-height:{:.2}px;", m.row_pt * 4.0 / 3.0);
+                    }
                     if has_sp || f.is_some_and(|f| f.vert_align.is_some()) {
                         esc(&run.text)
                     } else {
