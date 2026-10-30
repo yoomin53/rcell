@@ -224,6 +224,7 @@ fn png(d: &[u8]) -> Option<PdfImage> {
     })
 }
 
+/// BMP (BI_RGB·BI_BITFIELDS): 1·4·8 비트 색표, 16 비트 (5-5-5 또는 마스크), 24·32 비트. 압축(RLE)은 풀지 않는다
 fn bmp(d: &[u8]) -> Option<PdfImage> {
     let le32 = |i: usize| {
         d.get(i..i + 4)
@@ -231,31 +232,161 @@ fn bmp(d: &[u8]) -> Option<PdfImage> {
     };
     let le16 = |i: usize| d.get(i..i + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
     let off = le32(10)? as usize;
+    let hs = le32(14)? as usize;
     let w = le32(18)? as i32;
     let hh = le32(22)? as i32;
-    let bpp = le16(28)?;
+    let bpp = le16(28)? as usize;
     let compression = le32(30)?;
-    if w <= 0 || hh == 0 || compression != 0 || !matches!(bpp, 24 | 32) {
+    if w <= 0
+        || hh == 0
+        || !matches!(compression, 0 | 3)
+        || !matches!(bpp, 1 | 4 | 8 | 16 | 24 | 32)
+    {
         return None;
     }
-    let (h, flip) = (hh.unsigned_abs(), hh > 0);
-    let bytes = bpp as usize / 8;
-    let stride = (w as usize * bytes).div_ceil(4) * 4;
-    let mut out = Vec::with_capacity(w as usize * h as usize * 3);
-    for y in 0..h as usize {
-        let sy = if flip { h as usize - 1 - y } else { y };
-        let row = d.get(off + sy * stride..off + sy * stride + w as usize * bytes)?;
-        for x in 0..w as usize {
-            let p = &row[x * bytes..x * bytes + 3];
-            out.extend([p[2], p[1], p[0]]);
+    let (w, h, flip) = (w as usize, hh.unsigned_abs() as usize, hh > 0);
+    if w.checked_mul(h)? > 1 << 28 {
+        return None;
+    }
+    // 색표 (14 + 머리 크기 뒤)
+    let used = le32(46).unwrap_or(0) as usize;
+    let colors = if bpp <= 8 {
+        if used != 0 { used } else { 1 << bpp }
+    } else {
+        0
+    };
+    let pal_at = 14 + hs;
+    let mut pal = Vec::with_capacity(colors);
+    for i in 0..colors {
+        let e = d.get(pal_at + 4 * i..pal_at + 4 * i + 4)?;
+        pal.push([e[2], e[1], e[0]]);
+    }
+    // 마스크 (16·32 비트)
+    let (mut masks, mut mask_at) = ([0u32; 3], 0);
+    if bpp == 16 {
+        masks = [0x7C00, 0x03E0, 0x001F];
+    } else if bpp == 32 {
+        masks = [0x00FF_0000, 0x0000_FF00, 0x0000_00FF];
+    }
+    if compression == 3 && matches!(bpp, 16 | 32) {
+        mask_at = pal_at;
+        masks = [le32(mask_at)?, le32(mask_at + 4)?, le32(mask_at + 8)?];
+    }
+    // 마스크의 비트를 8 비트로
+    let chan = |v: u32, m: u32| -> u8 {
+        if m == 0 {
+            return 0;
+        }
+        let sh = m.trailing_zeros();
+        let bits = (m >> sh).count_ones();
+        let x = (v & m) >> sh;
+        if bits >= 8 {
+            (x >> (bits - 8)) as u8
+        } else {
+            ((x * 255) / ((1u32 << bits) - 1)) as u8
+        }
+    };
+    let stride = (w * bpp).div_ceil(32) * 4;
+    let mut out = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        let sy = if flip { h - 1 - y } else { y };
+        let row = d.get(off + sy * stride..off + sy * stride + (w * bpp).div_ceil(8))?;
+        for x in 0..w {
+            let rgb = match bpp {
+                1 | 4 | 8 => {
+                    let bit = x * bpp;
+                    let v = (row[bit / 8] >> (8 - bpp - bit % 8)) & ((1u16 << bpp) - 1) as u8;
+                    *pal.get(v as usize)?
+                }
+                16 => {
+                    let v = u16::from_le_bytes([row[2 * x], row[2 * x + 1]]) as u32;
+                    [chan(v, masks[0]), chan(v, masks[1]), chan(v, masks[2])]
+                }
+                24 => [row[3 * x + 2], row[3 * x + 1], row[3 * x]],
+                _ => {
+                    let v = u32::from_le_bytes([
+                        row[4 * x],
+                        row[4 * x + 1],
+                        row[4 * x + 2],
+                        row[4 * x + 3],
+                    ]);
+                    [chan(v, masks[0]), chan(v, masks[1]), chan(v, masks[2])]
+                }
+            };
+            out.extend(rgb);
         }
     }
+    let _ = mask_at;
     Some(PdfImage {
         width: w as u32,
-        height: h,
+        height: h as u32,
         components: 3,
         dct: false,
         data: out,
         alpha: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 머리 54 바이트 (파일 14 + 정보 40) 의 BMP
+    fn bmp_with(w: i32, h: i32, bpp: u16, palette: &[[u8; 4]], bits: &[u8]) -> Vec<u8> {
+        let off = 54 + 4 * palette.len();
+        let mut f = b"BM".to_vec();
+        f.extend(((off + bits.len()) as u32).to_le_bytes());
+        f.extend([0u8; 4]);
+        f.extend((off as u32).to_le_bytes());
+        f.extend(40u32.to_le_bytes());
+        f.extend(w.to_le_bytes());
+        f.extend(h.to_le_bytes());
+        f.extend(1u16.to_le_bytes());
+        f.extend(bpp.to_le_bytes());
+        f.extend([0u8; 4]); // BI_RGB
+        f.extend([0u8; 12]);
+        f.extend((palette.len() as u32).to_le_bytes());
+        f.extend([0u8; 4]);
+        for p in palette {
+            f.extend(p);
+        }
+        f.extend(bits);
+        f
+    }
+
+    #[test]
+    fn bmp_16_bit_555_and_palette() {
+        // 16 비트 (5-5-5): 위로 가는 행 차례 — 아래 행(빨강, 초록)이 먼저. 한 행 4 바이트(2 픽셀 + 채움)
+        let red = (0x1Fu16 << 10).to_le_bytes();
+        let green = (0x1Fu16 << 5).to_le_bytes();
+        let blue = 0x1Fu16.to_le_bytes();
+        let d = bmp_with(
+            2,
+            2,
+            16,
+            &[],
+            &[
+                red[0], red[1], green[0], green[1], blue[0], blue[1], 0, 0, 0, 0, 0, 0,
+            ],
+        );
+        let im = decode(&d).unwrap();
+        assert_eq!((im.width, im.height, im.components), (2, 2, 3));
+        // 위 행 = 파일의 둘째 행 (파랑, 검정), 아래 행 = 첫째 (빨강, 초록)
+        assert_eq!(&im.data[..6], &[0, 0, 255, 0, 0, 0]);
+        assert_eq!(&im.data[6..], &[255, 0, 0, 0, 255, 0]);
+        // 8 비트 색표 (BGRA): 0 = 파랑, 1 = 노랑
+        let d = bmp_with(2, 1, 8, &[[255, 0, 0, 0], [0, 255, 255, 0]], &[0, 1, 0, 0]);
+        let im = decode(&d).unwrap();
+        assert_eq!(im.data, vec![0, 0, 255, 255, 255, 0]);
+        // 1 비트: 첫 픽셀 1, 둘째 0
+        let d = bmp_with(
+            2,
+            1,
+            1,
+            &[[0, 0, 0, 0], [255, 255, 255, 0]],
+            &[0b1000_0000, 0, 0, 0],
+        );
+        let im = decode(&d).unwrap();
+        assert_eq!(im.data, vec![255, 255, 255, 0, 0, 0]);
+    }
 }

@@ -232,6 +232,8 @@ pub fn frame_with(
                 .collect()
         },
         origin_x: x0 + dx + (hw * 6.25).round(),
+        col_abs: cumulative(&sp.col_px),
+        row_abs: cumulative(&sp.row_px),
         rows: bounds(y0 + dy + (hh * 6.25).round(), &rows),
         row_dev: (0..sp.row_px.len() as u32)
             .map(|r| sp.row_print_px(r) * 6.25)
@@ -246,6 +248,18 @@ pub fn frame_with(
         draft: false,
         errors: ErrorPrint::Displayed,
     }
+}
+
+/// 화면 px 의 누적 시작 자리 (번호마다, 끝에 전체)
+fn cumulative(px: &[u32]) -> Vec<f64> {
+    let mut acc = 0.0;
+    let mut out = Vec::with_capacity(px.len() + 1);
+    for &v in px {
+        out.push(acc);
+        acc += v as f64;
+    }
+    out.push(acc);
+    out
 }
 
 /// 행·열 머리글 (가는 선 상자, 가운데 글자: 열 이름·행 번호)
@@ -443,14 +457,14 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
         f0.and_then(|f| f.size).unwrap_or(11.0),
     );
     let mut pages: Vec<(PageSize, Vec<Op>)> = Vec::new();
-    // 인쇄 차례에서 한 페이지짜리 시트가 이미 나왔는가 (배율 100 의 99 는 첫째에만)
-    let mut single_seen = false;
+    // 키 큰 모드가 아닌 시트가 이미 나왔는가 (배율 100 의 99 는 그 첫째에만)
+    let mut untall_seen = false;
     for si in sheets {
         let Some(sheet) = wb.sheets.get(si) else {
             continue;
         };
-        let sp = paginate::sheet_print_with(wb, si, !single_seen);
-        single_seen |= sp.pages.len() == 1;
+        let sp = paginate::sheet_print_with(wb, si, !untall_seen);
+        untall_seen |= !sp.tall && matches!(sp.settings.scaling, Scaling::Zoom(100));
         let size = page_size(&sp.settings);
         let po = sheet.page.print_options.as_ref();
         let setup = sheet.page.setup.as_ref();

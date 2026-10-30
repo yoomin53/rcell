@@ -461,10 +461,11 @@ pub fn sheet_print(wb: &Workbook, sheet_index: usize) -> SheetPrint {
     sheet_print_with(wb, sheet_index, true)
 }
 
-/// [`sheet_print`] — `first_single`: 인쇄 차례에서 처음 나오는 한 페이지짜리 시트인가. 한셀은 배율 100 인 그 시트만
-/// 99 로 찍는다 (시트 셋·다섯 개 실험: 한 페이지 시트 가운데 첫째만 Tf 91, 나머지와 여러 페이지 시트는 92 —
-/// 시트를 지우거나 옮기거나 숨겨도 인쇄 차례의 첫째)
-pub fn sheet_print_with(wb: &Workbook, sheet_index: usize, first_single: bool) -> SheetPrint {
+/// [`sheet_print`] — `first_untall`: 인쇄 차례에서 키 큰 모드가 아닌 시트가 아직 나오지 않았는가. 한셀은 배율 100 인 시트
+/// 가운데 키 큰 모드가 아닌 첫 시트만 99 부터 시작하고 나머지는 100 부터다 (시트 셋·다섯 개 실험: 키 큰 모드가 아닌 시트
+/// 가운데 첫째만 글자 91, 나머지는 92 — 시트를 지우거나 옮기거나 숨겨도 인쇄 차례의 첫째. 두 페이지로 나뉜 첫 시트도 99:
+/// 말뭉치 차트 문서). 키 큰 모드(작은 내용)의 시트는 늘 100
+pub fn sheet_print_with(wb: &Workbook, sheet_index: usize, first_untall: bool) -> SheetPrint {
     let s = settings(wb, sheet_index);
     let sheet = &wb.sheets[sheet_index];
     let max_r = s
@@ -664,11 +665,7 @@ pub fn sheet_print_with(wb: &Workbook, sheet_index: usize, first_single: bool) -
                 .sum();
             h as f64 * TALL <= avail75.1 + 1e-9 && w as f64 <= avail75.0 + 1e-9
         }) && pages.iter().any(|p| !p.rows.is_empty());
-        z = if !tall && first_single && pages.len() == 1 {
-            99
-        } else {
-            100
-        };
+        z = if !tall && first_untall { 99 } else { 100 };
     }
     if !tall {
         while z > 10 && !fits(z) {

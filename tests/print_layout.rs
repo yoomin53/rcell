@@ -608,10 +608,11 @@ fn oracle() {
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
-/// 배율 100 의 99 는 인쇄 차례의 첫 한 페이지 시트만 (한셀 PDF 의 Tf — 시트 페이지 수 "21121": 92 92 | 91 | 92 | 92 92 | 92,
-/// "1111": 91 92 92 92, 첫 시트를 지우거나 옮기거나 숨겨도 인쇄 차례의 첫 한 페이지 시트가 91)
+/// 배율 100 의 99 는 키 큰 모드가 아닌 첫 시트만 (한셀 PDF 의 Tf — 시트 페이지 수 "21121" (2 는 5 행씩 두 쪽): 92 92 | 91 |
+/// 92 | 92 92 | 92, "1111": 91 92 92 92, 첫 시트를 지우거나 옮기거나 숨겨도 그 첫 시트가 91. 말뭉치 차트 문서: 두 쪽으로
+/// 나뉜 첫 시트도 91)
 #[test]
-fn first_single_page_sheet_99() {
+fn first_untall_sheet_99() {
     let mut wb = base();
     fill(&mut wb, "A1:B10");
     assert_eq!(rcell::print::sheet_print_with(&wb, 0, true).print_scale, 99);

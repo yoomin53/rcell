@@ -30,6 +30,10 @@ pub struct FontKey {
 pub trait TextMeasure {
     /// `text` 를 `size`(장치 단위 글꼴 크기)로 쓴 폭 (장치 단위)
     fn width(&self, font: &FontKey, size: f64, text: &str) -> f64;
+    /// 글꼴의 오름·내림 (em 의 비율) — 메타파일 글자의 기준선
+    fn ascent_descent(&self, _font: &FontKey) -> (f64, f64) {
+        (0.88, 0.12)
+    }
 }
 
 /// 경로 조각 (장치 단위)
@@ -129,6 +133,10 @@ pub struct PageFrame {
     /// 화면 자리를 배율로 옮겨 반올림한 px 에 놓인다 (한셀 PDF 배율 50~150 실험)
     pub col_x100: Vec<(u32, f64)>,
     pub origin_x: f64,
+    /// 모든 열·행의 화면 px 누적 시작 자리 (번호 = 위치, 끝에 전체) — 그리기 개체는 칸 경계가 아니라 시트의 절대 px 에
+    /// 배율을 곱한 자리에 놓인다 (한셀 PDF 그림·도형 실험)
+    pub col_abs: Vec<f64>,
+    pub row_abs: Vec<f64>,
     pub gridlines: bool,
     pub black_and_white: bool,
     pub draft: bool,
@@ -428,6 +436,7 @@ fn page_body(
     let cols_set: HashSet<u32> = frame.cols.iter().map(|c| c.0).collect();
     let ax = Axis::new(&frame.cols, &frame.col_dev);
     let ay = Axis::new(&frame.rows, &frame.row_dev);
+
     // 페이지에 찍히는 영역 (자르기 상자)
     let area = (
         frame.cols.iter().map(|c| c.1).fold(f64::MAX, f64::min) - SHIFT,
@@ -1334,6 +1343,181 @@ fn shape_text(
     }
 }
 
+/// 개체 종류 — 한셀 PDF 에서 자리 규칙이 다르다
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjKind {
+    Picture,
+    Shape,
+    /// 차트 (한셀은 비트맵으로 찍는다)
+    Chart,
+}
+
+/// 개체의 왼쪽(위) 자리 (장치 단위). 한셀 PDF 그림·도형 실험 (배율 60–150, 개체 14 개, 장치 0.5 안에 모두 같다): 시트의 절대
+/// 화면 px 에 배율을 곱한 자리 `c = 원점 + px × k` (k = 6.25 × z/100) 에서 그림은 floor(c + 0.25) − 8, 도형은
+/// floor(c − 8.5) + 0.5. 칸 경계(배율에 맞춰 반올림한 행·열)와 상관없다. (앵커 오프셋이 1 EMU 모자라 정수 경계에서
+/// 틀리지 않게 0.001 을 더한다). 차트 비트맵은 개체 상자보다 반 px 씩 넓다: round(c − 8.5 − k/2) (배율 60·75·99·150,
+/// 앵커 둘에서 장치 1.5 안)
+pub(crate) fn object_origin(origin: f64, px: f64, k: f64, kind: ObjKind) -> f64 {
+    let c = origin + px * k + 0.001;
+    match kind {
+        ObjKind::Picture => (c + 0.25).floor() - 8.0,
+        ObjKind::Shape => (c - 8.5).floor() + 0.5,
+        ObjKind::Chart => (c - 8.5 - k / 2.0).round(),
+    }
+}
+
+/// 개체의 크기 (장치 단위): ceil(px 크기 × k). 차트는 round((px 크기 + 1) × k + 1)
+pub(crate) fn object_size(px: f64, k: f64, kind: ObjKind) -> f64 {
+    match kind {
+        ObjKind::Chart => ((px + 1.0) * k + 1.0).round(),
+        _ => (px * k - 0.001).ceil(),
+    }
+}
+
+/// 메타파일(EMF·WMF)을 그림 상자 `m` (그림 px → 장치, [`box_matrix`]) 에 그린다. 틀 전체가 상자에 늘어난다.
+/// 펜 굵기와 점선은 가로 배율, 글자는 가로·세로 배율을 따로 (한셀 PDF 와 같다)
+fn metafile_ops(
+    mf: &super::metafile::Metafile,
+    m: [f64; 6],
+    (wp, hp): (f64, f64),
+    rot: f64,
+    measure: &dyn TextMeasure,
+    ops: &mut Vec<Op>,
+) {
+    use super::metafile::Item;
+    if mf.width <= 0.0 || mf.height <= 0.0 {
+        return;
+    }
+    let (ax, ay) = (wp / mf.width, hp / mf.height);
+    let f = |u: f64, v: f64| {
+        let (u, v) = (u * ax, v * ay);
+        (m[0] * u + m[2] * v + m[4], m[1] * u + m[3] * v + m[5])
+    };
+    // 장치 단위 배율 (가로·세로)
+    let sx = (m[0] * m[0] + m[1] * m[1]).sqrt() * ax;
+    let sy = (m[2] * m[2] + m[3] * m[3]).sqrt() * ay;
+    // 그림 상자로 자르기 (한셀 PDF 의 자르기는 상자보다 장치 2.75 단위씩 넓다)
+    let corners = [
+        f(0.0, 0.0),
+        f(mf.width, 0.0),
+        f(mf.width, mf.height),
+        f(0.0, mf.height),
+    ];
+    let (x0, x1) = corners
+        .iter()
+        .fold((f64::MAX, f64::MIN), |a, c| (a.0.min(c.0), a.1.max(c.0)));
+    let (y0, y1) = corners
+        .iter()
+        .fold((f64::MAX, f64::MIN), |a, c| (a.0.min(c.1), a.1.max(c.1)));
+    ops.push(Op::Clip {
+        x0: x0 - 2.75,
+        y0: y0 - 2.75,
+        x1: x1 + 2.75,
+        y1: y1 + 2.75,
+    });
+    for it in &mf.items {
+        match it {
+            Item::Path {
+                segs,
+                fill,
+                stroke,
+                even_odd,
+            } => {
+                let segs = segs
+                    .iter()
+                    .map(|s| match *s {
+                        Seg::Move(a, b) => {
+                            let p = f(a, b);
+                            Seg::Move(p.0, p.1)
+                        }
+                        Seg::Line(a, b) => {
+                            let p = f(a, b);
+                            Seg::Line(p.0, p.1)
+                        }
+                        Seg::Cubic(a, b, c, d, e, g) => {
+                            let (p, q, r) = (f(a, b), f(c, d), f(e, g));
+                            Seg::Cubic(p.0, p.1, q.0, q.1, r.0, r.1)
+                        }
+                        Seg::Close => Seg::Close,
+                    })
+                    .collect();
+                ops.push(Op::Path {
+                    segs,
+                    fill: *fill,
+                    stroke: stroke
+                        .as_ref()
+                        .map(|(w, c, d)| (w * sx, *c, d.iter().map(|v| v * sx).collect())),
+                    even_odd: *even_odd,
+                });
+            }
+            Item::Text {
+                x,
+                y,
+                halign,
+                valign,
+                em,
+                name,
+                bold,
+                italic,
+                underline,
+                strike,
+                color,
+                text,
+                angle,
+            } => {
+                let key = FontKey {
+                    name: name.clone(),
+                    bold: *bold,
+                    italic: *italic,
+                };
+                let (asc, desc) = measure.ascent_descent(&key);
+                // 기준선까지: 위 맞춤은 오름(반올림), 아래 맞춤은 내림만큼
+                let off = match valign {
+                    0 => (asc * em).round(),
+                    2 => -(desc * em).round(),
+                    _ => 0.0,
+                };
+                let (gs, gc) = angle.to_radians().sin_cos();
+                let (bx, by) = (x - off * gs, y + off * gc);
+                let (px, py) = f(bx, by);
+                let th = (angle + rot).to_radians();
+                let (sn, cs) = th.sin_cos();
+                let size = em * sy;
+                let stretch = if sy > 0.0 { sx / sy } else { 1.0 };
+                let tw = measure.width(&key, size, text) * stretch;
+                let shift = match halign {
+                    1 => tw / 2.0,
+                    2 => tw,
+                    _ => 0.0,
+                };
+                ops.push(Op::Text {
+                    x: px - shift * cs,
+                    y: py - shift * sn,
+                    size,
+                    font: key,
+                    color: *color,
+                    text: text.clone(),
+                    underline: *underline,
+                    strike: *strike,
+                    stretch,
+                    angle: th.to_degrees(),
+                });
+            }
+            Item::Image { x, y, w, h, bmp } => {
+                let (a, b) = (f(*x, *y), f(x + w, y + h));
+                ops.push(Op::Image {
+                    x0: a.0.min(b.0),
+                    y0: a.1.min(b.1),
+                    x1: a.0.max(b.0),
+                    y1: a.1.max(b.1),
+                    data: std::sync::Arc::new(bmp.clone()),
+                });
+            }
+        }
+    }
+    ops.push(Op::Unclip);
+}
+
 /// 개체 하나 (그룹이면 자식들을 그룹 상자 안에)
 #[allow(clippy::too_many_arguments)]
 fn object_ops(
@@ -1420,13 +1604,17 @@ fn object_ops(
                 .as_ref()
                 .and_then(|t| wb.raw_parts.iter().find(|p| &p.name == t));
             if let Some(p) = img {
-                ops.push(Op::Image {
-                    x0: x,
-                    y0: y,
-                    x1: x + w,
-                    y1: y + h,
-                    data: std::sync::Arc::new(p.data.clone()),
-                });
+                if let Some(mf) = super::metafile::parse(&p.data) {
+                    metafile_ops(&mf, m, (wp, hp), rot, measure, ops);
+                } else {
+                    ops.push(Op::Image {
+                        x0: x,
+                        y0: y,
+                        x1: x + w,
+                        y1: y + h,
+                        data: std::sync::Arc::new(p.data.clone()),
+                    });
+                }
             }
         }
         ShapeKind::Chart => {
@@ -1475,8 +1663,7 @@ pub fn objects_ops(
         return ops;
     }
     let theme = wb.theme.clone().unwrap_or_default();
-    let ax = Axis::new(&frame.cols, &frame.col_dev);
-    let ay = Axis::new(&frame.rows, &frame.row_dev);
+
     let area = (
         frame.cols.iter().map(|c| c.1).fold(f64::MAX, f64::min) - SHIFT,
         frame.rows.iter().map(|r| r.1).fold(f64::MAX, f64::min) - SHIFT,
@@ -1484,10 +1671,25 @@ pub fn objects_ops(
         frame.rows.iter().map(|r| r.2).fold(f64::MIN, f64::max) - SHIFT,
     );
     let k = frame.px;
+    // 시트의 절대 화면 px (칸 시작 + 오프셋), 페이지의 첫 열·행 시작을 0 으로
+    let (Some(fc), Some(fr)) = (frame.cols.first(), frame.rows.first()) else {
+        return ops;
+    };
+    let start = |v: &[f64], i: u32, dflt: f64| -> f64 {
+        v.get(i as usize).copied().unwrap_or_else(|| {
+            let n = v.len().saturating_sub(1);
+            v.last().copied().unwrap_or(0.0) + (i as usize - n) as f64 * dflt
+        })
+    };
+    let (x_page0, y_page0) = (
+        start(&frame.col_abs, fc.0, 64.0),
+        start(&frame.row_abs, fr.0, 20.0),
+    );
     let at = |m: &crate::model::Marker| -> Option<(f64, f64)> {
-        let x = ax.start(m.col)? + (m.col_off as f64 / EMU * k).min(ax.size(m.col)).max(0.0);
-        let y = ay.start(m.row)? + (m.row_off as f64 / EMU * k).min(ay.size(m.row)).max(0.0);
-        Some((x, y))
+        Some((
+            start(&frame.col_abs, m.col, 64.0) + m.col_off as f64 / EMU - x_page0,
+            start(&frame.row_abs, m.row, 20.0) + m.row_off as f64 / EMU - y_page0,
+        ))
     };
     let mut inner = Vec::new();
     for sh in sheet
@@ -1497,22 +1699,32 @@ pub fn objects_ops(
     {
         let a = &sh.anchor;
         let first = match (a.kind, a.pos) {
-            (crate::model::AnchorKind::Absolute, Some((px, py))) => ax
-                .start(0)
-                .zip(ay.start(0))
-                .map(|(x0, y0)| (x0 + px as f64 / EMU * k, y0 + py as f64 / EMU * k)),
+            (crate::model::AnchorKind::Absolute, Some((px, py))) => Some((
+                start(&frame.col_abs, 0, 64.0) + px as f64 / EMU - x_page0,
+                start(&frame.row_abs, 0, 20.0) + py as f64 / EMU - y_page0,
+            )),
             _ => at(&a.from),
         };
         let Some((x1, y1)) = first else { continue };
         let second = match (&a.to, a.ext) {
             (Some(t), _) if a.kind == crate::model::AnchorKind::TwoCell => at(t),
-            (_, Some((cx, cy))) => Some((x1 + cx as f64 / EMU * k, y1 + cy as f64 / EMU * k)),
+            (_, Some((cx, cy))) => Some((x1 + cx as f64 / EMU, y1 + cy as f64 / EMU)),
             (Some(t), None) => at(t),
             _ => Some((x1, y1)),
         };
         let Some((x2, y2)) = second else { continue };
-        // 한셀 화면처럼 경계 1px 앞 (선 가운데)
-        let (x1, y1, x2, y2) = (x1 - SHIFT, y1 - SHIFT, x2 - SHIFT, y2 - SHIFT);
+        let kind = match sh.kind {
+            crate::model::ShapeKind::Picture => ObjKind::Picture,
+            crate::model::ShapeKind::Chart => ObjKind::Chart,
+            _ => ObjKind::Shape,
+        };
+        let (ox, oy) = (frame.origin_x, fr.1);
+        let (left, top) = (
+            object_origin(ox, x1, k, kind),
+            object_origin(oy, y1, k, kind),
+        );
+        let (wd, hd) = (object_size(x2 - x1, k, kind), object_size(y2 - y1, k, kind));
+        let (x1, y1, x2, y2) = (left, top, left + wd, top + hd);
         if x2 < area.0 || x1 > area.2 || y2 < area.1 || y1 > area.3 {
             continue;
         }
@@ -1551,6 +1763,30 @@ mod tests {
         assert_eq!(wrap_text("가나다라마바", 35.0, &w), ["가나다", "라마바"]);
         assert_eq!(wrap_text("abc def", 45.0, &w), ["abc", "def"]);
         assert_eq!(wrap_text("가\n나", 100.0, &w), ["가", "나"]);
+    }
+
+    /// 한셀 PDF 에서 잰 그림·도형 상자 (원점 449·591, 배율 99 = k 6.1875): 그림 off (133, 200) ext (200, 400) → 왼쪽 1264,
+    /// 위 …; 그림 off (17, 22) ext (102, 44) → 546, 크기 632 × 273; 도형 off (134, 200) ext (200, 400) → 1269.5, 크기 1238 ×
+    /// 2475; 도형 off (53, 53) ext (401, 300) → 768.5, 2482 × 1857
+    #[test]
+    fn object_boxes() {
+        let k = 6.25 * 0.99;
+        assert_eq!(object_origin(449.0, 133.0, k, ObjKind::Picture), 1264.0);
+        assert_eq!(object_origin(449.0, 17.0, k, ObjKind::Picture), 546.0);
+        assert_eq!(object_origin(449.0, 265.0, k, ObjKind::Picture), 2080.0);
+        assert_eq!(object_size(102.0, k, ObjKind::Shape), 632.0);
+        assert_eq!(object_size(44.0, k, ObjKind::Shape), 273.0);
+        assert_eq!(object_origin(449.0, 134.0, k, ObjKind::Shape), 1269.5);
+        assert_eq!(object_origin(449.0, 53.0, k, ObjKind::Shape), 768.5);
+        assert_eq!(object_origin(449.0, 17.0, k, ObjKind::Shape), 545.5);
+        assert_eq!(object_size(200.0, k, ObjKind::Shape), 1238.0);
+        assert_eq!(object_size(401.0, k, ObjKind::Shape), 2482.0);
+        assert_eq!(object_size(300.0, k, ObjKind::Shape), 1857.0);
+        // 앵커 오프셋이 1 EMU 모자라도 (52 − 1/9525 px) 한셀과 같은 칸에 놓인다
+        assert_eq!(
+            object_origin(449.0, 52.0 - 1.0 / 9525.0, k, ObjKind::Picture),
+            763.0
+        );
     }
 
     /// 한셀 PDF 에서 잰 글자 시작 (맑은 고딕 11pt: 숫자 8.078px, 한글 14.667px, "AAAA" 38.61px)

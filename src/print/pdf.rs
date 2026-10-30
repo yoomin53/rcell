@@ -200,6 +200,11 @@ impl FontSet<'_> {
 }
 
 impl TextMeasure for FontSet<'_> {
+    fn ascent_descent(&self, font: &FontKey) -> (f64, f64) {
+        let (a, d) = FontSet::ascent_descent(self, font);
+        (a / 1000.0, d / 1000.0)
+    }
+
     fn width(&self, font: &FontKey, size: f64, text: &str) -> f64 {
         self.runs(font, text, false)
             .iter()

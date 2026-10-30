@@ -748,11 +748,18 @@ pub(super) fn shape_body(
                 .as_ref()
                 .and_then(|t| wb.raw_parts.iter().find(|p| &p.name == t));
             if let Some(p) = img {
-                let ct = p.content_type.as_deref().unwrap_or("image/png");
+                // EMF·WMF 는 브라우저가 그리지 못하므로 SVG 로 바꿔 넣는다
+                let (ct, data) = match super::metafile::parse(&p.data) {
+                    Some(mf) => ("image/svg+xml", super::metafile::to_svg(&mf).into_bytes()),
+                    None => (
+                        p.content_type.as_deref().unwrap_or("image/png"),
+                        p.data.clone(),
+                    ),
+                };
                 let _ = write!(
                     inner,
                     "<img alt=\"\" style=\"width:100%;height:100%\" src=\"data:{ct};base64,{}\">",
-                    base64(&p.data)
+                    base64(&data)
                 );
             }
             // 그림 테두리
