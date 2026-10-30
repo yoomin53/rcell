@@ -269,6 +269,28 @@ function Invoke-Edit($wb, $e) {
         }
         "deleteCf" { $ws.Range([string]$e.range).FormatConditions.Delete() }
         "autoFitCols" { [void]$ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.AutoFit() }
+        "removeDuplicates" {
+            # 중복 항목 제거 (Range.RemoveDuplicates — 열은 범위 안 번호, Header 1 = 있음, 2 = 없음)
+            $rg = $ws.Range([string]$e.range)
+            $cols = if ($e.columns -and @($e.columns).Count -gt 0) { @($e.columns | ForEach-Object { [int]$_ }) } else { @(1..$rg.Columns.Count) }
+            $hdr = if ($e.header) { 1 } else { 2 }
+            [void]$rg.RemoveDuplicates($cols, $hdr)
+        }
+        "textToColumns" {
+            # 텍스트 나누기 (Range.TextToColumns — 구분 문자, 묶는 따옴표 1 큰따옴표 2 작은따옴표 -4142 없음, 필드 형식 1 일반 2 글 9 건너뜀)
+            $rg = $ws.Range([string]$e.range)
+            $M = [Type]::Missing
+            $dest = if ($e.dest) { $ws.Range([string]$e.dest) } else { $M }
+            $q = if ($null -eq $e.qualifier -or [string]$e.qualifier -eq [string][char]34) { 1 } elseif ([string]$e.qualifier -eq [string][char]39) { 2 } else { -4142 }
+            $other = [bool]($e.other)
+            $otherChar = if ($other) { [string]$e.other } else { $M }
+            $fi = $M
+            if ($e.fields -and @($e.fields).Count -gt 0) {
+                $types = @{ "general" = 1; "text" = 2; "skip" = 9 }
+                $fi = @(@($e.fields) | ForEach-Object { , @([int]$_.col, [int]$types[[string]$(if ($_.kind) { $_.kind } else { "general" })]) })
+            }
+            [void]$rg.TextToColumns($dest, 1, $q, [bool]$e.consecutive, [bool]$e.tab, [bool]$e.semicolon, [bool]$e.comma, [bool]$e.space, $other, $otherChar, $fi)
+        }
         "autoFitRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.AutoFit() }
         "insertCells" {
             # 셀 삽입 (아래로 -4121, 오른쪽으로 -4161)

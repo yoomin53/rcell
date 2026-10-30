@@ -27,6 +27,7 @@ pub mod clip;
 pub mod collate;
 mod collate_data;
 mod collate_kana;
+pub mod data;
 pub mod fill;
 mod filter;
 pub mod find;
@@ -113,6 +114,14 @@ fn shift_up() -> cells::ShiftDir {
 
 fn one_f() -> f64 {
     1.0
+}
+
+/// 텍스트 나누기의 필드 형식 (`col` 은 필드 번호 1부터, `kind` 는 `general` `text` `skip`)
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct FieldSpec {
+    pub col: u32,
+    #[serde(default)]
+    pub kind: String,
 }
 
 /// 편집 명령 하나. 행은 1부터(한셀 화면과 같다), 열은 이름(`C`), 셀·범위는 A1 표기.
@@ -486,6 +495,42 @@ pub enum Edit {
         col: String,
         #[serde(default = "one")]
         count: u32,
+    },
+    /// 중복 항목 제거 (`columns` 는 범위 안 열 번호 1부터 — 비면 모든 열, `header` 면 첫 행은 견주지 않는다)
+    RemoveDuplicates {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(default)]
+        columns: Vec<u32>,
+        #[serde(default)]
+        header: bool,
+    },
+    /// 텍스트 나누기 (한 열을 구분 문자로 — `dest` 가 없으면 그 열에서 시작)
+    TextToColumns {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(default)]
+        dest: Option<String>,
+        #[serde(default)]
+        tab: bool,
+        #[serde(default)]
+        semicolon: bool,
+        #[serde(default)]
+        comma: bool,
+        #[serde(default)]
+        space: bool,
+        /// 그 밖의 구분 문자 (글자 하나)
+        #[serde(default)]
+        other: Option<String>,
+        #[serde(default)]
+        consecutive: bool,
+        /// 묶는 따옴표: `"` (기본), `'`, 빈 글(없음)
+        #[serde(default)]
+        qualifier: Option<String>,
+        #[serde(default)]
+        fields: Vec<FieldSpec>,
     },
     /// 행 높이 자동 맞춤
     AutoFitRows {
@@ -1193,6 +1238,59 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             let i = si(wb, sheet)?;
             let c = parse_col(col)?;
             objects::autofit_cols(wb, i, c, c + count.max(&1) - 1)?;
+            Ok(i)
+        }
+        Edit::RemoveDuplicates {
+            sheet,
+            range,
+            columns,
+            header,
+        } => {
+            let i = si(wb, sheet)?;
+            data::remove_duplicates(wb, i, parse_range(range)?, columns, *header)?;
+            Ok(i)
+        }
+        Edit::TextToColumns {
+            sheet,
+            range,
+            dest,
+            tab,
+            semicolon,
+            comma,
+            space,
+            other,
+            consecutive,
+            qualifier,
+            fields,
+        } => {
+            let i = si(wb, sheet)?;
+            let opt = data::SplitOptions {
+                tab: *tab,
+                semicolon: *semicolon,
+                comma: *comma,
+                space: *space,
+                other: other.as_deref().and_then(|t| t.chars().next()),
+                consecutive: *consecutive,
+                qualifier: match qualifier.as_deref() {
+                    None => Some('"'),
+                    Some(q) => q.chars().next(),
+                },
+                fields: fields
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.col,
+                            match f.kind.as_str() {
+                                "text" => data::FieldKind::Text,
+                                "skip" => data::FieldKind::Skip,
+                                _ => data::FieldKind::General,
+                            },
+                        )
+                    })
+                    .collect(),
+            };
+            let d = dest.as_deref().map(|t| t.parse::<CellRef>()).transpose()?;
+            data::text_to_columns(wb, i, parse_range(range)?, d, &opt)?;
             Ok(i)
         }
         Edit::AutoFitRows { sheet, row, count } => {
