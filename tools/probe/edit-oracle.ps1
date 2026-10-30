@@ -308,6 +308,24 @@ function Invoke-Edit($wb, $e) {
             if ($null -ne $e.height) { $sh.Height = [double]$e.height }
         }
         "deleteShape" { $ws.Shapes.Item([int]$e.shape).Delete() }
+        "consolidate" {
+            # 통합 (Range.Consolidate — 원본은 R1C1 글, 함수 sum count average max min product countNums stdev stdevp var varp)
+            $fns = @{ "sum" = -4157; "count" = -4112; "average" = -4106; "max" = -4136; "min" = -4139; "product" = -4149; "countNums" = -4113; "stdev" = -4155; "stdevp" = -4156; "var" = -4164; "varp" = -4165 }
+            $fn = if ($e.func) { $fns[[string]$e.func] } else { -4157 }
+            $srcs = @($e.sources | ForEach-Object {
+                $t = [string]$_; $k = $t.LastIndexOf("!")
+                $nm = if ($k -ge 0) { $t.Substring(0, $k).Trim([char]39) } else { $ws.Name }
+                $rg = if ($k -ge 0) { $t.Substring($k + 1) } else { $t }
+                $parts = $rg.Split(":") | ForEach-Object {
+                    $a = $_ -replace '[$]', ''
+                    $m = [regex]::Match($a, '^([A-Za-z]+)([0-9]+)$')
+                    $cn = 0; foreach ($ch in $m.Groups[1].Value.ToUpper().ToCharArray()) { $cn = $cn * 26 + ([int]$ch - 64) }
+                    "R" + $m.Groups[2].Value + "C" + $cn
+                }
+                "'" + $nm + "'!" + ($parts -join ":")
+            })
+            [void]$ws.Range([string]$e.dest).Consolidate($srcs, $fn, [bool]$e.topRow, [bool]$e.leftColumn, $false)
+        }
         "autoFitRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.AutoFit() }
         "insertCells" {
             # 셀 삽입 (아래로 -4121, 오른쪽으로 -4161)

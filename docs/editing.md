@@ -51,6 +51,8 @@ rcell 의 편집 — 라이브러리 `rcell::edit`, 명령 `rcell edit`, 웹 편
 | `autoFitCols` / `autoFitRows` | `col` / `row`, `count` | 열 너비·행 높이 자동 맞춤 |
 | `removeDuplicates` | `range`, `columns`(범위 안 열 번호 1부터, 비면 모든 열), `header` | 중복 항목 제거 (18절) |
 | `textToColumns` | `range`(한 열), `dest`, `tab` `semicolon` `comma` `space`, `other`, `consecutive`, `qualifier`, `fields`(`col`, `kind`: `general` `text` `skip`) | 텍스트 나누기 (18절) |
+| `consolidate` | `dest`, `sources`(`시트!A1:B5` 글들), `func`, `topRow`, `leftColumn` | 통합 (18절) |
+| `moveShape` / `deleteShape` | `shape`(번호 1부터 또는 이름), `left` `top` `width` `height`(포인트) / `shape` | 도형·그림·차트 옮기기·크기·지우기 (19절) |
 | `subtotal` | `range`(첫 칸이 든 영역에 낸다), `groupBy`, `func`(`sum` `count` `average` `max` `min` `product` `countNums` `stdev` `stdevp` `var` `varp`), `totals`, `replace`, `pageBreaks`, `summaryBelow` | 부분합 (18절) |
 
 ```bash
@@ -552,3 +554,22 @@ wasm 함수: `rcell_doc_open`/`rcell_doc_new` → 문서 번호, `rcell_doc_edit
   `replace`(기본)는 이미 있는 `SUBTOTAL` 행을 지운 뒤 다시 낸다. 겹쳐 내는 부분합(`replace: false`, 개요 3단계)은 하지
   않는다 (실험 1가지). 한셀은 영역이 첫 행이 아닌 곳에서 시작하는 문서에서 `Subtotal` 이 서버 오류로 멈춘다 (실험 2가지 —
   확인할 수 없다).
+- 통합: `sources` 범위들을 `dest` 부터 **값으로**(연결 없이) 합친다. `leftColumn` 이면 각 범위의 왼쪽 열이, `topRow` 면 위쪽 행이 이름표
+  (대소문자 무시, 처음 나온 차례로 모은다)이고 없는 쪽은 칸 자리로 모은다. 이름표만 적고 숫자만 센다. 이름표 칸은 비어 있을 때만 쓰고
+  (이미 글이 든 이름표 칸은 그대로), 값 칸은 모두 쓴다 — 결과가 없으면(`stdev`·`var` 에 값이 하나뿐일 때 …) 그 칸을 비운다.
+  함수는 부분합과 같은 열한 가지 (실험 18가지 모두 같음). 연결을 만드는 통합(`createLinks`)은 하지 않는다.
+
+## 19. 도형·그림·차트 옮기기·크기·지우기
+
+한셀 COM `Shape.Left/Top/Width/Height`·`Shape.Delete` 로 도형 4개가 있는 서식 파일과 차트 문서에서 확인했다 (`src/edit/shapes.rs`,
+실험 54가지 모두 같음).
+
+- 위치·크기는 포인트(시트 왼쪽 위 기준)이고 한셀은 px(×96/72)의 정수 부분에 **1 px 를 더한다**: `Left` 50pt → 67px, 300pt → 401px,
+  `Width` 300pt → 401px (66.67 → 67, 400 → 401 …). 새 왼쪽 위·오른쪽 아래 표지는 시트 배치(열 너비·행 높이)에서 그 px 자리의 칸과
+  칸 안 오프셋(px)이다. 주지 않은 값은 그대로이고 (`Left` 만 주면 크기를 지킨다) 두 칸 앵커(`editAs="oneCell"` 그림 포함)·한 칸 앵커·
+  절대 앵커 모두 같은 규칙이다. 차트는 도형 차례에 들어 있다. 지우면 그 도형만 없어지고 다른 도형의 번호·이름은 그대로. 시트 보호의
+  `objects` 가 막혀 있으면 할 수 없다.
+- 한셀 COM 으로 확인할 수 없거나 하지 않은 것: 도형·차트 더하기(`Shapes.AddShape`·`ChartObjects.Add` 는 동작하지만 저장되는 그리기 XML 의
+  스타일·효과 참조를 아직 맞추지 않았다), 차트 종류·데이터 범위 바꾸기(`ChartType`·`SetSourceData` 는 동작, 계열 `Formula`·제목 글은
+  속성이 없다), 표(`ListObjects` 가 없다), 피벗 새로 고침·필드 바꾸기(말뭉치에 피벗 문서가 없고 COM 의 `PivotCaches` 가 표를 만들지 못했다).
+  표·차트는 행·열 삽입·삭제에서 따라간다 (3절·말뭉치 대조), 피벗은 그대로 둔다.

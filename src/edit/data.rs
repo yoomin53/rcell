@@ -720,6 +720,210 @@ pub fn subtotal(
     Ok(())
 }
 
+/// 통합 설정
+#[derive(Debug, Clone)]
+pub struct ConsolidateOptions {
+    pub func: String,
+    pub top_row: bool,
+    pub left_column: bool,
+}
+
+/// 통합할 원본 (시트 번호, 범위)
+pub type ConsolidateSource = (usize, CellRange);
+
+fn agg(func: &str, v: &[f64]) -> Option<CellValue> {
+    if v.is_empty() {
+        return None;
+    }
+    let n = v.len() as f64;
+    let sum: f64 = v.iter().sum();
+    Some(CellValue::Number(match func {
+        "sum" => sum,
+        "count" | "countNums" => n,
+        "average" => sum / n,
+        "max" => v.iter().cloned().fold(f64::MIN, f64::max),
+        "min" => v.iter().cloned().fold(f64::MAX, f64::min),
+        "product" => v.iter().product(),
+        "stdev" | "var" if v.len() < 2 => return None,
+        "stdev" => {
+            let m = sum / n;
+            (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
+        }
+        "stdevp" => {
+            let m = sum / n;
+            (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n).sqrt()
+        }
+        "var" => {
+            let m = sum / n;
+            v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n - 1.0)
+        }
+        "varp" => {
+            let m = sum / n;
+            v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n
+        }
+        _ => return Some(CellValue::Error("#DIV/0!".into())),
+    }))
+}
+
+/// 통합 (한셀 `Range.Consolidate` 대조 실험 — docs/editing.md 18절): 원본 범위들을 `dest` 부터 값으로 합친다 (연결 없이).
+/// 왼쪽 열 이름표(`left_column`)·위쪽 행 이름표(`top_row`)가 같은 것끼리(대소문자 무시, 처음 나온 차례) 모으고, 없는 쪽은
+/// 칸 자리로 모은다. 함수는 수만 센다.
+pub fn consolidate(
+    wb: &mut Workbook,
+    si: usize,
+    dest: CellRef,
+    sources: &[ConsolidateSource],
+    o: &ConsolidateOptions,
+) -> crate::Result<()> {
+    if si >= wb.sheets.len() || sources.is_empty() {
+        return Err(err("통합할 범위가 없습니다"));
+    }
+    crate::calc::recalculate(wb);
+    type Label = (String, String); // (표시, 대소문자 무시 키)
+    let key = |wb: &Workbook, s: usize, r: u32, c: u32| -> Option<Label> {
+        let t = super::find::display_text(wb, s, CellRef { row: r, col: c })?;
+        Some((t.clone(), t.to_lowercase()))
+    };
+    let num = |wb: &Workbook, s: usize, r: u32, c: u32| -> Option<f64> {
+        match wb.sheets[s]
+            .cell(CellRef { row: r, col: c })
+            .map(|x| &x.value)
+        {
+            Some(CellValue::Number(n)) => Some(*n),
+            _ => None,
+        }
+    };
+    let mut row_labels: Vec<Label> = Vec::new();
+    let mut col_labels: Vec<Label> = Vec::new();
+    // (행 번호, 열 번호) → 값들
+    let mut cells: std::collections::BTreeMap<(usize, usize), Vec<f64>> = Default::default();
+    for &(s, rg) in sources {
+        if s >= wb.sheets.len() {
+            return Err(err("시트가 없습니다"));
+        }
+        let (r0, c0, r1, c1) = (rg.start.row, rg.start.col, rg.end.row, rg.end.col);
+        let dr = r0 + o.top_row as u32;
+        let dc = c0 + o.left_column as u32;
+        // 열 번호: 위쪽 이름표가 있으면 이름표로, 없으면 자리로
+        let col_ids: Vec<usize> = (dc..=c1)
+            .map(|c| {
+                if o.top_row {
+                    match key(wb, s, r0, c) {
+                        Some(l) => {
+                            col_labels
+                                .iter()
+                                .position(|x| x.1 == l.1)
+                                .unwrap_or_else(|| {
+                                    col_labels.push(l);
+                                    col_labels.len() - 1
+                                })
+                        }
+                        None => usize::MAX,
+                    }
+                } else {
+                    (c - dc) as usize
+                }
+            })
+            .collect();
+        for r in dr..=r1 {
+            let rid = if o.left_column {
+                match key(wb, s, r, c0) {
+                    Some(l) => row_labels
+                        .iter()
+                        .position(|x| x.1 == l.1)
+                        .unwrap_or_else(|| {
+                            row_labels.push(l);
+                            row_labels.len() - 1
+                        }),
+                    None => continue,
+                }
+            } else {
+                (r - dr) as usize
+            };
+            for (k, c) in (dc..=c1).enumerate() {
+                if col_ids[k] == usize::MAX {
+                    continue;
+                }
+                if let Some(v) = num(wb, s, r, c) {
+                    cells.entry((rid, col_ids[k])).or_default().push(v);
+                }
+            }
+        }
+    }
+    let n_rows = if o.left_column {
+        row_labels.len()
+    } else {
+        cells.keys().map(|k| k.0 + 1).max().unwrap_or(0)
+    };
+    let n_cols = if o.top_row {
+        col_labels.len()
+    } else {
+        cells.keys().map(|k| k.1 + 1).max().unwrap_or(0)
+    };
+    let (hr, hc) = (o.top_row as u32, o.left_column as u32);
+    super::guard_cells(
+        wb,
+        si,
+        CellRange {
+            start: dest,
+            end: CellRef {
+                row: dest.row + hr + n_rows as u32,
+                col: dest.col + hc + n_cols as u32,
+            },
+        },
+    )?;
+    let put = |wb: &mut Workbook, r: u32, c: u32, v: CellValue| {
+        let cell = cell_mut(&mut wb.sheets[si], CellRef { row: r, col: c });
+        cell.value = v;
+        cell.formula = None;
+    };
+    if o.top_row {
+        for (j, l) in col_labels.iter().enumerate() {
+            put(
+                wb,
+                dest.row,
+                dest.col + hc + j as u32,
+                CellValue::Text(l.0.clone()),
+            );
+        }
+    }
+    if o.left_column {
+        for (i, l) in row_labels.iter().enumerate() {
+            // 이름표 칸은 비어 있을 때만 쓴다 (한셀 — 이미 글이 든 이름표 칸은 그대로)
+            let at = CellRef {
+                row: dest.row + hr + i as u32,
+                col: dest.col,
+            };
+            if wb.sheets[si]
+                .cell(at)
+                .is_none_or(|c| c.value.is_empty() && c.formula.is_none())
+            {
+                put(wb, at.row, at.col, CellValue::Text(l.0.clone()));
+            }
+        }
+    }
+    // 값 칸은 모두 쓴다 (결과가 없으면 비운다)
+    for i in 0..n_rows {
+        for j in 0..n_cols {
+            let at = CellRef {
+                row: dest.row + hr + i as u32,
+                col: dest.col + hc + j as u32,
+            };
+            match cells.get(&(i, j)).and_then(|x| agg(&o.func, x)) {
+                Some(v) => put(wb, at.row, at.col, v),
+                None => {
+                    if let Some(c) = wb.sheets[si].cells.iter_mut().find(|c| c.r == at) {
+                        c.value = CellValue::Empty;
+                        c.formula = None;
+                    }
+                }
+            }
+        }
+    }
+    super::structure::update_dimension(&mut wb.sheets[si]);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -573,6 +573,19 @@ pub enum Edit {
         sheet: Option<SheetSel>,
         shape: shapes::ShapeSel,
     },
+    /// 통합 (`sources`: `시트!A1:B5` 꼴 범위 글들, `dest` 부터 값으로 합친다)
+    Consolidate {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        dest: String,
+        sources: Vec<String>,
+        #[serde(default)]
+        func: Option<String>,
+        #[serde(default)]
+        top_row: bool,
+        #[serde(default)]
+        left_column: bool,
+    },
     /// 행 높이 자동 맞춤
     AutoFitRows {
         #[serde(default)]
@@ -1371,6 +1384,35 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
         Edit::DeleteShape { sheet, shape } => {
             let i = si(wb, sheet)?;
             shapes::delete_shape(wb, i, shape)?;
+            Ok(i)
+        }
+        Edit::Consolidate {
+            sheet,
+            dest,
+            sources,
+            func,
+            top_row,
+            left_column,
+        } => {
+            let i = si(wb, sheet)?;
+            let mut src = Vec::new();
+            for t in sources {
+                // `시트!A1:B5` (시트 이름은 작은따옴표로 묶을 수 있다), 시트가 없으면 대상 시트
+                let (sh, r) = match t.rfind('!') {
+                    Some(k) => {
+                        let name = t[..k].trim_matches('\'').to_string();
+                        (sheet_index(wb, Some(&SheetSel::Name(name)))?, &t[k + 1..])
+                    }
+                    None => (i, t.as_str()),
+                };
+                src.push((sh, parse_range(&r.replace('$', ""))?));
+            }
+            let o = data::ConsolidateOptions {
+                func: func.clone().unwrap_or_else(|| "sum".into()),
+                top_row: *top_row,
+                left_column: *left_column,
+            };
+            data::consolidate(wb, i, dest.parse::<CellRef>()?, &src, &o)?;
             Ok(i)
         }
         Edit::AutoFitRows { sheet, row, count } => {
