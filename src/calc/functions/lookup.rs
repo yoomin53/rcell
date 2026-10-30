@@ -242,6 +242,10 @@ fn vector(arr: &Array) -> Result<Vec<Value>, ErrorKind> {
 
 fn match_fn(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(scalar_key(ctx, &a[0]));
+    // 찾을 범위가 참조도 배열도 아닌 낱값이면 #N/A (MATCH(5,5,0), 대조 실험 refargs)
+    if matches!(a[1], Value::Number(_) | Value::Text(_) | Value::Bool(_)) {
+        return Value::Error(ErrorKind::NA);
+    }
     let arr = try_v!(lookup_array(ctx, &a[1]));
     let vals = try_v!(vector(&arr));
     let mt = try_v!(num_or(ctx, a, 2, 1.0));
@@ -673,7 +677,8 @@ fn row_col(ctx: &mut Ctx, a: &[Value], row: bool) -> Value {
             r[0]
         }
         Some(Value::Error(e)) => return Value::Error(*e),
-        Some(_) => return Value::Error(ErrorKind::Value),
+        // 참조가 아니면 #REF! (ROW({1,2}), ROW(5), ROW("a"), 대조 실험 refargs)
+        Some(_) => return Value::Error(ErrorKind::Ref),
     };
     let (lo, hi) = if row {
         (area.r0, area.r1)
@@ -705,6 +710,8 @@ fn dims(_ctx: &mut Ctx, a: &[Value], rows: bool) -> Value {
             Value::Number(if rows { r[0].rows() } else { r[0].cols() } as f64)
         }
         Value::Array(arr) => Value::Number(if rows { arr.rows } else { arr.cols } as f64),
+        // 글은 #VALUE! (ROWS("a")), 숫자는 1 (ROWS(5), 대조 실험 refargs)
+        Value::Text(_) => Value::Error(ErrorKind::Value),
         _ => Value::Number(1.0),
     }
 }
@@ -750,6 +757,13 @@ fn address(ctx: &mut Ctx, a: &[Value]) -> Value {
             row as u32
         )
     } else {
+        // R1C1 에서도 절대 위치는 범위 안이어야 한다 (ADDRESS(-1,1,1,FALSE), ADDRESS(1,16385,1,FALSE) = #VALUE!,
+        // 상대 위치 R[-1] 은 된다, 대조 실험 misc3)
+        if (ra && (row < 1.0 || row > MAX_ROWS as f64))
+            || (ca && (col < 1.0 || col > MAX_COLS as f64))
+        {
+            return Value::Error(ErrorKind::Value);
+        }
         let r = if ra {
             format!("R{}", row)
         } else {

@@ -74,7 +74,11 @@ pub const FNS: &[FnSpec] = &[
         let re = try_v!(num_arg(c, a, 0));
         let im = try_v!(num_arg(c, a, 1));
         let suf = match opt(a, 2) {
-            Some(v) => try_v!(c.text(v)).to_string(),
+            // 빈 접미사는 "i" (COMPLEX(1,2,"") = "1+2i", 대조 실험 misc5)
+            Some(v) => match try_v!(c.text(v)).to_string() {
+                s if s.is_empty() => "i".into(),
+                s => s,
+            },
             None => "i".into(),
         };
         if suf != "i" && suf != "j" {
@@ -250,6 +254,13 @@ fn fmt_radix(v: i64, radix: u32, places: Option<f64>) -> Result<String, ErrorKin
     if v < lo || v > hi {
         return Err(ErrorKind::Num);
     }
+    // 자릿수는 음수에서도 1–10 이어야 한다 (DEC2BIN(-3,0)·BIN2OCT("1111111111",12) = #NUM!, 대조 실험 numstr)
+    if let Some(p) = places {
+        let p = p.trunc();
+        if !(1.0..=10.0).contains(&p) {
+            return Err(ErrorKind::Num);
+        }
+    }
     if v < 0 {
         let u = (v + (1i64 << bits)) as u64;
         return Ok(super::math::to_radix(u, radix));
@@ -259,7 +270,7 @@ fn fmt_radix(v: i64, radix: u32, places: Option<f64>) -> Result<String, ErrorKin
         None => Ok(s),
         Some(p) => {
             let p = p.trunc();
-            if p < 0.0 || p > 10.0 || (s.len() as f64) > p {
+            if (s.len() as f64) > p {
                 return Err(ErrorKind::Num);
             }
             Ok(format!("{:0>width$}", s, width = p as usize))
@@ -290,12 +301,22 @@ fn dec2(ctx: &mut Ctx, a: &[Value], radix: u32) -> Value {
     if matches!(a[0], Value::Empty) {
         return Value::Error(ErrorKind::NA);
     }
-    let x = try_v!(num_arg(ctx, a, 0)).trunc();
+    let raw = try_v!(num_arg(ctx, a, 0));
+    let x = raw.trunc();
     let places = match opt(a, 1) {
         Some(p) => Some(try_v!(ctx.num(p))),
         None => None,
     };
     if x.abs() > 1e15 {
+        return Value::Error(ErrorKind::Num);
+    }
+    // 범위는 소수를 버리기 전의 값으로 잰다 (DEC2BIN(511.5) = #NUM!, 대조 실험 bitops)
+    let (lo, hi) = match radix {
+        2 => (-512.0, 511.0),
+        8 => (-536_870_912.0, 536_870_911.0),
+        _ => (-549_755_813_888.0, 549_755_813_887.0),
+    };
+    if raw > hi || raw < lo {
         return Value::Error(ErrorKind::Num);
     }
     match fmt_radix(x as i64, radix, places) {
@@ -316,7 +337,9 @@ fn bit_arg(
 ) -> Result<u64, ErrorKind> {
     let x = num_arg(ctx, a, i)?;
     let n = x.trunc();
-    if (strict && x - n > 0.0) || n < 0.0 || n > limit {
+    // BITAND 만 (−1, 0) 의 음수 소수를 0 으로 받는다; 나머지는 0 보다 작으면 모두 #NUM!
+    // (BITXOR(1023,-0.69)·BITRSHIFT(-0.5,6) = #NUM!, 대조 실험 bitops·rand)
+    if (strict && x - n > 0.0) || n < 0.0 || (!strict && x < 0.0) || n > limit {
         return Err(ErrorKind::Num);
     }
     Ok(n as u64)

@@ -565,6 +565,10 @@ pub fn paired_numbers(
     if let Value::Error(e) = b {
         return Err(*e);
     }
+    // 낱 글 인수는 #VALUE! (CORREL("a","b"), 대조 실험 typing)
+    if matches!(a, Value::Text(_)) || matches!(b, Value::Text(_)) {
+        return Err(ErrorKind::Value);
+    }
     let xa = flatten(ctx, a);
     let xb = flatten(ctx, b);
     if xa.len() != xb.len() {

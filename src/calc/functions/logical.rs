@@ -241,16 +241,27 @@ fn ifs(ctx: &mut Ctx, args: &[Expr]) -> Value {
 fn switch(ctx: &mut Ctx, args: &[Expr]) -> Value {
     let x = ctx.eval_value(&args[0]);
     let x = ctx.scalar(x);
-    if let Value::Error(e) = x {
-        return Value::Error(e);
-    }
+    // 식이 오류여도 멈추지 않는다: 같은 오류인 값과만 같고 (SWITCH(#N/A,#N/A,1,2) = 1), 맞는 값이 없으면 기본값
+    // (SWITCH(범위,10,"x","d") 의 암묵 교차 #VALUE! → "d", 대조 실험 misc5)
+    let x_err = if let Value::Error(e) = x {
+        Some(e)
+    } else {
+        None
+    };
     let rest = &args[1..];
     let mut i = 0;
     while i + 1 < rest.len() {
         let v = ctx.eval_value(&rest[i]);
         let v = ctx.scalar(v);
-        // 오류인 경우 값은 건너뛴다 (SWITCH(1,#N/A,2,1,3) = 3, 대조 실험 logical)
-        if matches!(v, Value::Error(_)) {
+        // 값이 오류면 식이 같은 오류일 때만 맞는다 (SWITCH(1,#N/A,2,1,3) = 3, 대조 실험 logical)
+        if let Value::Error(ve) = v {
+            if x_err == Some(ve) {
+                return branch(ctx, &rest[i + 1]);
+            }
+            i += 2;
+            continue;
+        }
+        if x_err.is_some() {
             i += 2;
             continue;
         }

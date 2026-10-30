@@ -286,6 +286,59 @@ pub fn gamma_p(a: f64, x: f64) -> f64 {
     }
 }
 
+/// GAMMA.DIST 의 누적: P(a, x) 를 끝까지 수렴시키되 앞에 곱하는 지수의 ln Γ 는 한셀 GAMMALN (C 런타임 lgamma) 이다 —
+/// a = 1E4 근처에서 끝자리가 정확한 값과 1E-11 다르다 (GAMMA.DIST(10000,10000,1,TRUE) = 0.5013298083352052).
+/// 아래쪽 급수의 지수가 넘쳐 0 이 되면 NaN (GAMMA.DIST(10,1000,1,TRUE) = #NUM!, 대조 실험 misc6)
+pub fn gamma_p_hc(a: f64, x: f64) -> f64 {
+    use crate::calc::hcmath::lgamma;
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let lg = lgamma(a);
+    if x < a + 1.0 {
+        let mut ap = a;
+        let mut sum = 1.0 / a;
+        let mut del = sum;
+        for _ in 0..10_000 {
+            ap += 1.0;
+            del *= x / ap;
+            sum += del;
+            if del.abs() < sum.abs() * EPS {
+                break;
+            }
+        }
+        let e = (-x + a * x.mln() - lg).mexp();
+        if e == 0.0 {
+            return f64::NAN;
+        }
+        sum * e
+    } else {
+        let mut b = x + 1.0 - a;
+        let mut c = 1.0 / TINY;
+        let mut d = 1.0 / b;
+        let mut h = d;
+        for i in 1..10_000 {
+            let an = -(i as f64) * (i as f64 - a);
+            b += 2.0;
+            d = an * d + b;
+            if d.abs() < TINY {
+                d = TINY;
+            }
+            c = b + an / c;
+            if c.abs() < TINY {
+                c = TINY;
+            }
+            d = 1.0 / d;
+            let del = d * c;
+            h *= del;
+            if (del - 1.0).abs() < EPS {
+                break;
+            }
+        }
+        1.0 - (-x + a * x.mln() - lg).mexp() * h
+    }
+}
+
 /// 정규화한 상부 불완전 감마 Q(a, x)
 pub fn gamma_q(a: f64, x: f64) -> f64 {
     if x <= 0.0 {
@@ -536,26 +589,20 @@ pub fn newton_refine(x0: f64, p: f64, f: impl Fn(f64) -> f64, df: impl Fn(f64) -
     x
 }
 
-/// 이항 계수 C(n, k) (n, k 는 0 이상 정수)
+/// 이항 계수 C(n, k) (n, k 는 0 이상 정수): e^{GAMMALN 차이}, 2^53 보다 작으면 정수로 반올림한다
+/// (COMBIN(1030,2) = 529935, COMBIN(1029,514) = 1.4298206865000652E+308, COMBIN(200,100) = 9.054851465609245E+58,
+/// 대조 실험 misc4)
 pub fn binom_coef(n: f64, k: f64) -> f64 {
+    use crate::calc::hcmath::lgamma;
     if k < 0.0 || k > n {
         return 0.0;
     }
-    let k = k.min(n - k);
-    if n <= 1029.0 {
-        let mut r = 1.0;
-        let mut i = 1.0;
-        while i <= k {
-            r = r * (n - k + i) / i;
-            i += 1.0;
-        }
-        return if r < 9.007_199_254_740_992e15 {
-            r.round()
-        } else {
-            r
-        };
+    let r = (lgamma(n + 1.0) - lgamma(k + 1.0) - lgamma(n - k + 1.0)).mexp();
+    if r < 9.007_199_254_740_992e15 {
+        r.round()
+    } else {
+        r
     }
-    (ln_gamma(n + 1.0) - ln_gamma(k + 1.0) - ln_gamma(n - k + 1.0)).mexp()
 }
 
 /// 이항 확률 P(X = k): 조합 수를 e^{GAMMALN 차이}로 구해 p^k·q^(n−k) 를 곱한다 (한셀 BINOM.DIST(…,FALSE) 가 n = 20–1000 의

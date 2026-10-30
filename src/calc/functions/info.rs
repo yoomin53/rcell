@@ -90,7 +90,8 @@ pub const FNS: &[FnSpec] = &[
             Value::Number(r.iter().map(|x| (x.sheet_last - x.sheet + 1) as f64).sum())
         }
         Some(Value::Error(e)) => Value::Error(*e),
-        Some(_) => Value::Error(ErrorKind::Value),
+        // 참조가 아니면 #N/A (SHEETS(5)·SHEETS({1}), 대조 실험 refargs)
+        Some(_) => Value::Error(ErrorKind::NA),
     }),
     f("CELL", 1, 2, VR, cell),
     f("INFO", 1, 1, V, |c, a| {
@@ -189,7 +190,8 @@ fn cell(ctx: &mut Ctx, a: &[Value]) -> Value {
         Some(Value::Ref(r)) => r[0],
         Some(Value::Error(e)) => return Value::Error(*e),
         Some(Value::Empty) | None => return Value::Error(ErrorKind::Ref),
-        Some(_) => return Value::Error(ErrorKind::Value),
+        // 참조가 아니면 #N/A (CELL("row",5), 대조 실험 refargs)
+        Some(_) => return Value::Error(ErrorKind::NA),
     };
     let (sheet, row, col) = (area.sheet, area.r0, area.c0);
     match what.as_str() {

@@ -276,6 +276,54 @@ fn binom_pmf_uses_gammaln() {
     );
 }
 
+/// 무작위 수식 차분 시험(rand)에서 찾은 한셀의 규칙들 (대조 실험 rand1xx·typing·refargs·misc3–6)
+#[test]
+fn rules_from_random_differential_tests() {
+    // 참조가 필요한 인수에 값·배열을 주면
+    assert_eq!(one("COUNTIF({1,2,3},\">1\")"), e("#VALUE!"));
+    assert_eq!(one("SUMIF({1,2,3},\">1\")"), e("#VALUE!"));
+    assert_eq!(one("COUNTBLANK({1,2;3,4})"), e("#NAME?"));
+    assert_eq!(one("ROW({1,2})"), e("#REF!"));
+    assert_eq!(one("SHEETS(5)"), e("#N/A"));
+    assert_eq!(one("MATCH(5,5,0)"), e("#N/A"));
+    assert_eq!(one("RANK(3.14159,-255)"), e("#N/A"));
+    // 숫자로 읽히는 글은 논리로도 읽힌다
+    assert_eq!(one("IF(\"0\",1,2)"), n(2.0));
+    assert_eq!(one("NOT(\"5\")"), CellValue::Bool(false));
+    // SWITCH 는 같은 오류끼리 맞는다
+    assert_eq!(one("SWITCH(#N/A,#N/A,1,2)"), n(1.0));
+    // 비트 함수·DEC2BIN 은 소수를 버리기 전에 범위를 잰다
+    assert_eq!(one("BITXOR(1023,-0.69)"), e("#NUM!"));
+    assert_eq!(one("BITAND(-0.5,1)"), n(0.0));
+    assert_eq!(one("DEC2BIN(511.5)"), e("#NUM!"));
+    // TEXTJOIN: 구분자가 오류면 빈 글, 배열 상수 안의 오류는 그 오류
+    assert_eq!(one("TEXTJOIN(#N/A,1,\"a\",\"b\")"), t(""));
+    assert_eq!(one("TEXTJOIN(\"/\",1,{\"a\",#N/A})"), e("#N/A"));
+    // 달 수는 16비트로 잘린다, 1899-12-31 이하는 #NUM!
+    assert_eq!(one("EDATE(36923,65535)"), n(36892.0));
+    assert_eq!(one("EOMONTH(31,-1)"), e("#NUM!"));
+    // 자릿수는 32비트
+    assert_eq!(one("ROUND(1234.5678,2147483648)"), e("#NUM!"));
+    assert_eq!(one("TRUNC(1234.5678,306)"), n(0.0));
+    // 와이블 밀도는 넘치면 0
+    assert_eq!(one("WEIBULL(65535,36526.5,10,FALSE)"), n(0.0));
+    // CHAR 의 두 바이트 코드
+    assert_eq!(one("CHAR(45217)"), t("가"));
+    assert_eq!(one("CHAR(1000)"), t("�"));
+    assert_eq!(one("CHAR(256)"), e("#VALUE!"));
+    // TEXT: 논리에 색 서식은 #VALUE!, 빈 서식은 글 그대로·음수는 "-"
+    assert_eq!(one("TEXT(TRUE,\"[Red]0.0\")"), e("#VALUE!"));
+    assert_eq!(one("TEXT(-5,\"\")"), t("-"));
+    assert_eq!(one("TEXT(\"abc\",\"\")"), t("abc"));
+    // 조합 수는 e^{GAMMALN 차이}
+    assert_eq!(one("COMBIN(1030,2)"), n(529935.0));
+    assert_eq!(one("COMBIN(1030,515)"), e("#NUM!"));
+    match one("PERMUT(45598,1)") {
+        CellValue::Number(x) => assert!((x - 45597.99999943975).abs() < 1e-9),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// 반복 계산 (calcPr iterate): 파일 값에서 시작해 2×iterateCount 번, 행 차례로 (대조 실험 circ)
 #[test]
 fn iterative_calculation() {

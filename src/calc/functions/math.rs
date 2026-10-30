@@ -392,15 +392,46 @@ pub fn round_digits(x: f64, digits: f64, mode: Rounding) -> f64 {
     }
 }
 
+/// 자릿수는 32비트 정수로 받는다: 반올림한 값이 범위 밖이면 #NUM!, 2147483647 은 0 (대조 실험 misc4·misc6)
+fn digits_limit(d: f64) -> Option<Value> {
+    let n = d.round();
+    if !(-2_147_483_648.0..=2_147_483_647.0).contains(&n) {
+        Some(Value::Error(ErrorKind::Num))
+    } else if n == 2_147_483_647.0 {
+        Some(Value::Number(0.0))
+    } else {
+        None
+    }
+}
+
 fn round_fn(ctx: &mut Ctx, a: &[Value], mode: Rounding) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
     let d = try_v!(num_arg(ctx, a, 1));
+    if let Some(v) = digits_limit(d) {
+        return v;
+    }
+    // ROUND·ROUNDUP·ROUNDDOWN(x,−2147483648) = 0
+    if d.round() == -2_147_483_648.0 {
+        return Value::Number(0.0);
+    }
     num(round_digits(x, d, mode))
 }
 
 fn trunc(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
     let d = try_v!(num_or(ctx, a, 1, 0.0));
+    if let Some(v) = digits_limit(d) {
+        return v;
+    }
+    // TRUNC 는 x·10^d 가 넘치면 0 (TRUNC(1234.5678,306) = 0; ROUNDDOWN 은 x 그대로, 대조 실험 misc6)
+    if d.trunc() >= 0.0 {
+        let f = 10f64.mpowi(d.trunc().min(400.0) as i32);
+        if !f.is_finite() || !(x * f).is_finite() {
+            return Value::Number(0.0);
+        }
+    } else if d.round() == -2_147_483_648.0 {
+        return Value::Error(ErrorKind::Num);
+    }
     num(round_digits(x, d, Rounding::Down))
 }
 
@@ -560,7 +591,9 @@ fn gcd_lcm(ctx: &mut Ctx, a: &[Value], gcd: bool) -> Value {
     let mut acc: Option<(f64, f64)> = None;
     for x in v {
         let n = x.trunc();
-        if n < 0.0 || n >= 9.007_199_254_740_992e15 {
+        // 소수를 버리기 전에 0 보다 작으면 #NUM! (GCD(-0.5,4)), 위로는 한도가 없다 (GCD(2^53+2,2) = 2, GCD(1E20,2) = 2,
+        // LCM(2^53,3) = 3·2^53, 대조 실험 misc4)
+        if x < 0.0 || !x.is_finite() {
             return Value::Error(ErrorKind::Num);
         }
         acc = Some(match acc {
@@ -651,6 +684,10 @@ pub fn ifs_mask(
     let mut dims: Option<(usize, usize)> = None;
     let mut mask: Vec<bool> = Vec::new();
     for (range, crit) in pairs {
+        // 범위 인수는 참조여야 한다 (배열 상수·값은 #VALUE!, 대조 실험 refargs)
+        if !matches!(range, Value::Ref(_) | Value::Error(_)) {
+            return Err(ErrorKind::Value);
+        }
         let g = grid(ctx, range)?;
         match dims {
             None => {
@@ -680,6 +717,12 @@ pub fn ifs_mask(
 }
 
 fn sumif(ctx: &mut Ctx, a: &[Value]) -> Value {
+    // 합 범위도 참조여야 한다 (SUMIF(…,{4,5,6}) = #VALUE!, 대조 실험 refargs)
+    if a.get(2)
+        .is_some_and(|t| !matches!(t, Value::Ref(_) | Value::Empty | Value::Error(_)))
+    {
+        return Value::Error(ErrorKind::Value);
+    }
     let target = match opt(a, 2) {
         Some(t) => resized(&a[0], t),
         None => a[0].clone(),
@@ -705,6 +748,9 @@ fn sumifs(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Value);
     }
     let pairs: Vec<(&Value, &Value)> = a[1..].chunks(2).map(|p| (&p[0], &p[1])).collect();
+    if !matches!(a[0], Value::Ref(_) | Value::Error(_)) {
+        return Value::Error(ErrorKind::Value);
+    }
     let (r, c, mask) = try_v!(ifs_mask(ctx, &pairs));
     let vals = try_v!(grid(ctx, &a[0]));
     if (vals.rows, vals.cols) != (r, c) {
@@ -1193,7 +1239,8 @@ fn base(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let mut s = to_radix(n as u64, radix as u32);
-    while s.len() < min_len as usize {
+    // 0 은 자릿수를 채우지 않는다 (BASE(0,2,5) = "0", 대조 실험 rand)
+    while n != 0.0 && s.len() < min_len as usize {
         s.insert(0, '0');
     }
     Value::from(s)
@@ -1221,6 +1268,12 @@ fn decimal(ctx: &mut Ctx, a: &[Value]) -> Value {
     if !(2.0..=36.0).contains(&radix) || t.chars().count() > 255 {
         return Value::Error(ErrorKind::Num);
     }
+    // 10진은 앞 공백을 건너뛴다 (DECIMAL(" 12",10) = 12; DECIMAL(" FF ",16) = #NUM!, 대조 실험 textjoin)
+    let t = if radix == 10.0 {
+        t.trim_start().into()
+    } else {
+        t
+    };
     let mut v = 0.0f64;
     // 공백은 숫자가 아니다 (DECIMAL(" FF ",16) = #NUM!, 대조 실험 math)
     for ch in t.chars() {

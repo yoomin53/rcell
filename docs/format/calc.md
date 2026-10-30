@@ -137,6 +137,36 @@ rcell 의 `hcmath::lgamma` 는 반정수 k/2 (k ≤ 400) 는 한셀에서 잰 �
 | N | 범위는 왼쪽 위 칸, 배열 수식에서도 원소마다 계산하지 않는다 |
 | 순환 참조 | 반복 계산이 꺼져 있으면 CalculateFull 이 끝나지 않는다 (경고 창으로 보인다) — rcell 은 순환 안의 칸이 파일 값을 읽는다. `calcPr iterate="1"` 이면 순환에 든 수식과 그것에 기대는 수식을 파일 값에서 시작해 2×iterateCount 번, 행 차례로 계산한다: 한 바퀴에서 앞 행은 이번 값, 뒤 행은 지난 바퀴 값을 읽는다 (`B3 = B3+1` 은 파일 값 + 2·4·6·20 (횟수 1·2·3·10), `B1 = B2+1`·`B2 = B1*0.5` 는 횟수 1 에서 1.5·0.75, `B1 = B3*2`·`B2 = B1+1`·`B3 = B2+1` 은 4·5·6, 뒤 행 순환을 읽는 앞 행 `B4 = B6*10` 은 한 바퀴 앞 값). iterateDelta 0.5 는 결과를 바꾸지 않았다 (멈추지 않는 칸이 있는 실험). 대조 실험 circ 98 경우 모두 같다. calcPr 의 속성은 그대로 저장한다 |
 
+### 무작위 수식 차분 시험에서 찾은 규칙
+
+`examples/calc_oracle_gen --random N --seed S` (`rand.rs`) 는 함수·인수 종류(숫자·글·논리·날짜·범위·배열·오류·빈 칸)·연산자를
+깊이 3 까지 겹쳐 무작위 수식을 만든다 (같은 시드는 같은 목록, `--emit` 로 글 목록을 남긴다). 한셀에서 작은 묶음(20 개씩)으로
+돌려 rcell 과 견줬다 — 처음 3000 개 가운데 120 가 달랐고, 아래 규칙을 고친 뒤 3–5/500 만 남았다 (`lists/*.txt` 는 규칙마다
+좁혀 본 목록). 한셀이 멈추거나 죽는 수식은 `POISSON.DIST(1E5,1E5,TRUE)` 와 `NUMBERSTRING(1E300,1)` 이 더 있다.
+
+| 규칙 | 한셀 |
+|---|---|
+| 참조가 필요한 인수에 값·배열 | COUNTIF·SUMIF·SUMIFS·COUNTIFS·MAXIFS 의 범위 `{1,2,3}`·`5` 는 #VALUE!. COUNTBLANK 는 #NAME? (오류 값도). ROW·COLUMN 은 #REF!, ROWS("a") 는 #VALUE! (ROWS(5) = 1), SHEETS·CELL 은 #N/A, MATCH(5,5,0) 은 #N/A, RANK 의 범위가 낱값이면 #N/A |
+| RANK | 범위 안에 오류가 있으면 첫 번째 오류 그대로 (`RANK(1,Data!H1:H3)` = #N/A, 두 번째 칸이 #N/A 이므로; `RANK(5,Data!H5:H7)` = #VALUE!) |
+| IF·NOT·IFS 의 글 | "TRUE"/"FALSE" 와 숫자로 읽히는 글 (`IF("0",1,2)` = 2, `NOT("5")` = FALSE, `IF("12:00",1,2)` = 1, `NOT(" 0")`·`"0%"`·`"$0"`) — 그 밖은 #VALUE! |
+| SWITCH | 식이 오류여도 멈추지 않고 같은 오류인 값과 맞는다 (`SWITCH(#N/A,#N/A,1,2)` = 1), 맞는 것이 없으면 기본값 (`SWITCH(Data!A1:A10,10,"x","d")` 의 암묵 교차 오류 → "d") |
+| BIT·DEC2BIN | BITAND 만 (−1, 0) 의 음수 소수를 0 으로 받는다 (`BITAND(-0.5,1)` = 0); BITOR·BITXOR·BITLSHIFT·BITRSHIFT 는 소수를 버리기 전에 0 보다 작으면 #NUM! (`BITXOR(1023,-0.69)`). DEC2BIN·DEC2OCT·DEC2HEX 도 범위(±512 …)를 소수를 버리기 전에 잰다 (`DEC2BIN(511.5)` = #NUM!). 자릿수는 음수에서도 1–10 (`DEC2BIN(-3,0)`·`BIN2OCT("1111111111",12)` = #NUM!) |
+| TEXTJOIN | 구분자가 오류면 빈 글. 오류 낱값·참조 안의 오류는 거기서 멈춘다. 배열 상수 안의 오류는 그 오류 (`TEXTJOIN("/",1,{"a",#N/A})` = #N/A) |
+| EDATE·EOMONTH | 달 수를 16비트 정수로 자른다 (`EDATE(36923,65535)` = EDATE(…,−1) = 36892, 65536 은 0달; 32767 은 #NUM!). 1899-12-31(0) 이하의 결과는 #NUM! (`EOMONTH(31,-1)`; 달을 옮기지 않으면 `EOMONTH(0,0)` = 0) |
+| 자릿수 인수 | ROUND·ROUNDUP·ROUNDDOWN·TRUNC·FIXED 의 자릿수는 32비트: 반올림한 값이 넘으면 #NUM! (`ROUND(x,2^31)`), 2147483647 은 0, ROUND·ROUNDUP·ROUNDDOWN(x,−2147483648) 은 0 (TRUNC 는 #NUM!). TRUNC 는 x·10^d 가 넘치면 0 (`TRUNC(1234.5678,306)` = 0; ROUNDDOWN 은 x 그대로) |
+| TINV·T.INV.2T·CHIINV·CHISQ.INV.RT | 자유도의 소수 부분을 버리지 않는다 (`TINV(0.05,2.5)` = 3.5746548420036817, `CHIINV(0.5,2.9)` = 2.2673045350780208). 정확한 풀이 |
+| QUARTILE·PERCENTILE | 소수를 버리기 전에 0 보다 작으면 #NUM! (`QUARTILE.INC(범위,-0.1)`); `4.5` 는 4 |
+| COUNTA | 비워 둔 인수는 세지 않는다 (`COUNTA("a",1,)` = 2) |
+| MEDIAN·MODE·MODE.SNGL | 첫 번째가 아닌 자리의 배열 상수는 #VALUE! (`MEDIAN(범위,{1,2})`, `MODE({1,2},{1,2})`; 첫 자리의 배열은 된다). CORREL·SLOPE … 의 낱 글 인수는 #VALUE! |
+| ADDRESS | R1C1 에서도 절대 위치가 범위 밖이면 #VALUE! (`ADDRESS(-1,1,1,FALSE)`, 열 16385); 상대 위치는 음수도 된다 |
+| WEIBULL 밀도 | e^{ln α − α ln β + (α−1) ln x − (x/β)^α} 꼴 (끝자리 — 정수 곱 꼴과 다르다): 넘치면 0 (`WEIBULL(65535,36526.5,10,FALSE)` = 0), x = 0 은 α > 1 이면 0, α = 1 이면 #NUM! |
+| GAMMA.DIST 누적 | 끝까지 수렴한 P(a,x) 에 곱하는 지수의 lnΓ 가 한셀 GAMMALN (a = 10⁴ 근처에서 끝자리 1E-11). 아래 급수의 지수가 넘쳐 0 이 되면 #NUM! (`GAMMA.DIST(10,1000,1,TRUE)`) |
+| COMBIN·COMBINA | e^{GAMMALN 차이}, 2⁵³ 보다 작으면 정수로 반올림 (`COMBIN(1030,2)` = 529935, `COMBIN(1029,514)` = 1.4298206865000652E+308, `COMBIN(200,100)` = 9.054851465609245E+58). PERMUT 도 e^{GAMMALN(n+1) − GAMMALN(n−k+1)} 이고 반올림하지 않는다 (`PERMUT(100,1)` = 99.9999999999981, `PERMUT(45598,1)` = 45597.99999943975) |
+| GCD·LCM | 소수를 버리기 전에 0 보다 작으면 #NUM!, 위로는 한도가 없다 (`GCD(1E20,2)` = 2, `LCM(2^53,3)` = 3·2^53) |
+| CHAR(256–65535) | 두 바이트 (높은 쪽이 앞): 앞이 949 의 앞 바이트(81–FE)면 두 바이트 글자 하나 (`CHAR(45217)` = "가", 표에 없는 짝은 #VALUE!); 앞이 ASCII 이고 뒤가 81–FE 면 "앞 글자 + 뒤 한 바이트 글자" (`CHAR(1000)` = U+0003 U+FFFD, `CHAR(1153)` = U+0004 U+0081); 그 밖(`CHAR(256)`, `CHAR(1152)`)은 #VALUE! |
+| TEXT | 논리·빈 칸에 색 지정 서식 (`[Red]0.0`, `[Red]General`, `[Red]@`) 은 #VALUE!. 서식이 빈 글이면 글은 그대로, 음수는 "-", 그 밖은 빈 글 |
+| COMPLEX·DECIMAL·BASE | COMPLEX 의 빈 접미사는 "i". DECIMAL 의 10진은 앞 공백을 건너뛴다 (`DECIMAL(" 12",10)` = 12). BASE(0,2,5) = "0" (0 은 자릿수를 채우지 않는다) |
+
 ## 5. 함수별 규칙
 
 ### 통계

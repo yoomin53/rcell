@@ -743,7 +743,8 @@ pub fn to_text(v: &Value) -> Result<Rc<str>, ErrorKind> {
     }
 }
 
-/// 논리로 (IF 조건, AND·OR 인수). 글은 "TRUE"/"FALSE" 만.
+/// 논리로 (IF 조건, NOT 인수). 글은 "TRUE"/"FALSE", 숫자로 읽히는 글은 0 이 아닌가
+/// (IF("0",1,2) = 2, NOT("5") = FALSE, IF("12:00",1,2) = 1 — 대조 실험 misc5·misc6), 그 밖의 글은 #VALUE!.
 pub fn to_bool(v: &Value) -> Result<bool, ErrorKind> {
     match v {
         Value::Empty => Ok(false),
@@ -754,6 +755,8 @@ pub fn to_bool(v: &Value) -> Result<bool, ErrorKind> {
                 Ok(true)
             } else if s.eq_ignore_ascii_case("FALSE") {
                 Ok(false)
+            } else if let Some(n) = parse_number(s, false) {
+                Ok(n != 0.0)
             } else {
                 Err(ErrorKind::Value)
             }
