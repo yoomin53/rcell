@@ -1635,7 +1635,8 @@ fn draw_axis_chart(
         && !horizontal
         && !xy
         && matches!(first.kind, "bar" | "line" | "area")
-        && ((legacy && !matches!(first.grouping, "stacked" | "percentStacked"))
+        && ((legacy
+            && (first.kind == "bar" || !matches!(first.grouping, "stacked" | "percentStacked")))
             || (!legacy
                 && ch
                     .view3d
@@ -2985,8 +2986,20 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
         match g.kind {
             "bar" => {
                 let gap = g.props.gap_width.unwrap_or(150) as f64 / 100.0;
-                let slot = (1.0 / n as f64) / (ns as f64 + gap);
+                let stacked = matches!(g.grouping, "stacked" | "percentStacked");
+                // 누적: 항목마다 기둥 하나 (폭 = 띠 / (1 + 간격)), 조각을 아래부터 쌓는다
+                let slot = if stacked {
+                    (1.0 / n as f64) / (1.0 + gap)
+                } else {
+                    (1.0 / n as f64) / (ns as f64 + gap)
+                };
                 for k in 0..n {
+                    let total: f64 = g
+                        .series
+                        .iter()
+                        .map(|s| s.values.get(k).copied().flatten().unwrap_or(0.0).abs())
+                        .sum();
+                    let mut cum = 0.0;
                     for (i, s) in g.series.iter().enumerate() {
                         let Some(val) = s.values.get(k).copied().flatten() else {
                             continue;
@@ -2994,9 +3007,23 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
                         let color = series_color(s, g.offset + i, cx);
                         let st = point_style(s, i, k, cx, &color);
                         let front = st.fill.as_ref().map_or(color.as_str(), |f| f.0.as_str());
-                        let bx0 = k as f64 / n as f64 + slot * (gap / 2.0 + i as f64);
+                        let (bx0, ya, yb) = if stacked {
+                            let d = if g.grouping == "percentStacked" && total > 0.0 {
+                                val / total
+                            } else {
+                                val
+                            };
+                            let (a, b) = (yv(cum), yv(cum + d));
+                            cum += d;
+                            (k as f64 / n as f64 + (1.0 / n as f64 - slot) / 2.0, a, b)
+                        } else {
+                            (
+                                k as f64 / n as f64 + slot * (gap / 2.0 + i as f64),
+                                base,
+                                yv(val),
+                            )
+                        };
                         let bx1 = bx0 + slot;
-                        let (ya, yb) = (base, yv(val));
                         let sx = if v.sb >= 0.0 { bx1 } else { bx0 };
                         out.path(
                             &v.path(&[(sx, ya, z0), (sx, yb, z0), (sx, yb, z1), (sx, ya, z1)]),
