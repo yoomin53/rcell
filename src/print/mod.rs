@@ -64,18 +64,18 @@ pub enum OpenRecalc {
 /// 한셀 2024 계산 엔진 번호 (`calcPr/@hs:hclCalcId`, 레거시 0xA101)
 pub const HCELL_CALC_ID: u32 = 904;
 
-/// 문서 바이트와 읽은 모델로 한셀이 열 때 다시 계산하는 범위를 정한다.
-/// XML·xlsx: 엔진 번호(`hs:hclCalcId`, 없으면 Excel 의 `calcId`)가 904 보다 작거나 없으면 모두, 아니면 하지 않는다
-/// (904 → 하지 않음, 903 → 모두, Excel 191029 → 하지 않음, 둘 다 없음 → 모두). 레거시·xls: 0xA101 이 904 이상이면
-/// 휘발성 칸만, 아니면 모두. ODS: 모두. 바이너리 .cell 은 한셀 COM 이 열지 못해 재지 못했다 — 저장된 값 그대로
+/// 문서 바이트와 읽은 모델로 한셀이 열 때 다시 계산하는 범위를 정한다 (값을 틀리게 적은 20 칸 문서를 형식·엔진 번호별로 한셀에서
+/// 읽은 값). XML·xlsx: `hs:hclCalcId` 가 904 이상이면 하지 않고 903 이하면 모두; 그 번호가 없으면 Excel 의 `calcId` 가 있는
+/// 문서(값 100·904·191029 모두)는 하지 않고, 둘 다 없으면 모두. 레거시·xls: 0xA101 이 904 이상이면 휘발성 칸만, 아니면
+/// (2·100·903 도) 모두. 바이너리 .cell(`.xlsb` 이름으로 연다): BrtCalcProp 의 recalcID 가 0·1 이면 모두, 2 이상(10·100·903·904·
+/// 191029)이면 휘발성 칸만. ODS: 모두
 pub fn open_recalc(bytes: &[u8], wb: &Workbook) -> OpenRecalc {
-    let id = wb.hancom.calc_id.or_else(|| {
-        wb.calc_attrs
-            .iter()
-            .find(|(k, _)| k == "calcId")
-            .and_then(|(_, v)| v.trim().parse().ok())
-    });
-    let current = id.is_some_and(|i| i >= HCELL_CALC_ID);
+    let xml_id = wb.hancom.calc_id;
+    let excel_id = wb.calc_attrs.iter().any(|(k, _)| k == "calcId");
+    let xml_current = match xml_id {
+        Some(i) => i >= HCELL_CALC_ID,
+        None => excel_id,
+    };
     match crate::detect(bytes) {
         crate::FileKind::Cfb => {
             let encrypted = crate::container::list_entries(bytes).is_ok_and(|e| {
@@ -84,12 +84,12 @@ pub fn open_recalc(bytes: &[u8], wb: &Workbook) -> OpenRecalc {
             });
             if encrypted {
                 // 암호화된 OOXML: 안은 XML 패키지
-                if current {
+                if xml_current {
                     OpenRecalc::None
                 } else {
                     OpenRecalc::Full
                 }
-            } else if wb.hancom.calc_id.is_some_and(|i| i >= HCELL_CALC_ID) {
+            } else if xml_id.is_some_and(|i| i >= HCELL_CALC_ID) {
                 OpenRecalc::Volatile
             } else {
                 OpenRecalc::Full
@@ -97,9 +97,32 @@ pub fn open_recalc(bytes: &[u8], wb: &Workbook) -> OpenRecalc {
         }
         crate::FileKind::Zip if crate::ods::is_ods(bytes) => OpenRecalc::Full,
         crate::FileKind::Zip => {
-            let binary = crate::Package::from_bytes(bytes.to_vec())
-                .is_ok_and(|p| p.has_part("xl/workbook.bin"));
-            if binary || current {
+            let mut pkg = match crate::Package::from_bytes(bytes.to_vec()) {
+                Ok(p) => p,
+                Err(_) => return OpenRecalc::None,
+            };
+            if pkg.has_part("xl/workbook.bin") {
+                let recalc_id = pkg
+                    .read_bytes("xl/workbook.bin")
+                    .ok()
+                    .flatten()
+                    .and_then(|part| {
+                        crate::binary::biff12::records(&part)
+                            .into_iter()
+                            .find(|r| r.rtype == 157)
+                            .and_then(|r| {
+                                r.data
+                                    .get(..4)
+                                    .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                            })
+                    });
+                return if recalc_id.is_some_and(|i| i >= 2) {
+                    OpenRecalc::Volatile
+                } else {
+                    OpenRecalc::Full
+                };
+            }
+            if xml_current {
                 OpenRecalc::None
             } else {
                 OpenRecalc::Full

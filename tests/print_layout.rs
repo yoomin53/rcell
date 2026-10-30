@@ -683,6 +683,17 @@ fn open_recalc_rules() {
     wb.hancom.calc_id = Some(904);
     assert_eq!(mode(&wb, "c.cell"), OpenRecalc::None);
     assert_eq!(mode(&wb, "c.legacy.cell"), OpenRecalc::Volatile);
+    // 바이너리 (한셀은 .xlsb 이름으로 연다): rcell 이 쓰는 BrtCalcProp 의 recalcID 는 0 → 모두 (2 이상이면 휘발성만)
+    assert_eq!(mode(&wb, "c.bin.cell"), OpenRecalc::Full);
+    // 엔진 번호 없이 Excel 의 calcId 만 있는 XML (값 100 도) 은 저장된 값 그대로
+    let mut x = wb.clone();
+    x.hancom.calc_id = None;
+    x.calc_attrs = vec![("calcId".into(), "100".into())];
+    assert_eq!(mode(&x, "d.cell"), OpenRecalc::None);
+    // 레거시는 903 도 모두
+    wb.hancom.calc_id = Some(903);
+    assert_eq!(mode(&wb, "e.legacy.cell"), OpenRecalc::Full);
+    wb.hancom.calc_id = Some(904);
     let _ = std::fs::remove_dir_all(&dir);
     let value = |wb: &Workbook, r: &str| {
         let r = CellRef::parse(r).unwrap();
