@@ -200,7 +200,8 @@ impl FontMetrics {
         let row = row_for(name);
         // 표에 없는 글꼴은 한셀처럼 한글 대체 글꼴(맑은 고딕) 높이보다 낮지 않다
         let k = interp(size, |i| row.k[i] as f64).round().max(1.0);
-        let row_pt = (interp(size, |i| row.h[i] as f64) / 20.0 * 20.0).round() / 20.0;
+        // 표 사이 크기는 보간한 값을 1/20 pt 로 자른다 (반은 아래로 — 17pt 맑은 고딕 24.9pt, 보기 실험)
+        let row_pt = (interp(size, |i| row.h[i] as f64) - 1e-6).round() / 20.0;
         let row_frac = match SIZES.iter().position(|&s| s == size) {
             Some(i) if row.half & (1 << i) != 0 => 0.75,
             _ => 0.25,
@@ -212,7 +213,9 @@ impl FontMetrics {
             if i == SIZES.len() - 1 {
                 row.h2[i] as f64 - h1
             } else {
-                (row.h5[i] as f64 - h1) / 4.0
+                // 한셀은 n 줄 높이를 1/20 pt 로 버린다 — 5줄 표도 버린 값이라 0.75 를 더해 한 줄을 어림한다
+                // (15줄 칸 245.55pt, 줄 바꿈 실험)
+                (row.h5[i] as f64 + 0.75 - h1) / 4.0
             }
         });
         FontMetrics {

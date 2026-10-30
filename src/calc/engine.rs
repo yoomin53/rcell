@@ -9,7 +9,8 @@
 //! 후위 순서(선행 셀이 먼저)로 계산한다. INDIRECT·OFFSET 처럼 계산해 봐야 아는 참조는 그때
 //! 필요한 셀을 먼저 계산한다. 재귀 깊이가 한도를 넘으면 계산을 멈추고 필요한 셀부터 바깥에서
 //! 계산한 뒤 다시 시도한다 (호출 스택이 넘치지 않는다). 순환 참조는 그래프와 계산 중 표시로
-//! 찾고, 순환 안의 셀은 파일에 있던 값을 읽는다.
+//! 찾고, 순환 안의 셀은 파일에 있던 값을 읽는다. calcPr iterate 이면 순환과 그것에 기대는 셀을 파일 값에서
+//! 시작해 2×iterateCount 번 행 차례로 다시 계산한다 (한셀과 같은 반복 계산).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -147,6 +148,8 @@ pub struct Engine {
     pub(crate) hcell_bugs: bool,
     /// 문서 파일 이름 (CELL("address") 가 다른 시트를 가리킬 때 `[이름]` 으로 쓴다)
     pub(crate) file_name: Option<String>,
+    /// 반복 계산 횟수 (`calcPr iterate="1"` 이면 iterateCount, 없으면 100). None 은 반복 계산 꺼짐
+    pub(crate) iterate: Option<u32>,
 }
 
 impl Engine {
@@ -397,6 +400,7 @@ impl Engine {
             excel_functions: false,
             hcell_bugs: false,
             file_name: None,
+            iterate: iterate_count(&wb.calc_attrs),
         }
     }
 
@@ -762,6 +766,9 @@ impl Engine {
         for fid in order {
             self.run(fid);
         }
+        if let Some(n) = self.iterate {
+            self.iterate_cycles(n);
+        }
         let tables: Vec<u32> = (0..self.formulas.len() as u32)
             .filter(|&i| self.formulas[i as usize].dt.is_some())
             .collect();
@@ -833,8 +840,59 @@ impl Engine {
         f.unsupported = false;
     }
 
+    /// 반복 계산: 순환에 든 수식과 그것에 (정적 참조로) 기대는 수식을 파일 값에서 다시 시작해 2×횟수 번,
+    /// 시트·행·열 차례로 계산한다. 다른 칸은 그때의 값을 읽는다 — 한셀이 그렇다 (대조 실험 circ: iterateCount
+    /// 1·2·3·10 에서 `B3 = B3+1` 이 파일 값 + 2·4·6·20, 뒤 행의 순환 칸을 읽는 앞 행 수식은 한 바퀴 앞 값)
+    fn iterate_cycles(&mut self, count: u32) {
+        let cyc: Vec<u32> = (0..self.formulas.len() as u32)
+            .filter(|&i| self.formulas[i as usize].cycle)
+            .collect();
+        if cyc.is_empty() {
+            return;
+        }
+        let cells: Vec<(u32, u32, u32)> = cyc
+            .iter()
+            .map(|&i| {
+                let f = &self.formulas[i as usize];
+                (f.sheet, f.row, f.col)
+            })
+            .collect();
+        let mut set = self.dependents_of_cells(cells);
+        set.extend(cyc);
+        set.retain(|&i| {
+            let f = &self.formulas[i as usize];
+            f.array.is_none() && f.dt.is_none()
+        });
+        set.sort_by_key(|&i| {
+            let f = &self.formulas[i as usize];
+            (f.sheet, f.row, f.col)
+        });
+        set.dedup();
+        for &i in &set {
+            let (sheet, row, col, cached) = {
+                let f = &mut self.formulas[i as usize];
+                f.state = State::Done;
+                (f.sheet, f.row, f.col, f.cached.clone())
+            };
+            let sd = &mut self.sheets[sheet as usize];
+            if let Some(k) = sd.find(row, col) {
+                sd.values[k] = cached;
+            }
+        }
+        for _ in 0..count.saturating_mul(2) {
+            for &i in &set {
+                self.compute(i);
+            }
+        }
+    }
+
     /// 입력 셀들에 (직접·간접으로) 기대는 수식 번호
     fn dependents_of(&self, sheet: u32, inputs: &[(u32, u32)]) -> Vec<u32> {
+        self.dependents_of_cells(inputs.iter().map(|&(r, c)| (sheet, r, c)).collect())
+    }
+
+    /// 칸들(시트, 행, 열)에 (직접·간접으로) 기대는 수식 번호
+    fn dependents_of_cells(&self, mut cells: Vec<(u32, u32, u32)>) -> Vec<u32> {
         let areas: Vec<Vec<Area>> = self
             .formulas
             .iter()
@@ -850,7 +908,6 @@ impl Engine {
                 && (a.c0..=a.c1).contains(&c)
         };
         let mut on = vec![false; self.formulas.len()];
-        let mut cells: Vec<(u32, u32, u32)> = inputs.iter().map(|&(r, c)| (sheet, r, c)).collect();
         let mut changed = true;
         while changed {
             changed = false;
@@ -1175,5 +1232,18 @@ impl Engine {
             self.formulas[c].cycle = true;
         }
         order
+    }
+}
+
+/// `calcPr` 의 iterate·iterateCount: 반복 계산이 켜져 있으면 횟수 (iterateCount 가 없으면 100)
+fn iterate_count(attrs: &[(String, String)]) -> Option<u32> {
+    let get = |k: &str| attrs.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+    match get("iterate") {
+        Some("1") | Some("true") => Some(
+            get("iterateCount")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100),
+        ),
+        _ => None,
     }
 }

@@ -294,7 +294,8 @@ fn lines_pt(n: u32, m: &FontMetrics) -> f64 {
         return m.row_pt;
     }
     let h1 = m.row_pt * 20.0 + m.row_frac;
-    ((h1 + (n - 1) as f64 * m.line_twips).round() / 20.0).min(MAX_ROW_PT)
+    // 1/20 pt 로 버린다 (한셀)
+    ((h1 + (n - 1) as f64 * m.line_twips + 1e-6).floor() / 20.0).min(MAX_ROW_PT)
 }
 
 /// 행 높이 한계 (pt)
