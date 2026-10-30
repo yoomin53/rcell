@@ -344,6 +344,382 @@ pub fn text_to_columns(
     Ok(())
 }
 
+/// 부분합 함수 (한셀 `Range.Subtotal` 대조: SUBTOTAL 함수 번호, 소계 글)
+fn subtotal_fn(name: &str) -> Option<(u8, &'static str)> {
+    Some(match name {
+        "sum" => (9, "합계"),
+        "count" => (3, "개수"),
+        "average" => (1, "평균"),
+        "max" => (4, "최댓값"),
+        "min" => (5, "최솟값"),
+        "product" => (6, "곱"),
+        "countNums" => (2, "수치 개수"),
+        "stdev" => (7, "표본 표준 편차"),
+        "stdevp" => (8, "표준 편차"),
+        "var" => (10, "표본 분산"),
+        "varp" => (11, "분산"),
+        _ => return None,
+    })
+}
+
+/// 부분합 설정
+#[derive(Debug, Clone)]
+pub struct SubtotalOptions {
+    /// 기준 열 (범위 안 번호, 1부터)
+    pub group_by: u32,
+    pub func: String,
+    /// 합계를 낼 열 (범위 안 번호)
+    pub totals: Vec<u32>,
+    /// 이미 있는 부분합을 바꾼다
+    pub replace: bool,
+    pub page_breaks: bool,
+    pub summary_below: bool,
+}
+
+/// 칸이 든 영역 (빈 행·빈 열로 둘러싸인 덩어리 — 한셀 `CurrentRegion`)
+pub fn current_region(sheet: &crate::model::Sheet, at: CellRef) -> CellRange {
+    let filled = |r: i64, c: i64| -> bool {
+        r >= 0
+            && c >= 0
+            && sheet
+                .cell(CellRef {
+                    row: r as u32,
+                    col: c as u32,
+                })
+                .is_some_and(|x| !x.value.is_empty() || x.formula.is_some())
+    };
+    let (mut r0, mut c0, mut r1, mut c1) =
+        (at.row as i64, at.col as i64, at.row as i64, at.col as i64);
+    loop {
+        let mut grew = false;
+        // 둘러싼 행·열(모서리 포함)에 칸이 있으면 넓힌다
+        if (c0 - 1..=c1 + 1).any(|c| filled(r0 - 1, c)) {
+            r0 -= 1;
+            grew = true;
+        }
+        if (c0 - 1..=c1 + 1).any(|c| filled(r1 + 1, c)) {
+            r1 += 1;
+            grew = true;
+        }
+        if (r0 - 1..=r1 + 1).any(|r| filled(r, c0 - 1)) {
+            c0 -= 1;
+            grew = true;
+        }
+        if (r0 - 1..=r1 + 1).any(|r| filled(r, c1 + 1)) {
+            c1 += 1;
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+    CellRange {
+        start: CellRef {
+            row: r0 as u32,
+            col: c0 as u32,
+        },
+        end: CellRef {
+            row: r1 as u32,
+            col: c1 as u32,
+        },
+    }
+}
+
+/// 새로 넣을 행
+struct Item {
+    /// 넣을 자리 (원래 행 번호 — 그 행 앞)
+    at: u32,
+    /// 같은 자리일 때 차례
+    seq: u8,
+    /// 묶음 번호 (None = 전체 행)
+    group: Option<usize>,
+}
+
+/// 부분합 (한셀 `Range.Subtotal` 대조 실험 — docs/editing.md 18절): 범위의 첫 행은 머리글. 기준 열 값이 이어진 묶음마다
+/// 끝(위에 두면 처음)에 행을 넣고 기준 열에 `값 합계`, 합계 열에 `SUBTOTAL(번호,묶음 범위)` 를 둔다. 맨 끝(위에 두면 머리글
+/// 아래)에는 `총 합계`(그 밖의 함수는 `전체 …`)와 전체 범위의 `SUBTOTAL`. 개요: 자료 행 2단계, 부분합 행 1단계, 전체 행
+/// 0단계, 요약 행마다 `collapsed`.
+pub fn subtotal(
+    wb: &mut Workbook,
+    si: usize,
+    range: CellRange,
+    o: &SubtotalOptions,
+) -> crate::Result<()> {
+    let (code, label) =
+        subtotal_fn(&o.func).ok_or_else(|| err(format!("부분합 함수가 아닙니다: {}", o.func)))?;
+    if si >= wb.sheets.len() {
+        return Err(err("시트가 없습니다"));
+    }
+    // 한셀은 고른 범위가 아니라 그 첫 칸의 현재 영역에 부분합을 낸다 (열 번호도 영역 안 번호)
+    let range = current_region(&wb.sheets[si], range.start);
+    let width = range.end.col - range.start.col + 1;
+    if o.group_by < 1 || o.group_by > width || o.totals.iter().any(|&t| t < 1 || t > width) {
+        return Err(err("부분합 열이 범위를 벗어났습니다"));
+    }
+    super::guard_cells(wb, si, range)?;
+    let c0 = range.start.col;
+    let gcol = c0 + o.group_by - 1;
+    let mut r1 = range.end.row;
+    // 이미 있는 부분합 행은 지운다
+    if o.replace {
+        let rows: Vec<u32> = {
+            let sheet = &wb.sheets[si];
+            (range.start.row..=r1)
+                .filter(|&r| {
+                    sheet.cells.iter().any(|c| {
+                        c.r.row == r
+                            && c.formula.as_ref().is_some_and(|f| {
+                                f.text.to_ascii_uppercase().starts_with("SUBTOTAL(")
+                            })
+                    })
+                })
+                .collect()
+        };
+        for &r in rows.iter().rev() {
+            super::structure::shift(wb, si, super::refs::Shift::DelRows { at: r, n: 1 })?;
+            r1 -= 1;
+        }
+        for r in &mut wb.sheets[si].rows {
+            if (range.start.row + 1..=r1 + 1).contains(&r.index) {
+                r.outline_level = 0;
+                r.collapsed = false;
+            }
+        }
+    }
+    if !o.replace
+        && wb.sheets[si].cells.iter().any(|c| {
+            (range.start.row..=r1).contains(&c.r.row)
+                && c.formula
+                    .as_ref()
+                    .is_some_and(|f| f.text.to_ascii_uppercase().starts_with("SUBTOTAL("))
+        })
+    {
+        return Err(err(
+            "이미 부분합이 있는 범위에 겹쳐 내는 것은 지원하지 않습니다",
+        ));
+    }
+    crate::calc::recalculate(wb);
+    let first = range.start.row + 1;
+    if first > r1 {
+        return Err(err("부분합을 낼 자료가 없습니다"));
+    }
+    // 묶음: 기준 열 값이 이어진 행들 (시작 행, 끝 행)
+    let mut groups: Vec<(u32, u32)> = Vec::new();
+    {
+        let sheet = &wb.sheets[si];
+        let key = |r: u32| {
+            part_of(
+                &sheet
+                    .cell(CellRef { row: r, col: gcol })
+                    .map(|c| c.value.clone())
+                    .unwrap_or_default(),
+            )
+        };
+        let mut start = first;
+        for r in first + 1..=r1 + 1 {
+            if r > r1 || key(r) != key(start) {
+                groups.push((start, r - 1));
+                start = r;
+            }
+        }
+    }
+    let below = o.summary_below;
+    // 묶음 글과 합계 열의 표시 형식 (묶음 마지막 칸의 것)
+    let mut keys: Vec<String> = Vec::new();
+    let mut fmts: Vec<Vec<u32>> = Vec::new();
+    // 표시 형식: 묶음에서 General 이 아닌 첫 칸의 것 (한셀 — 합계 열도 기준 열도), 없으면 General. 전체 행은 전체 범위에서
+    let fmt_of = |wb: &Workbook, rows: std::ops::RangeInclusive<u32>, col: u32| -> u32 {
+        let sheet = &wb.sheets[si];
+        rows.map(|r| {
+            let st = sheet
+                .cell(CellRef { row: r, col })
+                .map_or_else(|| sheet.effective_style(r, col), |c| c.style);
+            wb.styles.xf(st).map_or(0, |x| x.num_fmt_id)
+        })
+        .find(|&f| f != 0)
+        .unwrap_or(0)
+    };
+    let mut key_fmts: Vec<u32> = Vec::new();
+    for &(a, b) in &groups {
+        keys.push(
+            super::find::display_text(wb, si, CellRef { row: a, col: gcol }).unwrap_or_default(),
+        );
+        key_fmts.push(fmt_of(wb, a..=b, gcol));
+        fmts.push(
+            o.totals
+                .iter()
+                .map(|&t| fmt_of(wb, a..=b, c0 + t - 1))
+                .collect(),
+        );
+    }
+    let all_key_fmt = fmt_of(wb, first..=r1, gcol);
+    let all_fmts: Vec<u32> = o
+        .totals
+        .iter()
+        .map(|&t| fmt_of(wb, first..=r1, c0 + t - 1))
+        .collect();
+    // 넣을 행: 아래 모드는 묶음 끝 다음 · 맨 끝에 전체, 위 모드는 묶음 시작 앞 · 머리글 바로 아래에 전체 (먼저)
+    let mut items: Vec<Item> = groups
+        .iter()
+        .enumerate()
+        .filter(|(g, _)| !keys[*g].is_empty())
+        .map(|(g, &(a, b))| Item {
+            at: if below { b + 1 } else { a },
+            seq: if below { 0 } else { 1 },
+            group: Some(g),
+        })
+        .collect();
+    items.push(Item {
+        at: if below { r1 + 1 } else { first },
+        seq: if below { 1 } else { 0 },
+        group: None,
+    });
+    items.sort_by_key(|i| (i.at, i.seq));
+    // 아래에서 위로 넣는다 (자리는 원래 행 번호)
+    for it in items.iter().rev() {
+        super::structure::shift(wb, si, super::refs::Shift::InsRows { at: it.at, n: 1 })?;
+    }
+    let ats: Vec<u32> = items.iter().map(|i| i.at).collect();
+    let moved = |r: u32| r + ats.iter().filter(|&&a| a <= r).count() as u32;
+    let new_rows: Vec<u32> = items
+        .iter()
+        .enumerate()
+        .map(|(k, i)| i.at + k as u32)
+        .collect();
+    // 새 행이 물려받은 칸·행 속성은 지운다
+    {
+        let sheet = &mut wb.sheets[si];
+        sheet.cells.retain(|c| !new_rows.contains(&c.r.row));
+        sheet.hyperlinks.retain(|h| {
+            CellRange::parse(&h.range).is_none_or(|g| !new_rows.contains(&g.start.row))
+        });
+    }
+    let bold = {
+        let mut font = wb.styles.font_of(0).cloned().unwrap_or_default();
+        font.bold = true;
+        let fid = super::style::intern_font(&mut wb.styles, font);
+        let mut xf = wb.styles.xf(0).cloned().unwrap_or_default();
+        xf.font_id = fid;
+        xf.apply_font = Some(true);
+        super::style::intern_xf(&mut wb.styles, xf)
+    };
+    let mut summary_rows: Vec<u32> = Vec::new();
+    let mut total_row = 0;
+    for (k, it) in items.iter().enumerate() {
+        let row = new_rows[k];
+        let (text, (ra, rb), fm): (String, (u32, u32), &[u32]) = match it.group {
+            Some(g) => (
+                format!("{} {}", keys[g], label),
+                (moved(groups[g].0), moved(groups[g].1)),
+                &fmts[g],
+            ),
+            None => {
+                total_row = row;
+                (
+                    if o.func == "sum" {
+                        "총 합계".to_string()
+                    } else {
+                        format!("전체 {label}")
+                    },
+                    (moved(first), moved(r1)),
+                    &all_fmts,
+                )
+            }
+        };
+        summary_rows.push(row);
+        let key_fmt = it.group.map_or(all_key_fmt, |g| key_fmts[g]);
+        let label_style = if key_fmt != 0 {
+            let mut xf = wb.styles.xf(bold).cloned().unwrap_or_default();
+            xf.num_fmt_id = key_fmt;
+            xf.apply_number_format = Some(true);
+            super::style::intern_xf(&mut wb.styles, xf)
+        } else {
+            bold
+        };
+        let c = cell_mut(&mut wb.sheets[si], CellRef { row, col: gcol });
+        c.style = label_style;
+        c.value = CellValue::Text(text);
+        c.formula = None;
+        for (j, &t) in o.totals.iter().enumerate() {
+            let col = c0 + t - 1;
+            let name = CellRef::col_name(col);
+            let mut xf = wb.styles.xf(0).cloned().unwrap_or_default();
+            xf.num_fmt_id = fm.get(j).copied().unwrap_or(0);
+            xf.apply_number_format = Some(true);
+            let st = super::style::intern_xf(&mut wb.styles, xf);
+            let c = cell_mut(&mut wb.sheets[si], CellRef { row, col });
+            c.style = st;
+            c.value = CellValue::Empty;
+            c.formula = Some(crate::model::Formula {
+                text: format!("SUBTOTAL({code},{name}{}:{name}{})", ra + 1, rb + 1),
+                ..Default::default()
+            });
+        }
+    }
+    // 개요: 자료 행 2단계, 부분합 행 1단계, 전체 행 0단계, 요약 행마다 collapsed (한셀은 맨 바깥 요약 행에도)
+    let sheet = &mut wb.sheets[si];
+    sheet.summary_above = !below;
+    let set_row = |sheet: &mut crate::model::Sheet, r: u32, level: u8, collapsed: bool| {
+        let i = match sheet.rows.binary_search_by_key(&(r + 1), |x| x.index) {
+            Ok(i) => i,
+            Err(i) => {
+                sheet.rows.insert(
+                    i,
+                    crate::model::RowInfo {
+                        index: r + 1,
+                        ..Default::default()
+                    },
+                );
+                i
+            }
+        };
+        sheet.rows[i].outline_level = level;
+        sheet.rows[i].collapsed = collapsed;
+    };
+    for (g, &(a, b)) in groups.iter().enumerate() {
+        for r in moved(a)..=moved(b) {
+            set_row(sheet, r, if keys[g].is_empty() { 1 } else { 2 }, false);
+        }
+    }
+    for (k, it) in items.iter().enumerate() {
+        set_row(
+            sheet,
+            new_rows[k],
+            if it.group.is_some() { 1 } else { 0 },
+            true,
+        );
+    }
+    if below {
+        set_row(sheet, total_row + 1, 0, true);
+    } else {
+        set_row(sheet, range.start.row, 0, true);
+    }
+    if o.page_breaks {
+        // 아래 모드: 묶음마다 부분합 행 뒤, 마지막 묶음은 전체 행 뒤. 위 모드: 마지막 묶음을 뺀 묶음의 끝 자료 행 뒤
+        let mut ids: Vec<u32> = Vec::new();
+        if below {
+            for (k, it) in items.iter().enumerate() {
+                if it.group.is_some() && it.group != Some(groups.len() - 1) {
+                    ids.push(new_rows[k] + 1);
+                }
+            }
+            ids.push(total_row + 1);
+        } else {
+            for &(_, b) in &groups[..groups.len() - 1] {
+                ids.push(moved(b) + 1);
+            }
+        }
+        for id in ids {
+            if !sheet.page.row_breaks.contains(&id) {
+                sheet.page.row_breaks.push(id);
+            }
+        }
+        sheet.page.row_breaks.sort();
+    }
+    super::structure::update_dimension(sheet);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

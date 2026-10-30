@@ -100,6 +100,10 @@ pub enum SheetSel {
     Name(String),
 }
 
+fn yes() -> bool {
+    true
+}
+
 fn one() -> u32 {
     1
 }
@@ -531,6 +535,22 @@ pub enum Edit {
         qualifier: Option<String>,
         #[serde(default)]
         fields: Vec<FieldSpec>,
+    },
+    /// 부분합 (`group_by`·`totals` 는 범위 안 열 번호 1부터, `func`: sum count average max min product countNums stdev stdevp var varp)
+    Subtotal {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        group_by: u32,
+        #[serde(default)]
+        func: Option<String>,
+        totals: Vec<u32>,
+        #[serde(default = "yes")]
+        replace: bool,
+        #[serde(default)]
+        page_breaks: bool,
+        #[serde(default = "yes")]
+        summary_below: bool,
     },
     /// 행 높이 자동 맞춤
     AutoFitRows {
@@ -1291,6 +1311,28 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             };
             let d = dest.as_deref().map(|t| t.parse::<CellRef>()).transpose()?;
             data::text_to_columns(wb, i, parse_range(range)?, d, &opt)?;
+            Ok(i)
+        }
+        Edit::Subtotal {
+            sheet,
+            range,
+            group_by,
+            func,
+            totals,
+            replace,
+            page_breaks,
+            summary_below,
+        } => {
+            let i = si(wb, sheet)?;
+            let o = data::SubtotalOptions {
+                group_by: *group_by,
+                func: func.clone().unwrap_or_else(|| "sum".into()),
+                totals: totals.clone(),
+                replace: *replace,
+                page_breaks: *page_breaks,
+                summary_below: *summary_below,
+            };
+            data::subtotal(wb, i, parse_range(range)?, &o)?;
             Ok(i)
         }
         Edit::AutoFitRows { sheet, row, count } => {

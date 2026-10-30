@@ -49,6 +49,9 @@ rcell 의 편집 — 라이브러리 `rcell::edit`, 명령 `rcell edit`, 웹 편
 | `addValidation` / `deleteValidation` | `range`, `type`, `operator`, `formula1`, `formula2`, `errorStyle`, `prompt`, `error` / `range` | 데이터 유효성 |
 | `addCf` / `deleteCf` | `range`, `type`(`cellIs` `expression` …), `operator`, `formula1`, `formula2`, `fill`, `fontColor`, `bold` / `range` | 조건부 서식 |
 | `autoFitCols` / `autoFitRows` | `col` / `row`, `count` | 열 너비·행 높이 자동 맞춤 |
+| `removeDuplicates` | `range`, `columns`(범위 안 열 번호 1부터, 비면 모든 열), `header` | 중복 항목 제거 (18절) |
+| `textToColumns` | `range`(한 열), `dest`, `tab` `semicolon` `comma` `space`, `other`, `consecutive`, `qualifier`, `fields`(`col`, `kind`: `general` `text` `skip`) | 텍스트 나누기 (18절) |
+| `subtotal` | `range`(첫 칸이 든 영역에 낸다), `groupBy`, `func`(`sum` `count` `average` `max` `min` `product` `countNums` `stdev` `stdevp` `var` `varp`), `totals`, `replace`, `pageBreaks`, `summaryBelow` | 부분합 (18절) |
 
 ```bash
 rcell edit 문서.cell 대본.json 결과.cell        # {"edits": [...]} 를 차례로 실행하고 다시 계산해 저장
@@ -523,3 +526,29 @@ wasm 함수: `rcell_doc_open`/`rcell_doc_new` → 문서 번호, `rcell_doc_edit
   너비로 ASCII 95자를 모두 쟀다 (숫자·a·e 8, 한글 15, 공백 5, W·M 14, i·l 4, 마침표·쉼표 3 …, 다른 크기는 비례해 반올림),
   다른 글꼴은 렌더러의 어림을 반올림한다. 실험 125가지 중 122가지가 같다 (다른 것: 소문자 a–j 1/256, 쉼표·지수 꼴 숫자).
   행 높이 자동 맞춤은 높이를 지정하지 않은 행으로 둔다 (한셀이 문서를 열 때 맞춘다).
+
+## 18. 데이터 도구: 중복 항목 제거·텍스트 나누기·부분합
+
+한셀 COM `Range.RemoveDuplicates`(실험 10가지)·`TextToColumns`(14가지)·`Subtotal`(30가지 중 27가지, 나머지는 아래)로 확인했다
+(`src/edit/data.rs`).
+
+- 중복 항목 제거: 범위의 행을 고른 열의 값으로 견준다 — 글은 대소문자 무시(공백은 그대로), 수 `1` 과 글 `'1` 은 다르고, 빈 칸끼리·
+  같은 논리값·같은 오류끼리는 같다. 표시 형식이 달라도 값이 같아야 같다 (1.2 가 `0` 서식으로 `1` 로 보여도 1 과 다르다).
+  첫 행만 남기고 범위 안 열의 칸을 위로 당긴다 — 수식 글은 그대로이고(참조를 고치지 않는다) 서식·메모·하이퍼링크도 따라간다.
+  모자란 끝 행은 내용과 서식을 지운다. 범위 밖 열, 행 높이·숨김은 그대로. 병합이 걸치면 할 수 없다.
+- 텍스트 나누기: 한 열의 칸마다 표시된 글을 구분 문자(탭·세미콜론·쉼표·공백·그 밖의 한 글자)로 나눠 `dest`(없으면 그 열
+  자리에 덮어쓴다)부터 오른쪽으로 넣는다. 필드는 입력 규칙대로 들어간다 (`007` → 7, `2024-01-05` → 날짜, `50%`, `=1+2` 는 수식,
+  빈 필드는 그 칸의 내용을 지움). 열 형식 `text` 는 `@` 서식의 글, `skip` 은 넣지 않는다(목적지 열을 차지하지 않는다).
+  큰따옴표(또는 `qualifier` 로 정한 글자)로 묶은 필드 안의 구분 문자는 글자 그대로이고 따옴표 두 개는 하나, 짝 없는 따옴표는
+  끝까지가 한 필드. `consecutive` 면 이어진 구분 문자는 하나. 구분 문자가 없으면 글을 그대로 옮긴다.
+- 부분합: 한셀은 고른 범위가 아니라 **그 첫 칸의 현재 영역**(빈 행·열로 둘러싸인 덩어리)에 내고, 열 번호도 영역 안 번호다.
+  첫 행은 머리글. 기준 열 값이 이어진 묶음마다 끝에 행을 넣어 기준 열에 `값 합계`(굵게, 기준 값의 표시 형식), 합계 열에
+  `SUBTOTAL(번호,묶음 범위)` (묶음에서 General 이 아닌 첫 칸의 표시 형식 — 없어도 `applyNumberFormat`)를 둔다. 맨 끝에는
+  `총 합계`(합계만, 그 밖은 `전체 개수` …)와 전체 범위. 소계 글: 합계·개수·평균·최댓값·최솟값·곱·수치 개수·표본 표준 편차(7)·
+  표준 편차(8)·표본 분산(10)·분산(11). 새 행은 위 행의 행 속성을 받고 칸 서식은 위 규칙대로만. 개요: 자료 행 2단계, 소계 행
+  1단계, 전체 행 0단계, 요약 행마다(맨 바깥 요약 행 — 아래 모드는 전체 행 다음 빈 행, 위 모드는 머리글 — 에도) `collapsed`.
+  `summaryBelow: false` 는 묶음 위와 머리글 바로 아래에 넣고 `sheetPr/outlinePr` 를 쓴다. `pageBreaks` 는 묶음마다(아래 모드는
+  소계 행 뒤, 마지막은 전체 행 뒤 / 위 모드는 마지막을 뺀 묶음의 끝 자료 행 뒤). 기준 열이 빈 묶음은 소계 행이 없고 개요 1단계.
+  `replace`(기본)는 이미 있는 `SUBTOTAL` 행을 지운 뒤 다시 낸다. 겹쳐 내는 부분합(`replace: false`, 개요 3단계)은 하지
+  않는다 (실험 1가지). 한셀은 영역이 첫 행이 아닌 곳에서 시작하는 문서에서 `Subtotal` 이 서버 오류로 멈춘다 (실험 2가지 —
+  확인할 수 없다).

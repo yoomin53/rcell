@@ -291,6 +291,14 @@ function Invoke-Edit($wb, $e) {
             }
             [void]$rg.TextToColumns($dest, 1, $q, [bool]$e.consecutive, [bool]$e.tab, [bool]$e.semicolon, [bool]$e.comma, [bool]$e.space, $other, $otherChar, $fi)
         }
+        "subtotal" {
+            # 부분합 (Range.Subtotal — 함수 sum count average max min product countNums stdev stdevp var varp)
+            $rg = $ws.Range([string]$e.range)
+            $fns = @{ "sum" = -4157; "count" = -4112; "average" = -4106; "max" = -4136; "min" = -4139; "product" = -4149; "countNums" = -4113; "stdev" = -4155; "stdevp" = -4156; "var" = -4164; "varp" = -4165 }
+            $fn = if ($e.func) { $fns[[string]$e.func] } else { -4157 }
+            $tl = @($e.totals | ForEach-Object { [int]$_ })
+            [void]$rg.Subtotal([int]$e.groupBy, $fn, $tl, $(if ($null -eq $e.replace) { $true } else { [bool]$e.replace }), [bool]$e.pageBreaks, $(if ($null -eq $e.summaryBelow) { $true } else { [bool]$e.summaryBelow }))
+        }
         "autoFitRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.AutoFit() }
         "insertCells" {
             # 셀 삽입 (아래로 -4121, 오른쪽으로 -4161)
