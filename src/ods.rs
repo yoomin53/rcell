@@ -802,7 +802,7 @@ const PAPERS: &[(u32, f64, f64)] = &[
     (13, 18.2, 25.7),
 ];
 
-/// 한셀의 .ods 열 너비: 화면 픽셀(96 dpi) = (글자 수 + 0.77234) × 숫자 폭 + 5. 숫자 폭은 기본 글꼴 크기로 (11pt 7px,
+/// 한셀의 .ods 열 너비: 화면 픽셀(96 dpi) = (글자 수 + 0.772342) × 숫자 폭 + 5. 숫자 폭은 기본 글꼴 크기로 (11pt 7px,
 /// 10pt 6px — 한셀이 저장한 .ods 의 cm 와 다시 연 글자 수를 맞춘 식, 오차 1/256 글자 안팎)
 fn digit_px(font_pt: f64) -> f64 {
     (((font_pt * 96.0 / 72.0 * 0.55).round()) - 1.0).max(4.0)
@@ -810,12 +810,12 @@ fn digit_px(font_pt: f64) -> f64 {
 
 fn width_chars(cm: f64, font_pt: f64) -> f64 {
     let px = cm / 2.54 * 96.0;
-    let w = (px - 5.0) / digit_px(font_pt) - 0.77234;
-    (w.max(0.0) * 256.0).round() / 256.0
+    let w = (px - 5.0) / digit_px(font_pt) - 0.772342;
+    (w.max(0.0) * 256.0).trunc() / 256.0
 }
 
 fn width_cm(chars: f64, font_pt: f64) -> f64 {
-    (((chars + 0.77234) * digit_px(font_pt) + 5.0) / 96.0 * 2.54).max(0.0)
+    (((chars + 0.772342) * digit_px(font_pt) + 5.0) / 96.0 * 2.54).max(0.0)
 }
 
 const NS_NUMBER: &str = "urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0";
