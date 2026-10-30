@@ -1724,3 +1724,76 @@ fn subtotal_like_hcell() {
     assert!(levels.contains(&(2, 2, false)) && levels.contains(&(4, 1, true)));
     assert!(levels.contains(&(7, 0, true)) && levels.contains(&(8, 0, true)));
 }
+
+// 한셀 자동화의 중복 제거·통합·텍스트 나누기는 시트 보호를 보지 않는다 (잠긴 칸도 덮어쓴다 — 실험). 부분합은 한셀이 오류로 멈춘다
+#[test]
+fn data_tools_ignore_sheet_protection_like_hcell() {
+    let mut wb = hcell_book();
+    fill_rows(&mut wb, &[&["a 1"], &["a 1"], &["b 2"]]);
+    wb.sheets[0].protection = Some(crate::model::SheetProtection {
+        password: None,
+        flags: vec![("sheet".into(), true)],
+    });
+    let n = data::remove_duplicates(&mut wb, 0, parse_range("A1:A3").unwrap(), &[], false).unwrap();
+    assert_eq!(n, 1);
+    let o = data::SplitOptions {
+        space: true,
+        ..Default::default()
+    };
+    data::text_to_columns(&mut wb, 0, parse_range("A1:A2").unwrap(), None, &o).unwrap();
+    assert_eq!(text_at(&wb, "B1"), "1");
+    let so = data::SubtotalOptions {
+        group_by: 1,
+        func: "sum".into(),
+        totals: vec![2],
+        replace: true,
+        page_breaks: false,
+        summary_below: true,
+    };
+    assert!(data::subtotal(&mut wb, 0, parse_range("A1:B2").unwrap(), &so).is_err());
+}
+
+// 통합 이름표: 숫자 이름표는 숫자로 쓰고, 이름표 칸에 이미 내용이 있으면 그대로 둔다 (한셀 대조 실험 cons3)
+#[test]
+fn consolidate_labels_like_hcell() {
+    let mut wb = hcell_book();
+    fill_rows(
+        &mut wb,
+        &[&["k", "10", "20"], &["a", "1", "2"], &["a", "3", "4"]],
+    );
+    set_input(&mut wb, 0, "E1".parse().unwrap(), "x").unwrap();
+    let o = data::ConsolidateOptions {
+        func: "sum".into(),
+        top_row: true,
+        left_column: true,
+    };
+    let src = vec![(0, parse_range("A1:C3").unwrap())];
+    data::consolidate(&mut wb, 0, "D1".parse().unwrap(), &src, &o).unwrap();
+    // E1 은 이미 내용이 있어 이름표(10)를 쓰지 않고, F1 은 숫자 20
+    assert_eq!(text_at(&wb, "E1"), "x");
+    assert!(matches!(
+        wb.sheets[0].cell("F1".parse().unwrap()).map(|c| &c.value),
+        Some(CellValue::Number(n)) if *n == 20.0
+    ));
+    assert_eq!(text_at(&wb, "D2"), "a");
+    assert_eq!(text_at(&wb, "E2"), "4");
+}
+
+// 줄 바꿈이 든 글을 넣으면 한셀은 자동 줄 바꿈을 켠다 (수식 결과는 그렇지 않다)
+#[test]
+fn newline_input_turns_on_wrap_like_hcell() {
+    let mut wb = hcell_book();
+    let wrap = |wb: &Workbook, a: &str| {
+        let st = wb.sheets[0].cell(a.parse().unwrap()).map_or(0, |c| c.style);
+        wb.styles
+            .xf(st)
+            .and_then(|x| x.alignment.as_ref())
+            .is_some_and(|a| a.wrap_text)
+    };
+    set_input(&mut wb, 0, "A1".parse().unwrap(), "a\nb").unwrap();
+    set_input(&mut wb, 0, "A2".parse().unwrap(), "ab").unwrap();
+    set_input(&mut wb, 0, "A3".parse().unwrap(), "=\"a\"&CHAR(10)&\"b\"").unwrap();
+    assert!(wrap(&wb, "A1"));
+    assert!(!wrap(&wb, "A2"));
+    assert!(!wrap(&wb, "A3"));
+}

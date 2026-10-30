@@ -1854,13 +1854,24 @@ pub fn set_input(wb: &mut Workbook, si: usize, r: CellRef, text: &str) -> crate:
             quote_prefix,
         } => {
             let cur_qp = wb.styles.xf(style).is_some_and(|x| x.quote_prefix);
-            let new_style = if num_fmt.is_some() || cur_qp != quote_prefix {
+            // 줄 바꿈이 든 글을 넣으면 한셀은 칸 서식에 자동 줄 바꿈을 켠다 (`'` 앞붙임·`\r\n` 도 같다 — 실험)
+            let cur_wrap = wb
+                .styles
+                .xf(style)
+                .and_then(|x| x.alignment.as_ref())
+                .is_some_and(|a| a.wrap_text);
+            let need_wrap = !cur_wrap && matches!(&value, CellValue::Text(t) if t.contains('\n'));
+            let new_style = if num_fmt.is_some() || cur_qp != quote_prefix || need_wrap {
                 Restyler::default().apply(&mut wb.styles, style, &|_, x| {
                     if let Some(id) = num_fmt {
                         x.num_fmt_id = id;
                         x.apply_number_format = Some(true);
                     }
                     x.quote_prefix = quote_prefix;
+                    if need_wrap {
+                        x.alignment.get_or_insert_with(Default::default).wrap_text = true;
+                        x.apply_alignment = Some(true);
+                    }
                 })
             } else {
                 style

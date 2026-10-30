@@ -76,7 +76,7 @@ pub fn remove_duplicates(
             return Err(err("배열 수식이 있으면 중복 항목을 제거할 수 없습니다"));
         }
     }
-    super::guard_cells(wb, si, range)?;
+    // 한셀 자동화는 시트 보호를 보지 않는다 (보호된 시트에서도 지운다 — 실험)
     crate::calc::recalculate(wb);
     super::structure::unshare(&mut wb.sheets[si]);
     let width = c1 - c0 + 1;
@@ -279,6 +279,22 @@ pub fn text_to_columns(
     dest: Option<CellRef>,
     o: &SplitOptions,
 ) -> crate::Result<()> {
+    // 한셀 자동화는 시트 보호를 보지 않는다 (잠긴 칸도 덮어쓴다 — 실험): 입력 규칙을 쓰는 동안 보호를 잠시 푼다
+    let kept = wb.sheets.get_mut(si).and_then(|s| s.protection.take());
+    let r = text_to_columns_inner(wb, si, range, dest, o);
+    if let Some(s) = wb.sheets.get_mut(si) {
+        s.protection = kept;
+    }
+    r
+}
+
+fn text_to_columns_inner(
+    wb: &mut Workbook,
+    si: usize,
+    range: CellRange,
+    dest: Option<CellRef>,
+    o: &SplitOptions,
+) -> crate::Result<()> {
     if si >= wb.sheets.len() {
         return Err(err("시트가 없습니다"));
     }
@@ -313,21 +329,8 @@ pub fn text_to_columns(
         let kept = (1..=max_fields)
             .filter(|&n| kind_of(n) != FieldKind::Skip)
             .count() as u32;
-        if kept > 0 {
-            if dest.col + kept > crate::edit::refs::MAX_COLS {
-                return Err(err("텍스트 나누기 결과가 시트를 넘습니다"));
-            }
-            super::guard_cells(
-                wb,
-                si,
-                CellRange {
-                    start: dest,
-                    end: CellRef {
-                        row: dest.row + rows - 1,
-                        col: dest.col + kept - 1,
-                    },
-                },
-            )?;
+        if kept > 0 && dest.col + kept > crate::edit::refs::MAX_COLS {
+            return Err(err("텍스트 나누기 결과가 시트를 넘습니다"));
         }
     }
     for (k, line) in lines.iter().enumerate() {
@@ -345,10 +348,16 @@ pub fn text_to_columns(
                 FieldKind::Text if !field.is_empty() => {
                     let style = super::style_at(&wb.sheets[si], at);
                     let id = super::style::num_fmt_id(&mut wb.styles, "@");
+                    // 줄 바꿈이 든 글은 자동 줄 바꿈도 켠다 (`set_input` 과 같다)
+                    let wrap = field.contains('\n');
                     let new =
                         super::style::Restyler::default().apply(&mut wb.styles, style, &|_, x| {
                             x.num_fmt_id = id;
                             x.apply_number_format = Some(true);
+                            if wrap {
+                                x.alignment.get_or_insert_with(Default::default).wrap_text = true;
+                                x.apply_alignment = Some(true);
+                            }
                         });
                     let c = cell_mut(&mut wb.sheets[si], at);
                     c.style = new;
@@ -798,10 +807,13 @@ pub fn consolidate(
         return Err(err("통합할 범위가 없습니다"));
     }
     crate::calc::recalculate(wb);
-    type Label = (String, String); // (표시, 대소문자 무시 키)
+    // 이름표: (쓸 값 — 원본 칸의 값 그대로, 숫자는 숫자), 대소문자 무시 키(표시 글))
+    type Label = (CellValue, String);
     let key = |wb: &Workbook, s: usize, r: u32, c: u32| -> Option<Label> {
-        let t = super::find::display_text(wb, s, CellRef { row: r, col: c })?;
-        Some((t.clone(), t.to_lowercase()))
+        let at = CellRef { row: r, col: c };
+        let t = super::find::display_text(wb, s, at)?;
+        let v = wb.sheets[s].cell(at).map(|x| x.value.clone())?;
+        Some((v, t.to_lowercase()))
     };
     let num = |wb: &Workbook, s: usize, r: u32, c: u32| -> Option<f64> {
         match wb.sheets[s]
@@ -880,44 +892,37 @@ pub fn consolidate(
         cells.keys().map(|k| k.1 + 1).max().unwrap_or(0)
     };
     let (hr, hc) = (o.top_row as u32, o.left_column as u32);
-    super::guard_cells(
-        wb,
-        si,
-        CellRange {
-            start: dest,
-            end: CellRef {
-                row: dest.row + hr + n_rows as u32,
-                col: dest.col + hc + n_cols as u32,
-            },
-        },
-    )?;
+    // 한셀 자동화는 시트 보호를 보지 않는다 (보호된 시트에서도 덮어쓴다 — 실험)
     let put = |wb: &mut Workbook, r: u32, c: u32, v: CellValue| {
         let cell = cell_mut(&mut wb.sheets[si], CellRef { row: r, col: c });
         cell.value = v;
         cell.formula = None;
     };
+    // 이름표 칸은 비어 있을 때만 쓴다 (한셀 — 이미 내용이 든 이름표 칸은 그대로)
+    let empty_at = |wb: &Workbook, at: CellRef| {
+        wb.sheets[si]
+            .cell(at)
+            .is_none_or(|c| c.value.is_empty() && c.formula.is_none())
+    };
     if o.top_row {
         for (j, l) in col_labels.iter().enumerate() {
-            put(
-                wb,
-                dest.row,
-                dest.col + hc + j as u32,
-                CellValue::Text(l.0.clone()),
-            );
+            let at = CellRef {
+                row: dest.row,
+                col: dest.col + hc + j as u32,
+            };
+            if empty_at(wb, at) {
+                put(wb, at.row, at.col, l.0.clone());
+            }
         }
     }
     if o.left_column {
         for (i, l) in row_labels.iter().enumerate() {
-            // 이름표 칸은 비어 있을 때만 쓴다 (한셀 — 이미 글이 든 이름표 칸은 그대로)
             let at = CellRef {
                 row: dest.row + hr + i as u32,
                 col: dest.col,
             };
-            if wb.sheets[si]
-                .cell(at)
-                .is_none_or(|c| c.value.is_empty() && c.formula.is_none())
-            {
-                put(wb, at.row, at.col, CellValue::Text(l.0.clone()));
+            if empty_at(wb, at) {
+                put(wb, at.row, at.col, l.0.clone());
             }
         }
     }
