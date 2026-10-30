@@ -17,6 +17,8 @@
 //! - 조건부 서식: 데이터 막대는 한셀처럼 삼각형([`cell`]), 아이콘은 16px SVG ([`icons`]). 보이는 메모는 상자와
 //!   화살표 ([`note`]).
 
+mod advance;
+mod advance_data;
 mod cell;
 mod draw;
 mod icons;

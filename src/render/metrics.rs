@@ -192,6 +192,9 @@ pub struct FontMetrics {
     pub px: f64,
     w: [f64; 6],
     bold: bool,
+    /// 정수 폭 표가 있는 글꼴 (advance.rs) — 글자 폭이 한셀 화면과 같다
+    em: Option<&'static super::advance_data::FontEm>,
+    size_pt: f64,
 }
 
 impl FontMetrics {
@@ -226,12 +229,20 @@ impl FontMetrics {
             px: size * 96.0 / 72.0,
             w: row.w.map(|v| v as f64 / 1000.0),
             bold,
+            em: super::advance::table(name),
+            size_pt: size,
         }
     }
 
     /// 글자 하나의 폭 (px, 어림). 영문은 글꼴마다 잰 소문자·대문자 평균에 글자별 비율(보통 산세리프
     /// 글꼴의 비례, 알파벳 평균 1)을 곱한다. 고정폭 글꼴(소문자·대문자 평균이 같다)은 비율을 쓰지 않는다
     pub fn char_width(&self, c: char) -> f64 {
+        // 정수 폭 표가 있으면 한셀의 폭 그대로 (round(설계 폭 × ppem))
+        if let Some(t) = self.em
+            && let Some(w) = super::advance::hcell_px(t, self.bold, self.size_pt, c)
+        {
+            return w;
+        }
         // a–z, A–Z 의 상대 폭 (평균 1)
         const LOWER: [f64; 26] = [
             1.08, 1.16, 0.96, 1.16, 1.08, 0.65, 1.16, 1.14, 0.49, 0.49, 1.02, 0.49, 1.73, 1.14,
@@ -264,6 +275,11 @@ impl FontMetrics {
         };
         let b = if self.bold { 1.06 } else { 1.0 };
         em * self.px * b
+    }
+
+    /// 글꼴 크기 (pt — 상대 크기를 곱한 값)
+    pub fn size_pt(&self) -> f64 {
+        self.size_pt
     }
 
     /// 글자열 폭 (px, 어림). 넘침·줄 바꿈·좁은 칸 숫자 판단에 쓴다

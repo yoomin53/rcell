@@ -258,6 +258,25 @@ fn rich_html(v: &CellView, text: &str, theme: &Theme) -> String {
                     .as_ref()
                     .map(|f| font_css(Some(f), theme, None))
                     .unwrap_or_default();
+                // 글자 폭: 조각마다 한셀의 정수 폭에 맞춘 자간 (advance.rs)
+                {
+                    let f = run.font.as_ref();
+                    let has_sp = f
+                        .and_then(|f| f.hancom.as_ref())
+                        .and_then(|h| h.spacing)
+                        .is_some_and(|s| s != 0);
+                    let name = f
+                        .and_then(|f| f.name.as_deref())
+                        .or_else(|| v.font.and_then(|c| c.name.as_deref()));
+                    let size = f.and_then(|f| f.size).unwrap_or_else(|| v.m.size_pt());
+                    let bold = f.map_or_else(|| v.font.is_some_and(|c| c.bold), |f| f.bold);
+                    if !has_sp
+                        && f.is_none_or(|f| f.vert_align.is_none())
+                        && let Some(ls) = super::advance::spacing(name, size, bold, &run.text)
+                    {
+                        let _ = write!(css, "letter-spacing:{ls:.3}px;");
+                    }
+                }
                 // 조각의 위·아래 첨자도 칸 전체와 같게: 60% 글꼴을 기준선에서 올리거나 내린다
                 if let Some(f) = run.font.as_ref()
                     && let Some(va) = f.vert_align.as_deref()
@@ -360,6 +379,19 @@ pub(super) fn cell_content(
     // 줄 높이 = 글꼴의 한 줄 높이 (행 자동 높이와 같은 값)
     let line = v.m.row_pt * 4.0 / 3.0;
     let _ = write!(fcss, "line-height:{line:.2}px;");
+    // 글자 폭: 한셀은 글자마다 정수 px (advance.rs) — 브라우저의 소수 폭과의 차를 자간으로 (서식 있는 글은 조각마다)
+    if v.rich.is_none_or(|rt| text != rt.text)
+        && v.font
+            .and_then(|f| f.hancom.as_ref())
+            .and_then(|h| h.spacing)
+            .is_none_or(|s| s == 0)
+    {
+        let bold = v.font.is_some_and(|f| f.bold) || cf.is_some_and(|c| c.bold == Some(true));
+        let name = v.font.and_then(|f| f.name.as_deref());
+        if let Some(ls) = super::advance::spacing(name, v.m.size_pt(), bold, &text) {
+            let _ = write!(fcss, "letter-spacing:{ls:.3}px;");
+        }
+    }
     // 왼쪽 맞춤 글자는 아이콘 뒤에서 (3px + 16px)
     let indent = v.indent as f64 * INDENT_PX
         + if has_icon
