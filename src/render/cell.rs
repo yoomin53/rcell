@@ -531,7 +531,16 @@ pub(super) fn cell_content(
             VAlign::Center => "center",
             VAlign::Bottom => "flex-end",
         };
-        let mut css = fcss;
+        // 줄 높이가 정수에 가까우면 (11pt 맑은 고딕 21.87px) 가운데·아래 맞춤은 정수 px 줄 간격 (한셀 화면: 22px —
+        // 줄 바꿈 묶음 2.91 → 1.85%). 위 맞춤과 다른 크기는 소수 줄 높이가 더 가깝다 (줄 바꿈 실험 2 — 글꼴 4종 × 8–20pt)
+        let mut css = if v.v != VAlign::Top && (line.round() - line).abs() <= 0.15 {
+            fcss.replace(
+                &format!("line-height:{line:.2}px;"),
+                &format!("line-height:{:.0}px;", line.round()),
+            )
+        } else {
+            fcss
+        };
         let _ = write!(
             css,
             "width:{bw:.0}px;height:{bh:.0}px;justify-content:{jc};text-align:{ta};white-space:pre-wrap;overflow-wrap:anywhere;"
