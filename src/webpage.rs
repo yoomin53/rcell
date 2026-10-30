@@ -277,7 +277,13 @@ fn font_props(font: &Font, theme: &crate::theme::Theme) -> String {
 }
 
 /// 셀 서식 번호 → CSS (`.hcxN` 의 속성들, 한셀과 같은 차례)
-fn xf_css(wb: &Workbook, xf_index: u32, theme: &crate::theme::Theme) -> String {
+/// `edges` 가 있으면 병합 범위의 오른쪽·아래 테두리를 그 서식 칸 것으로 바꿔 넣는다 (병합 파생 클래스)
+fn xf_css(
+    wb: &Workbook,
+    xf_index: u32,
+    theme: &crate::theme::Theme,
+    edges: Option<(u32, u32)>,
+) -> String {
     let st = &wb.styles;
     let xf = st.xf(xf_index).cloned().unwrap_or_default();
     let font: Font = st
@@ -290,11 +296,23 @@ fn xf_css(wb: &Workbook, xf_index: u32, theme: &crate::theme::Theme) -> String {
     let _ = write!(s, "mso-number-format:\"{}\";", mso_format(&code));
     if let Some(b) = st.borders.get(xf.border_id as usize) {
         let b: &Border = b;
+        // 병합 파생: 오른쪽은 병합 범위 위쪽 끝 칸, 아래쪽은 왼쪽 끝 칸의 테두리
+        let edge_of = |x: u32| {
+            st.xf(x)
+                .and_then(|x| st.borders.get(x.border_id as usize))
+                .cloned()
+        };
+        let right = edges
+            .and_then(|(r, _)| edge_of(r))
+            .map_or(b.right.clone(), |e| e.right);
+        let bottom = edges
+            .and_then(|(_, d)| edge_of(d))
+            .map_or(b.bottom.clone(), |e| e.bottom);
         for (side, e) in [
             ("top", &b.top),
             ("left", &b.left),
-            ("bottom", &b.bottom),
-            ("right", &b.right),
+            ("bottom", &bottom),
+            ("right", &right),
         ] {
             if let Some(x) = border_css(side, e.as_ref(), theme) {
                 s.push_str(&x);
@@ -344,6 +362,102 @@ fn class_of(wb: &Workbook, xf: u32) -> u32 {
     } else {
         20 + wb.styles.cell_style_xfs.len().max(1) as u32 + xf
     }
+}
+
+/// 칸의 서식 번호: 칸 자신, 없으면 행 서식, 열 서식, 기본(0)
+fn style_at(sheet: &Sheet, cells: &HashMap<(u32, u32), &Cell>, r: u32, c: u32) -> u32 {
+    if let Some(cell) = cells.get(&(r, c)) {
+        return cell.style;
+    }
+    let row = sheet
+        .rows
+        .iter()
+        .find(|x| x.index == r + 1)
+        .and_then(|x| x.style);
+    let col = sheet
+        .cols
+        .iter()
+        .find(|x| x.min <= c + 1 && c < x.max)
+        .and_then(|x| x.style);
+    row.or(col).unwrap_or(0)
+}
+
+/// 시트 쪽 CSS 에 쓰인 클래스: 번호, 서식 번호, 병합 파생이면 (오른쪽·아래 테두리를 가져올 서식)
+struct UsedClass {
+    cls: u32,
+    xf: u32,
+    edges: Option<(u32, u32)>,
+}
+
+/// 병합 파생 클래스: 번호와 (오른쪽 테두리를 가져올 서식, 아래쪽 테두리를 가져올 서식)
+struct MergeClass {
+    class: u32,
+    edges: Option<(u32, u32)>,
+}
+
+/// 병합 칸의 파생 클래스 번호 (서식 번호 → 클래스 번호). 한셀은 병합 범위 안의 칸 서식마다 서식 표 끝(모든 서식 뒤)에
+/// 복사본을 하나씩 만들고, 병합 시작 칸은 그 복사본의 클래스를 쓴다. 번호는 시트 차례대로, 시트 안에서는 병합 목록
+/// 차례로, 범위 안에서는 행 우선으로 처음 나온 서식부터 매긴다 (한셀 웹 저장 28문서 병합 199곳이 모두 맞는다)
+fn merge_classes(wb: &Workbook) -> HashMap<u32, MergeClass> {
+    let mut map: HashMap<u32, MergeClass> = HashMap::new();
+    let mut next =
+        20 + wb.styles.cell_style_xfs.len().max(1) as u32 + wb.styles.cell_xfs.len() as u32;
+    for sheet in &wb.sheets {
+        if sheet.merges.is_empty() {
+            continue;
+        }
+        let cells: HashMap<(u32, u32), &Cell> = sheet
+            .cells
+            .iter()
+            .map(|c| ((c.r.row, c.r.col), c))
+            .collect();
+        for m in &sheet.merges {
+            let area = (m.end.row - m.start.row + 1) as u64 * (m.end.col - m.start.col + 1) as u64;
+            // 병합 시작 칸의 파생 클래스는 처음 그 서식으로 시작한 병합의 오른쪽 위·왼쪽 아래 칸 테두리를 쓴다
+            let corner = (
+                style_at(sheet, &cells, m.start.row, m.end.col),
+                style_at(sheet, &cells, m.end.row, m.start.col),
+            );
+            let anchor = style_at(sheet, &cells, m.start.row, m.start.col);
+            let mut take = |map: &mut HashMap<u32, MergeClass>, xf: u32| {
+                map.entry(xf).or_insert_with(|| {
+                    next += 1;
+                    MergeClass {
+                        class: next - 1,
+                        edges: None,
+                    }
+                });
+            };
+            if area <= 100_000 {
+                for r in m.start.row..=m.end.row {
+                    for c in m.start.col..=m.end.col {
+                        take(&mut map, style_at(sheet, &cells, r, c));
+                    }
+                }
+            } else {
+                // 아주 큰 병합은 있는 칸만 (행 우선), 나머지는 기본 서식으로 센다
+                let mut inside: Vec<&Cell> = sheet
+                    .cells
+                    .iter()
+                    .filter(|c| {
+                        (m.start.row..=m.end.row).contains(&c.r.row)
+                            && (m.start.col..=m.end.col).contains(&c.r.col)
+                    })
+                    .collect();
+                inside.sort_by_key(|c| (c.r.row, c.r.col));
+                take(&mut map, anchor);
+                for c in inside {
+                    take(&mut map, c.style);
+                }
+            }
+            if let Some(e) = map.get_mut(&anchor)
+                && e.edges.is_none()
+            {
+                e.edges = Some(corner);
+            }
+        }
+    }
+    map
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +637,7 @@ fn sheet_page(
     sheet: &Sheet,
     theme: &crate::theme::Theme,
     fonts: &FontNumbers,
+    merge_cls: &HashMap<u32, MergeClass>,
     image_base: &mut u32,
     mht_base: Option<&str>,
 ) -> SheetOut {
@@ -530,10 +645,12 @@ fn sheet_page(
     // 칸 수가 터무니없이 큰 시트(멀리 떨어진 칸 하나)는 앞부분만 쓴다 — 한 쪽이 수 GB 가 되지 않게
     const MAX_CELLS: u32 = 4_000_000;
     let ncols = ncols.min(2048);
-    let data_cols = data_cols.min(ncols);
+    // 열 줄(`<col>`)은 칸이 없는 끝 열 정보(너비를 정한 열)까지 쓰므로 너비는 그 열까지 잰다 (표 너비·칸은 ncols 까지)
+    let data_cols = data_cols.min(2048);
+    let gcols = ncols.max(data_cols);
     let nrows = nrows.min(MAX_CELLS / ncols).max(1);
-    let geo = crate::render::sheet_geometry(wb, sheet, nrows, ncols);
-    let col_exact: Vec<f64> = (0..ncols as usize)
+    let geo = crate::render::sheet_geometry(wb, sheet, nrows, gcols);
+    let col_exact: Vec<f64> = (0..gcols as usize)
         .map(|c| {
             if sheet
                 .cols
@@ -547,9 +664,16 @@ fn sheet_page(
         })
         .collect();
     let col_w: Vec<u32> = col_exact.iter().map(|w| w.trunc() as u32).collect();
-    // 행 높이(px) = 올림(pt × 4/3). 높이를 정하지 않은 행은 글에 맞춘 높이(값이 있는 행만)와 시트 기본 높이 가운데 큰 것.
-    // 한셀 웹 저장과 맞지 않는 행이 있다 (정한 높이 12.75pt 인 행이 18px, 19.5pt 가 27px — 행 서식·테두리와 얽힌 듯하나
-    // 규칙을 찾지 못했다. docs/format/other-formats.md 9절)
+    // 열 너비는 트윕(1/15 px) 정수로 내림해서 더한다: 표 너비·병합 칸 너비 = 내림(트윕 합 / 15) (한셀 웹 저장 52시트 대조)
+    let col_tw: Vec<f64> = col_exact
+        .iter()
+        .map(|w| (w * 15.0 + 1e-6).floor())
+        .collect();
+    let span_w = |a: u32, b: u32| -> u32 {
+        (col_tw[a as usize..=b as usize].iter().sum::<f64>() / 15.0 + 1e-9).floor() as u32
+    };
+    // 행 높이(px) = 내림(pt × 4/3) + 1. 높이를 정하지 않은 행은 글에 맞춘 높이(값이 있는 행만)와 시트 기본 높이 가운데 큰 것.
+    // (docs/format/other-formats.md 9절)
     let mut has_value: std::collections::HashSet<u32> = Default::default();
     // 행의 값 칸 가운데 가장 큰 글꼴의 한 줄 높이(pt)와 줄 간격(pt)
     let mut line_of: HashMap<u32, (f64, f64)> = HashMap::new();
@@ -605,7 +729,8 @@ fn sheet_page(
                     (a, d) => a.or(d),
                 })
                 .unwrap_or(16.5);
-            (pt * 4.0 / 3.0).ceil() as u32
+            // 한셀 웹 저장: 내림(pt × 4/3) + 1 (12.75pt → 18, 19.5pt → 27 — 정수 px 가 되는 높이는 한 칸 더 커진다)
+            (pt * 4.0 / 3.0).floor() as u32 + 1
         })
         .collect();
     let hidden_row = |r: u32| sheet.rows.iter().any(|x| x.index == r + 1 && x.hidden);
@@ -646,9 +771,18 @@ fn sheet_page(
         .filter(|c| c.min == 1)
         .and_then(|c| c.style)
         .unwrap_or(0);
-    let mut used: Vec<u32> = vec![0];
+    // 쓰인 클래스: (클래스 번호, 서식 번호) — 병합 시작 칸은 파생 번호
+    let mut used: Vec<UsedClass> = vec![UsedClass {
+        cls: class_of(wb, 0),
+        xf: 0,
+        edges: None,
+    }];
     if table_xf != 0 {
-        used.push(table_xf);
+        used.push(UsedClass {
+            cls: class_of(wb, table_xf),
+            xf: table_xf,
+            edges: None,
+        });
     }
     let mut body = String::new();
     // 부분 서식 글 (같은 글의 공유 문자열 조각), 조각 글꼴 번호 → 글꼴
@@ -659,24 +793,9 @@ fn sheet_page(
         .map(|r| (r.text.as_str(), r))
         .collect();
     let mut font_css: std::collections::BTreeMap<usize, Font> = Default::default();
-    let style_of = |r: u32, c: u32| -> u32 {
-        if let Some(cell) = cell_at.get(&(r, c)) {
-            return cell.style;
-        }
-        let row = sheet
-            .rows
-            .iter()
-            .find(|x| x.index == r + 1)
-            .and_then(|x| x.style);
-        let col = sheet
-            .cols
-            .iter()
-            .find(|x| x.min <= c + 1 && c < x.max)
-            .and_then(|x| x.style);
-        row.or(col).unwrap_or(0)
-    };
+    let style_of = |r: u32, c: u32| -> u32 { style_at(sheet, &cell_at, r, c) };
     // 표 너비는 열 너비(px 소수)의 합을 버린 값 (한셀 웹 저장 대조: 72.03 × 10 → 720)
-    let total_w: u32 = col_exact.iter().sum::<f64>().trunc() as u32;
+    let total_w: u32 = span_w(0, ncols - 1);
     // 열 줄: 열 정보 하나(min–max)가 한 줄이고 열 정보가 없는 이어진 열은 한 줄 (한셀 웹 저장 대조).
     // 모든 열이 열 정보 없이 같은 너비면 쓰지 않는다
     let record_of = |c: usize| {
@@ -717,13 +836,17 @@ fn sheet_page(
                 continue;
             }
             let xf = style_of(r, c);
-            if !used.contains(&xf) {
-                used.push(xf);
-            }
             let (er, ec) = merge_end.get(&(r, c)).copied().unwrap_or((r, c));
-            let w: u32 = (c..=ec).map(|k| col_w[k as usize]).sum();
+            let (cls, edges) = match merge_cls.get(&xf) {
+                Some(m) if merge_end.contains_key(&(r, c)) => (m.class, m.edges),
+                _ => (class_of(wb, xf), None),
+            };
+            if !used.iter().any(|u| u.cls == cls) {
+                used.push(UsedClass { cls, xf, edges });
+            }
+            let w: u32 = span_w(c, ec);
             let h: u32 = (r..=er).map(|k| row_h[k as usize]).sum();
-            let mut attrs = format!("class=\"hcx{}\"", class_of(wb, xf));
+            let mut attrs = format!("class=\"hcx{cls}\"");
             if ec > c {
                 let _ = write!(attrs, " colspan=\"{}\"", ec - c + 1);
             }
@@ -818,7 +941,7 @@ fn sheet_page(
         }
         body.push_str("      </tr>\n");
     }
-    used.sort_unstable();
+    used.sort_by_key(|u| u.cls);
     let mut css = String::new();
     // 메모 글꼴 (.hcx1)
     let comments: Vec<&crate::model::Comment> = sheet.comments.iter().collect();
@@ -843,12 +966,12 @@ fn sheet_page(
     for (n, f) in &font_css {
         let _ = write!(css, ".hclfont{n} {{ {} }}", font_css_text(f, theme));
     }
-    for xf in &used {
+    for u in &used {
         let _ = write!(
             css,
             ".hcx{} {{ {} }}",
-            class_of(wb, *xf),
-            xf_css(wb, *xf, theme)
+            u.cls,
+            xf_css(wb, u.xf, theme, u.edges)
         );
     }
     if memo_font.is_some() {
@@ -961,13 +1084,22 @@ fn pages(wb: &Workbook, files_dir: &str, mht_base: Option<&str>) -> Pages {
     let theme = wb.theme.clone().unwrap_or_default();
     let fonts = FontNumbers::new(wb);
     let mut image_base = 29000u32;
+    let merge_cls = merge_classes(wb);
     let mut sheets = Vec::new();
     let mut images = Vec::new();
     for (i, sh) in wb.sheets.iter().enumerate() {
         if sh.state != SheetState::Visible {
             continue;
         }
-        let out = sheet_page(wb, sh, &theme, &fonts, &mut image_base, mht_base);
+        let out = sheet_page(
+            wb,
+            sh,
+            &theme,
+            &fonts,
+            &merge_cls,
+            &mut image_base,
+            mht_base,
+        );
         sheets.push((format!("sheet{:03}.htm", i + 1), out.html));
         images.extend(out.images);
     }
