@@ -273,6 +273,14 @@ fn spaced_html(name: Option<&str>, size_pt: f64, bold: bool, text: &str) -> Stri
 
 fn rich_html(v: &CellView, text: &str, theme: &Theme, cf_bold: bool) -> String {
     let mut s = String::new();
+    // 돌린 글은 정수 폭에 맞추지 않는다
+    let spaced = |name: Option<&str>, size: f64, bold: bool, t: &str| {
+        if v.rotation == 0 {
+            spaced_html(name, size, bold, t)
+        } else {
+            esc(t)
+        }
+    };
     match v.rich {
         Some(rt) if text == rt.text => {
             for run in &rt.runs {
@@ -296,7 +304,7 @@ fn rich_html(v: &CellView, text: &str, theme: &Theme, cf_bold: bool) -> String {
                     if has_sp || f.is_some_and(|f| f.vert_align.is_some()) {
                         esc(&run.text)
                     } else {
-                        spaced_html(name, size, bold, &run.text)
+                        spaced(name, size, bold, &run.text)
                     }
                 };
                 // 조각의 위·아래 첨자도 칸 전체와 같게: 60% 글꼴을 기준선에서 올리거나 내린다
@@ -342,7 +350,7 @@ fn rich_html(v: &CellView, text: &str, theme: &Theme, cf_bold: bool) -> String {
                 s.push_str(&esc(text));
             } else {
                 let bold = v.font.is_some_and(|f| f.bold);
-                s.push_str(&spaced_html(
+                s.push_str(&spaced(
                     v.font.and_then(|f| f.name.as_deref()),
                     v.m.size_pt(),
                     bold || cf_bold,
