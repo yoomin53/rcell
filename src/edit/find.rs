@@ -287,7 +287,10 @@ mod tests {
         assert_eq!(t(0.0, true, false), "1900-01-00");
         assert_eq!(t(60.0, true, false), "1900-02-29");
         assert_eq!(t(59.5, true, false), "1900-02-28 12:00:00 PM");
-        assert_eq!(t(0.378_472_222_222_222, true, false), "1900-01-00 09:05:00 AM");
+        assert_eq!(
+            t(0.378_472_222_222_222, true, false),
+            "1900-01-00 09:05:00 AM"
+        );
     }
 
     #[test]
