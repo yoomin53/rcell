@@ -64,6 +64,33 @@ pub fn spacing(name: Option<&str>, size_pt: f64, bold: bool, text: &str) -> Opti
     (n > 0 && diff.abs() > 1e-9).then_some(diff / n as f64)
 }
 
+/// 글 덩이를 글자 폭이 정수가 되도록 자간을 붙인 조각들로 나눈다: (자간 px, 글) 목록. 같은 자간은 한 조각으로 묶는다.
+/// 표에 없는 글꼴이면 None
+pub fn segments(
+    name: Option<&str>,
+    size_pt: f64,
+    bold: bool,
+    text: &str,
+) -> Option<Vec<(f64, String)>> {
+    let t = table(name)?;
+    let px = size_pt * 96.0 / 72.0;
+    let pp = ppem(size_pt);
+    let mut out: Vec<(i32, String)> = Vec::new();
+    for c in text.chars() {
+        let d = char_em(t, bold, c).map_or(0.0, |em| (em * pp).round() - em * px);
+        let q = (d * 1000.0).round() as i32;
+        match out.last_mut() {
+            Some((lq, buf)) if *lq == q => buf.push(c),
+            _ => out.push((q, c.to_string())),
+        }
+    }
+    Some(
+        out.into_iter()
+            .map(|(q, s)| (f64::from(q) / 1000.0, s))
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

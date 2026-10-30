@@ -248,7 +248,30 @@ pub(super) fn ratio_of(f: Option<&Font>) -> Option<f64> {
 }
 
 /// 글 (서식 있는 글이면 조각마다 글꼴)
-fn rich_html(v: &CellView, text: &str, theme: &Theme) -> String {
+/// 글 덩이의 HTML: 한셀의 정수 글자 폭이 되도록 글자마다(같은 자간끼리 묶어) 자간을 붙인다 (advance.rs). `.rc-t>span` 의
+/// 절대 위치 규칙에 걸리지 않게 서식 없는 인라인 요소 `<data>` 를 쓴다
+fn spaced_html(name: Option<&str>, size_pt: f64, bold: bool, text: &str) -> String {
+    match super::advance::segments(name, size_pt, bold, text) {
+        Some(segs) => {
+            let mut s = String::new();
+            for (ls, t) in segs {
+                if ls == 0.0 {
+                    s.push_str(&esc(&t));
+                } else {
+                    let _ = write!(
+                        s,
+                        "<data style=\"letter-spacing:{ls:.3}px\">{}</data>",
+                        esc(&t)
+                    );
+                }
+            }
+            s
+        }
+        None => esc(text),
+    }
+}
+
+fn rich_html(v: &CellView, text: &str, theme: &Theme, cf_bold: bool) -> String {
     let mut s = String::new();
     match v.rich {
         Some(rt) if text == rt.text => {
@@ -259,7 +282,7 @@ fn rich_html(v: &CellView, text: &str, theme: &Theme) -> String {
                     .map(|f| font_css(Some(f), theme, None))
                     .unwrap_or_default();
                 // 글자 폭: 조각마다 한셀의 정수 폭에 맞춘 자간 (advance.rs)
-                {
+                let html = {
                     let f = run.font.as_ref();
                     let has_sp = f
                         .and_then(|f| f.hancom.as_ref())
@@ -270,13 +293,12 @@ fn rich_html(v: &CellView, text: &str, theme: &Theme) -> String {
                         .or_else(|| v.font.and_then(|c| c.name.as_deref()));
                     let size = f.and_then(|f| f.size).unwrap_or_else(|| v.m.size_pt());
                     let bold = f.map_or_else(|| v.font.is_some_and(|c| c.bold), |f| f.bold);
-                    if !has_sp
-                        && f.is_none_or(|f| f.vert_align.is_none())
-                        && let Some(ls) = super::advance::spacing(name, size, bold, &run.text)
-                    {
-                        let _ = write!(css, "letter-spacing:{ls:.3}px;");
+                    if has_sp || f.is_some_and(|f| f.vert_align.is_some()) {
+                        esc(&run.text)
+                    } else {
+                        spaced_html(name, size, bold, &run.text)
                     }
-                }
+                };
                 // 조각의 위·아래 첨자도 칸 전체와 같게: 60% 글꼴을 기준선에서 올리거나 내린다
                 if let Some(f) = run.font.as_ref()
                     && let Some(va) = f.vert_align.as_deref()
@@ -304,13 +326,30 @@ fn rich_html(v: &CellView, text: &str, theme: &Theme) -> String {
                     }
                 }
                 if css.is_empty() {
-                    s.push_str(&esc(&run.text));
+                    s.push_str(&html);
                 } else {
-                    let _ = write!(s, "<span style=\"{css}\">{}</span>", esc(&run.text));
+                    let _ = write!(s, "<span style=\"{css}\">{html}</span>");
                 }
             }
         }
-        _ => s.push_str(&esc(text)),
+        _ => {
+            let has_sp = v
+                .font
+                .and_then(|f| f.hancom.as_ref())
+                .and_then(|h| h.spacing)
+                .is_some_and(|s| s != 0);
+            if has_sp {
+                s.push_str(&esc(text));
+            } else {
+                let bold = v.font.is_some_and(|f| f.bold);
+                s.push_str(&spaced_html(
+                    v.font.and_then(|f| f.name.as_deref()),
+                    v.m.size_pt(),
+                    bold || cf_bold,
+                    text,
+                ));
+            }
+        }
     }
     s
 }
@@ -379,19 +418,6 @@ pub(super) fn cell_content(
     // 줄 높이 = 글꼴의 한 줄 높이 (행 자동 높이와 같은 값)
     let line = v.m.row_pt * 4.0 / 3.0;
     let _ = write!(fcss, "line-height:{line:.2}px;");
-    // 글자 폭: 한셀은 글자마다 정수 px (advance.rs) — 브라우저의 소수 폭과의 차를 자간으로 (서식 있는 글은 조각마다)
-    if v.rich.is_none_or(|rt| text != rt.text)
-        && v.font
-            .and_then(|f| f.hancom.as_ref())
-            .and_then(|h| h.spacing)
-            .is_none_or(|s| s == 0)
-    {
-        let bold = v.font.is_some_and(|f| f.bold) || cf.is_some_and(|c| c.bold == Some(true));
-        let name = v.font.and_then(|f| f.name.as_deref());
-        if let Some(ls) = super::advance::spacing(name, v.m.size_pt(), bold, &text) {
-            let _ = write!(fcss, "letter-spacing:{ls:.3}px;");
-        }
-    }
     // 왼쪽 맞춤 글자는 아이콘 뒤에서 (3px + 16px)
     let indent = v.indent as f64 * INDENT_PX
         + if has_icon
@@ -422,7 +448,7 @@ pub(super) fn cell_content(
         VAlign::Bottom => "bottom:0".to_string(),
     };
     let vshift = if v.v == VAlign::Center { "-50%" } else { "0" };
-    let mut body = rich_html(v, &text, theme);
+    let mut body = rich_html(v, &text, theme, cf.is_some_and(|c| c.bold == Some(true)));
     // 칸 전체 위·아래 첨자: 60% 글꼴을 기준선에서 올리거나 내린다 (한셀 화면 — 글꼴 실험의 11pt: 위 첨자 잉크
     // 1–9px, 아래 첨자 10–17px, 보통 글 3–16px)
     if let Some(va) = v.font.and_then(|f| f.vert_align.as_deref()) {
@@ -510,7 +536,7 @@ pub(super) fn cell_content(
         }
         let _ = write!(
             out,
-            "<div class=\"rc-t rc-w\" style=\"{css}\">{}</div>",
+            "<div class=\"rc-t rc-w\" style=\"{css}\"><span style=\"white-space:inherit\">{}</span></div>",
             scaled(body, "left")
         );
         return out;
