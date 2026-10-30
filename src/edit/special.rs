@@ -205,6 +205,63 @@ fn transposed_cf(c: &Clip, at: CellRef) -> Vec<Vec<crate::model::ConditionalForm
     out
 }
 
+/// 행/열 바꿔 붙일 때 유효성 범위 목록 (유효성 대조 실험 12가지): 한셀은 원본 칸마다(행 차례) 붙이고 — 칸이 유효성 범위
+/// 안이면 바꾼 자리의 한 칸을 목록 끝에 더하고 — 칸마다(범위 밖 칸도) 목록의 차례를 뒤집는다 (범위가 둘 이상이던 유효성만). 끝나면 맞닿은 칸을 하나로
+/// 이어 붙인다 (먼저 이은 자리에). 그래서 칸이 홀수 개면 뒤집힌 채, 짝수 개면 원래 차례다
+fn transposed_dv_sqref(old: &str, origin: CellRef, rows: u32, cols: u32, at: CellRef) -> String {
+    type R = (u32, u32, u32, u32);
+    let mut list: Vec<(R, bool)> = refs::parse_sqref(old)
+        .iter()
+        .map(|a| (a.bounds(), false))
+        .collect();
+    let inside = |list: &[(R, bool)], r: u32, c: u32| {
+        list.iter()
+            .any(|&((r0, c0, r1, c1), piece)| !piece && r >= r0 && r <= r1 && c >= c0 && c <= c1)
+    };
+    let orig: Vec<(R, bool)> = list.clone();
+    for dr in 0..rows {
+        for dc in 0..cols {
+            if inside(&orig, origin.row + dr, origin.col + dc) {
+                let (r, c) = (at.row + dc, at.col + dr);
+                list.push(((r, c, r, c), true));
+            }
+            // 범위가 하나뿐이던 유효성은 뒤집지 않는다 (한셀 — 더한 칸이 끝에 이어진다)
+            if orig.len() > 1 {
+                list.reverse();
+            }
+        }
+    }
+    // 더한 칸 중 맞닿은 것은 먼저 이은 자리에 하나로
+    let mut out: Vec<(R, bool)> = Vec::new();
+    for (rect, piece) in list {
+        if piece {
+            let mut cur = rect;
+            let mut at_i: Option<usize> = None;
+            while let Some(i) = out.iter().position(|&(a, p)| {
+                p && (super::cfpaste::join(a, cur).is_some()
+                    || super::cfpaste::join(cur, a).is_some())
+            }) {
+                let (a, _) = out.remove(i);
+                cur = super::cfpaste::join(a, cur)
+                    .or_else(|| super::cfpaste::join(cur, a))
+                    .unwrap_or(cur);
+                at_i = Some(at_i.map_or(i, |x: usize| x.min(i)));
+            }
+            match at_i {
+                Some(i) => out.insert(i, (cur, true)),
+                None => out.push((cur, true)),
+            }
+        } else {
+            out.push((rect, false));
+        }
+    }
+    let areas: Vec<Area> = out
+        .iter()
+        .map(|&((a, b, c, d), _)| Area::rect(a, b, c, d))
+        .collect();
+    refs::sqref_text(&areas)
+}
+
 /// 숫자 글 (수식에 넣을 상수)
 fn num_text(v: f64) -> String {
     crate::model::format_general(v)
@@ -225,6 +282,8 @@ pub fn paste_special(
     crate::calc::recalculate(wb);
     let mut c = clip::copy(wb, si, src)?;
     let mut cf_cells = Vec::new();
+    // 바꾸기 전 원본의 자리와 크기 (유효성 범위를 칸마다 따라가는 데 쓴다)
+    let (src_origin, src_rows, src_cols) = (c.origin, c.rows, c.cols);
     if o.transpose {
         cf_cells = transposed_cf(&c, to.start);
         c = transpose_clip(&c, to.start);
@@ -297,10 +356,23 @@ pub fn paste_special(
         super::cfpaste::fix_bare(&mut sheets[si], &mut styles.dxfs);
     }
     if formats {
+        let dv_before: Vec<String> = wb.sheets[dsi]
+            .data_validations
+            .iter()
+            .map(|d| d.sqref.clone())
+            .collect();
         clip::paste_with(wb, dsi, at, &c, Some(area), false)?;
-        // 붙이기는 유효성마다 범위 차례를 뒤집지만 서식만·행/열 바꿈 붙이기는 뒤집지 않는다 (한셀 — 바꿔 붙인 범위는 끝에)
-        if o.transpose || o.what == PasteWhat::Formats {
-            clip::reverse_dv_areas(&mut wb.sheets[dsi]);
+        // 붙이기는 유효성마다 범위 차례를 뒤집는다. 서식만 붙이기는 뒤집지 않고, 행/열 바꿈 붙이기는 범위가 더해진
+        // 유효성만 뒤집는다 (한셀 — 바꿔 붙인 범위는 원래 범위 뒤에 더한 뒤 뒤집힌다)
+        if o.what == PasteWhat::Formats {
+            for (dv, old) in wb.sheets[dsi].data_validations.iter_mut().zip(&dv_before) {
+                dv.sqref = old.clone();
+            }
+        } else if o.transpose {
+            let sheet = &mut wb.sheets[dsi];
+            for (dv, old) in sheet.data_validations.iter_mut().zip(&dv_before) {
+                dv.sqref = transposed_dv_sqref(old, src_origin, src_rows, src_cols, at);
+            }
         }
         for blocks in cf_cells {
             super::cfpaste::place_pasted(&mut wb.sheets[dsi], &mut wb.styles.dxfs, blocks);

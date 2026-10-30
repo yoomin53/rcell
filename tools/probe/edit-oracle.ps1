@@ -269,6 +269,63 @@ function Invoke-Edit($wb, $e) {
         }
         "deleteCf" { $ws.Range([string]$e.range).FormatConditions.Delete() }
         "autoFitCols" { [void]$ws.Range((Get-ColRange $e.col ([int](Get-Count $e)))).EntireColumn.AutoFit() }
+        "removeDuplicates" {
+            # 중복 항목 제거 (Range.RemoveDuplicates — 열은 범위 안 번호, Header 1 = 있음, 2 = 없음)
+            $rg = $ws.Range([string]$e.range)
+            $cols = if ($e.columns -and @($e.columns).Count -gt 0) { @($e.columns | ForEach-Object { [int]$_ }) } else { @(1..$rg.Columns.Count) }
+            $hdr = if ($e.header) { 1 } else { 2 }
+            [void]$rg.RemoveDuplicates($cols, $hdr)
+        }
+        "textToColumns" {
+            # 텍스트 나누기 (Range.TextToColumns — 구분 문자, 묶는 따옴표 1 큰따옴표 2 작은따옴표 -4142 없음, 필드 형식 1 일반 2 글 9 건너뜀)
+            $rg = $ws.Range([string]$e.range)
+            $M = [Type]::Missing
+            $dest = if ($e.dest) { $ws.Range([string]$e.dest) } else { $M }
+            $q = if ($null -eq $e.qualifier -or [string]$e.qualifier -eq [string][char]34) { 1 } elseif ([string]$e.qualifier -eq [string][char]39) { 2 } else { -4142 }
+            $other = [bool]($e.other)
+            $otherChar = if ($other) { [string]$e.other } else { $M }
+            $fi = $M
+            if ($e.fields -and @($e.fields).Count -gt 0) {
+                $types = @{ "general" = 1; "text" = 2; "skip" = 9 }
+                $fi = @(@($e.fields) | ForEach-Object { , @([int]$_.col, [int]$types[[string]$(if ($_.kind) { $_.kind } else { "general" })]) })
+            }
+            [void]$rg.TextToColumns($dest, 1, $q, [bool]$e.consecutive, [bool]$e.tab, [bool]$e.semicolon, [bool]$e.comma, [bool]$e.space, $other, $otherChar, $fi)
+        }
+        "subtotal" {
+            # 부분합 (Range.Subtotal — 함수 sum count average max min product countNums stdev stdevp var varp)
+            $rg = $ws.Range([string]$e.range)
+            $fns = @{ "sum" = -4157; "count" = -4112; "average" = -4106; "max" = -4136; "min" = -4139; "product" = -4149; "countNums" = -4113; "stdev" = -4155; "stdevp" = -4156; "var" = -4164; "varp" = -4165 }
+            $fn = if ($e.func) { $fns[[string]$e.func] } else { -4157 }
+            $tl = @($e.totals | ForEach-Object { [int]$_ })
+            [void]$rg.Subtotal([int]$e.groupBy, $fn, $tl, $(if ($null -eq $e.replace) { $true } else { [bool]$e.replace }), [bool]$e.pageBreaks, $(if ($null -eq $e.summaryBelow) { $true } else { [bool]$e.summaryBelow }))
+        }
+        "moveShape" {
+            # 도형·그림·차트 옮기기/크기 바꾸기 (Shape.Left/Top/Width/Height — 포인트, 번호는 1부터)
+            $sh = $ws.Shapes.Item([int]$e.shape)
+            if ($null -ne $e.left) { $sh.Left = [double]$e.left }
+            if ($null -ne $e.top) { $sh.Top = [double]$e.top }
+            if ($null -ne $e.width) { $sh.Width = [double]$e.width }
+            if ($null -ne $e.height) { $sh.Height = [double]$e.height }
+        }
+        "deleteShape" { $ws.Shapes.Item([int]$e.shape).Delete() }
+        "consolidate" {
+            # 통합 (Range.Consolidate — 원본은 R1C1 글, 함수 sum count average max min product countNums stdev stdevp var varp)
+            $fns = @{ "sum" = -4157; "count" = -4112; "average" = -4106; "max" = -4136; "min" = -4139; "product" = -4149; "countNums" = -4113; "stdev" = -4155; "stdevp" = -4156; "var" = -4164; "varp" = -4165 }
+            $fn = if ($e.func) { $fns[[string]$e.func] } else { -4157 }
+            $srcs = @($e.sources | ForEach-Object {
+                $t = [string]$_; $k = $t.LastIndexOf("!")
+                $nm = if ($k -ge 0) { $t.Substring(0, $k).Trim([char]39) } else { $ws.Name }
+                $rg = if ($k -ge 0) { $t.Substring($k + 1) } else { $t }
+                $parts = $rg.Split(":") | ForEach-Object {
+                    $a = $_ -replace '[$]', ''
+                    $m = [regex]::Match($a, '^([A-Za-z]+)([0-9]+)$')
+                    $cn = 0; foreach ($ch in $m.Groups[1].Value.ToUpper().ToCharArray()) { $cn = $cn * 26 + ([int]$ch - 64) }
+                    "R" + $m.Groups[2].Value + "C" + $cn
+                }
+                "'" + $nm + "'!" + ($parts -join ":")
+            })
+            [void]$ws.Range([string]$e.dest).Consolidate($srcs, $fn, [bool]$e.topRow, [bool]$e.leftColumn, $false)
+        }
         "autoFitRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.AutoFit() }
         "insertCells" {
             # 셀 삽입 (아래로 -4121, 오른쪽으로 -4161)

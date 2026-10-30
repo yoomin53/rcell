@@ -1617,3 +1617,183 @@ fn code_names_follow_the_original_order() {
         ]
     );
 }
+
+// 데이터 도구 대조 실험 (한셀 `Range.RemoveDuplicates`·`TextToColumns`·`Subtotal`)
+fn fill_rows(wb: &mut Workbook, rows: &[&[&str]]) {
+    for (i, r) in rows.iter().enumerate() {
+        for (j, v) in r.iter().enumerate() {
+            let at = CellRef {
+                row: i as u32,
+                col: j as u32,
+            };
+            set_input(wb, 0, at, v).unwrap();
+        }
+    }
+}
+
+fn text_at(wb: &Workbook, a1: &str) -> String {
+    let c = a1.parse::<CellRef>().unwrap();
+    match wb.sheets[0].cell(c).map(|x| x.value.clone()) {
+        Some(CellValue::Text(t)) => t,
+        Some(CellValue::Number(n)) => crate::model::format_general(n),
+        _ => String::new(),
+    }
+}
+
+#[test]
+fn remove_duplicates_like_hcell() {
+    let mut wb = hcell_book();
+    fill_rows(
+        &mut wb,
+        &[
+            &["k", "v"],
+            &["a", "1"],
+            &["A", "1"],
+            &["a", "2"],
+            &["'1", "x"],
+            &["1", "x"],
+        ],
+    );
+    // 머리글이 있고 두 열로: 대소문자는 무시, 글 `1` 과 수 1 은 다르다
+    let n =
+        data::remove_duplicates(&mut wb, 0, parse_range("A1:B6").unwrap(), &[1, 2], true).unwrap();
+    assert_eq!(n, 1);
+    let col: Vec<String> = (1..=6).map(|r| text_at(&wb, &format!("B{r}"))).collect();
+    assert_eq!(col, ["v", "1", "2", "x", "x", ""]);
+}
+
+#[test]
+fn text_to_columns_like_hcell() {
+    let mut wb = hcell_book();
+    fill_rows(&mut wb, &[&["a,\"b,c\",007"], &["1,,x"]]);
+    let o = data::SplitOptions {
+        comma: true,
+        qualifier: Some('"'),
+        ..Default::default()
+    };
+    data::text_to_columns(
+        &mut wb,
+        0,
+        parse_range("A1:A2").unwrap(),
+        "C1".parse().ok(),
+        &o,
+    )
+    .unwrap();
+    assert_eq!(text_at(&wb, "C1"), "a");
+    assert_eq!(text_at(&wb, "D1"), "b,c");
+    assert_eq!(text_at(&wb, "E1"), "7");
+    assert_eq!(text_at(&wb, "C2"), "1");
+    assert_eq!(text_at(&wb, "D2"), "");
+    assert_eq!(text_at(&wb, "E2"), "x");
+}
+
+#[test]
+fn subtotal_like_hcell() {
+    let mut wb = hcell_book();
+    fill_rows(
+        &mut wb,
+        &[&["부서", "금액"], &["A", "10"], &["A", "20"], &["B", "5"]],
+    );
+    let o = data::SubtotalOptions {
+        group_by: 1,
+        func: "sum".into(),
+        totals: vec![2],
+        replace: true,
+        page_breaks: false,
+        summary_below: true,
+    };
+    data::subtotal(&mut wb, 0, parse_range("A1").unwrap(), &o).unwrap();
+    // 머리글, A·A, A 합계, B, B 합계, 총 합계
+    let col: Vec<String> = (1..=7).map(|r| text_at(&wb, &format!("A{r}"))).collect();
+    assert_eq!(col, ["부서", "A", "A", "A 합계", "B", "B 합계", "총 합계"]);
+    let f = |a1: &str| {
+        wb.sheets[0]
+            .cell(a1.parse().unwrap())
+            .and_then(|c| c.formula.as_ref())
+            .map(|f| f.text.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(f("B4"), "SUBTOTAL(9,B2:B3)");
+    assert_eq!(f("B6"), "SUBTOTAL(9,B5:B5)");
+    assert_eq!(f("B7"), "SUBTOTAL(9,B2:B5)");
+    let levels: Vec<(u32, u8, bool)> = wb.sheets[0]
+        .rows
+        .iter()
+        .map(|r| (r.index, r.outline_level, r.collapsed))
+        .collect();
+    assert!(levels.contains(&(2, 2, false)) && levels.contains(&(4, 1, true)));
+    assert!(levels.contains(&(7, 0, true)) && levels.contains(&(8, 0, true)));
+}
+
+// 한셀 자동화의 중복 제거·통합·텍스트 나누기는 시트 보호를 보지 않는다 (잠긴 칸도 덮어쓴다 — 실험). 부분합은 한셀이 오류로 멈춘다
+#[test]
+fn data_tools_ignore_sheet_protection_like_hcell() {
+    let mut wb = hcell_book();
+    fill_rows(&mut wb, &[&["a 1"], &["a 1"], &["b 2"]]);
+    wb.sheets[0].protection = Some(crate::model::SheetProtection {
+        password: None,
+        flags: vec![("sheet".into(), true)],
+    });
+    let n = data::remove_duplicates(&mut wb, 0, parse_range("A1:A3").unwrap(), &[], false).unwrap();
+    assert_eq!(n, 1);
+    let o = data::SplitOptions {
+        space: true,
+        ..Default::default()
+    };
+    data::text_to_columns(&mut wb, 0, parse_range("A1:A2").unwrap(), None, &o).unwrap();
+    assert_eq!(text_at(&wb, "B1"), "1");
+    let so = data::SubtotalOptions {
+        group_by: 1,
+        func: "sum".into(),
+        totals: vec![2],
+        replace: true,
+        page_breaks: false,
+        summary_below: true,
+    };
+    assert!(data::subtotal(&mut wb, 0, parse_range("A1:B2").unwrap(), &so).is_err());
+}
+
+// 통합 이름표: 숫자 이름표는 숫자로 쓰고, 이름표 칸에 이미 내용이 있으면 그대로 둔다 (한셀 대조 실험 cons3)
+#[test]
+fn consolidate_labels_like_hcell() {
+    let mut wb = hcell_book();
+    fill_rows(
+        &mut wb,
+        &[&["k", "10", "20"], &["a", "1", "2"], &["a", "3", "4"]],
+    );
+    set_input(&mut wb, 0, "E1".parse().unwrap(), "x").unwrap();
+    let o = data::ConsolidateOptions {
+        func: "sum".into(),
+        top_row: true,
+        left_column: true,
+    };
+    let src = vec![(0, parse_range("A1:C3").unwrap())];
+    data::consolidate(&mut wb, 0, "D1".parse().unwrap(), &src, &o).unwrap();
+    // E1 은 이미 내용이 있어 이름표(10)를 쓰지 않고, F1 은 숫자 20
+    assert_eq!(text_at(&wb, "E1"), "x");
+    assert!(matches!(
+        wb.sheets[0].cell("F1".parse().unwrap()).map(|c| &c.value),
+        Some(CellValue::Number(n)) if *n == 20.0
+    ));
+    assert_eq!(text_at(&wb, "D2"), "a");
+    assert_eq!(text_at(&wb, "E2"), "4");
+}
+
+// 줄 바꿈이 든 글을 넣으면 한셀은 자동 줄 바꿈을 켠다 (수식 결과는 그렇지 않다)
+#[test]
+fn newline_input_turns_on_wrap_like_hcell() {
+    let mut wb = hcell_book();
+    let wrap = |wb: &Workbook, a: &str| {
+        let st = wb.sheets[0].cell(a.parse().unwrap()).map_or(0, |c| c.style);
+        wb.styles
+            .xf(st)
+            .and_then(|x| x.alignment.as_ref())
+            .is_some_and(|a| a.wrap_text)
+    };
+    set_input(&mut wb, 0, "A1".parse().unwrap(), "a\nb").unwrap();
+    set_input(&mut wb, 0, "A2".parse().unwrap(), "ab").unwrap();
+    set_input(&mut wb, 0, "A3".parse().unwrap(), "=\"a\"&CHAR(10)&\"b\"").unwrap();
+    assert!(wrap(&wb, "A1"));
+    assert!(!wrap(&wb, "A2"));
+    assert!(!wrap(&wb, "A3"));
+}

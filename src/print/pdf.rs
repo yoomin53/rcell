@@ -200,6 +200,11 @@ impl FontSet<'_> {
 }
 
 impl TextMeasure for FontSet<'_> {
+    fn ascent_descent(&self, font: &FontKey) -> (f64, f64) {
+        let (a, d) = FontSet::ascent_descent(self, font);
+        (a / 1000.0, d / 1000.0)
+    }
+
     fn width(&self, font: &FontKey, size: f64, text: &str) -> f64 {
         self.runs(font, text, false)
             .iter()
@@ -228,6 +233,13 @@ fn num(v: f64) -> String {
     if s == "-0" { "0".into() } else { s.into() }
 }
 
+/// 장치 단위 변환의 배율은 소수 여섯 자리 (세 자리면 0.119935 가 0.12 가 되어 오른쪽 끝에서 장치 1.4 어긋난다)
+fn num6(v: f64) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".into() } else { s.into() }
+}
+
 fn color(c: [u8; 3]) -> String {
     format!(
         "{} {} {}",
@@ -242,6 +254,10 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> 
     let mut s = String::new();
     let sx = size.width / (size.dev_w * 0.12);
     let sy = size.height / (size.dev_h * 0.12);
+    // 글자 변환의 배율: 채우기가 있는 페이지는 0.12 그대로, 없으면 용지 비율을 곱한다 (한셀 PDF 1105 페이지:
+    // 채우기 있는 192 페이지 중 168 이 `0.120 0 0 -0.120`, 없는 913 페이지 중 904 가 `0.119935 0 0 -0.119869` 꼴)
+    let filled = ops.iter().any(|o| matches!(o, Op::Rect { .. }));
+    let (tsx, tsy) = if filled { (1.0, 1.0) } else { (sx, sy) };
     // 선·채우기는 pt 좌표로 (한셀 PDF 처럼 — 같은 렌더러에서 선 굵기·자리가 같게 그려진다), 글자만 장치 단위 cm 아래
     let px = |x: f64| x * 0.12 * sx;
     let py = |y: f64| size.height - y * 0.12 * sy;
@@ -391,8 +407,8 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> 
                 let _ = writeln!(
                     s,
                     "q {} 0 0 {} 0 {} cm {} rg {} RG",
-                    num(0.12 * sx),
-                    num(-0.12 * sy),
+                    num6(0.12 * tsx),
+                    num6(-0.12 * tsy),
                     num(size.height),
                     color(*c),
                     color(*c)

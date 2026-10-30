@@ -381,6 +381,36 @@ fn cases() -> Vec<Case> {
         );
     }
 
+    // 용지 높이의 문턱: 위 여백을 문턱 ± 0.15pt 로 (행 15pt = 20px, 첫 페이지 행 수가 하나 바뀐다).
+    // Letter·Legal 은 인치 그대로 (11·14 인치 — mm 로 반올림한 279·356mm 이면 문턱이 1.13pt 옮겨 둘 다 같은 쪽),
+    // A3·A5·B5(JIS) 는 mm 그대로
+    for (paper, top, n, h) in [
+        (1, 87.74, 5, "45,89,133,177"),
+        (1, 88.04, 5, "44,87,130,173"),
+        (5, 87.74, 4, "60,119,178"),
+        (5, 88.04, 4, "59,117,175"),
+        (8, 97.49, 3, "72,143"),
+        (8, 97.79, 3, "71,141"),
+        (11, 92.62, 7, "31,61,91,121,151,181"),
+        (11, 92.92, 7, "30,59,88,117,146,175"),
+        (13, 96.24, 6, "40,79,118,157,196"),
+        (13, 96.54, 6, "39,77,115,153,191"),
+    ] {
+        let mut wb = base();
+        fill(&mut wb, "A1:B200");
+        rows(&mut wb, 1, 200, 15.0);
+        setup(&mut wb).paper_size = Some(paper);
+        margins(&mut wb).top = top / 72.0;
+        add(
+            Box::leak(format!("paper{paper}_top{top}").into_boxed_str()),
+            wb,
+            n,
+            h,
+            "",
+            0,
+        );
+    }
+
     // 페이지 순서는 나누기를 바꾸지 않는다
     let mut wb = base();
     fill(&mut wb, "A1:Z200");
@@ -576,4 +606,82 @@ fn oracle() {
     }
     eprintln!("인쇄 페이지 대조: {} / {total} 같음", total - bad.len());
     assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// 배율 100 의 99 는 키 큰 모드가 아닌 첫 시트만 (한셀 PDF 의 Tf — 시트 페이지 수 "21121" (2 는 5 행씩 두 쪽): 92 92 | 91 |
+/// 92 | 92 92 | 92, "1111": 91 92 92 92, 첫 시트를 지우거나 옮기거나 숨겨도 그 첫 시트가 91. 말뭉치 차트 문서: 두 쪽으로
+/// 나뉜 첫 시트도 91)
+#[test]
+fn first_untall_sheet_99() {
+    let mut wb = base();
+    fill(&mut wb, "A1:B10");
+    assert_eq!(rcell::print::sheet_print_with(&wb, 0, true).print_scale, 99);
+    assert_eq!(
+        rcell::print::sheet_print_with(&wb, 0, false).print_scale,
+        100
+    );
+    // 수동 나누기로 두 페이지면 첫째여도 100
+    wb.sheets[0].page.row_breaks = vec![5];
+    let p = rcell::print::sheet_print_with(&wb, 0, true);
+    assert_eq!((p.pages.len(), p.print_scale), (2, 100));
+}
+
+/// 한셀이 문서를 열 때 다시 계산하는 칸 (값을 틀리게 적은 20 칸 문서를 형식·계산 엔진 번호별로 한셀 COM 에서 읽은 값):
+/// XML 은 엔진 번호가 없거나 904 보다 작으면 모두, 904 면 하지 않는다. 레거시는 904 면 휘발성 칸(과 그에 기대는 칸)만.
+#[test]
+fn open_recalc_rules() {
+    use rcell::print::{OpenRecalc, apply_open_recalc, open_recalc};
+    let mut wb = base();
+    let cell = |r: &str, f: Option<&str>, v: f64| rcell::model::Cell {
+        r: CellRef::parse(r).unwrap(),
+        style: 0,
+        value: CellValue::Number(v),
+        formula: f.map(|t| rcell::model::Formula {
+            text: t.into(),
+            kind: Default::default(),
+            shared_index: None,
+            range: None,
+            data_table: None,
+        }),
+    };
+    wb.sheets[0].cells = vec![
+        cell("A1", None, 5.0),
+        cell("B1", Some("A1*2"), 999.0),
+        cell("B2", Some("NOW()*0+3"), 1.0),
+        cell("B3", Some("B2+1"), 1.0),
+    ];
+    let dir = std::env::temp_dir().join(format!("rcell-recalc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mode = |wb: &Workbook, name: &str| {
+        let path = dir.join(name);
+        rcell::save(wb, &path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        open_recalc(&bytes, &rcell::open(&path).unwrap())
+    };
+    assert_eq!(mode(&wb, "a.cell"), OpenRecalc::Full);
+    assert_eq!(mode(&wb, "a.legacy.cell"), OpenRecalc::Full);
+    wb.hancom.calc_id = Some(903);
+    assert_eq!(mode(&wb, "b.cell"), OpenRecalc::Full);
+    wb.hancom.calc_id = Some(904);
+    assert_eq!(mode(&wb, "c.cell"), OpenRecalc::None);
+    assert_eq!(mode(&wb, "c.legacy.cell"), OpenRecalc::Volatile);
+    let _ = std::fs::remove_dir_all(&dir);
+    let value = |wb: &Workbook, r: &str| {
+        let r = CellRef::parse(r).unwrap();
+        wb.sheets[0]
+            .cells
+            .iter()
+            .find(|c| c.r == r)
+            .unwrap()
+            .value
+            .clone()
+    };
+    // 휘발성: NOW 와 그에 기대는 칸만 (A1*2 의 999 는 그대로)
+    let mut v = wb.clone();
+    apply_open_recalc(&mut v, OpenRecalc::Volatile);
+    assert_eq!(value(&v, "B1"), CellValue::Number(999.0));
+    assert_eq!(value(&v, "B3"), CellValue::Number(4.0));
+    let mut f = wb.clone();
+    apply_open_recalc(&mut f, OpenRecalc::Full);
+    assert_eq!(value(&f, "B1"), CellValue::Number(10.0));
 }
