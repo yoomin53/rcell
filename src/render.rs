@@ -1070,7 +1070,7 @@ table.rc-grid td{border-right-color:#D9D9D9;border-bottom-color:#D9D9D9}\
 table.rc-sheet th{box-sizing:border-box;background:#F5F5F5;border:0 solid #CCCCCC;border-right-width:1px;border-bottom-width:1px;padding:0;font-weight:normal;font-size:9pt;color:#333;position:sticky;top:0;z-index:3;overflow:hidden;white-space:nowrap}\
 table.rc-sheet thead th.rc-corner{left:0;z-index:5}\
 table.rc-sheet tbody th{position:sticky;left:0;text-align:center}\
-.rc-t{position:absolute;left:0;top:0;overflow:hidden;box-sizing:border-box;white-space:pre;z-index:1}\
+.rc-t{position:absolute;left:0;top:0;overflow:hidden;box-sizing:border-box;white-space:pre;z-index:1;font-kerning:none}\
 .rc-t>span{position:absolute;white-space:pre;text-decoration:inherit}\
 .rc-w,.rc-flex{display:flex;flex-direction:column;padding:0 2px}\
 .rc-w>span,.rc-flex>span{position:static}\
