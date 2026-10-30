@@ -20,6 +20,15 @@ pub fn table(name: Option<&str>) -> Option<&'static FontEm> {
         .find(|t| t.names.iter().any(|x| x.eq_ignore_ascii_case(n)))
 }
 
+/// 식이 한셀 화면과 모두 같은 글꼴인가 (맑은 고딕·Segoe UI·Consolas). 나머지는 힌트 폭이 섞여 있다
+pub fn is_exact(name: Option<&str>) -> bool {
+    table(name).is_some_and(|t| {
+        t.names
+            .iter()
+            .any(|n| matches!(*n, "맑은 고딕" | "Segoe UI" | "Consolas"))
+    })
+}
+
 /// 크기(pt) → ppem
 pub fn ppem(size_pt: f64) -> f64 {
     (size_pt * 4.0 / 3.0).round().max(1.0)

@@ -208,8 +208,9 @@ impl Svg {
         }
         let _ = write!(
             self.s,
-            "<text x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"{anchor}\"{}>{}</text>",
+            "<text x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"{anchor}\"{}{}>{}</text>",
             f.attrs(),
+            f.spacing_attr(t),
             esc(t)
         );
     }
@@ -359,6 +360,17 @@ impl Font {
             );
         }
         a
+    }
+    /// 한셀의 정수 글자 폭에 맞춘 자간 (letter-spacing 속성, 표에 있는 글꼴만)
+    fn spacing_attr(&self, t: &str) -> String {
+        let name = self.family.as_deref().and_then(|f| {
+            let first = f.split(',').next()?.trim().trim_matches('\'');
+            (!first.is_empty()).then_some(first)
+        });
+        match crate::render::chart_spacing(name, self.size, self.bold, t) {
+            Some(ls) => format!(" letter-spacing=\"{ls:.3}\""),
+            None => String::new(),
+        }
     }
     /// 글자열 폭 어림 (px): 한글·한자 1em, 숫자 0.5em (한셀 축 배치: 9pt 숫자 하나가 6px — chart_range12 의 100 이 70 보다 6px 넓다), 그 밖 0.5em
     fn width(&self, t: &str) -> f64 {

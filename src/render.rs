@@ -1156,3 +1156,18 @@ pub fn workbook_html_with(wb: &Workbook, title: &str, opts: Options, extras: &Ex
         workbook_fragment_with(wb, opts, extras)
     )
 }
+
+/// 차트 글자의 자간 보정 (px) — 한셀의 정수 글자 폭에 맞춘다 (advance.rs)
+pub(crate) fn chart_spacing(
+    name: Option<&str>,
+    size_pt: f64,
+    bold: bool,
+    text: &str,
+) -> Option<f64> {
+    // 차트 글자는 식이 모든 표본과 같은 글꼴만 (COM 차트의 Calibri 는 보정하면 오히려 어긋난다)
+    if advance::is_exact(name) {
+        advance::spacing(name, size_pt, bold, text)
+    } else {
+        None
+    }
+}
