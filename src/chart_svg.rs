@@ -84,7 +84,6 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
         w: w - PAD.0 - PAD.1,
         h: h - PAD.2 - PAD.3,
     };
-
     // 제목: 위 가운데 (한셀 화면: 14pt, 굵게 — 글(c:tx)이 있으면 b="0" 이어도 굵다, 글자 윗변이 틀에서 14px, 그림
     // 영역은 제목 줄 아래 20px 뒤 — c2_e2_title_*: 맨 위 눈금선이 틀 + 60.5, 18pt 는 + 66.5). 자동 제목("차트 제목",
     // 한셀이 COM 으로 만든 차트)은 c:txPr 의 b 를 따른다 (차트 종류 실험: b="0" → 보통 굵기). 범례는 제목 아래 자리의 가운데
@@ -115,7 +114,9 @@ pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> S
             );
         }
         if ch.title_full.as_ref().and_then(|t| t.overlay) != Some(true) {
-            let bottom = ty + lh * lines.len() as f64 + 20.0;
+            // 자동 제목(글을 적지 않은 "차트 제목" — 한셀이 COM 으로 만든 차트)은 1px 위에서 끝난다 (차트 종류 실험)
+            let auto = ch.title_full.as_ref().is_some_and(|t| t.tx.is_none());
+            let bottom = ty + lh * lines.len() as f64 + if auto { 19.0 } else { 20.0 };
             inner.h -= bottom - inner.y;
             inner.y = bottom;
         } else {
