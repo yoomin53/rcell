@@ -283,6 +283,36 @@ fn iterative_calculation() {
     assert_eq!(calc(&w, "B6"), n(8.0));
 }
 
+/// 반복 계산을 켜지 않으면 같은 고리에 든 칸은 모두 계산하지 않고 지금 값을 둔다 (새 수식은 0). 고리 밖에서 읽는 칸은 그 값을
+/// 읽는다 (바꾸기 대조 실험)
+#[test]
+fn cycle_cells_keep_their_value_without_iteration() {
+    let mut w = wb(vec![sheet(
+        "S",
+        &[
+            ("A1", "=IF(SUM(A1:A3),SUM(A1:A3),\"\")"),
+            ("B1", "=SUM(B2:B4)"),
+            ("B2", "=B1+1"),
+            ("B3", "=IF(SUM(B1,B2),B1-B2,\"\")"),
+            ("C1", "=B2+10"),
+        ],
+    )]);
+    // 파일 값: A1 은 새 수식(값 없음), B1·B2 는 5·6
+    for c in &mut w.sheets[0].cells {
+        match (c.r.row, c.r.col) {
+            (0, 1) => c.value = CellValue::Number(5.0),
+            (1, 1) => c.value = CellValue::Number(6.0),
+            _ => {}
+        }
+    }
+    assert_eq!(calc(&w, "A1"), n(0.0));
+    assert_eq!(calc(&w, "B1"), n(5.0));
+    assert_eq!(calc(&w, "B2"), n(6.0));
+    // B3 도 B1 → B3 → B1 고리에 든다 (B1 의 범위 B2:B4 에 들어 있다)
+    assert_eq!(calc(&w, "B3"), n(0.0));
+    assert_eq!(calc(&w, "C1"), n(16.0));
+}
+
 #[test]
 fn array_formula_and_lifting() {
     assert_eq!(one("SUM(1/{1,2,4})"), n(1.75));

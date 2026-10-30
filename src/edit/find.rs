@@ -44,26 +44,59 @@ pub fn formula_text(wb: &Workbook, si: usize, r: CellRef) -> Option<String> {
         CellValue::Empty => return None,
         CellValue::Number(v) => {
             let v = *v;
-            match super::input::category(&code) {
-                super::input::Cat::Date if (1.0..2_958_466.0).contains(&v) => {
-                    super::input_text(wb, si, r)
-                }
-                // 시각만: 12시간 표기 (`12:30:00 PM`)
-                super::input::Cat::Time if (0.0..1.0).contains(&v) => {
-                    let (h, m, s) = crate::calc::date::hms_from_serial(v);
-                    let (h12, ap) = match h {
-                        0 => (12, "AM"),
-                        1..=11 => (h, "AM"),
-                        12 => (12, "PM"),
-                        _ => (h - 12, "PM"),
-                    };
-                    format!("{h12}:{m:02}:{s:02} {ap}")
+            let (cat, dated, timed) = super::input::classify(&code);
+            match cat {
+                super::input::Cat::Date | super::input::Cat::Time
+                    if (0.0..2_958_466.0).contains(&v) =>
+                {
+                    date_time_text(wb, v, dated, timed)
                 }
                 _ => crate::model::format_general(v),
             }
         }
         v => v.display(),
     })
+}
+
+/// 날짜·시각 값이 한셀의 바꾸기에 보이는 글 (날짜·시각 형식의 칸, 한셀 Replace 실험 270가지): 12시간 `yyyy-mm-dd hh:mm:ss
+/// AM/PM` (시는 두 자리, 0시 = `12:00:00 AM`). 초는 천 분의 1초로 반올림한 뒤 반올림해 끊고 (자리 올림은 날짜로),
+/// 시각 부분이 있는 형식은 1 미만이면 시각만, 그 밖에는 날짜 + 시각. 날짜만 있는 형식은 날짜(0 = `1900-01-00`)에 소수 부분이
+/// 있을 때만 시각을 붙인다
+fn date_time_text(wb: &Workbook, v: f64, dated: bool, timed: bool) -> String {
+    let frac = v - v.floor();
+    let ms = (frac * 86_400_000.0).round() as i64;
+    let mut secs = (ms + 500) / 1000;
+    let mut day = v.floor();
+    if secs >= 86_400 {
+        secs -= 86_400;
+        day += 1.0;
+    }
+    let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
+    let h12 = if h % 12 == 0 { 12 } else { h % 12 };
+    let time = format!(
+        "{h12:02}:{m:02}:{s:02} {}",
+        if h < 12 { "AM" } else { "PM" }
+    );
+    let date = || {
+        crate::calc::date::ymd_from_serial(day, wb.date1904)
+            .map(|(y, mo, d)| format!("{y:04}-{mo:02}-{d:02}"))
+    };
+    let with_date = |t: &str| match date() {
+        Some(d) => format!("{d} {t}"),
+        None => crate::model::format_general(v),
+    };
+    if timed && v < 1.0 {
+        return time;
+    }
+    if timed {
+        return with_date(&time);
+    }
+    debug_assert!(dated);
+    if frac == 0.0 {
+        date().unwrap_or_else(|| crate::model::format_general(v))
+    } else {
+        with_date(&time)
+    }
 }
 
 /// 셀의 표시된 글
@@ -208,6 +241,13 @@ pub fn replace_all(
         }
         if super::set_input(wb, s, r, &input).is_ok() {
             n += 1;
+            // 바꿔서 새로 고른 수식은 처음 값이 0 이다 — 순환에 들면 한셀은 그 0 을 그대로 둔다 (바꾸기 대조 실험:
+            // `IF(SUM(G9:G11),…,"")` 가 `SUM(G9:G77)` 로 바뀌어 자기 칸을 품으면 0)
+            if let Some(c) = wb.sheets[s].cells.iter_mut().find(|c| c.r == r)
+                && c.formula.is_some()
+            {
+                c.value = CellValue::Number(0.0);
+            }
         }
     }
     Ok(n)
@@ -224,6 +264,30 @@ mod tests {
             match_case: case,
             ..Default::default()
         }
+    }
+
+    // 한셀 Replace 가 보는 날짜·시각 글 (날짜·시각 형식 칸 대조 실험 160가지에서 고른 것)
+    #[test]
+    fn date_time_text_like_hcell() {
+        let wb = Workbook::default();
+        let t = |v: f64, dated: bool, timed: bool| date_time_text(&wb, v, dated, timed);
+        // 시각 부분이 있는 형식: 1 미만이면 시각만, 아니면 날짜 + 시각 (0시 = 12:00:00 AM, 시는 두 자리)
+        assert_eq!(t(45000.5, true, true), "2023-03-15 12:00:00 PM");
+        assert_eq!(t(45000.0, true, true), "2023-03-15 12:00:00 AM");
+        assert_eq!(t(1234.5678, true, true), "1903-05-18 01:37:38 PM");
+        assert_eq!(t(0.5, true, true), "12:00:00 PM");
+        assert_eq!(t(0.04, false, true), "12:57:36 AM");
+        assert_eq!(t(0.378_472_222_222_222, false, true), "09:05:00 AM");
+        // 초는 반올림, 자리 올림은 날짜로 (시각만이면 날짜 없이)
+        assert_eq!(t(0.999_999_99, false, true), "12:00:00 AM");
+        assert_eq!(t(45000.999_999_99, true, true), "2023-03-16 12:00:00 AM");
+        assert_eq!(t(45000.000_005_787, false, true), "2023-03-15 12:00:01 AM");
+        // 날짜만 있는 형식: 정수면 날짜만 (0 = 1900-01-00), 소수 부분이 있으면 시각도
+        assert_eq!(t(45000.0, true, false), "2023-03-15");
+        assert_eq!(t(0.0, true, false), "1900-01-00");
+        assert_eq!(t(60.0, true, false), "1900-02-29");
+        assert_eq!(t(59.5, true, false), "1900-02-28 12:00:00 PM");
+        assert_eq!(t(0.378_472_222_222_222, true, false), "1900-01-00 09:05:00 AM");
     }
 
     #[test]
