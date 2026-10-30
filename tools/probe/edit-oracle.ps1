@@ -299,6 +299,15 @@ function Invoke-Edit($wb, $e) {
             $tl = @($e.totals | ForEach-Object { [int]$_ })
             [void]$rg.Subtotal([int]$e.groupBy, $fn, $tl, $(if ($null -eq $e.replace) { $true } else { [bool]$e.replace }), [bool]$e.pageBreaks, $(if ($null -eq $e.summaryBelow) { $true } else { [bool]$e.summaryBelow }))
         }
+        "moveShape" {
+            # 도형·그림·차트 옮기기/크기 바꾸기 (Shape.Left/Top/Width/Height — 포인트, 번호는 1부터)
+            $sh = $ws.Shapes.Item([int]$e.shape)
+            if ($null -ne $e.left) { $sh.Left = [double]$e.left }
+            if ($null -ne $e.top) { $sh.Top = [double]$e.top }
+            if ($null -ne $e.width) { $sh.Width = [double]$e.width }
+            if ($null -ne $e.height) { $sh.Height = [double]$e.height }
+        }
+        "deleteShape" { $ws.Shapes.Item([int]$e.shape).Delete() }
         "autoFitRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.AutoFit() }
         "insertCells" {
             # 셀 삽입 (아래로 -4121, 오른쪽으로 -4161)

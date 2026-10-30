@@ -34,6 +34,7 @@ pub mod find;
 pub mod input;
 pub mod objects;
 pub mod refs;
+pub mod shapes;
 pub mod sort;
 pub mod special;
 pub mod structure;
@@ -551,6 +552,26 @@ pub enum Edit {
         page_breaks: bool,
         #[serde(default = "yes")]
         summary_below: bool,
+    },
+    /// 도형·그림·차트 옮기기·크기 바꾸기 (`shape`: 번호 1부터 또는 이름, 위치·크기는 포인트)
+    MoveShape {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        shape: shapes::ShapeSel,
+        #[serde(default)]
+        left: Option<f64>,
+        #[serde(default)]
+        top: Option<f64>,
+        #[serde(default)]
+        width: Option<f64>,
+        #[serde(default)]
+        height: Option<f64>,
+    },
+    /// 도형·그림·차트 지우기
+    DeleteShape {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        shape: shapes::ShapeSel,
     },
     /// 행 높이 자동 맞춤
     AutoFitRows {
@@ -1333,6 +1354,23 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
                 summary_below: *summary_below,
             };
             data::subtotal(wb, i, parse_range(range)?, &o)?;
+            Ok(i)
+        }
+        Edit::MoveShape {
+            sheet,
+            shape,
+            left,
+            top,
+            width,
+            height,
+        } => {
+            let i = si(wb, sheet)?;
+            shapes::move_shape(wb, i, shape, *left, *top, *width, *height)?;
+            Ok(i)
+        }
+        Edit::DeleteShape { sheet, shape } => {
+            let i = si(wb, sheet)?;
+            shapes::delete_shape(wb, i, shape)?;
             Ok(i)
         }
         Edit::AutoFitRows { sheet, row, count } => {
