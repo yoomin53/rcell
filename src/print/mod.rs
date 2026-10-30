@@ -221,16 +221,6 @@ pub fn frame_with(
     let z = if sp.tall { 100 } else { sp.print_scale };
     PageFrame {
         cols: bounds(x0 + dx + (hw * 6.25).round(), &cols),
-        col_x100: {
-            let mut acc = 0.0;
-            cols.iter()
-                .map(|&(c, _)| {
-                    let at = acc;
-                    acc += sp.col_px.get(c as usize).copied().unwrap_or(0) as f64;
-                    (c, at)
-                })
-                .collect()
-        },
         origin_x: x0 + dx + (hw * 6.25).round(),
         col_abs: cumulative(&sp.col_px),
         row_abs: cumulative(&sp.row_px),

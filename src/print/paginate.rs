@@ -128,6 +128,11 @@ impl SheetPrint {
 /// 키 큰 모드의 세로 배수 (600 dpi / 96 dpi)
 const TALL: f64 = 6.25;
 
+/// 열 너비 px → 0.05pt 로 반올림한 px
+fn quantize(px: f64) -> f64 {
+    (px * PX * 20.0).round() / 20.0 / PX
+}
+
 /// round(px × z / 100), 반은 올림
 fn scaled(px: u32, z: u32) -> u32 {
     (px * z + 50) / 100
@@ -533,7 +538,9 @@ pub fn sheet_print_with(wb: &Workbook, sheet_index: usize, first_untall: bool) -
             }
         })
         .collect();
-    let col_exact: Vec<f64> = geo.col_px.clone();
+    // 한셀은 열 너비(pt)를 0.05pt 로 반올림해 둔다 (COM Width: 5 글자 34.65pt, 8.43 글자 55.25pt) — 서식 파일 열 15.71 글자
+    // (109.98px → 82.5pt → 110.0px)가 배율 75 에서 82.5 → 83px 로 찍힌다
+    let col_exact: Vec<f64> = geo.col_px.iter().map(|&v| quantize(v)).collect();
 
     let (pw, ph) = printable(&s);
     let avail100 = (
@@ -705,13 +712,27 @@ pub fn sheet_print_with(wb: &Workbook, sheet_index: usize, first_untall: bool) -
         v_breaks,
         row_px,
         col_px,
-        col_exact: geo.col_px.clone(),
+        col_exact: col_exact.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 한셀 COM 열 너비 (pt 를 0.05 로 반올림): 5 글자 34.65pt = 46.2px, 3.3 글자 24.45pt = 32.6px, 8.43 글자 55.25pt,
+    /// 서식 파일 15.71 글자 82.5pt = 110.0px (배율 75 에서 82.5 → 83px)
+    #[test]
+    fn column_width_is_quantized_to_a_twentieth_of_a_point() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(close(quantize(46.21875), 34.65 / 0.75));
+        assert!(close(quantize(32.59375), 24.45 / 0.75));
+        assert!(close(quantize(73.65625), 55.25 / 0.75));
+        assert!(close(quantize(109.98), 110.0));
+        assert_eq!((quantize(109.98) * 75.0 / 100.0 + 0.5).floor(), 83.0);
+        // 3.3 글자 열은 배율 99 에서 32px (화면 격자 33px 에 배율을 곱한 33 이 아니다)
+        assert_eq!((quantize(32.59375) * 99.0 / 100.0 + 0.5).floor(), 32.0);
+    }
 
     #[test]
     fn print_names() {
