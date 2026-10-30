@@ -674,7 +674,9 @@ fn db(ctx: &mut Ctx, a: &[Value]) -> Value {
         || life <= 0.0
         || per <= 0.0
         || !(1.0..=12.0).contains(&month)
-        || per > life + 1.0
+        // 기간은 수명을 넘을 수 없다. 첫 해가 열두 달이 아니면 (month < 12) 수명 + 1 까지
+        // (DB(1000,100,3,4) = #NUM!, DB(1000,100,3,4,6) = 42.2, 대조 실험 conv3·conv4)
+        || per > life + if month < 12.0 { 1.0 } else { 0.0 }
     {
         return Value::Error(ErrorKind::Num);
     }
@@ -694,7 +696,8 @@ fn db(ctx: &mut Ctx, a: &[Value]) -> Value {
     total += dep;
     let mut p = 2.0;
     while p <= per {
-        if p == life + 1.0 {
+        // 수명을 넘는 마지막 해는 남은 달수만큼 (DB(1000,100,2.5,3,6) = 83.7, 수명이 소수여도)
+        if p > life {
             dep = (cost - total) * rate * (12.0 - month) / 12.0;
         } else {
             dep = (cost - total) * rate;

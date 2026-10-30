@@ -264,20 +264,12 @@ impl<'a> Ctx<'a> {
         if areas.len() != 1 {
             return Value::Error(ErrorKind::Value);
         }
-        // 여러 시트에 걸친 영역은 시트별 값을 이어 한 열로 (TRIMMEAN('S1:S3'!A1,0.5) = 37, 대조 실험 rand)
-        if areas[0].is_3d() {
-            let mut data = Vec::new();
-            for sh in areas[0].sheet..=areas[0].sheet_last {
-                let mut one = areas[0];
-                one.sheet = sh;
-                one.sheet_last = sh;
-                match self.area_to_array(&one) {
-                    Ok(arr) => data.extend(arr.data.iter().cloned()),
-                    Err(e) => return Value::Error(e),
-                }
-            }
-            let n = data.len();
-            return Value::Array(Rc::new(Array::new(n, 1, data)));
+        // 여러 시트에 걸친 영역을 배열로 읽으면 #VALUE! ('S1:S3'!A1&"x", SUMPRODUCT('S1:S3'!A1), TEXT 대조 실험).
+        // 참조를 받는 함수(SUM·LARGE·TRIMMEAN 등)는 `flatten` 이 시트마다 읽는다.
+        // 한 칸은 배열이 아니라 낱값이다 (XOR(255<=Data!C3,Data!B1&"") 의 글은 낱값이라 #VALUE!, 대조 실험 rand)
+        if areas[0].is_cell() {
+            let a = areas[0];
+            return self.area_cell(&a, a.sheet, a.r0, a.c0);
         }
         match self.area_to_array(&areas[0]) {
             Ok(a) => Value::Array(Rc::new(a)),
@@ -576,6 +568,8 @@ impl<'a> Ctx<'a> {
                 }
                 let out = f(self, &args);
                 data.push(match out {
+                    // 배열을 돌려주는 함수를 여러 칸에 펼치면 #VALUE! (MUNIT(범위) — 한셀, 대조 실험 rand)
+                    Value::Array(_) if rows * cols > 1 => Value::Error(ErrorKind::Value),
                     Value::Array(a) => a
                         .data
                         .first()

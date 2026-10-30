@@ -322,6 +322,42 @@ fn rules_from_random_differential_tests() {
         CellValue::Number(x) => assert!((x - 45597.99999943975).abs() < 1e-9),
         other => panic!("{other:?}"),
     }
+    // 오류 값 이름의 글은 그 오류 (대소문자·뒤 공백 무시)
+    assert_eq!(one("NOT(\"#N/A\")"), e("#N/A"));
+    assert_eq!(one("\"#div/0!\"+1"), e("#DIV/0!"));
+    assert_eq!(one("VALUE(\"#NUM! \")"), e("#NUM!"));
+    // MULTINOMIAL·GCD: 글·논리는 #VALUE!, 1 보다 작은 값은 0, 짝이 0 이면 소수째
+    assert_eq!(one("MULTINOMIAL(3,\"2\")"), e("#VALUE!"));
+    assert_eq!(one("GCD(2.9)"), n(2.9));
+    assert_eq!(one("GCD(0.99)"), n(0.0));
+    assert_eq!(one("GCD(2.9,4)"), n(2.0));
+    assert_eq!(one("GCD(1E20)"), n(0.0));
+    assert_eq!(one("LCM(2.9,0)"), n(0.0));
+    // UNICHAR 의 U+10FFFE·U+10FFFF 는 #N/A
+    assert_eq!(one("UNICHAR(1114111)"), e("#N/A"));
+    assert_eq!(one("LEN(UNICHAR(65535))"), n(1.0));
+    // DB: 첫 해가 열두 달이면 기간은 수명까지, 아니면 수명 + 1 까지, 수명을 넘는 해는 남은 달수만큼
+    assert_eq!(one("DB(1000,100,3,4)"), e("#NUM!"));
+    match one("DB(1000,100,2.5,3,6)") {
+        CellValue::Number(x) => assert!((x - 83.738802).abs() < 1e-6),
+        other => panic!("{other:?}"),
+    }
+    // TRUNC 은 10^자리가 0 이 되면 #NUM!, FLOOR.PRECISE 는 배수 0 이면 첫 인수를 보지 않는다
+    assert_eq!(one("TRUNC(1023,-323)"), n(0.0));
+    assert_eq!(one("TRUNC(1023,-324)"), e("#NUM!"));
+    assert_eq!(one("FLOOR.PRECISE(NA(),0)"), n(0.0));
+    assert_eq!(one("CEILING.PRECISE(NA(),0)"), e("#N/A"));
+    // COMBIN·PERMUT 은 n 이 2^31 − 2 까지
+    assert_eq!(one("COMBIN(2147483647,1)"), e("#NUM!"));
+    // RANK: 값의 오류가 먼저, 다음이 범위의 오류, 숫자로 읽히는 글 범위는 #N/A
+    assert_eq!(one("RANK(1/0,NA())"), e("#DIV/0!"));
+    assert_eq!(one("RANK(\"x\",NA())"), e("#N/A"));
+    assert_eq!(one("RANK(1,\"50%\")"), e("#N/A"));
+    // QUARTILE.EXC 의 순위가 범위 밖이면 0
+    assert_eq!(one("QUARTILE.EXC({3},1)"), n(0.0));
+    // 음수 큰 수의 글: 15자리 아래는 올림 (양수는 버림)
+    assert_eq!(one("(-(2^50))&\"\""), t("-1125899906842630"));
+    assert_eq!(one("(2^50)&\"\""), t("1125899906842620"));
 }
 
 /// 반복 계산 (calcPr iterate): 파일 값에서 시작해 2×iterateCount 번, 행 차례로 (대조 실험 circ)

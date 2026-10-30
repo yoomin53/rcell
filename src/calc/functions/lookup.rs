@@ -16,25 +16,28 @@ use crate::calc::value::{self, Area, Array, ErrorKind, MAX_COLS, MAX_ROWS, Value
 
 const RAV: &[Arg] = &[Arg::RA, Arg::V, Arg::V, Arg::V];
 const VRAV: &[Arg] = &[Arg::V, Arg::RA, Arg::V, Arg::V];
+const RA1: &[Arg] = &[Arg::RA];
+const VRV: &[Arg] = &[Arg::V, Arg::R, Arg::V];
 const VRARA: &[Arg] = &[Arg::V, Arg::RA, Arg::RA];
-const VRARAV: &[Arg] = &[Arg::RA, Arg::RA, Arg::RA, Arg::V, Arg::V, Arg::V];
+// MATCH·XLOOKUP 의 찾을 범위·돌려줄 범위는 식을 배열로 계산하지 않는다 (MATCH(2,범위*2,0) = #VALUE!, 대조 실험 conv5)
+const VRRV: &[Arg] = &[Arg::V, Arg::R, Arg::R, Arg::V, Arg::V, Arg::V];
 const RVVVV: &[Arg] = &[Arg::R, Arg::V, Arg::V, Arg::V, Arg::V];
 
 pub const FNS: &[FnSpec] = &[
     f("INDEX", 2, 4, RAV, index),
-    f("MATCH", 2, 3, VRAV, match_fn),
+    f("MATCH", 2, 3, VRV, match_fn),
     f("XMATCH", 2, 4, VRAV, xmatch),
     f("VLOOKUP", 3, 4, VRAV, |c, a| vh_lookup(c, a, true)),
     f("HLOOKUP", 3, 4, VRAV, |c, a| vh_lookup(c, a, false)),
     f("LOOKUP", 2, 3, VRARA, lookup),
-    f("XLOOKUP", 3, 6, VRARAV, xlookup),
+    f("XLOOKUP", 3, 6, VRRV, xlookup),
     lazy("CHOOSE", 2, MANY, choose),
     super::volatile(f("OFFSET", 3, 5, RVVVV, offset)),
     super::volatile(f("INDIRECT", 1, 2, V, indirect)),
     f("ROW", 0, 1, R, |c, a| row_col(c, a, true)),
     f("COLUMN", 0, 1, R, |c, a| row_col(c, a, false)),
-    f("ROWS", 1, 1, R, |c, a| dims(c, a, true)),
-    f("COLUMNS", 1, 1, R, |c, a| dims(c, a, false)),
+    f("ROWS", 1, 1, RA1, |c, a| dims(c, a, true)),
+    f("COLUMNS", 1, 1, RA1, |c, a| dims(c, a, false)),
     f("AREAS", 1, 1, R, |_, a| match &a[0] {
         // 여러 시트에 걸친 참조는 #VALUE!
         Value::Ref(r) if r.iter().any(|x| x.sheet != x.sheet_last) => {
@@ -404,6 +407,10 @@ fn lookup(ctx: &mut Ctx, a: &[Value]) -> Value {
         }
         Some(rv) => {
             let keys = try_v!(vector(&arr));
+            // 못 찾으면 결과 범위는 읽지 않는다 (LOOKUP(없는 값,범위,3차원 참조) = #N/A, 대조 실험 rand)
+            if approx_index(&keys, &x).is_none() {
+                return Value::Error(ErrorKind::NA);
+            }
             let res = try_v!(lookup_array(ctx, rv));
             // 결과 범위는 찾는 범위와 같은 방향으로 읽는다: 세로 찾기에 가로 한 줄 결과면 둘째 칸부터 #REF!
             // (LOOKUP(35,Data!F1:F10,Data!A12:E12), 대조 실험 lookup)
@@ -456,9 +463,10 @@ fn xlookup(ctx: &mut Ctx, a: &[Value]) -> Value {
     match &a[2] {
         Value::Ref(r) if r.len() == 1 => {
             let ar = r[0];
+            // 찾은 자리가 돌려줄 범위를 벗어나면 #REF! (대조 실험 conv3)
             let sub = if vertical {
                 if i as u32 > ar.r1 - ar.r0 {
-                    return Value::Error(ErrorKind::Value);
+                    return Value::Error(ErrorKind::Ref);
                 }
                 Area {
                     r0: ar.r0 + i as u32,
@@ -467,7 +475,7 @@ fn xlookup(ctx: &mut Ctx, a: &[Value]) -> Value {
                 }
             } else {
                 if i as u32 > ar.c1 - ar.c0 {
-                    return Value::Error(ErrorKind::Value);
+                    return Value::Error(ErrorKind::Ref);
                 }
                 Area {
                     c0: ar.c0 + i as u32,

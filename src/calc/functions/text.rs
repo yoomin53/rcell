@@ -113,7 +113,8 @@ pub const FNS: &[FnSpec] = &[
             .or_else(|| value::parse_number(s, c.date1904()))
         {
             Some(n) => Value::Number(n),
-            None => Value::Error(ErrorKind::Value),
+            // 오류 값 이름의 글은 그 오류 (VALUE("#N/A") = #N/A)
+            None => Value::Error(ErrorKind::parse(s).unwrap_or(ErrorKind::Value)),
         },
         Value::Bool(_) => Value::Error(ErrorKind::Value),
         v => value::num_r(c.num(v)),
@@ -170,6 +171,10 @@ pub const FNS: &[FnSpec] = &[
         let n = try_v!(num_arg(c, a, 0)).trunc();
         if n < 1.0 || n > 0x10FFFF as f64 {
             return Value::Error(ErrorKind::Value);
+        }
+        // U+10FFFE·U+10FFFF 는 #N/A (U+FFFE·U+1FFFE… 는 글자로 나온다, 대조 실험 conv2·conv4)
+        if n >= 1_114_110.0 {
+            return Value::Error(ErrorKind::NA);
         }
         // 대리 쌍 반쪽은 반쪽 그대로 (UNICODE(UNICHAR(55357)) = 55357, 파일에는 U+FFFD, 대조 실험 text·cmisc)
         match char::from_u32(n as u32) {

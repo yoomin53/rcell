@@ -21,7 +21,7 @@ use crate::calc::value::{self, Array, ErrorKind, Value, num};
 const RVR: &[Arg] = &[Arg::R, Arg::V, Arg::R];
 const RRV: &[Arg] = &[Arg::R, Arg::R, Arg::V];
 const RV: &[Arg] = &[Arg::R, Arg::V];
-const AV: &[Arg] = &[Arg::A, Arg::V];
+const RAR: &[Arg] = &[Arg::RA, Arg::R];
 const VRV: &[Arg] = &[Arg::V, Arg::R, Arg::V];
 const AAV: &[Arg] = &[Arg::A, Arg::A, Arg::V];
 const VAA: &[Arg] = &[Arg::V, Arg::A, Arg::A];
@@ -55,21 +55,21 @@ pub const FNS: &[FnSpec] = &[
         }
         median(&v)
     }),
-    f("MODE", 1, MANY, R, |c, a| {
+    f("MODE", 1, MANY, RAR, |c, a| {
         let v = try_v!(collect_numbers(c, a, Agg::Numbers));
         if late_array(a) {
             return Value::Error(ErrorKind::Value);
         }
         mode_sngl(&v)
     }),
-    f("MODE.SNGL", 1, MANY, R, |c, a| {
+    f("MODE.SNGL", 1, MANY, RAR, |c, a| {
         let v = try_v!(collect_numbers(c, a, Agg::Numbers));
         if late_array(a) {
             return Value::Error(ErrorKind::Value);
         }
         mode_sngl(&v)
     }),
-    f("MODE.MULT", 1, MANY, R, mode_mult),
+    f("MODE.MULT", 1, MANY, RAR, mode_mult),
     f("DEVSQ", 1, MANY, R, |c, a| {
         let v = try_v!(collect_numbers(c, a, Agg::Numbers));
         if v.is_empty() {
@@ -117,27 +117,27 @@ pub const FNS: &[FnSpec] = &[
         let k = try_v!(num_arg(c, a, 1));
         large_small(&v, k, false)
     }),
-    f("PERCENTILE", 2, 2, AV, |c, a| pct(c, a, percentile_inc)),
-    f("PERCENTILE.INC", 2, 2, AV, |c, a| pct(c, a, percentile_inc)),
-    f("PERCENTILE.EXC", 2, 2, AV, |c, a| pct(c, a, percentile_exc)),
-    f("QUARTILE", 2, 2, AV, |c, a| {
+    f("PERCENTILE", 2, 2, RV, |c, a| pct(c, a, percentile_inc)),
+    f("PERCENTILE.INC", 2, 2, RV, |c, a| pct(c, a, percentile_inc)),
+    f("PERCENTILE.EXC", 2, 2, RV, |c, a| pct(c, a, percentile_exc)),
+    f("QUARTILE", 2, 2, RV, |c, a| {
         pct(c, a, |v, q| quartile(v, q, true))
     }),
-    f("QUARTILE.INC", 2, 2, AV, |c, a| {
+    f("QUARTILE.INC", 2, 2, RV, |c, a| {
         pct(c, a, |v, q| quartile(v, q, true))
     }),
-    f("QUARTILE.EXC", 2, 2, AV, |c, a| {
+    f("QUARTILE.EXC", 2, 2, RV, |c, a| {
         pct(c, a, |v, q| quartile(v, q, false))
     }),
-    f("PERCENTRANK", 2, 3, AV, |c, a| percentrank(c, a, true)),
-    f("PERCENTRANK.INC", 2, 3, AV, |c, a| percentrank(c, a, true)),
-    f("PERCENTRANK.EXC", 2, 3, AV, |c, a| percentrank(c, a, false)),
+    f("PERCENTRANK", 2, 3, RV, |c, a| percentrank(c, a, true)),
+    f("PERCENTRANK.INC", 2, 3, RV, |c, a| percentrank(c, a, true)),
+    f("PERCENTRANK.EXC", 2, 3, RV, |c, a| percentrank(c, a, false)),
     f("RANK", 2, 3, VRV, |c, a| rank(c, a, false)),
     f("RANK.EQ", 2, 3, VRV, |c, a| rank(c, a, false)),
     f("RANK.AVG", 2, 3, VRV, |c, a| rank(c, a, true)),
     f("RANKEQ", 2, 3, VRV, |c, a| rank(c, a, false)),
     f("RANKAVG", 2, 3, VRV, |c, a| rank(c, a, true)),
-    f("TRIMMEAN", 2, 2, AV, trimmean),
+    f("TRIMMEAN", 2, 2, RV, trimmean),
     f("STANDARDIZE", 3, 3, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
         let m = try_v!(num_arg(c, a, 1));
@@ -158,7 +158,7 @@ pub const FNS: &[FnSpec] = &[
     f("RSQ", 2, 2, A, |c, a| correl(c, a, true)),
     f("COVAR", 2, 2, A, |c, a| covar(c, a, false)),
     f("COVARIANCE.P", 2, 2, A, |c, a| covar(c, a, false)),
-    f("COVARIANCE.S", 2, 2, A, |c, a| covar(c, a, true)),
+    f("COVARIANCE.S", 2, 2, R, |c, a| covar(c, a, true)),
     f("SLOPE", 2, 2, A, |c, a| regression(c, &a[0], &a[1], 0, 0.0)),
     f("INTERCEPT", 2, 2, A, |c, a| {
         regression(c, &a[0], &a[1], 1, 0.0)
@@ -184,7 +184,7 @@ pub const FNS: &[FnSpec] = &[
     f("GROWTH", 1, 4, &[Arg::A, Arg::A, Arg::A, Arg::V], |c, a| {
         trend(c, a, true)
     }),
-    f("FREQUENCY", 2, 2, A, frequency),
+    f("FREQUENCY", 2, 2, R, frequency),
     f("PROB", 3, 4, AAV, prob),
     f("FISHER", 1, 1, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
@@ -205,6 +205,7 @@ pub const FNS: &[FnSpec] = &[
             || n <= 0.0 && !(n == 0.0 && k == 0.0)
             || (nr > 0.0 && n == 0.0)
             || k > n
+            || n >= 2_147_483_647.0
         {
             return Value::Error(ErrorKind::Num);
         }
@@ -740,8 +741,11 @@ pub fn large_small(v: &[f64], k: f64, large: bool) -> Value {
 
 fn pct(ctx: &mut Ctx, a: &[Value], f: fn(&[f64], f64) -> Value) -> Value {
     // 낱 글 (숫자로 읽히지 않는) 은 #VALUE! (PERCENTILE.INC(글,…), 대조 실험 rand)
-    if matches!(&a[0], Value::Text(s) if value::parse_number(s, ctx.date1904()).is_none()) {
-        return Value::Error(ErrorKind::Value);
+    // (오류 값 이름의 글은 그 오류: QUARTILE.EXC("#N/A",1.5) = #N/A)
+    if let Value::Text(s) = &a[0]
+        && value::parse_number(s, ctx.date1904()).is_none()
+    {
+        return Value::Error(ErrorKind::parse(s).unwrap_or(ErrorKind::Value));
     }
     let v = try_v!(array_numbers(ctx, &a[0]));
     let k = try_v!(num_arg(ctx, a, 1));
@@ -810,9 +814,13 @@ pub fn quartile(v: &[f64], q: f64, inclusive: bool) -> Value {
         if q != 2.0 {
             let mut s = v.to_vec();
             s.sort_by(f64::total_cmp);
-            let r = (q * (s.len() as f64 + 1.0) / 4.0).floor();
-            if r < 1.0 || r > s.len() as f64 {
+            if s.is_empty() {
                 return Value::Error(ErrorKind::Num);
+            }
+            let r = (q * (s.len() as f64 + 1.0) / 4.0).floor();
+            // 순위가 범위 밖이면 0 (QUARTILE.EXC(칸 하나,1) = 0, PERCENTILE.EXC 와 같다, 대조 실험 conv3)
+            if r < 1.0 || r > s.len() as f64 {
+                return num(0.0);
             }
             return num(s[r as usize - 1]);
         }
@@ -873,7 +881,11 @@ fn late_array(a: &[Value]) -> bool {
 }
 
 fn rank(ctx: &mut Ctx, a: &[Value], average: bool) -> Value {
-    // 범위 인수의 오류가 먼저다 (RANK.AVG(#VALUE!,#N/A) = #N/A, 대조 실험 rand)
+    // 순위를 구할 값이 오류면 그 오류, 다음이 범위 인수의 오류, 값이 글이면 그다음 (RANK(1/0,NA()) = #DIV/0!,
+    // RANK("x",NA()) = #N/A, 대조 실험 conv3·conv5)
+    if let Value::Error(e) = &a[0] {
+        return Value::Error(*e);
+    }
     if let Value::Error(e) = &a[1] {
         return Value::Error(*e);
     }
@@ -901,9 +913,14 @@ fn rank(ctx: &mut Ctx, a: &[Value], average: bool) -> Value {
             }
         }
         Value::Error(e) => return Value::Error(*e),
-        // 참조도 배열도 아닌 낱값은 #N/A, 글이면 #VALUE! (RANK(5,5), RANK(3.14159,-255) = #N/A, RANK(3,"a") = #VALUE!,
-        // 대조 실험 typing·refargs·rand)
-        Value::Text(_) => return Value::Error(ErrorKind::Value),
+        // 참조도 배열도 아닌 낱값은 #N/A, 숫자로 읽히지 않는 글이면 #VALUE! (RANK(5,5), RANK(3.14159,-255),
+        // RANK(1,"50%") = #N/A, RANK(3,"a") = #VALUE!, 대조 실험 typing·refargs·rand)
+        Value::Text(_) => {
+            return match value::to_number(&a[1], ctx.date1904()) {
+                Ok(_) => Value::Error(ErrorKind::NA),
+                Err(e) => Value::Error(e),
+            };
+        }
         _ => return Value::Error(ErrorKind::NA),
     }
     if let Some(e) = first_err {
@@ -1426,6 +1443,10 @@ fn trend(ctx: &mut Ctx, a: &[Value], log: bool) -> Value {
 }
 
 fn frequency(ctx: &mut Ctx, a: &[Value]) -> Value {
+    // 구간 인수가 오류면 그 오류, 자료 인수가 오류면 자료가 없는 셈 (FREQUENCY(범위*2,{2,4}) = 0, 대조 실험 conv5)
+    if let Value::Error(e) = &a[1] {
+        return Value::Error(*e);
+    }
     let data: Vec<f64> = flatten(ctx, &a[0])
         .into_iter()
         .filter_map(|v| {

@@ -404,7 +404,41 @@ fn format_general(v: f64, round_large: bool) -> String {
     };
     let (r_digits, r_exp) = split(format!("{a:.14e}"), 15);
     let (digits, exp) = if a >= 1e15 && !round_large {
-        split(format!("{a:.15e}"), 15)
+        if v < 0.0 {
+            // 음수는 15자리 아래를 올림 (-(2^50) → -1125899906842630, 부호 있는 값의 내림이라 크기는 올림 —
+            // 대조 실험 conv5)
+            let (d16, e) = split(format!("{a:.15e}"), 16);
+            let mut d15: Vec<u8> = d16.bytes().collect();
+            let last = d15.get(15).copied().unwrap_or(b'0');
+            d15.truncate(15);
+            while d15.len() < 15 {
+                d15.push(b'0');
+            }
+            let mut e = e;
+            if last != b'0' {
+                let mut i = 14;
+                loop {
+                    if d15[i] == b'9' {
+                        d15[i] = b'0';
+                        if i == 0 {
+                            d15.insert(0, b'1');
+                            d15.truncate(15);
+                            e += 1;
+                            break;
+                        }
+                        i -= 1;
+                    } else {
+                        d15[i] += 1;
+                        break;
+                    }
+                }
+            }
+            let d: String = String::from_utf8(d15).unwrap_or_default();
+            let d = d.trim_end_matches('0').to_string();
+            (if d.is_empty() { "0".to_string() } else { d }, e)
+        } else {
+            split(format!("{a:.15e}"), 15)
+        }
     } else {
         (r_digits.clone(), r_exp)
     };
@@ -720,9 +754,13 @@ pub fn to_number(v: &Value, date1904: bool) -> Result<f64, ErrorKind> {
         Value::Empty => Ok(0.0),
         Value::Number(n) => Ok(*n),
         Value::Bool(b) => Ok(*b as u8 as f64),
+        // 오류 값 이름의 글은 그 오류 (NOT("#N/A") = #N/A, "#DIV/0!"+1 = #DIV/0! — 대조 실험 conv2)
         Value::Text(s) => match parse_bool_text(s) {
             Some(b) => Ok(b as u8 as f64),
-            None => parse_number(s, date1904).ok_or(ErrorKind::Value),
+            None => match parse_number(s, date1904) {
+                Some(n) => Ok(n),
+                None => Err(ErrorKind::parse(s).unwrap_or(ErrorKind::Value)),
+            },
         },
         Value::Error(e) => Err(*e),
         Value::Array(a) => to_number(a.data.first().unwrap_or(&Value::Empty), date1904),
@@ -758,12 +796,21 @@ pub fn to_bool(v: &Value) -> Result<bool, ErrorKind> {
             } else if let Some(n) = parse_number(s, false) {
                 Ok(n != 0.0)
             } else {
-                Err(ErrorKind::Value)
+                Err(ErrorKind::parse(s).unwrap_or(ErrorKind::Value))
             }
         }
         Value::Error(e) => Err(*e),
         Value::Array(a) => to_bool(a.data.first().unwrap_or(&Value::Empty)),
         Value::Ref(_) => Err(ErrorKind::Value),
+    }
+}
+
+/// 같은 종류·같은 값의 숫자·논리 (XOR 이 이웃 칸을 한 칸으로 세는지 가릴 때)
+pub fn same_constant(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        _ => false,
     }
 }
 

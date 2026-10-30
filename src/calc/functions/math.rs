@@ -242,7 +242,8 @@ pub const FNS: &[FnSpec] = &[
     f("COMBIN", 2, 2, V, |c, a| {
         let (nr, kr) = (try_v!(num_arg(c, a, 0)), try_v!(num_arg(c, a, 1)));
         let (n, k) = (nr.trunc(), kr.trunc());
-        if nr < 0.0 || kr < 0.0 || k > n {
+        // n·k 는 2^31 − 2 까지 (COMBIN(2147483647,1) = #NUM!, 대조 실험 conv4)
+        if nr < 0.0 || kr < 0.0 || k > n || n >= 2_147_483_647.0 {
             return Value::Error(ErrorKind::Num);
         }
         num(super::special::binom_coef(n, k))
@@ -251,7 +252,7 @@ pub const FNS: &[FnSpec] = &[
         let (nr, kr) = (try_v!(num_arg(c, a, 0)), try_v!(num_arg(c, a, 1)));
         let (n, k) = (nr.trunc(), kr.trunc());
         // COMBINA(0,0) 은 #NUM! (대조 실험 math)
-        if nr < 0.0 || kr < 0.0 || n == 0.0 {
+        if nr < 0.0 || kr < 0.0 || n == 0.0 || n >= 2_147_483_647.0 || k >= 2_147_483_647.0 {
             return Value::Error(ErrorKind::Num);
         }
         num(super::special::binom_coef(n + k - 1.0, k))
@@ -429,7 +430,8 @@ fn trunc(ctx: &mut Ctx, a: &[Value]) -> Value {
         if !f.is_finite() || !(x * f).is_finite() {
             return Value::Number(0.0);
         }
-    } else if d.round() == -2_147_483_648.0 {
+    } else if d.trunc() <= -324.0 {
+        // 10^d 가 0 이 되는 자리 (TRUNC(1023,-323) = 0, TRUNC(1023,-324) = #NUM!, 대조 실험 conv4)
         return Value::Error(ErrorKind::Num);
     }
     num(round_digits(x, d, Rounding::Down))
@@ -503,6 +505,11 @@ fn math_round(ctx: &mut Ctx, a: &[Value], up: bool) -> Value {
 }
 
 fn precise(ctx: &mut Ctx, a: &[Value], up: bool) -> Value {
+    // FLOOR.PRECISE 는 배수가 0 이면 첫 인수의 오류·글을 보지 않고 0 (FLOOR.PRECISE(NA(),0) = 0, CEILING.PRECISE 는
+    // #N/A — 대조 실험 conv3)
+    if !up && matches!(num_or(ctx, a, 1, 1.0), Ok(s) if s == 0.0) {
+        return Value::Number(0.0);
+    }
     let x = try_v!(num_arg(ctx, a, 0));
     let s = try_v!(num_or(ctx, a, 1, 1.0)).abs();
     if s == 0.0 || x == 0.0 {
@@ -559,7 +566,8 @@ pub fn fact(x: f64) -> Result<f64, ErrorKind> {
 }
 
 fn multinomial(ctx: &mut Ctx, a: &[Value]) -> Value {
-    let v = try_v!(collect_numbers(ctx, a, Agg::Numbers));
+    // 글·논리 인수는 (범위 안의 것도) #VALUE! — GCD 와 같다 (MULTINOMIAL(3,"2"), 대조 실험 conv2)
+    let v = try_v!(strict_numbers(ctx, a));
     let mut total = 0.0;
     let mut denom = 1.0;
     for x in v {
@@ -573,9 +581,39 @@ fn multinomial(ctx: &mut Ctx, a: &[Value]) -> Value {
     num(try_v!(fact(total)) / denom)
 }
 
-/// GCD·LCM: 글·논리 인수(범위 안의 것도)는 #VALUE! (GCD("12",18), 대조 실험 math). 최대공약수는 버린 정수로,
-/// 최소공배수는 원래 값의 곱 / 버린 값들의 최대공약수 (LCM(2.5,5) = 12.5).
+/// GCD·LCM: 글·논리 인수(범위 안의 것도)는 #VALUE! (GCD("12",18), 대조 실험 math). 소수를 버리기 전에 0 보다 작으면
+/// #NUM! (GCD(-0.5,4)). 1 보다 작거나 2^63 이상인 값은 0 으로 보고 (GCD(0.99) = 0, GCD(1E20) = 0, GCD(1E20,2) = 2),
+/// 두 값 가운데 하나가 0 이면 다른 값을 소수째로 돌려주고 (GCD(2.9) = 2.9, GCD(2.9,0) = 2.9), 둘 다 있으면 버린
+/// 정수의 최대공약수 (GCD(2.9,2.9) = 2). 최소공배수는 원래 값의 곱 / 버린 값들의 최대공약수 (LCM(2.5,5) = 12.5,
+/// LCM(2.9,0) = 0, 대조 실험 misc4·conv3·conv4).
 fn gcd_lcm(ctx: &mut Ctx, a: &[Value], gcd: bool) -> Value {
+    let v = try_v!(strict_numbers(ctx, a));
+    let mut acc: Option<f64> = None;
+    for x in v {
+        if x < 0.0 || !x.is_finite() {
+            return Value::Error(ErrorKind::Num);
+        }
+        let x = if !(1.0..9_223_372_036_854_775_808.0).contains(&x) {
+            0.0
+        } else {
+            x
+        };
+        acc = Some(match acc {
+            None => x,
+            Some(m) if gcd && m == 0.0 => x,
+            Some(m) if gcd && x == 0.0 => m,
+            Some(m) if !gcd && (m == 0.0 || x == 0.0) => 0.0,
+            Some(m) => {
+                let g = gcd2(m.trunc(), x.trunc());
+                if gcd { g } else { m * x / g }
+            }
+        });
+    }
+    num(acc.unwrap_or(0.0))
+}
+
+/// 숫자만 받는 인수 모으기: 글·논리는 #VALUE!, 참조 안의 빈 칸은 건너뛰고 직접 준 빈 값은 0
+fn strict_numbers(ctx: &mut Ctx, a: &[Value]) -> Result<Vec<f64>, ErrorKind> {
     let mut v = Vec::new();
     for x in a {
         for y in super::flatten(ctx, x) {
@@ -583,35 +621,12 @@ fn gcd_lcm(ctx: &mut Ctx, a: &[Value], gcd: bool) -> Value {
                 Value::Number(n) => v.push(n),
                 Value::Empty if matches!(x, Value::Ref(_)) => {}
                 Value::Empty => v.push(0.0),
-                Value::Error(e) => return Value::Error(e),
-                _ => return Value::Error(ErrorKind::Value),
+                Value::Error(e) => return Err(e),
+                _ => return Err(ErrorKind::Value),
             }
         }
     }
-    let mut acc: Option<(f64, f64)> = None;
-    for x in v {
-        let n = x.trunc();
-        // 소수를 버리기 전에 0 보다 작으면 #NUM! (GCD(-0.5,4)), 위로는 한도가 없다 (GCD(2^53+2,2) = 2, GCD(1E20,2) = 2,
-        // LCM(2^53,3) = 3·2^53, 대조 실험 misc4)
-        if x < 0.0 || !x.is_finite() {
-            return Value::Error(ErrorKind::Num);
-        }
-        acc = Some(match acc {
-            None => (n, x),
-            Some((m, mx)) => {
-                let g = gcd2(m, n);
-                if gcd {
-                    (g, g)
-                } else if m == 0.0 || n == 0.0 {
-                    (0.0, 0.0)
-                } else {
-                    let l = mx * x / g;
-                    (l.trunc(), l)
-                }
-            }
-        });
-    }
-    num(acc.map(|(m, mx)| if gcd { m } else { mx }).unwrap_or(0.0))
+    Ok(v)
 }
 
 fn gcd2(mut a: f64, mut b: f64) -> f64 {
@@ -771,6 +786,12 @@ fn sumproduct(ctx: &mut Ctx, a: &[Value]) -> Value {
         // 글·논리 스칼라 인수는 #VALUE! (SUMPRODUCT("3"), 대조 실험 math)
         if matches!(v, Value::Text(_) | Value::Bool(_)) {
             return Value::Error(ErrorKind::Value);
+        }
+        // 오류 낱값도 한 칸 배열 — 크기가 안 맞으면 오류보다 #VALUE! 가 먼저
+        // (SUMPRODUCT(범위, IMPOWER("","-i")) = #VALUE!, 대조 실험 rand)
+        if let Value::Error(_) = v {
+            arrays.push(Rc::new(Array::new(1, 1, vec![v.clone()])));
+            continue;
         }
         arrays.push(try_v!(to_array(ctx, v)));
     }

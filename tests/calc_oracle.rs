@@ -98,6 +98,8 @@ fn functions_match_hancell() {
         let opts = CalcOptions {
             now: saved,
             file_name: f.file_name().map(|n| n.to_string_lossy().into_owned()),
+            // RCELL_CALC_ORACLE_BUGS 이면 한셀의 오류도 흉내 낸다 (기본은 끔 — 수치는 끈 채로 센다)
+            hcell_bugs: std::env::var_os("RCELL_CALC_ORACLE_BUGS").is_some(),
             ..Default::default()
         };
         let (results, report) = rcell::calc::evaluate(&wb, &opts);
