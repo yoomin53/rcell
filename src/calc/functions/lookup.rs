@@ -36,6 +36,10 @@ pub const FNS: &[FnSpec] = &[
     f("ROWS", 1, 1, R, |c, a| dims(c, a, true)),
     f("COLUMNS", 1, 1, R, |c, a| dims(c, a, false)),
     f("AREAS", 1, 1, R, |_, a| match &a[0] {
+        // 여러 시트에 걸친 참조는 #VALUE!
+        Value::Ref(r) if r.iter().any(|x| x.sheet != x.sheet_last) => {
+            Value::Error(ErrorKind::Value)
+        }
         Value::Ref(r) => Value::Number(r.len() as f64),
         Value::Error(e) => Value::Error(*e),
         _ => Value::Error(ErrorKind::Value),
@@ -705,14 +709,15 @@ fn dims(_ctx: &mut Ctx, a: &[Value], rows: bool) -> Value {
         // 여러 영역·오류(빈 교차 포함)는 #VALUE! (ROWS((A1:A3,B1:B5)), ROWS(#N/A), 대조 실험 lookup·misc4)
         Value::Error(_) => Value::Error(ErrorKind::Value),
         Value::Ref(r) => {
-            if r.len() != 1 {
+            // 여러 영역·여러 시트에 걸친 참조는 #VALUE!
+            if r.len() != 1 || r[0].sheet != r[0].sheet_last {
                 return Value::Error(ErrorKind::Value);
             }
             Value::Number(if rows { r[0].rows() } else { r[0].cols() } as f64)
         }
         Value::Array(arr) => Value::Number(if rows { arr.rows } else { arr.cols } as f64),
-        // 글은 #VALUE! (ROWS("a")), 숫자는 1 (ROWS(5), 대조 실험 refargs)
-        Value::Text(_) => Value::Error(ErrorKind::Value),
+        // 글·논리는 #VALUE! (ROWS("a"), COLUMNS(TRUE)), 숫자는 1 (ROWS(5), 대조 실험 refargs·rand)
+        Value::Text(_) | Value::Bool(_) => Value::Error(ErrorKind::Value),
         _ => Value::Number(1.0),
     }
 }

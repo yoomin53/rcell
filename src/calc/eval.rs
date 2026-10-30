@@ -264,6 +264,21 @@ impl<'a> Ctx<'a> {
         if areas.len() != 1 {
             return Value::Error(ErrorKind::Value);
         }
+        // 여러 시트에 걸친 영역은 시트별 값을 이어 한 열로 (TRIMMEAN('S1:S3'!A1,0.5) = 37, 대조 실험 rand)
+        if areas[0].is_3d() {
+            let mut data = Vec::new();
+            for sh in areas[0].sheet..=areas[0].sheet_last {
+                let mut one = areas[0];
+                one.sheet = sh;
+                one.sheet_last = sh;
+                match self.area_to_array(&one) {
+                    Ok(arr) => data.extend(arr.data.iter().cloned()),
+                    Err(e) => return Value::Error(e),
+                }
+            }
+            let n = data.len();
+            return Value::Array(Rc::new(Array::new(n, 1, data)));
+        }
         match self.area_to_array(&areas[0]) {
             Ok(a) => Value::Array(Rc::new(a)),
             Err(e) => Value::Error(e),
@@ -496,6 +511,10 @@ impl<'a> Ctx<'a> {
         }
         let n = c.args.len();
         if n < spec.min as usize || (spec.max != super::functions::MANY && n > spec.max as usize) {
+            // 한셀은 FILTER·SORT 의 인수 개수가 틀리면 #NAME? (FILTER(1), SORT(1,2,3,4,5), 대조 실험 arity)
+            if matches!(spec.name, "FILTER" | "SORT") {
+                return Value::Error(ErrorKind::Name);
+            }
             return Value::Error(ErrorKind::Value);
         }
         match spec.imp {
@@ -544,7 +563,7 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        let mut data = Vec::with_capacity(rows * cols);
+        let mut data: Vec<Value> = Vec::with_capacity(rows * cols);
         let mut args = vals.clone();
         for r in 0..rows {
             for c in 0..cols {
@@ -566,6 +585,11 @@ impl<'a> Ctx<'a> {
                     o => o,
                 });
             }
+        }
+        // 한 칸짜리 결과는 낱값이다 (배열 수식의 SUM(범위, IMCSC(칸)) 에서 글이 인수로 보인다: 한셀은 #VALUE!,
+        // 대조 실험 prec)
+        if rows * cols == 1 {
+            return data.pop().unwrap_or(Value::Empty);
         }
         Value::Array(Rc::new(Array::new(rows, cols, data)))
     }

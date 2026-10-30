@@ -31,6 +31,10 @@ pub const FNS: &[FnSpec] = &[
     f("BITRSHIFT", 2, 2, V, |c, a| shift(c, a, false)),
     f("DELTA", 1, 2, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
+        // 둘째 인수가 오류면 #VALUE! (DELTA(1,1/0) = #VALUE!, 대조 실험 prec)
+        if matches!(a.get(1), Some(Value::Error(_))) {
+            return Value::Error(ErrorKind::Value);
+        }
         let y = try_v!(num_or(c, a, 1, 0.0));
         Value::Number((x == y) as u8 as f64)
     }),
@@ -319,8 +323,12 @@ fn dec2(ctx: &mut Ctx, a: &[Value], radix: u32) -> Value {
     if raw > hi || raw < lo {
         return Value::Error(ErrorKind::Num);
     }
-    // 음수 소수가 0 이 되면 자릿수를 채우지 않는다 (DEC2OCT(-0.5,5) = "0", 대조 실험 rand)
+    // 음수 소수가 0 이 되면 자릿수를 채우지 않는다 (DEC2OCT(-0.5,5) = "0", 자릿수는 1–10 이어야 한다:
+    // DEC2HEX(-0.5,0) = #NUM!, 대조 실험 rand)
     if raw < 0.0 && x == 0.0 {
+        if places.is_some_and(|p| !(1.0..=10.0).contains(&p.trunc())) {
+            return Value::Error(ErrorKind::Num);
+        }
         return Value::from("0");
     }
     match fmt_radix(x as i64, radix, places) {

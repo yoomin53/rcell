@@ -66,8 +66,10 @@ pub const FNS: &[FnSpec] = &[
     }),
     f("REPT", 2, 2, V, |c, a| {
         let t = try_v!(text_arg(c, a, 0));
-        let n = try_v!(num_arg(c, a, 1)).trunc();
-        if n < 0.0 || t.chars().count() as f64 * n > 32_767.0 {
+        let raw = try_v!(num_arg(c, a, 1));
+        let n = raw.trunc();
+        // 소수를 버리기 전에 0 보다 작으면 #VALUE! (REPT("a",-0.5), 대조 실험 rand)
+        if raw < 0.0 || t.chars().count() as f64 * n > 32_767.0 {
             return Value::Error(ErrorKind::Value);
         }
         Value::from(t.repeat(n as usize))
@@ -259,8 +261,9 @@ fn map_case(s: &str, upper: bool) -> String {
 
 fn left_right(ctx: &mut Ctx, a: &[Value], left: bool, bytes: bool) -> Value {
     let t = try_v!(text_arg(ctx, a, 0));
-    let n = try_v!(num_or(ctx, a, 1, 1.0)).trunc();
-    if n < 0.0 {
+    let raw = try_v!(num_or(ctx, a, 1, 1.0));
+    let n = raw.trunc();
+    if raw < 0.0 {
         return Value::Error(ErrorKind::Value);
     }
     let chars: Vec<char> = value::utf16_chars(&t);
@@ -285,8 +288,10 @@ fn left_right(ctx: &mut Ctx, a: &[Value], left: bool, bytes: bool) -> Value {
 fn mid(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
     let t = try_v!(text_arg(ctx, a, 0));
     let start = try_v!(num_arg(ctx, a, 1)).trunc();
-    let n = try_v!(num_arg(ctx, a, 2)).trunc();
-    if start < 1.0 || n < 0.0 {
+    let n_raw = try_v!(num_arg(ctx, a, 2));
+    let n = n_raw.trunc();
+    // 길이도 소수를 버리기 전에 0 보다 작으면 #VALUE! (MID("abc",2,-0.5), 대조 실험 rand)
+    if start < 1.0 || n_raw < 0.0 {
         return Value::Error(ErrorKind::Value);
     }
     let chars: Vec<char> = value::utf16_chars(&t);
@@ -422,11 +427,13 @@ fn substitute(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn replace(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
     let t = try_v!(text_arg(ctx, a, 0));
     let start = try_v!(num_arg(ctx, a, 1)).trunc();
-    let n = try_v!(num_arg(ctx, a, 2)).trunc();
-    let new = try_v!(text_arg(ctx, a, 3));
-    if start < 1.0 || n < 0.0 {
+    let n_raw = try_v!(num_arg(ctx, a, 2));
+    let n = n_raw.trunc();
+    // 시작·길이가 틀리면 새 글 인수의 오류는 보지 않는다 (REPLACE("abc",-1,1,NA()) = #VALUE!, 대조 실험 prec)
+    if start < 1.0 || n_raw < 0.0 {
         return Value::Error(ErrorKind::Value);
     }
+    let new = try_v!(text_arg(ctx, a, 3));
     let chars: Vec<char> = value::utf16_chars(&t);
     if bytes {
         // 앞쪽·뒤쪽 바이트 조각 사이에 새 글 (걸친 반쪽은 공백: REPLACEB("한글나라",2,2,"X") = " X 나라")
@@ -565,6 +572,11 @@ fn numbervalue(ctx: &mut Ctx, a: &[Value]) -> Value {
     }
     match value::parse_plain_number(&s) {
         Some(v) => value::num_r(Ok(v / 100f64.mpowi(pct))),
+        // 날짜·시각 글도 읽는다 (NUMBERVALUE("2024-03-15") = 45366, 대조 실험 rand)
+        None if a.len() == 1 => match value::parse_number(&t, ctx.date1904()) {
+            Some(v) => Value::Number(v),
+            None => Value::Error(ErrorKind::Value),
+        },
         None => Value::Error(ErrorKind::Value),
     }
 }

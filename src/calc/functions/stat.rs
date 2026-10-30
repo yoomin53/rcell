@@ -49,22 +49,25 @@ pub const FNS: &[FnSpec] = &[
     f("VARA", 1, MANY, R, |c, a| agg(c, a, Agg::NumbersA, 10)),
     f("VARPA", 1, MANY, R, |c, a| agg(c, a, Agg::NumbersA, 11)),
     f("MEDIAN", 1, MANY, R, |c, a| {
+        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
         if late_array(a) {
             return Value::Error(ErrorKind::Value);
         }
-        median(&try_v!(collect_numbers(c, a, Agg::Numbers)))
+        median(&v)
     }),
     f("MODE", 1, MANY, R, |c, a| {
+        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
         if late_array(a) {
             return Value::Error(ErrorKind::Value);
         }
-        mode_sngl(&try_v!(collect_numbers(c, a, Agg::Numbers)))
+        mode_sngl(&v)
     }),
     f("MODE.SNGL", 1, MANY, R, |c, a| {
+        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
         if late_array(a) {
             return Value::Error(ErrorKind::Value);
         }
-        mode_sngl(&try_v!(collect_numbers(c, a, Agg::Numbers)))
+        mode_sngl(&v)
     }),
     f("MODE.MULT", 1, MANY, R, mode_mult),
     f("DEVSQ", 1, MANY, R, |c, a| {
@@ -194,9 +197,15 @@ pub const FNS: &[FnSpec] = &[
         num(try_v!(num_arg(c, a, 0)).mtanh())
     }),
     f("PERMUT", 2, 2, V, |c, a| {
-        let n = try_v!(num_arg(c, a, 0)).trunc();
-        let k = try_v!(num_arg(c, a, 1)).trunc();
-        if n <= 0.0 && !(n == 0.0 && k == 0.0) || k < 0.0 || k > n {
+        let (nr, kr) = (try_v!(num_arg(c, a, 0)), try_v!(num_arg(c, a, 1)));
+        let (n, k) = (nr.trunc(), kr.trunc());
+        // 소수를 버리기 전에 0 보다 작으면 #NUM! (PERMUT(10,-0.5), 대조 실험 rand)
+        if nr < 0.0
+            || kr < 0.0
+            || n <= 0.0 && !(n == 0.0 && k == 0.0)
+            || (nr > 0.0 && n == 0.0)
+            || k > n
+        {
             return Value::Error(ErrorKind::Num);
         }
         // e^{GAMMALN(n+1) − GAMMALN(n−k+1)} — 정수 곱이 아니다 (PERMUT(100,1) = 99.9999999999981,
@@ -205,9 +214,9 @@ pub const FNS: &[FnSpec] = &[
         num((lgamma(n + 1.0) - lgamma(n - k + 1.0)).mexp())
     }),
     f("PERMUTATIONA", 2, 2, V, |c, a| {
-        let n = try_v!(num_arg(c, a, 0)).trunc();
-        let k = try_v!(num_arg(c, a, 1)).trunc();
-        if n < 0.0 || k < 0.0 {
+        let (nr, kr) = (try_v!(num_arg(c, a, 0)), try_v!(num_arg(c, a, 1)));
+        let (n, k) = (nr.trunc(), kr.trunc());
+        if nr < 0.0 || kr < 0.0 {
             return Value::Error(ErrorKind::Num);
         }
         // PERMUTATIONA(0,0) = 0 (대조 실험 stat)
@@ -571,6 +580,8 @@ fn counta(ctx: &mut Ctx, a: &[Value]) -> Value {
 
 fn countblank(ctx: &mut Ctx, a: &[Value]) -> Value {
     match &a[0] {
+        // 여러 시트에 걸친 참조도 #NAME? (COUNTBLANK('S1:S3'!A1), 대조 실험 rand)
+        Value::Ref(r) if r.iter().any(|x| x.sheet != x.sheet_last) => Value::Error(ErrorKind::Name),
         Value::Ref(r) => {
             let mut total = 0f64;
             let mut filled = 0f64;
@@ -862,6 +873,10 @@ fn late_array(a: &[Value]) -> bool {
 }
 
 fn rank(ctx: &mut Ctx, a: &[Value], average: bool) -> Value {
+    // 범위 인수의 오류가 먼저다 (RANK.AVG(#VALUE!,#N/A) = #N/A, 대조 실험 rand)
+    if let Value::Error(e) = &a[1] {
+        return Value::Error(*e);
+    }
     let x = try_v!(num_arg(ctx, a, 0));
     let mut v = Vec::new();
     // 범위 안의 오류는 첫 번째 것이 그대로 나온다 (RANK(1,Data!H1:H3) = #N/A, RANK(5,Data!H5:H7) = #VALUE!, 대조 실험 misc6)
@@ -974,8 +989,7 @@ fn countif(ctx: &mut Ctx, a: &[Value]) -> Value {
             }
             Value::Number(n)
         }
-        // 범위 인수가 참조가 아니면 #VALUE! (COUNTIF({1,2,3},">1"), COUNTIF(5,5), 대조 실험 refargs)
-        Value::Error(e) => Value::Error(*e),
+        // 범위 인수가 참조가 아니면 오류 값도 #VALUE! (COUNTIF({1,2,3},">1"), COUNTIF(5,5), COUNTIF(IRR(…),…), 대조 실험 refargs)
         _ => Value::Error(ErrorKind::Value),
     }
 }
@@ -1620,10 +1634,6 @@ fn weibull(ctx: &mut Ctx, a: &[Value]) -> Value {
     let be = try_v!(num_arg(ctx, a, 2));
     let cum = try_v!(bool_or(ctx, a, 3, true));
     if x < 0.0 || al <= 0.0 || be <= 0.0 {
-        return Value::Error(ErrorKind::Num);
-    }
-    // 밀도의 x = 0 은 #NUM! (WEIBULL(0,1,1,FALSE), 대조 실험 dist)
-    if x == 0.0 && !cum {
         return Value::Error(ErrorKind::Num);
     }
     let t = (x / be).mpow(al);

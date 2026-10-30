@@ -240,18 +240,18 @@ pub const FNS: &[FnSpec] = &[
         })
     }),
     f("COMBIN", 2, 2, V, |c, a| {
-        let n = try_v!(num_arg(c, a, 0)).trunc();
-        let k = try_v!(num_arg(c, a, 1)).trunc();
-        if n < 0.0 || k < 0.0 || k > n {
+        let (nr, kr) = (try_v!(num_arg(c, a, 0)), try_v!(num_arg(c, a, 1)));
+        let (n, k) = (nr.trunc(), kr.trunc());
+        if nr < 0.0 || kr < 0.0 || k > n {
             return Value::Error(ErrorKind::Num);
         }
         num(super::special::binom_coef(n, k))
     }),
     f("COMBINA", 2, 2, V, |c, a| {
-        let n = try_v!(num_arg(c, a, 0)).trunc();
-        let k = try_v!(num_arg(c, a, 1)).trunc();
+        let (nr, kr) = (try_v!(num_arg(c, a, 0)), try_v!(num_arg(c, a, 1)));
+        let (n, k) = (nr.trunc(), kr.trunc());
         // COMBINA(0,0) 은 #NUM! (대조 실험 math)
-        if n < 0.0 || k < 0.0 || n == 0.0 {
+        if nr < 0.0 || kr < 0.0 || n == 0.0 {
             return Value::Error(ErrorKind::Num);
         }
         num(super::special::binom_coef(n + k - 1.0, k))
@@ -564,7 +564,7 @@ fn multinomial(ctx: &mut Ctx, a: &[Value]) -> Value {
     let mut denom = 1.0;
     for x in v {
         let n = x.trunc();
-        if n < 0.0 {
+        if x < 0.0 {
             return Value::Error(ErrorKind::Num);
         }
         total += n;
@@ -685,7 +685,7 @@ pub fn ifs_mask(
     let mut mask: Vec<bool> = Vec::new();
     for (range, crit) in pairs {
         // 범위 인수는 참조여야 한다 (배열 상수·값은 #VALUE!, 대조 실험 refargs)
-        if !matches!(range, Value::Ref(_) | Value::Error(_)) {
+        if !matches!(range, Value::Ref(_)) {
             return Err(ErrorKind::Value);
         }
         let g = grid(ctx, range)?;
@@ -719,7 +719,7 @@ pub fn ifs_mask(
 fn sumif(ctx: &mut Ctx, a: &[Value]) -> Value {
     // 합 범위도 참조여야 한다 (SUMIF(…,{4,5,6}) = #VALUE!, 대조 실험 refargs)
     if a.get(2)
-        .is_some_and(|t| !matches!(t, Value::Ref(_) | Value::Empty | Value::Error(_)))
+        .is_some_and(|t| !matches!(t, Value::Ref(_) | Value::Empty))
     {
         return Value::Error(ErrorKind::Value);
     }
@@ -748,7 +748,7 @@ fn sumifs(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Value);
     }
     let pairs: Vec<(&Value, &Value)> = a[1..].chunks(2).map(|p| (&p[0], &p[1])).collect();
-    if !matches!(a[0], Value::Ref(_) | Value::Error(_)) {
+    if !matches!(a[0], Value::Ref(_)) {
         return Value::Error(ErrorKind::Value);
     }
     let (r, c, mask) = try_v!(ifs_mask(ctx, &pairs));
@@ -1231,11 +1231,12 @@ fn arabic(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn base(ctx: &mut Ctx, a: &[Value]) -> Value {
     let n = try_v!(num_arg(ctx, a, 0)).trunc();
     let radix = try_v!(num_arg(ctx, a, 1)).trunc();
+    // 앞 인수가 틀리면 자릿수 인수의 오류는 보지 않는다 (BASE(1,1,NA()) = #NUM!, 대조 실험 prec)
+    if !(0.0..9.007_199_254_740_992e15).contains(&n) || !(2.0..=36.0).contains(&radix) {
+        return Value::Error(ErrorKind::Num);
+    }
     let min_len = try_v!(num_or(ctx, a, 2, 0.0)).trunc();
-    if !(0.0..9.007_199_254_740_992e15).contains(&n)
-        || !(2.0..=36.0).contains(&radix)
-        || !(0.0..=255.0).contains(&min_len)
-    {
+    if !(0.0..=255.0).contains(&min_len) {
         return Value::Error(ErrorKind::Num);
     }
     let mut s = to_radix(n as u64, radix as u32);

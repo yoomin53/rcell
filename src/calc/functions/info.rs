@@ -34,7 +34,8 @@ pub const FNS: &[FnSpec] = &[
         Value::Bool(!matches!(a[0], Value::Text(_)))
     }),
     f("ISREF", 1, 1, R, |_, a| {
-        Value::Bool(matches!(a[0], Value::Ref(_)))
+        // 여러 시트에 걸친 참조는 FALSE (ISREF('S1:S3'!A1), 대조 실험 rand)
+        Value::Bool(matches!(&a[0], Value::Ref(r) if r.iter().all(|x| x.sheet == x.sheet_last)))
     }),
     f("ISFORMULA", 1, 1, R, |c, a| match first_area(&a[0]) {
         Some(ar) if ar.book == 0 => {
