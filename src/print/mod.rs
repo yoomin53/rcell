@@ -449,18 +449,37 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
     let mut pages: Vec<(PageSize, Vec<Op>)> = Vec::new();
     // 키 큰 모드가 아닌 시트가 이미 나왔는가 (배율 100 의 99 는 그 첫째에만)
     let mut untall_seen = false;
+    let mut prints = Vec::new();
     for si in sheets {
-        let Some(sheet) = wb.sheets.get(si) else {
+        if wb.sheets.get(si).is_none() {
             continue;
-        };
+        }
         let sp = paginate::sheet_print_with(wb, si, !untall_seen);
         untall_seen |= !sp.tall && matches!(sp.settings.scaling, Scaling::Zoom(100));
+        prints.push((si, sp));
+    }
+    // 쪽 번호 (한셀 통합 문서 PDF — 시트 셋 실험): `&P` 는 PDF 의 쪽 차례 (시트가 바뀌어도 이어진다), `&N` 은 PDF 전체
+    // 쪽 수. 시트가 `firstPageNumber` (useFirstPageNumber) 를 주면 그 시트는 `&P` 에 (값 − 1) 을 더하고 `&N` 에도 더한다
+    // (첫 쪽 번호 5 인 시트: 5·6·7 / 14, 이어지는 시트는 4·5·6 / 10)
+    let counts: Vec<(usize, u32)> = prints
+        .iter()
+        .map(|(_, sp)| {
+            (
+                sp.pages.len(),
+                sp.settings
+                    .first_page_number
+                    .map_or(0, |n| n.saturating_sub(1)),
+            )
+        })
+        .collect();
+    let numbers = page_numbers(&counts);
+    let mut job_index = 0usize;
+    for (si, sp) in prints {
+        let sheet = &wb.sheets[si];
         let size = page_size(&sp.settings);
         let po = sheet.page.print_options.as_ref();
         let setup = sheet.page.setup.as_ref();
         let hfd = sheet.page.header_footer.as_ref();
-        let total = sp.pages.len() as u32;
-        let first_no = sp.settings.first_page_number.unwrap_or(1);
         // 그릴 범위 (모든 페이지의 행·열)
         let max_r = sp
             .pages
@@ -477,11 +496,13 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
             .max()
             .unwrap_or(0);
         let painter = SheetPainter::new(wb, sheet, max_r, max_c);
-        for (pi, page) in sp.pages.iter().enumerate() {
+        for page in sp.pages.iter() {
             // 아주 큰 범위(마지막 칸에 값이 있는 문서 — 80만 페이지)는 앞 페이지들만
             if pages.len() >= opts.max_pages.unwrap_or(MAX_PAGES) {
                 break;
             }
+            let (no, pages_total) = numbers.get(job_index).copied().unwrap_or((1, 1));
+            job_index += 1;
             let headings = po.is_some_and(|o| o.headings);
             let z = if sp.tall { 100 } else { sp.print_scale };
             let hpx = headings.then(|| heading_px(wb, z));
@@ -502,17 +523,17 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
             }
             // 머리글·바닥글
             if let Some(h) = hfd {
-                let no = first_no + pi as u32;
                 let fields = hf::HfFields {
                     page: no,
-                    pages: total + first_no - 1,
+                    pages: pages_total,
                     sheet: sheet.name.clone(),
                     file: opts.file_name.clone(),
                     path: opts.path.clone(),
                     date: opts.date.clone(),
                     time: opts.time.clone(),
                 };
-                let (head, foot) = if h.different_first && pi == 0 {
+                // 첫 쪽 머리글은 PDF 의 첫 쪽에만 (시트 셋 실험: 둘째·셋째 시트의 첫 쪽은 쪽 번호의 홀짝을 따른다)
+                let (head, foot) = if h.different_first && job_index == 1 {
                     (h.first_header.as_deref(), h.first_footer.as_deref())
                 } else if h.different_odd_even && no.is_multiple_of(2) {
                     (h.even_header.as_deref(), h.even_footer.as_deref())
@@ -566,7 +587,23 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
     pdf::write_pdf(&pages, &fonts, &opts.file_name)
 }
 
-/// 지금 날짜·시간을 한셀 머리글 꼴로 (`2026-10-28`, `06:13 오후`). 시간대는 `RCELL_TZ`(분, 예: 540) 가 없으면 UTC
+/// 쪽마다 (`&P`, `&N`): 시트마다 (쪽 수, 첫 쪽 번호 − 1 — 정하지 않으면 0). `&P` = PDF 의 쪽 차례 + 그 시트의 값, `&N` =
+/// 전체 쪽 수 + 그 시트의 값 (한셀 통합 문서 PDF: 첫 쪽 번호 5 인 시트 셋 3·3·4 쪽 → 5·6·7 / 14, 4·5·6 / 10, 7·8·9·10 / 10)
+pub fn page_numbers(sheets: &[(usize, u32)]) -> Vec<(u32, u32)> {
+    let total: usize = sheets.iter().map(|s| s.0).sum();
+    let total = total.min(u32::MAX as usize) as u32;
+    let mut out = Vec::new();
+    let mut index = 0u32;
+    for &(n, offset) in sheets {
+        for _ in 0..n.min(MAX_PAGES + 1) {
+            index += 1;
+            out.push((index + offset, total + offset));
+        }
+    }
+    out
+}
+
+/// 지금 날짜·시간을 한셀 머리글 꼴로 (`2026-10-28`, `06:13 오후`). 시간대는 `RCELL_TZ`(분, 예: 540) 가 없으면 +9:00 (한국 표준시)
 pub fn now_strings() -> (String, String) {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -574,7 +611,8 @@ pub fn now_strings() -> (String, String) {
     let tz: i64 = std::env::var("RCELL_TZ")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+        // 표준 라이브러리로는 지역 시간대를 알 수 없다 — 기본 +9:00 (한국 표준시, 계산 엔진의 NOW 와 같다)
+        .unwrap_or(9 * 60);
     let t = secs + tz * 60;
     let days = t.div_euclid(86_400);
     let sod = t.rem_euclid(86_400);
@@ -622,5 +660,31 @@ fn settings_default() -> Settings {
         row_breaks: Vec::new(),
         col_breaks: Vec::new(),
         first_page_number: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 한셀 통합 문서 PDF (시트 셋, 3·3·4 쪽, 첫 시트만 첫 쪽 번호 5)의 머리글 쪽 번호
+    #[test]
+    fn page_numbers_continue_across_sheets() {
+        let n = page_numbers(&[(3, 4), (3, 0), (4, 0)]);
+        let want = [
+            (5, 14),
+            (6, 14),
+            (7, 14),
+            (4, 10),
+            (5, 10),
+            (6, 10),
+            (7, 10),
+            (8, 10),
+            (9, 10),
+            (10, 10),
+        ];
+        assert_eq!(n, want);
+        // 첫 쪽 번호가 없으면 1 부터 이어진다
+        assert_eq!(page_numbers(&[(2, 0), (1, 0)]), [(1, 3), (2, 3), (3, 3)]);
     }
 }

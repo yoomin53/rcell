@@ -417,6 +417,24 @@ fn cases() -> Vec<Case> {
     setup(&mut wb).page_order = Some("overThenDown".into());
     add("order", wb, 15, "45,89,133,177", "10,19", 0);
 
+    // 병합한 제목 행 (A1:F1, A2:C2) 을 반복 — 첫 페이지 44 행, 다음부터 제목 2 행을 뺀 42 행
+    let mut wb = base();
+    fill(&mut wb, "A1:F150");
+    for (a, b) in [("A1", "F1"), ("A2", "C2")] {
+        wb.sheets[0].merges.push(rcell::model::CellRange {
+            start: CellRef::parse(a).unwrap(),
+            end: CellRef::parse(b).unwrap(),
+        });
+    }
+    name(&mut wb, "_xlnm.Print_Titles", "Sheet1!$1:$2");
+    add("titles_merge", wb, 4, "45,87,129", "", 0);
+
+    // 가로 먼저 (100 행 × 24 열)
+    let mut wb = base();
+    fill(&mut wb, "A1:X100");
+    setup(&mut wb).page_order = Some("overThenDown".into());
+    add("order_over", wb, 9, "45,89", "10,19", 0);
+
     // 페이지에 맞추기 (열 A 300px, 행 15pt): 95 부터 줄여 찾고, 25 밑이면 12
     for (n, wide, tall, pages, h, z) in [
         (20, 1, 1, 1, "", 95),
