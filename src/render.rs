@@ -147,7 +147,7 @@ pub fn overflow_end_col(wb: &Workbook, sheet: &Sheet, max_r: u32) -> Option<u32>
             || views.get(&(r, c)).is_some_and(|v| v.has_value())
             || ctx.cells.get(&(r, c)).is_some_and(|x| x.formula.is_some())
     };
-    let ov = overflow_spans(lay, &views, &blocked, lay_c);
+    let ov = overflow_spans(lay, &views, &blocked, lay_c, sheet.view.right_to_left);
     (!ov.span.is_empty()).then_some(ov.max_col)
 }
 
@@ -268,20 +268,27 @@ struct Overflow {
     max_col: u32,
 }
 
+/// 열 하나의 이웃 열 (너비 0 인 숨긴 열은 건너뛴다)
+type NeighborFn<'a> = dyn Fn(u32) -> Option<u32> + 'a;
+
 /// 넘치는 글자의 범위를 정한다 (값이 있는 칸·병합·스파크라인에서 멈춘다)
 fn overflow_spans(
     lay: &layout::Layout,
     views: &HashMap<(u32, u32), CellView>,
     blocked: &dyn Fn(u32, u32) -> bool,
     ncols: u32,
+    rtl: bool,
 ) -> Overflow {
     let mut out = Overflow {
         span: HashMap::new(),
         no_vline: HashSet::new(),
         max_col: 0,
     };
-    let next = |c: u32| ((c + 1)..ncols).find(|&k| lay.col_w(k) > 0);
-    let prev = |c: u32| (0..c).rev().find(|&k| lay.col_w(k) > 0);
+    let up = |c: u32| ((c + 1)..ncols).find(|&k| lay.col_w(k) > 0);
+    let down = |c: u32| (0..c).rev().find(|&k| lay.col_w(k) > 0);
+    // 오른쪽에서 왼쪽 시트: 화면의 오른쪽 이웃은 앞 열, 왼쪽 이웃은 다음 열 (한셀 화면 — 맞춤은 화면 방향 그대로)
+    let (next, prev): (&NeighborFn<'_>, &NeighborFn<'_>) =
+        if rtl { (&down, &up) } else { (&up, &down) };
     for (&(r, c), v) in views {
         if !v.may_overflow() || lay.span.contains_key(&(r, c)) {
             continue;
@@ -298,12 +305,12 @@ fn overflow_spans(
                     break;
                 }
                 right += lay.col_w(n);
-                out.no_vline.insert((r, k));
+                out.no_vline.insert(if rtl { (r, n) } else { (r, k) });
                 k = n;
             }
             if right > 0 {
                 out.span.insert((r, c), (0, right));
-                out.max_col = out.max_col.max(k);
+                out.max_col = out.max_col.max(if rtl { c } else { k });
             }
             // 이어진 범위보다 넓으면 그 바깥으로도 넘친다 (아래에서 다시 보지 않는다)
             continue;
@@ -335,11 +342,13 @@ fn overflow_spans(
                 if blocked(r, n) || got as f64 >= want {
                     break;
                 }
-                out.no_vline.insert(if forward { (r, k) } else { (r, n) });
+                // 지울 세로 경계는 칸의 오른쪽 (화면 왼쪽 시트) 또는 칸의 왼쪽 (오른쪽에서 왼쪽 시트 — 격자선이 칸의 왼쪽)
+                out.no_vline
+                    .insert(if forward != rtl { (r, k) } else { (r, n) });
                 got += lay.col_w(n);
                 k = n;
             }
-            if forward {
+            if forward != rtl {
                 out.max_col = out.max_col.max(k);
             }
             got
@@ -662,7 +671,8 @@ pub fn sheet_table_grid(
             || cells.get(&(r, c)).is_some_and(|x| x.formula.is_some())
             || sparks.contains_key(&(r, c))
     };
-    let ov = overflow_spans(lay, &views, &blocked, lay_c);
+    let rtl = view.right_to_left;
+    let ov = overflow_spans(lay, &views, &blocked, lay_c, rtl);
 
     // ---- 3. 그릴 범위: 쓰는 범위 + 넘친 글자 + 최소 크기
     let mut ncols = used_c.max(ov.max_col + 1).min(lay_c);
@@ -848,9 +858,10 @@ pub fn sheet_table_grid(
     }
     let _ = write!(
         s,
-        "<table class=\"rc-sheet{}{}{}\">",
+        "<table class=\"rc-sheet{}{}{}{}\">",
         if grid { " rc-grid" } else { "" },
         if grid_color.is_some() { " rc-gc" } else { "" },
+        if rtl { " rc-rtl" } else { "" },
         if zoom_pct != 100 {
             format!(" rc-z{zoom_pct}")
         } else {
@@ -966,6 +977,11 @@ pub fn sheet_table_grid(
             if tlooks.get(&(r, c)).is_some_and(|t| t.button) {
                 inner.push_str(&table::button_svg(w, h));
             }
+            // 오른쪽에서 왼쪽 시트: 표를 통째로 뒤집었으니 칸 안 내용(글·아이콘·막대)은 한 번 더 뒤집어 바로 세운다
+            // (테두리는 뒤집힌 채 둔다 — 왼쪽 테두리가 물리적 오른쪽에 그려진다)
+            if rtl && !inner.is_empty() {
+                inner = format!("<div class=\"rc-flip\">{inner}</div>");
+            }
             // 테두리: 병합 영역은 가장자리 칸들의 테두리 (위·왼쪽은 왼쪽 위 칸, 오른쪽은 오른쪽 위 칸,
             // 아래는 왼쪽 아래 칸). 넘친 글자가 지나가는 세로 경계는 지운다 (한셀 화면: 위·아래 선은 남는다)
             let style_at = |rr: u32, cc: u32| {
@@ -1067,6 +1083,9 @@ pub const CSS: &str = "\
 table.rc-sheet{border-collapse:separate;border-spacing:0;table-layout:fixed;background:#fff;width:max-content}\
 table.rc-sheet td{position:relative;box-sizing:border-box;padding:0;border:0 solid transparent;border-right-width:1px;border-bottom-width:1px;font-size:11pt;vertical-align:top;background-clip:border-box;overflow:visible}\
 table.rc-grid td{border-right-color:#D9D9D9;border-bottom-color:#D9D9D9}\
+table.rc-rtl{transform:scaleX(-1)}\
+table.rc-rtl th{transform:scaleX(-1)}\
+.rc-flip{position:absolute;left:1px;top:0;width:100%;height:100%;transform:scaleX(-1)}\
 table.rc-sheet th{box-sizing:border-box;background:#F5F5F5;border:0 solid #CCCCCC;border-right-width:1px;border-bottom-width:1px;padding:0;font-weight:normal;font-size:9pt;color:#333;position:sticky;top:0;z-index:3;overflow:hidden;white-space:nowrap}\
 table.rc-sheet thead th.rc-corner{left:0;z-index:5}\
 table.rc-sheet tbody th{position:sticky;left:0;text-align:center}\

@@ -459,7 +459,7 @@ fn page_body(
             || views.get(&(r, c)).is_some_and(|v| v.has_value())
             || ctx.cells.get(&(r, c)).is_some_and(|x| x.formula.is_some())
     };
-    let ov = overflow_spans(lay, &views, &blocked, lay_c);
+    let ov = overflow_spans(lay, &views, &blocked, lay_c, false);
 
     // 그릴 칸: 페이지의 (행, 열) 중 병합에 덮이지 않은 것 + 페이지에 걸친 병합의 시작 칸
     let mut draw: Vec<(u32, u32)> = Vec::new();
