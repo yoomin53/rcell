@@ -118,7 +118,13 @@ pub fn remove_duplicates(
         }
     }
     let removed = (r1 + 1 - next) as usize;
-    if removed == 0 {
+    // 범위에 값이 하나도 없으면 아무것도 하지 않는다 (한셀 — 빈 칸뿐인 범위는 그대로, 서식도 지우지 않는다)
+    let any_value = wb.sheets[si].cells.iter().any(|c| {
+        (r0..=r1).contains(&c.r.row)
+            && (c0..=c1).contains(&c.r.col)
+            && (!c.value.is_empty() || c.formula.is_some())
+    });
+    if removed == 0 || !any_value {
         return Ok(0);
     }
     let sheet = &mut wb.sheets[si];
@@ -135,6 +141,19 @@ pub fn remove_duplicates(
             None => false,
         }
     });
+    // 모자란 끝 칸은 내용과 서식을 지운다 — 한셀은 기본 서식(0번)으로 되돌린다 (열 서식이 있어도)
+    for row in next..=r1 {
+        for col in c0..=c1 {
+            if sheet.effective_style(row, col) != 0 {
+                sheet.cells.push(crate::model::Cell {
+                    r: CellRef { row, col },
+                    style: 0,
+                    value: CellValue::Empty,
+                    formula: None,
+                });
+            }
+        }
+    }
     sheet.cells.sort_by_key(|c| (c.r.row, c.r.col));
     // 메모·하이퍼링크는 칸을 따라간다 (지워진 행의 것은 없어진다)
     sheet.comments.retain_mut(|m| {
