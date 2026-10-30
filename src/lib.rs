@@ -113,6 +113,11 @@ pub fn from_bytes_with_password(bytes: Vec<u8>, password: Option<&str>) -> Resul
                 };
                 return from_bytes_with_password(plain, None);
             }
+            // 한셀이 암호를 걸어 저장한 레거시 `.cell`·`.nxl`: `/HCellCrypto` 와 암호화한 `/Workbook`
+            if has("/HCellCrypto") {
+                let plain = decrypt_legacy_container(&bytes, password)?;
+                return legacy::read(&plain);
+            }
             legacy::read(&bytes)
         }
         _ if ods::is_ods(&bytes) => ods::read(&bytes),
@@ -153,7 +158,7 @@ pub enum SaveFormat {
 }
 
 impl SaveFormat {
-    /// 파일 이름으로 고른다: `.xlsx` → Excel, `.xlsb`·`*.bin.cell` → 바이너리, `*.legacy.cell` → 레거시,
+    /// 파일 이름으로 고른다: `.xlsx`·`.xltx`·`.xltm` → Excel (서식 파일은 콘텐츠 형식만 다르다), `.xlsb`·`*.bin.cell` → 바이너리, `*.legacy.cell` → 레거시,
     /// `.xls` → Excel 97-2003, `.nxl` → 넥셀, `.ods` → ODF, `.csv` → CSV, `.txt`·`.tsv` → 탭 텍스트, `.prn` → 공백 텍스트, 나머지 → XML `.cell`
     pub fn from_path(path: &Path) -> SaveFormat {
         let name = path
@@ -161,7 +166,7 @@ impl SaveFormat {
             .and_then(|n| n.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if name.ends_with(".xlsx") {
+        if name.ends_with(".xlsx") || name.ends_with(".xltx") || name.ends_with(".xltm") {
             SaveFormat::Xlsx
         } else if name.ends_with(".xlsb") || name.ends_with(".bin.cell") {
             SaveFormat::Binary
@@ -200,24 +205,83 @@ pub fn save_as(wb: &Workbook, path: impl AsRef<Path>, format: SaveFormat) -> Res
     if format == SaveFormat::Htm {
         return webpage::save_htm(wb, path.as_ref());
     }
+    std::fs::write(path.as_ref(), render(wb, path.as_ref(), format)?)?;
+    Ok(())
+}
+
+/// 암호를 걸어 저장한다. 한셀이 암호를 받아들이는 형식은 XML `.cell`·`.xlsx`·`.xlsm`·바이너리 `.cell`·`.xlsb` 는 표준 암호화
+/// (AES-128 ECB, SHA-1) OLE2 컨테이너로, 레거시 `.cell`·`.nxl` 은 `/Workbook` 을 같은 키로 암호화하고 `/HCellCrypto` 를 더한다.
+/// 한셀이 암호를 무시하는 형식(`.xls`·`.ods`·텍스트)은 오류를 돌려준다
+pub fn save_as_encrypted(
+    wb: &Workbook,
+    path: impl AsRef<Path>,
+    format: SaveFormat,
+    password: &str,
+) -> Result<()> {
+    let bytes = render(wb, path.as_ref(), format)?;
+    let out = match format {
+        SaveFormat::Cell | SaveFormat::Xlsx | SaveFormat::Binary => {
+            binary::encrypt::wrap_with_password(&bytes, password)
+        }
+        SaveFormat::Legacy | SaveFormat::Nxl => {
+            encrypt_legacy_container(&bytes, password, format == SaveFormat::Nxl)?
+        }
+        _ => {
+            return Err(Error::InvalidValue {
+                context: "암호 저장".into(),
+                value: format!(
+                    "{format:?} 형식은 암호를 걸 수 없다 (XML·바이너리 .cell, .xlsx, 레거시 .cell, .nxl 만)"
+                ),
+            });
+        }
+    };
+    std::fs::write(path.as_ref(), out)?;
+    Ok(())
+}
+
+/// `.xltx`·`.xltm` 이름이면 통합 문서 콘텐츠 형식을 서식 파일(template) 것으로 바꾼다. 한셀은 서식 파일을 저장하지 못하지만
+/// (`SaveAs` 53·54·17 은 0x800A03EC) 이 콘텐츠 형식의 파일은 연다 (한셀 열기 대조)
+fn template_type(bytes: Vec<u8>, path: &Path) -> Vec<u8> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let to = match ext.as_str() {
+        "xltx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml",
+        "xltm" => "application/vnd.ms-excel.template.macroEnabled.main+xml",
+        _ => return bytes,
+    };
+    let from = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
+    let patched = container::read_entry(&bytes, "[Content_Types].xml")
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .map(|s| s.replace(from, to))
+        .and_then(|s| {
+            container::replace_zip_parts(&bytes, &[("[Content_Types].xml".into(), s.into_bytes())])
+                .ok()
+        });
+    patched.unwrap_or(bytes)
+}
+
+fn render(wb: &Workbook, path: &Path, format: SaveFormat) -> Result<Vec<u8>> {
     let bytes = match format {
         SaveFormat::Cell => writer::write(wb, writer::Flavor::Cell)?,
-        SaveFormat::Xlsx => writer::write(wb, writer::Flavor::Xlsx)?,
+        SaveFormat::Xlsx => template_type(writer::write(wb, writer::Flavor::Xlsx)?, path),
         SaveFormat::Binary => binary::writer::write(wb, &Default::default())?,
         SaveFormat::Legacy => {
-            legacy::write_with_options(wb, &legacy::WriteOptions::for_path(path.as_ref()))?.0
+            legacy::write_with_options(wb, &legacy::WriteOptions::for_path(path))?.0
         }
         SaveFormat::Csv => csv::write(wb, csv::Delimiter::Comma)?,
         SaveFormat::Text => csv::write(wb, csv::Delimiter::Tab)?,
         SaveFormat::Prn => csv::write(wb, csv::Delimiter::Space)?,
-        SaveFormat::Xls => legacy::write_xls(wb, &legacy::WriteOptions::for_path(path.as_ref()))?.0,
-        SaveFormat::Nxl => legacy::write_nxl(wb, &legacy::WriteOptions::for_path(path.as_ref()))?.0,
+        SaveFormat::Xls => legacy::write_xls(wb, &legacy::WriteOptions::for_path(path))?.0,
+        SaveFormat::Nxl => legacy::write_nxl(wb, &legacy::WriteOptions::for_path(path))?.0,
         SaveFormat::Ods => ods::write(wb)?,
         SaveFormat::Mht => webpage::write_mht(wb),
         SaveFormat::Htm => unreachable!("위에서 처리"),
     };
-    std::fs::write(path, bytes)?;
-    Ok(())
+    Ok(bytes)
 }
 
 /// 통합 문서를 바이너리 `.cell` (한셀 xlCellb) 로 저장한다.
@@ -265,7 +329,58 @@ pub fn decrypt_if_needed(bytes: Vec<u8>, password: Option<&str>) -> Result<Vec<u
     )
 }
 
+/// `/HCellCrypto` 가 있는 복합 문서를 풀어 암호 없는 복합 문서로 (`/Workbook` 만 풀고 나머지 스트림은 그대로)
+fn decrypt_legacy_container(bytes: &[u8], password: Option<&str>) -> Result<Vec<u8>> {
+    let cfb = cfb::Cfb::open(bytes)?;
+    let crypto_stream = cfb.read("/HCellCrypto")?;
+    let pw = password.ok_or(Error::WrongPassword)?;
+    let mut parts: Vec<(String, Vec<u8>)> = Vec::new();
+    for (path, _) in cfb.streams() {
+        if path.eq_ignore_ascii_case("/HCellCrypto") {
+            continue;
+        }
+        let data = cfb.read(&path)?;
+        let data = if path.eq_ignore_ascii_case("/Workbook") {
+            crypto::decrypt_hcell_workbook(&crypto_stream, &data, pw)?
+        } else {
+            data
+        };
+        parts.push((path.trim_start_matches('/').to_string(), data));
+    }
+    let streams: Vec<cfb_write::Stream> = parts
+        .iter()
+        .map(|(n, d)| cfb_write::Stream { name: n, data: d })
+        .collect();
+    Ok(cfb_write::write(&streams, 0))
+}
+
 /// 암호가 걸린 파일을 연다.
 pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> Result<Workbook> {
     open_path(path.as_ref(), Some(password))
+}
+
+/// 복합 문서의 `/Workbook` 을 암호화한다 (`/HCellCrypto` 를 더한다)
+fn encrypt_legacy_container(bytes: &[u8], password: &str, nxl: bool) -> Result<Vec<u8>> {
+    let cfb = cfb::Cfb::open(bytes)?;
+    let h = crypto::sha1(bytes);
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&h[..16]);
+    let mut parts: Vec<(String, Vec<u8>)> = Vec::new();
+    for (path, _) in cfb.streams() {
+        let data = cfb.read(&path)?;
+        parts.push((path.trim_start_matches('/').to_string(), data));
+    }
+    let wb_at = parts
+        .iter()
+        .position(|(n, _)| n.eq_ignore_ascii_case("Workbook"))
+        .ok_or_else(|| Error::MissingPart("/Workbook".into()))?;
+    let (crypto_stream, enc) =
+        crypto::encrypt_hcell_workbook(&parts[wb_at].1, password, nxl, &salt, &salt);
+    parts[wb_at].1 = enc;
+    parts.push(("HCellCrypto".into(), crypto_stream));
+    let streams: Vec<cfb_write::Stream> = parts
+        .iter()
+        .map(|(n, d)| cfb_write::Stream { name: n, data: d })
+        .collect();
+    Ok(cfb_write::write(&streams, 0))
 }
