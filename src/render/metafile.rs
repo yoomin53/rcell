@@ -17,6 +17,12 @@
 
 use super::page::Seg;
 
+/// 호의 (시작점, 조각들 — 각 조각은 제어점 둘과 끝점)
+type ArcPieces = ((f64, f64), Vec<[(f64, f64); 3]>);
+
+/// 빗금 붓: (무늬, 빗금 색, 바탕색)
+pub type Hatch = (u8, [u8; 3], Option<[u8; 3]>);
+
 /// 그리기 하나 (틀의 px)
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
@@ -26,6 +32,11 @@ pub enum Item {
         /// 굵기(px), 색, 점선 무늬(px)
         stroke: Option<(f64, [u8; 3], Vec<f64>)>,
         even_odd: bool,
+        /// 선 끝·꺾임 (PDF 의 J·j 값: 0 평평/뾰족, 1 둥글게, 2 네모/비스듬) — GDI 펜 기본은 둘 다 둥글다 (한셀 PDF 는 `1 J 1 j`)
+        caps: (u8, u8),
+        /// 빗금 붓 채우기: (무늬 0~5 = 가로·세로·\·/·+·x, 빗금 색, 바탕색 — 불투명 모드일 때) — 한셀 PDF 는 8pt 바둑 무늬(Tiling)로,
+        /// 페이지 원점에 맞춘다. 이때 `fill` 은 None
+        hatch: Option<Hatch>,
     },
     Text {
         /// 기준점 (글자 정렬 기준)
@@ -47,6 +58,14 @@ pub enum Item {
         /// 시계 방향 각도 (도)
         angle: f64,
     },
+    /// 사각형으로 자르기 시작 (틀의 px) — 짝이 되는 `Unclip` 까지
+    Clip {
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+    },
+    Unclip,
     /// 비트맵 (BMP 파일 바이트)
     Image {
         x: f64,
@@ -147,6 +166,8 @@ enum Obj {
     Brush {
         style: u32,
         color: [u8; 3],
+        /// 빗금 무늬 (style 2)
+        hatch: u32,
     },
     Font(FontSpec),
     Other,
@@ -194,6 +215,13 @@ struct Dc {
     text_align: u32,
     winding: bool,
     cur: (f64, f64),
+    /// 바탕색과 바탕 모드 (빗금 붓 — 기본 흰색·불투명)
+    bk_color: [u8; 3],
+    bk_opaque: bool,
+    /// 호의 방향 (SETARCDIRECTION — 기본 반시계)
+    arc_ccw: bool,
+    /// 열려 있는 자르기 수
+    clips: u32,
 }
 
 impl Dc {
@@ -212,6 +240,10 @@ impl Dc {
             text_align: 0,
             winding: false,
             cur: (0.0, 0.0),
+            bk_color: [255; 3],
+            bk_opaque: true,
+            arc_ccw: true,
+            clips: 0,
         }
     }
 }
@@ -221,6 +253,7 @@ fn stock(n: u32) -> Obj {
     let gray = |v: u8| Obj::Brush {
         style: 0,
         color: [v, v, v],
+        hatch: 0,
     };
     match n {
         0 => gray(255),
@@ -231,6 +264,7 @@ fn stock(n: u32) -> Obj {
         5 => Obj::Brush {
             style: 1,
             color: [0; 3],
+            hatch: 0,
         },
         6 => Obj::Pen {
             style: 0,
@@ -357,9 +391,45 @@ impl Player {
         Some((w, *color, dash))
     }
 
+    /// 펜의 (끝 모양, 꺾임) — 확장 펜의 스타일 비트, 기본은 둥글게
+    fn caps(&self) -> (u8, u8) {
+        let Obj::Pen { style, .. } = &self.dc.pen else {
+            return (1, 1);
+        };
+        let cap = match style & 0x0F00 {
+            0x100 => 2,
+            0x200 => 0,
+            _ => 1,
+        };
+        let join = match style & 0xF000 {
+            0x1000 => 2,
+            0x2000 => 0,
+            _ => 1,
+        };
+        (cap, join)
+    }
+
+    /// 빗금 붓이면 (무늬, 색, 바탕색)
+    fn hatch(&self) -> Option<Hatch> {
+        match &self.dc.brush {
+            Obj::Brush {
+                style: 2,
+                color,
+                hatch,
+            } if *hatch < 6 => Some((
+                *hatch as u8,
+                *color,
+                self.dc.bk_opaque.then_some(self.dc.bk_color),
+            )),
+            _ => None,
+        }
+    }
+
     fn fill(&self) -> Option<[u8; 3]> {
         match &self.dc.brush {
-            Obj::Brush { style: 0, color } => Some(*color),
+            Obj::Brush {
+                style: 0, color, ..
+            } => Some(*color),
             _ => None,
         }
     }
@@ -370,11 +440,12 @@ impl Player {
             p.extend(segs);
             return;
         }
+        let hatch = if fill { self.hatch() } else { None };
         let (fill, stroke) = (
             fill.then(|| self.fill()).flatten(),
             stroke.then(|| self.stroke()).flatten(),
         );
-        if fill.is_none() && stroke.is_none() {
+        if fill.is_none() && stroke.is_none() && hatch.is_none() {
             return;
         }
         self.items.push(Item::Path {
@@ -382,6 +453,8 @@ impl Player {
             fill,
             stroke,
             even_odd: !self.dc.winding,
+            caps: self.caps(),
+            hatch,
         });
     }
 
@@ -546,6 +619,113 @@ impl Player {
         });
     }
 
+    /// 사각형으로 자르기 시작 (논리 좌표)
+    fn clip_rect(&mut self, l: f64, t: f64, r: f64, b: f64) {
+        let (x0, y0) = self.pt(l, t);
+        let (x1, y1) = self.pt(r, b);
+        self.items.push(Item::Clip {
+            x0: x0.min(x1),
+            y0: y0.min(y1),
+            x1: x0.max(x1),
+            y1: y0.max(y1),
+        });
+        self.dc.clips += 1;
+    }
+
+    /// 저장한 장치 상태로 돌아간다 — 그 뒤에 연 자르기를 닫는다
+    fn restore(&mut self, dc: Dc) {
+        for _ in dc.clips..self.dc.clips {
+            self.items.push(Item::Unclip);
+        }
+        self.dc = dc;
+    }
+
+    /// 열린 자르기를 모두 닫는다
+    fn finish(&mut self) {
+        for _ in 0..self.dc.clips {
+            self.items.push(Item::Unclip);
+        }
+        self.dc.clips = 0;
+    }
+
+    /// 타원 `box` 위의 호 (논리 좌표): 시작·끝 반지름 점의 각도로 방향에 따라 조각 (베지어 ≤ 90°).
+    /// 돌려주는 것은 (시작점, 조각들 — 각 조각은 제어점 둘과 끝점)
+    fn arc_pieces(
+        &self,
+        (l, t, r, b): (f64, f64, f64, f64),
+        start: (f64, f64),
+        end: (f64, f64),
+    ) -> Option<ArcPieces> {
+        let (cx, cy) = ((l + r) / 2.0, (t + b) / 2.0);
+        let (rx, ry) = ((r - l).abs() / 2.0, (b - t).abs() / 2.0);
+        if rx == 0.0 || ry == 0.0 {
+            return None;
+        }
+        let ang = |p: (f64, f64)| ((p.1 - cy) / ry).atan2((p.0 - cx) / rx);
+        let (a0, a1) = (ang(start), ang(end));
+        let tau = std::f64::consts::TAU;
+        // 화면(y 아래) 에서 반시계 = 각도 감소
+        let mut sweep = a1 - a0;
+        if self.dc.arc_ccw {
+            while sweep >= 0.0 {
+                sweep -= tau;
+            }
+        } else {
+            while sweep <= 0.0 {
+                sweep += tau;
+            }
+        }
+        let n = (sweep.abs() / std::f64::consts::FRAC_PI_2).ceil().max(1.0) as usize;
+        let d = sweep / n as f64;
+        let k = 4.0 / 3.0 * (d / 4.0).tan();
+        let pt_at = |a: f64| (cx + rx * a.cos(), cy + ry * a.sin());
+        let tan_at = |a: f64| (-rx * a.sin(), ry * a.cos());
+        let mut out = Vec::new();
+        for i in 0..n {
+            let (s0, s1) = (a0 + d * i as f64, a0 + d * (i + 1) as f64);
+            let (p0, p3) = (pt_at(s0), pt_at(s1));
+            let (t0, t3) = (tan_at(s0), tan_at(s1));
+            out.push([
+                (p0.0 + k * t0.0, p0.1 + k * t0.1),
+                (p3.0 - k * t3.0, p3.1 - k * t3.1),
+                p3,
+            ]);
+        }
+        Some((pt_at(a0), out))
+    }
+
+    /// 호·활꼴·부채꼴 (kind 0 호, 1 활꼴, 2 부채꼴)
+    fn arc_shape(
+        &mut self,
+        kind: u8,
+        bx: (f64, f64, f64, f64),
+        start: (f64, f64),
+        end: (f64, f64),
+    ) {
+        let Some((p0, pieces)) = self.arc_pieces(bx, start, end) else {
+            return;
+        };
+        let mut segs = Vec::new();
+        let m = |p: (f64, f64)| self.pt(p.0, p.1);
+        if kind == 2 {
+            let c = m(((bx.0 + bx.2) / 2.0, (bx.1 + bx.3) / 2.0));
+            segs.push(Seg::Move(c.0, c.1));
+            let q = m(p0);
+            segs.push(Seg::Line(q.0, q.1));
+        } else {
+            let q = m(p0);
+            segs.push(Seg::Move(q.0, q.1));
+        }
+        for pc in &pieces {
+            let (a, b, c) = (m(pc[0]), m(pc[1]), m(pc[2]));
+            segs.push(Seg::Cubic(a.0, a.1, b.0, b.1, c.0, c.1));
+        }
+        if kind != 0 {
+            segs.push(Seg::Close);
+        }
+        self.emit(segs, kind != 0, true);
+    }
+
     fn image(&mut self, x: f64, y: f64, w: f64, h: f64, bmp: Vec<u8>) {
         let (x0, y0) = self.pt(x, y);
         let (x1, y1) = self.pt(x + w, y + h);
@@ -578,11 +758,12 @@ impl Player {
         let Some(segs) = self.path.take() else {
             return;
         };
+        let hatch = if fill { self.hatch() } else { None };
         let (fill, stroke) = (
             fill.then(|| self.fill()).flatten(),
             stroke.then(|| self.stroke()).flatten(),
         );
-        if segs.is_empty() || (fill.is_none() && stroke.is_none()) {
+        if segs.is_empty() || (fill.is_none() && stroke.is_none() && hatch.is_none()) {
             return;
         }
         self.items.push(Item::Path {
@@ -590,6 +771,8 @@ impl Player {
             fill,
             stroke,
             even_odd: !self.dc.winding,
+            caps: self.caps(),
+            hatch,
         });
     }
 }
@@ -661,6 +844,7 @@ fn emf(d: &[u8]) -> Option<Metafile> {
         }
         o += n;
     }
+    p.finish();
     Some(Metafile {
         width: fw,
         height: fh,
@@ -739,6 +923,8 @@ fn emf_record(p: &mut Player, ty: u32, r: &Bytes) {
             11 => p.dc.vp_ext = (r.i32(8)? as f64, r.i32(12)? as f64),
             12 => p.dc.vp_org = (r.i32(8)? as f64, r.i32(12)? as f64),
             17 => p.dc.map_mode = r.u32(8)?,
+            18 => p.dc.bk_opaque = r.u32(8)? != 1,
+            25 => p.dc.bk_color = colorref(r.u32(8)?),
             19 => p.dc.winding = r.u32(8)? == 2,
             22 => p.dc.text_align = r.u32(8)?,
             24 => p.dc.text_color = colorref(r.u32(8)?),
@@ -759,7 +945,7 @@ fn emf_record(p: &mut Player, ty: u32, r: &Bytes) {
                 if let Some(mut dc) = dc {
                     // 현재 위치는 복원하지 않는다 (GDI 도 위치는 장치 상태에서 따로)
                     dc.cur = p.dc.cur;
-                    p.dc = dc;
+                    p.restore(dc);
                 }
             }
             35 => {
@@ -834,6 +1020,7 @@ fn emf_record(p: &mut Player, ty: u32, r: &Bytes) {
                     Obj::Brush {
                         style: r.u32(12)?,
                         color: colorref(r.u32(16)?),
+                        hatch: r.u32(20)?,
                     },
                 );
             }
@@ -898,11 +1085,61 @@ fn emf_record(p: &mut Player, ty: u32, r: &Bytes) {
             62 => p.finish_path(true, false),
             63 => p.finish_path(true, true),
             64 => p.finish_path(false, true),
-            67 | 75 | 30 => {
-                // 자르기는 쓰지 않는다 (경로는 버린다)
+            30 => p.clip_rect(
+                r.i32(8)? as f64,
+                r.i32(12)? as f64,
+                r.i32(16)? as f64,
+                r.i32(20)? as f64,
+            ),
+            // 경로·영역 자르기는 그리지 않는다 (경로는 버린다)
+            67 | 75 => {
                 if ty == 67 {
                     p.path = None;
                 }
+            }
+            57 => p.dc.arc_ccw = r.u32(8)? != 2,
+            // ARC·CHORD·PIE: 상자(16), 시작점(8), 끝점(8). ARCTO(55) 는 한셀 PDF 에 경로가 없다 (그리지 않는다)
+            45..=47 => {
+                let bx = (
+                    r.i32(8)? as f64,
+                    r.i32(12)? as f64,
+                    r.i32(16)? as f64,
+                    r.i32(20)? as f64,
+                );
+                let st = (r.i32(24)? as f64, r.i32(28)? as f64);
+                let en = (r.i32(32)? as f64, r.i32(36)? as f64);
+                p.arc_shape(ty as u8 - 45, bx, st, en);
+            }
+            // ANGLEARC: 중심(8, 12), 반지름(16), 시작·쓸기 각도 (도, 반시계 — 화면에서 위가 +)
+            41 => {
+                let (cx, cy, rad) = (r.i32(8)? as f64, r.i32(12)? as f64, r.u32(16)? as f64);
+                let (a0, sw) = (r.f32(20)?.to_radians(), r.f32(24)?.to_radians());
+                let pt_at = |a: f64| (cx + rad * a.cos(), cy - rad * a.sin());
+                let from = p.dc.cur;
+                let n = (sw.abs() / std::f64::consts::FRAC_PI_2).ceil().max(1.0) as usize;
+                let d = sw / n as f64;
+                let k = 4.0 / 3.0 * (d / 4.0).tan();
+                let mut segs = Vec::new();
+                let m = |q: (f64, f64)| p.pt(q.0, q.1);
+                let (f0, s0) = (m(from), m(pt_at(a0)));
+                segs.push(Seg::Move(f0.0, f0.1));
+                segs.push(Seg::Line(s0.0, s0.1));
+                for i in 0..n {
+                    let (u0, u1) = (a0 + d * i as f64, a0 + d * (i + 1) as f64);
+                    let (q0, q3) = (pt_at(u0), pt_at(u1));
+                    let (t0, t3) = (
+                        (-rad * u0.sin(), -rad * u0.cos()),
+                        (-rad * u1.sin(), -rad * u1.cos()),
+                    );
+                    let (c1, c2, c3) = (
+                        m((q0.0 + k * t0.0, q0.1 + k * t0.1)),
+                        m((q3.0 - k * t3.0, q3.1 - k * t3.1)),
+                        m(q3),
+                    );
+                    segs.push(Seg::Cubic(c1.0, c1.1, c2.0, c2.1, c3.0, c3.1));
+                }
+                p.emit(segs, false, true);
+                p.dc.cur = pt_at(a0 + sw);
             }
             81 => {
                 // STRETCHDIBITS: bounds, xDest yDest xSrc ySrc cxSrc cySrc, offBmi cbBmi offBits cbBits usage rop cxDest cyDest
@@ -993,6 +1230,7 @@ fn wmf(d: &[u8]) -> Option<Metafile> {
         wmf_record(&mut p, f, &Bytes(&d[o + 6..o + n]));
         o += n;
     }
+    p.finish();
     Some(Metafile {
         width: ext.0.abs(),
         height: ext.1.abs(),
@@ -1004,8 +1242,9 @@ fn wmf_record(p: &mut Player, f: u16, r: &Bytes) {
     // 인수: 6 바이트 머리 뒤. 점은 (x, y) 쌍이지만 단일 점 인수는 y, x 차례
     let _ = (|| -> Option<()> {
         match f {
-            0x0102 => {}
+            0x0102 => p.dc.bk_opaque = r.u16(0)? != 1,
             0x0103 => {}
+            0x0201 => p.dc.bk_color = colorref(r.u32(0)?),
             0x0106 => p.dc.winding = r.u16(0)? == 2,
             0x012E => p.dc.text_align = r.u16(0)? as u32,
             0x0209 => p.dc.text_color = colorref(r.u32(0)?),
@@ -1020,7 +1259,7 @@ fn wmf_record(p: &mut Player, f: u16, r: &Bytes) {
                     dc = p.stack.pop();
                 }
                 if let Some(dc) = dc {
-                    p.dc = dc;
+                    p.restore(dc);
                 }
             }
             0x0214 => p.dc.cur = (r.i16(2)? as f64, r.i16(0)? as f64),
@@ -1042,6 +1281,7 @@ fn wmf_record(p: &mut Player, f: u16, r: &Bytes) {
                 let o = Obj::Brush {
                     style: r.u16(0)? as u32,
                     color: colorref(r.u32(2)?),
+                    hatch: r.u16(6).unwrap_or(0) as u32,
                 };
                 wmf_put(p, o);
             }
@@ -1158,6 +1398,29 @@ fn wmf_record(p: &mut Player, f: u16, r: &Bytes) {
                 let bmp = wmf_dib(dib)?;
                 p.image(xd, yd, dw, dh, bmp);
             }
+            0x0416 => p.clip_rect(
+                r.i16(6)? as f64,
+                r.i16(4)? as f64,
+                r.i16(2)? as f64,
+                r.i16(0)? as f64,
+            ),
+            // ARC·PIE·CHORD
+            0x0817 | 0x081A | 0x0830 => {
+                let bx = (
+                    r.i16(14)? as f64,
+                    r.i16(12)? as f64,
+                    r.i16(10)? as f64,
+                    r.i16(8)? as f64,
+                );
+                let st = (r.i16(6)? as f64, r.i16(4)? as f64);
+                let en = (r.i16(2)? as f64, r.i16(0)? as f64);
+                let kind = match f {
+                    0x0817 => 0,
+                    0x0830 => 1,
+                    _ => 2,
+                };
+                p.arc_shape(kind, bx, st, en);
+            }
             0x0B41 => {
                 // DIBSTRETCHBLT: rop(4), srcH, srcW, ySrc, xSrc, destH, destW, yDest, xDest, DIB
                 let (dh, dw, yd, xd) = (
@@ -1215,6 +1478,18 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// 빗금 무늬 8×8 칸의 선 (SVG 는 y 가 아래)
+fn hatch_svg(style: u8) -> &'static str {
+    match style {
+        0 => "M0 4H8",
+        1 => "M4 0V8",
+        2 => "M0 0L8 8M0 8L8 16M0 -8L8 0",
+        3 => "M0 8L8 0M0 16L8 8M8 8L16 0",
+        4 => "M0 4H8M4 0V8",
+        _ => "M0 0L8 8M0 8L8 16M0 -8L8 0M0 8L8 0M0 16L8 8M8 8L16 0",
+    }
+}
+
 fn path_d(segs: &[Seg]) -> String {
     use std::fmt::Write as _;
     let mut d = String::new();
@@ -1236,6 +1511,8 @@ pub fn to_svg(m: &Metafile) -> String {
         "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 {:.2} {:.2}\" preserveAspectRatio=\"none\">",
         m.width, m.height
     );
+    let mut clips = 0;
+    let mut hatches = 0;
     for it in &m.items {
         match it {
             Item::Path {
@@ -1243,11 +1520,32 @@ pub fn to_svg(m: &Metafile) -> String {
                 fill,
                 stroke,
                 even_odd,
+                caps,
+                hatch,
             } => {
+                let mut fill = fill.map(hex);
+                if let Some((style, fg, bg)) = hatch {
+                    hatches += 1;
+                    let id = format!("mh{hatches}");
+                    let _ = write!(
+                        s,
+                        "<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"8\" height=\"8\">"
+                    );
+                    if let Some(b) = bg {
+                        let _ = write!(s, "<rect width=\"8\" height=\"8\" fill=\"{}\"/>", hex(*b));
+                    }
+                    let _ = write!(
+                        s,
+                        "<path d=\"{}\" stroke=\"{}\" stroke-width=\"1\" fill=\"none\"/></pattern>",
+                        hatch_svg(*style),
+                        hex(*fg)
+                    );
+                    fill = Some(format!("url(#{id})"));
+                }
                 let _ = write!(s, "<path d=\"{}\"", path_d(segs));
-                match fill {
+                match &fill {
                     Some(c) => {
-                        let _ = write!(s, " fill=\"{}\"", hex(*c));
+                        let _ = write!(s, " fill=\"{c}\"");
                         if *even_odd {
                             s.push_str(" fill-rule=\"evenodd\"");
                         }
@@ -1260,6 +1558,12 @@ pub fn to_svg(m: &Metafile) -> String {
                         let d: Vec<String> = dash.iter().map(|v| format!("{v:.2}")).collect();
                         let _ = write!(s, " stroke-dasharray=\"{}\"", d.join(" "));
                     }
+                    let _ = write!(
+                        s,
+                        " stroke-linecap=\"{}\" stroke-linejoin=\"{}\"",
+                        ["butt", "round", "square"][caps.0 as usize % 3],
+                        ["miter", "round", "bevel"][caps.1 as usize % 3]
+                    );
                 }
                 s.push_str("/>");
             }
@@ -1277,6 +1581,7 @@ pub fn to_svg(m: &Metafile) -> String {
                 color,
                 text,
                 angle,
+                ..
             } => {
                 let anchor = ["start", "middle", "end"][*halign as usize % 3];
                 let base =
@@ -1312,6 +1617,16 @@ pub fn to_svg(m: &Metafile) -> String {
                     esc(text)
                 );
             }
+            Item::Clip { x0, y0, x1, y1 } => {
+                clips += 1;
+                let _ = write!(
+                    s,
+                    "<clipPath id=\"mc{clips}\"><rect x=\"{x0:.2}\" y=\"{y0:.2}\" width=\"{:.2}\" height=\"{:.2}\"/></clipPath><g clip-path=\"url(#mc{clips})\">",
+                    x1 - x0,
+                    y1 - y0
+                );
+            }
+            Item::Unclip => s.push_str("</g>"),
             Item::Image { x, y, w, h, bmp } => {
                 let _ = write!(
                     s,
@@ -1475,6 +1790,169 @@ mod tests {
             panic!()
         };
         assert_eq!(segs[1], Seg::Line(90.0, 10.0));
+    }
+
+    /// ARC·PIE·CHORD 의 본문: 타원 상자 4, 시작점 2, 끝점 2
+    fn arc_body(bx: [i32; 4], st: [i32; 2], en: [i32; 2]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend(bx);
+        v.extend(st);
+        v.extend(en);
+        i32s(&v)
+    }
+
+    fn cubic_count(segs: &[Seg]) -> usize {
+        segs.iter().filter(|s| matches!(s, Seg::Cubic(..))).count()
+    }
+
+    #[test]
+    fn emf_arc_pie_chord() {
+        // 중심 (150, 150), 반지름 50: 동쪽(200,150)에서 북쪽(150,100) 까지. 기본 방향은 반시계 → 90° 한 조각
+        let body = arc_body([100, 100, 200, 200], [200, 150], [150, 100]);
+        let m = parse(&emf_with(&[(45, body.clone())])).unwrap();
+        let Item::Path {
+            segs, fill, stroke, ..
+        } = &m.items[0]
+        else {
+            panic!()
+        };
+        assert!(fill.is_none() && stroke.is_some());
+        assert_eq!(segs[0], Seg::Move(200.0, 150.0));
+        assert_eq!(cubic_count(segs), 1);
+        let Some(Seg::Cubic(_, _, _, _, x, y)) = segs.last() else {
+            panic!()
+        };
+        assert!((x - 150.0).abs() < 1e-6 && (y - 100.0).abs() < 1e-6);
+        // 시계 방향으로 바꾸면 같은 점들 사이 270° → 세 조각
+        let m = parse(&emf_with(&[
+            (57, 2u32.to_le_bytes().to_vec()),
+            (45, body.clone()),
+        ]))
+        .unwrap();
+        let Item::Path { segs, .. } = &m.items[0] else {
+            panic!()
+        };
+        assert_eq!(cubic_count(segs), 3);
+        // 부채꼴: 중심에서 시작, 닫고 채운다 (기본 붓은 흰색)
+        let m = parse(&emf_with(&[(47, body.clone())])).unwrap();
+        let Item::Path { segs, fill, .. } = &m.items[0] else {
+            panic!()
+        };
+        assert!(fill.is_some());
+        assert_eq!(segs[0], Seg::Move(150.0, 150.0));
+        assert_eq!(segs[1], Seg::Line(200.0, 150.0));
+        assert_eq!(segs.last(), Some(&Seg::Close));
+        // 활꼴: 호의 시작에서 시작해 닫는다
+        let m = parse(&emf_with(&[(46, body)])).unwrap();
+        let Item::Path { segs, .. } = &m.items[0] else {
+            panic!()
+        };
+        assert_eq!(segs[0], Seg::Move(200.0, 150.0));
+        assert_eq!(segs.last(), Some(&Seg::Close));
+    }
+
+    #[test]
+    fn emf_clip_rect_is_balanced() {
+        // 자르기 → 사각형 → (저장·복원 없이) 끝에서 닫힌다
+        let d = emf_with(&[(30, i32s(&[10, 10, 100, 100])), (43, i32s(&[0, 0, 50, 50]))]);
+        let m = parse(&d).unwrap();
+        assert!(
+            matches!(m.items[0], Item::Clip { x0, y0, x1, y1 } if (x0, y0, x1, y1) == (10.0, 10.0, 100.0, 100.0))
+        );
+        assert!(matches!(m.items[1], Item::Path { .. }));
+        assert!(matches!(m.items[2], Item::Unclip));
+        // 저장한 뒤 연 자르기는 복원에서 닫힌다
+        let d = emf_with(&[
+            (33, vec![]),
+            (30, i32s(&[10, 10, 100, 100])),
+            (43, i32s(&[0, 0, 50, 50])),
+            (34, (-1i32).to_le_bytes().to_vec()),
+            (43, i32s(&[0, 0, 5, 5])),
+        ]);
+        let m = parse(&d).unwrap();
+        let kinds: Vec<&str> = m
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::Clip { .. } => "clip",
+                Item::Unclip => "unclip",
+                Item::Path { .. } => "path",
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(kinds, ["clip", "path", "unclip", "path"]);
+        // SVG 는 clipPath 와 짝이 맞는 g 로
+        let svg = to_svg(&m);
+        assert_eq!(
+            svg.matches("<g clip-path").count(),
+            svg.matches("</g>").count()
+        );
+    }
+
+    #[test]
+    fn wmf_text_and_arc() {
+        let rec = |f: u16, params: &[i16]| {
+            let mut r = Vec::new();
+            r.extend((3 + params.len() as u32).to_le_bytes());
+            r.extend(f.to_le_bytes());
+            for p in params {
+                r.extend(p.to_le_bytes());
+            }
+            r
+        };
+        let mut d = vec![0xD7, 0xCD, 0xC6, 0x9A, 0, 0];
+        for v in [0i16, 0, 100, 50] {
+            d.extend(v.to_le_bytes());
+        }
+        d.extend(96u16.to_le_bytes());
+        d.extend([0; 6]);
+        d.extend([1, 0, 9, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        d.extend(rec(0x020B, &[0, 0]));
+        d.extend(rec(0x020C, &[50, 100]));
+        // TEXTOUT "Hi": 길이 2, 글, y 20, x 10
+        d.extend(rec(0x0521, &[2, i16::from_le_bytes(*b"Hi"), 20, 10]));
+        // ARC: 상자 (0,0)-(100,50), 시작 (100,25), 끝 (50,0)
+        d.extend(rec(0x0817, &[0, 50, 25, 100, 50, 100, 0, 0]));
+        d.extend(rec(0, &[]));
+        let m = parse(&d).unwrap();
+        assert!(matches!(m.items[0], Item::Text { .. }));
+        let Item::Path { segs, .. } = &m.items[1] else {
+            panic!("{:?}", m.items)
+        };
+        assert_eq!(segs[0], Seg::Move(100.0, 25.0));
+        assert_eq!(cubic_count(segs), 1);
+    }
+
+    #[test]
+    fn emf_hatch_brush_and_pen_caps() {
+        // 빗금 붓 (BS_HATCHED, 무늬 1 = 세로, 파랑) + 불투명 바탕 흰색 → 빗금 채우기; 바탕 모드 투명이면 바탕색 없음
+        let mut brush = i32s(&[1, 2]);
+        brush.extend(0x00FF_0000u32.to_le_bytes());
+        brush.extend(1u32.to_le_bytes());
+        let d = emf_with(&[
+            (39, brush),
+            (37, 1u32.to_le_bytes().to_vec()),
+            (43, i32s(&[0, 0, 50, 50])),
+            (18, 1u32.to_le_bytes().to_vec()),
+            (43, i32s(&[60, 0, 110, 50])),
+        ]);
+        let m = parse(&d).unwrap();
+        let Item::Path {
+            fill, hatch, caps, ..
+        } = &m.items[0]
+        else {
+            panic!()
+        };
+        assert!(fill.is_none());
+        assert_eq!(*hatch, Some((1, [0, 0, 255], Some([255, 255, 255]))));
+        // CREATEPEN 기본 펜: 끝·꺾임 둥글게
+        assert_eq!(*caps, (1, 1));
+        let Item::Path { hatch, .. } = &m.items[1] else {
+            panic!()
+        };
+        assert_eq!(*hatch, Some((1, [0, 0, 255], None)));
+        let svg = to_svg(&m);
+        assert!(svg.contains("<pattern id=\"mh1\"") && svg.contains("fill=\"url(#mh2)\""));
     }
 
     #[test]

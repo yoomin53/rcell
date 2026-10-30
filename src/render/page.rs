@@ -34,6 +34,12 @@ pub trait TextMeasure {
     fn ascent_descent(&self, _font: &FontKey) -> (f64, f64) {
         (0.88, 0.12)
     }
+    /// 글꼴 높이 `ppem`(장치 px) 에서 GDI 가 돌려주는 오름·내림 (장치 px, 내림은 양수) — 글꼴에 VDMX 표가 있으면 그 값,
+    /// 없으면 비율을 반올림
+    fn device_ascent_descent(&self, font: &FontKey, ppem: u32) -> (f64, f64) {
+        let (a, d) = self.ascent_descent(font);
+        ((a * ppem as f64).round(), (d * ppem as f64).round())
+    }
 }
 
 /// 경로 조각 (장치 단위)
@@ -54,6 +60,10 @@ pub enum Op {
         fill: Option<[u8; 3]>,
         stroke: Option<(f64, [u8; 3], Vec<f64>)>,
         even_odd: bool,
+        /// 선 끝·꺾임 (PDF 의 J·j). 없으면 PDF 기본 (평평·뾰족)
+        caps: Option<(u8, u8)>,
+        /// 빗금 채우기: (무늬, 빗금 색, 바탕색) — PDF 는 페이지에 맞춘 8×8 Tiling 무늬. 이때 `fill` 은 None
+        hatch: Option<super::metafile::Hatch>,
     },
     /// 그림 (PNG·JPEG 바이트)
     Image {
@@ -1403,6 +1413,8 @@ fn metafile_ops(
                 fill,
                 stroke,
                 even_odd,
+                caps,
+                hatch,
             } => {
                 let segs = segs
                     .iter()
@@ -1429,6 +1441,8 @@ fn metafile_ops(
                         .as_ref()
                         .map(|(w, c, d)| (w * sx, *c, d.iter().map(|v| v * sx).collect())),
                     even_odd: *even_odd,
+                    caps: Some(*caps),
+                    hatch: *hatch,
                 });
             }
             Item::Text {
@@ -1452,11 +1466,24 @@ fn metafile_ops(
                     italic: *italic,
                 };
                 let (asc, desc) = measure.ascent_descent(&key);
-                // 기준선까지: 위 맞춤은 오름(반올림), 아래 맞춤은 내림만큼
-                let off = match valign {
-                    0 => (asc * em).round(),
-                    2 => -(desc * em).round(),
-                    _ => 0.0,
+                // 기준선까지: 위 맞춤은 오름, 아래 맞춤은 내림만큼. 한셀은 장치 글꼴 크기(em × 장치 배율)에서 GDI 가 돌려주는
+                // 오름·셀 높이를 각각 논리 단위로 반올림하고 내림 = 높이 − 오름 (Arial 15px: 장치 91 → 오름 81, 높이 101 →
+                // 13, 17 → 내림 4. 비율 반올림은 14·3). WMF 도 한셀이 EMF 로 바꿔 넣으므로 같다
+                let off = if *valign != 1 && sy > 0.0 {
+                    let ppem = (em * sy).round().max(1.0) as u32;
+                    let (ad, dd) = measure.device_ascent_descent(&key, ppem);
+                    let a = (ad / sy).round();
+                    if *valign == 0 {
+                        a
+                    } else {
+                        -(((ad + dd) / sy).round() - a)
+                    }
+                } else {
+                    match *valign {
+                        0 => (asc * em).round(),
+                        2 => -(desc * em).round(),
+                        _ => 0.0,
+                    }
                 };
                 let (gs, gc) = angle.to_radians().sin_cos();
                 let (bx, by) = (x - off * gs, y + off * gc);
@@ -1484,6 +1511,16 @@ fn metafile_ops(
                     angle: th.to_degrees(),
                 });
             }
+            Item::Clip { x0, y0, x1, y1 } => {
+                let (a, b) = (f(*x0, *y0), f(*x1, *y1));
+                ops.push(Op::Clip {
+                    x0: a.0.min(b.0),
+                    y0: a.1.min(b.1),
+                    x1: a.0.max(b.0),
+                    y1: a.1.max(b.1),
+                });
+            }
+            Item::Unclip => ops.push(Op::Unclip),
             Item::Image { x, y, w, h, bmp } => {
                 let (a, b) = (f(*x, *y), f(x + w, y + h));
                 ops.push(Op::Image {
@@ -1744,6 +1781,67 @@ mod tests {
         assert_eq!(wrap_text("가나다라마바", 35.0, &w), ["가나다", "라마바"]);
         assert_eq!(wrap_text("abc def", 45.0, &w), ["abc", "def"]);
         assert_eq!(wrap_text("가\n나", 100.0, &w), ["가", "나"]);
+    }
+
+    /// 메타파일 글자의 기준선: 한셀은 장치 글꼴 크기의 GDI 오름·셀 높이를 논리 단위로 반올림한다. Arial 15px (장치 배율 6.049 →
+    /// 장치 91px): 오름 81·내림 20 → 오름 13, 높이 101 → 17, 내림 4 (비율 반올림이면 14·3)
+    #[test]
+    fn metafile_text_baseline_uses_device_metrics() {
+        use super::super::metafile::{Item, Metafile};
+        struct Arial;
+        impl TextMeasure for Arial {
+            fn width(&self, _: &FontKey, size: f64, text: &str) -> f64 {
+                size * text.chars().count() as f64
+            }
+            fn ascent_descent(&self, _: &FontKey) -> (f64, f64) {
+                (0.9053, 0.2119)
+            }
+            fn device_ascent_descent(&self, _: &FontKey, ppem: u32) -> (f64, f64) {
+                if ppem == 91 {
+                    (81.0, 20.0)
+                } else {
+                    (0.9053 * ppem as f64, 0.2119 * ppem as f64)
+                }
+            }
+        }
+        let text = |valign: u8| Item::Text {
+            x: 20.0,
+            y: 100.0,
+            halign: 0,
+            valign,
+            em: 15.0,
+            name: "Arial".into(),
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            color: [0, 0, 0],
+            text: "H".into(),
+            angle: 0.0,
+        };
+        let mf = Metafile {
+            width: 400.0,
+            height: 1000.0,
+            items: vec![text(0), text(1), text(2)],
+        };
+        let s = 6.049;
+        let mut ops = Vec::new();
+        metafile_ops(
+            &mf,
+            [s, 0.0, 0.0, s, 0.0, 0.0],
+            (400.0, 1000.0),
+            0.0,
+            &Arial,
+            &mut ops,
+        );
+        let ys: Vec<f64> = ops
+            .iter()
+            .filter_map(|o| match o {
+                Op::Text { y, .. } => Some((y / s).round()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ys, [113.0, 100.0, 96.0]);
     }
 
     /// 한셀 PDF 에서 잰 그림·도형 상자 (원점 449·591, 배율 99 = k 6.1875): 그림 off (133, 200) ext (200, 400) → 왼쪽 1264,

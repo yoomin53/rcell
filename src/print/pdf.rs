@@ -11,11 +11,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
-use pdf_writer::types::{CidFontType, FontFlags, SystemInfo, UnicodeCmap};
+use pdf_writer::types::{CidFontType, FontFlags, PaintType, SystemInfo, TilingType, UnicodeCmap};
 use pdf_writer::{Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 
 use super::font::{FaceRef, FontDb, LoadedFace};
 use super::pdfimage::{PdfImage, decode};
+use crate::render::metafile::Hatch;
 use crate::render::page::{FontKey, Op, Seg, TextMeasure};
 
 /// 페이지들이 쓴 그림 (같은 바이트는 한 번만)
@@ -38,6 +39,48 @@ impl Images {
         self.by_ptr.insert(key, k);
         k
     }
+}
+
+/// 페이지들이 쓴 빗금 무늬 (같은 것은 한 번만)
+#[derive(Default)]
+struct Hatches {
+    list: Vec<Hatch>,
+}
+
+impl Hatches {
+    fn add(&mut self, h: Hatch) -> usize {
+        match self.list.iter().position(|x| *x == h) {
+            Some(k) => k,
+            None => {
+                self.list.push(h);
+                self.list.len() - 1
+            }
+        }
+    }
+}
+
+/// 빗금 무늬 8×8 칸의 내용 (PDF 의 y 는 위). 한셀 PDF 의 Tiling 무늬와 같은 꼴: 칸으로 자르고, 불투명이면 바탕색을
+/// 깔고, 1 굵기 둥근 선. 무늬 번호 0 가로·1 세로·2 \·3 /·4 +·5 x (선이 칸 밖으로 나가는 것은 이웃 칸과 이어지게)
+fn hatch_tile(h: &Hatch) -> String {
+    let (style, fg, bg) = h;
+    let lines = match style {
+        0 => "0 4 m 8 4 l",
+        1 => "4 0 m 4 8 l",
+        2 => "0 0 m 8 -8 l 0 8 m 8 0 l 8 8 m 16 0 l",
+        3 => "0 0 m 8 8 l 0 -8 m 8 0 l 0 8 m 8 16 l",
+        4 => "0 4 m 8 4 l 4 0 m 4 8 l",
+        _ => "0 0 m 8 -8 l 0 8 m 8 0 l 8 8 m 16 0 l 0 0 m 8 8 l 0 -8 m 8 0 l 0 8 m 8 16 l",
+    };
+    let mut s = String::from("q\n1 i\n0 0 8 8 re\nW n\n");
+    if let Some(b) = bg {
+        let _ = write!(s, "{} rg\n0 0 8 8 re\nf\n", color(*b));
+    }
+    let _ = write!(
+        s,
+        "{} RG\n1 J 1 j 1 w 10 M []0 d\n{lines}\nS\nQ\n",
+        color(*fg)
+    );
+    s
 }
 
 /// 넣은 글꼴 하나 (얼굴 + 쓴 글리프)
@@ -205,6 +248,27 @@ impl TextMeasure for FontSet<'_> {
         (a / 1000.0, d / 1000.0)
     }
 
+    fn device_ascent_descent(&self, font: &FontKey, ppem: u32) -> (f64, f64) {
+        let mut st = self.state.borrow_mut();
+        let st = &mut *st;
+        let fr = *st
+            .select
+            .entry(font.clone())
+            .or_insert_with(|| self.db.select(&font.name, font.bold, font.italic));
+        let face = fr.and_then(|fr| Self::embedded(st, self.db, fr.face));
+        if let Some(v) = face.and_then(|e| st.fonts[e].face.vdmx(ppem)) {
+            return v;
+        }
+        let (a, d) = face.map_or((880.0, 120.0), |e| {
+            let m = &st.fonts[e].face.metrics;
+            (m.ascent, -m.descent)
+        });
+        (
+            (a * ppem as f64 / 1000.0).round(),
+            (d * ppem as f64 / 1000.0).round(),
+        )
+    }
+
     fn width(&self, font: &FontKey, size: f64, text: &str) -> f64 {
         self.runs(font, text, false)
             .iter()
@@ -250,7 +314,13 @@ fn color(c: [u8; 3]) -> String {
 }
 
 /// 그리기 목록 → 내용 스트림 (장치 단위). 글꼴은 `/F{n}` (넣은 글꼴 번호), 표준 CID 글꼴은 `/FK`
-fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> (Vec<u8>, bool) {
+fn content(
+    ops: &[Op],
+    size: PageSize,
+    fonts: &FontSet,
+    images: &mut Images,
+    hatches: &mut Hatches,
+) -> (Vec<u8>, bool) {
     let mut s = String::new();
     let sx = size.width / (size.dev_w * 0.12);
     let sy = size.height / (size.dev_h * 0.12);
@@ -330,6 +400,8 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> 
                 fill,
                 stroke,
                 even_odd,
+                caps,
+                hatch,
             } => {
                 let mut d = String::new();
                 for sg in segs {
@@ -360,8 +432,18 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> 
                         .collect::<Vec<_>>()
                         .join(" ");
                     let _ = write!(pre, "{} RG {} w [{dd}] 0 d ", color(*c), num(w * 0.12));
+                    if let Some((cap, join)) = caps {
+                        let _ = write!(pre, "{cap} J {join} j 10 M ");
+                    }
                 }
-                let op = match (fill.is_some(), stroke.is_some(), even_odd) {
+                if let Some(h) = hatch {
+                    let _ = write!(pre, "/Pattern cs /Pa{} scn ", hatches.add(*h));
+                }
+                let op = match (
+                    fill.is_some() || hatch.is_some(),
+                    stroke.is_some(),
+                    even_odd,
+                ) {
                     (true, true, false) => "B",
                     (true, true, true) => "B*",
                     (true, false, false) => "f",
@@ -520,8 +602,9 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
     let mut contents = Vec::new();
     let mut any_plain = false;
     let mut images = Images::default();
+    let mut hatches = Hatches::default();
     for (size, ops) in pages {
-        let (c, plain) = content(ops, *size, fonts, &mut images);
+        let (c, plain) = content(ops, *size, fonts, &mut images, &mut hatches);
         any_plain |= plain;
         contents.push(c);
     }
@@ -533,6 +616,7 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
         .iter()
         .map(|im| (alloc(), im.alpha.as_ref().map(|_| alloc())))
         .collect();
+    let hatch_refs: Vec<Ref> = hatches.list.iter().map(|_| alloc()).collect();
     let page_refs: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
     let content_refs: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
 
@@ -563,6 +647,13 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
                 x.pair(Name(format!("Im{k}").as_bytes()), *r);
             }
             x.finish();
+        }
+        if !hatch_refs.is_empty() {
+            let mut pd = res.patterns();
+            for (k, r) in hatch_refs.iter().enumerate() {
+                pd.pair(Name(format!("Pa{k}").as_bytes()), *r);
+            }
+            pd.finish();
         }
         res.finish();
         page.finish();
@@ -639,6 +730,20 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
         let buf = cmap.finish();
         pdf.cmap(tu, buf.as_slice());
     }
+    // 빗금 무늬
+    for (h, r) in hatches.list.iter().zip(&hatch_refs) {
+        let z = deflate(hatch_tile(h).as_bytes());
+        let mut t = pdf.tiling_pattern(*r, &z);
+        t.paint_type(PaintType::Colored)
+            .tiling_type(TilingType::NoDistortion)
+            .bbox(Rect::new(0.0, 0.0, 8.0, 8.0))
+            .x_step(8.0)
+            .y_step(8.0)
+            .matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        t.filter(Filter::FlateDecode);
+        t.resources().finish();
+        t.finish();
+    }
     // 그림
     for (im, (r, mask)) in images.list.iter().zip(&image_refs) {
         let z;
@@ -712,6 +817,27 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 빗금 무늬 칸: 한셀 PDF 의 Tiling 무늬와 같은 내용 (불투명이면 바탕색을 깐다)
+    #[test]
+    fn hatch_tile_content() {
+        let h: Hatch = (0, [0, 0, 192], Some([255, 255, 255]));
+        let s = hatch_tile(&h);
+        assert!(s.contains(
+            "0 0 8 8 re
+W n
+1 1 1 rg
+0 0 8 8 re
+f
+"
+        ));
+        assert!(s.contains(
+            "1 J 1 j 1 w 10 M []0 d
+0 4 m 8 4 l
+S"
+        ));
+        assert!(!hatch_tile(&(1, [0, 0, 0], None)).contains(" rg"));
+    }
 
     #[test]
     fn numbers_are_short() {
