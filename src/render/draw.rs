@@ -42,6 +42,16 @@ fn anchor_px(lay: &Layout, x0: u32, y0: u32, m: &Marker) -> (f64, f64) {
     (x0 as f64 + x + col_off, y0 as f64 + y + row_off)
 }
 
+/// XML 차트 틀의 가로 자리 보정: 앵커의 열 안 오프셋이 8px 이상이면 틀이 1px 오른쪽 (한셀 — 차트 종류 실험: 오프셋 5px 는 앵커 − 2,
+/// 17·33·61px 는 앵커 − 1. 오프셋 0 은 − 2). 규칙의 이유는 모른다
+fn chart_dx(col_off: i64) -> f64 {
+    if col_off as f64 / EMU >= 8.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 /// 그리기 개체를 표 위에 절대 위치로 그린다
 pub(super) fn shapes_html(
     wb: &Workbook,
@@ -74,7 +84,12 @@ pub(super) fn shapes_html(
         // 경계의 1px 안쪽까지 (틀 크기 +1)
         let r = match sh.kind {
             crate::model::ShapeKind::Chart => (
-                x1.round() - 2.0,
+                x1.round() - 2.0
+                    + if sh.chart.as_ref().is_some_and(|c| c.legacy.is_none()) {
+                        chart_dx(a.from.col_off)
+                    } else {
+                        0.0
+                    },
                 y1.round() - 1.0,
                 w.round() + 1.0,
                 h.round() + 1.0,
