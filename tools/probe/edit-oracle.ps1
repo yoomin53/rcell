@@ -48,7 +48,7 @@ function Get-ColRange([string]$col, [int]$count) {
     $last = $n + $count - 1
     $name = ""
     $k = $last
-    while ($k -gt 0) { $m = ($k - 1) % 26; $name = [char](65 + $m) + $name; $k = [math]::Floor(($k - 1) / 26) }
+    while ($k -gt 0) { $m = [int](($k - 1) % 26); $name = [string][char][int](65 + $m) + $name; $k = [int][math]::Floor(($k - 1) / 26) }
     return "$($col.ToUpper())1:$($name)1"
 }
 
@@ -106,6 +106,7 @@ function Invoke-Edit($wb, $e) {
             switch ([string]$e.preset) {
                 "all" { foreach ($k in 7, 8, 9, 10, 11, 12) { try { Set-Edge $r $k $style $color } catch {} } }
                 "outline" { foreach ($k in 7, 8, 9, 10) { Set-Edge $r $k $style $color } }
+                "inside" { foreach ($k in 11, 12) { try { Set-Edge $r $k $style $color } catch {} } }
                 "none" { foreach ($k in 5, 6, 7, 8, 9, 10, 11, 12) { try { Set-Edge $r $k $null $null } catch {} } }
                 "left" { Set-Edge $r 7 $style $color }
                 "top" { Set-Edge $r 8 $style $color }
@@ -206,8 +207,19 @@ function Invoke-Edit($wb, $e) {
             $dst = Get-Sheet $wb $(if ($e.toSheet) { $e.toSheet } else { $e.sheet })
             $k = if ($e.paste) { $kinds[[string]$e.paste] } else { -4104 }
             $o = if ($e.operation) { $ops[[string]$e.operation] } else { -4142 }
-            [void]$ws.Range([string]$e.from).Copy()
-            [void]$dst.Range([string]$e.to).PasteSpecial($k, $o, [bool]$e.skipBlanks, [bool]$e.transpose)
+            # 클립보드는 컴퓨터 전체가 함께 쓴다 — 다른 프로그램이 Copy 와 PasteSpecial 사이에 덮어쓰면 0x800A03EC 로
+            # 실패하므로 처음부터 다시 한다 (붙이기는 실패하면 아무것도 바꾸지 않는다)
+            $done = $false
+            for ($try = 1; $try -le 6 -and -not $done; $try++) {
+                try {
+                    [void]$ws.Range([string]$e.from).Copy()
+                    [void]$dst.Range([string]$e.to).PasteSpecial($k, $o, [bool]$e.skipBlanks, [bool]$e.transpose)
+                    $done = $true
+                } catch {
+                    if ($try -ge 6) { throw }
+                    Start-Sleep -Milliseconds (500 * $try)
+                }
+            }
         }
         "addComment" { [void]$ws.Range([string]$e.cell).AddComment([string]$e.text) }
         "editComment" { [void]$ws.Range([string]$e.cell).Comment.Text([string]$e.text) }

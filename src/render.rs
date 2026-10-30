@@ -429,10 +429,15 @@ impl<'a> Views<'a> {
         let m = layout::font_metrics(wb, font);
         let h = h_align(align, &value);
         let (w_px, _) = lay.cell_size(r, c);
-        let origin = (lay.col_x(c), lay.row_y(r));
+        // 무늬 타일은 확대율과 상관없이 화면 픽셀 (한셀 — 확대 125·150% 의 무늬 18종)
+        let z = f64::from(
+            view.zoom_scale
+                .filter(|&z| (10..=400).contains(&z))
+                .unwrap_or(100),
+        ) / 100.0;
         let fill = xf
             .and_then(|x| st.fills.get(x.fill_id as usize))
-            .and_then(|f| paint::fill_css(f, theme, origin));
+            .and_then(|f| paint::fill_css(f, theme, z));
         let code = xf
             .map(|x| crate::numfmt::code_for(st, x.num_fmt_id))
             .unwrap_or_else(|| "General".into());
@@ -1011,7 +1016,13 @@ pub fn sheet_table_grid(
                     .unwrap_or_else(|| own.clone())
                 };
                 let gaps = [own.clone(), edge(false), own.clone(), edge(true)];
-                inner.push_str(&paint::borders_svg(&b, w, h, &gaps));
+                inner.push_str(&paint::borders_svg(
+                    &b,
+                    w,
+                    h,
+                    &gaps,
+                    f64::from(zoom_pct) / 100.0,
+                ));
             }
             if let Some((gi, vals)) = sparks.get(&(r, c))
                 && let Some(g) = spark_groups.get(*gi)

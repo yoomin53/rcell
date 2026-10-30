@@ -691,9 +691,13 @@ impl Engine {
         {
             *self.unsupported.entry(n).or_default() += 1;
         }
+        // 순환 참조(반복 계산을 켜지 않았을 때)는 계산하지 않고 지금 값을 그대로 둔다 — 한셀은 새로 고른 수식이 자기
+        // 칸을 품으면 0 을 둔다 (바꾸기 대조 실험: `IF(SUM(G9:G77),SUM(G9:G77),"")` 가 G13 에 있으면 0)
+        let keep_cycle =
+            self.iterate.is_none() && array.is_none() && self.formulas[fid as usize].cycle;
         let keep_cached = {
             let f = &self.formulas[fid as usize];
-            f.unsupported && !f.cached.is_empty()
+            (f.unsupported && !f.cached.is_empty()) || keep_cycle
         };
         let sd = &mut self.sheets[sheet as usize];
         match array {
@@ -721,10 +725,12 @@ impl Engine {
                 }
             }
             None => {
-                if let Some(i) = sd.find(row, col)
-                    && !keep_cached
-                {
-                    sd.values[i] = v;
+                if let Some(i) = sd.find(row, col) {
+                    if !keep_cached {
+                        sd.values[i] = v;
+                    } else if keep_cycle && sd.values[i].is_empty() {
+                        sd.values[i] = Value::Number(0.0);
+                    }
                 }
             }
         }
@@ -1228,11 +1234,74 @@ impl Engine {
                 }
             }
         }
+        // 순환에 든 수식은 모두 (같은 고리에 든 칸: 강한 연결 요소) 표시한다 — 되돌아가는 간선의 길만으론 같은 고리의
+        // 다른 가지를 놓친다 (한셀은 고리의 칸 모두를 계산하지 않고 지금 값으로 둔다)
+        cyclic.extend(cyclic_members(&deps, nf));
         for c in cyclic {
             self.formulas[c].cycle = true;
         }
         order
     }
+}
+
+/// 의존 그래프(수식 `0..nf`, 범위 `nf..`)에서 두 칸 이상으로 된 강한 연결 요소에 든 수식 번호 (반복 없는 타잔)
+fn cyclic_members(deps: &[Vec<usize>], nf: usize) -> Vec<usize> {
+    let n = deps.len();
+    const NONE: usize = usize::MAX;
+    let mut index = vec![NONE; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut counter = 0usize;
+    let mut out = Vec::new();
+    for root in 0..n {
+        if index[root] != NONE {
+            continue;
+        }
+        let mut call: Vec<(usize, usize)> = vec![(root, 0)];
+        index[root] = counter;
+        low[root] = counter;
+        counter += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&(v, i)) = call.last() {
+            if i < deps[v].len() {
+                if let Some(top) = call.last_mut() {
+                    top.1 += 1;
+                }
+                let w = deps[v][i];
+                if index[w] == NONE {
+                    index[w] = counter;
+                    low[w] = counter;
+                    counter += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    call.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+            } else {
+                call.pop();
+                if let Some(&(parent, _)) = call.last() {
+                    low[parent] = low[parent].min(low[v]);
+                }
+                if low[v] == index[v] {
+                    let mut comp = Vec::new();
+                    while let Some(w) = stack.pop() {
+                        on_stack[w] = false;
+                        comp.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    if comp.len() > 1 {
+                        out.extend(comp.into_iter().filter(|&x| x < nf));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `calcPr` 의 iterate·iterateCount: 반복 계산이 켜져 있으면 횟수 (iterateCount 가 없으면 100)

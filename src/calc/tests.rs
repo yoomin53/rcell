@@ -255,6 +255,27 @@ fn cycles_are_reported() {
     assert_eq!(calc(&w, "C1"), n(5.0));
 }
 
+/// BINOM.DIST 확률 질량: 조합 수를 e^{lnΓ 차이} 로 구한다 (대조 실험 dist4, 한셀 값과 끝자리까지)
+#[test]
+fn binom_pmf_uses_gammaln() {
+    assert_eq!(
+        one("BINOM.DIST(10,20,0.5,FALSE)"),
+        n(0.176_197_052_001_953_24)
+    );
+    assert_eq!(
+        one("BINOM.DIST(5,10,0.1,FALSE)"),
+        n(0.001_488_034_800_000_000_8)
+    );
+    assert_eq!(
+        one("BINOM.DIST(50,100,0.3,TRUE)"),
+        n(0.999_990_965_313_804_3)
+    );
+    assert_eq!(
+        one("BINOM.DIST(170,171,0.9,TRUE)"),
+        n(0.999_999_985_021_472_7)
+    );
+}
+
 /// 반복 계산 (calcPr iterate): 파일 값에서 시작해 2×iterateCount 번, 행 차례로 (대조 실험 circ)
 #[test]
 fn iterative_calculation() {
@@ -281,6 +302,36 @@ fn iterative_calculation() {
     // 뒤 행의 순환 칸은 한 바퀴 앞 값
     assert_eq!(calc(&w, "B4"), n(60.0));
     assert_eq!(calc(&w, "B6"), n(8.0));
+}
+
+/// 반복 계산을 켜지 않으면 같은 고리에 든 칸은 모두 계산하지 않고 지금 값을 둔다 (새 수식은 0). 고리 밖에서 읽는 칸은 그 값을
+/// 읽는다 (바꾸기 대조 실험)
+#[test]
+fn cycle_cells_keep_their_value_without_iteration() {
+    let mut w = wb(vec![sheet(
+        "S",
+        &[
+            ("A1", "=IF(SUM(A1:A3),SUM(A1:A3),\"\")"),
+            ("B1", "=SUM(B2:B4)"),
+            ("B2", "=B1+1"),
+            ("B3", "=IF(SUM(B1,B2),B1-B2,\"\")"),
+            ("C1", "=B2+10"),
+        ],
+    )]);
+    // 파일 값: A1 은 새 수식(값 없음), B1·B2 는 5·6
+    for c in &mut w.sheets[0].cells {
+        match (c.r.row, c.r.col) {
+            (0, 1) => c.value = CellValue::Number(5.0),
+            (1, 1) => c.value = CellValue::Number(6.0),
+            _ => {}
+        }
+    }
+    assert_eq!(calc(&w, "A1"), n(0.0));
+    assert_eq!(calc(&w, "B1"), n(5.0));
+    assert_eq!(calc(&w, "B2"), n(6.0));
+    // B3 도 B1 → B3 → B1 고리에 든다 (B1 의 범위 B2:B4 에 들어 있다)
+    assert_eq!(calc(&w, "B3"), n(0.0));
+    assert_eq!(calc(&w, "C1"), n(16.0));
 }
 
 #[test]

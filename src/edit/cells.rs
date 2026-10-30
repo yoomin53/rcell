@@ -129,17 +129,18 @@ pub fn shift_cells(
                 f.text = refs::shift_formula_band(&f.text, &here, &target, op, band);
             }
         }
-        // 조건부 서식·유효성 수식의 참조도 띠 안이면 옮긴다 (한셀: 목록 원본 `$B$1:$B$5` 에 `B3:C4` 를 아래로 넣으면 `$B$1:$B$7`)
+        // 조건부 서식·유효성 수식: 절대 참조만 띠 안이면 옮긴다 (한셀: 목록 원본 `$B$1:$B$5` 에 `B3:C4` 를 아래로 넣으면
+        // `$B$1:$B$7`). 상대 참조는 범위의 왼쪽 위 칸 기준이므로 4단계에서 맞춘다
         for cf in &mut sh.conditional_formats {
             for r in &mut cf.rules {
                 for f in &mut r.formulas {
-                    *f = refs::shift_formula_band(f, &here, &target, op, band);
+                    *f = refs::shift_formula_band_abs(f, &here, &target, op, band);
                 }
             }
         }
         for dv in &mut sh.data_validations {
             for f in [&mut dv.formula1, &mut dv.formula2].into_iter().flatten() {
-                *f = refs::shift_formula_band(f, &here, &target, op, band);
+                *f = refs::shift_formula_band_abs(f, &here, &target, op, band);
             }
         }
         super::structure::unshare(sh);
@@ -377,12 +378,44 @@ pub fn shift_cells(
     sheet.merges = merges;
     // 4. 조건부 서식·유효성 범위
     let fix = |sq: &str| -> String { band_sqref(sq, op, band, insert, area) };
+    // 한셀은 수식의 상대 참조를 범위 전체(묶음)의 왼쪽 위 칸 기준으로 둔다 — 그 칸이 바뀌면 같은 차이만큼 옮긴다
+    // (`F1:F12 H1:H3` 의 `LEN(TRIM(F1))` 에서 D6:E6 을 왼쪽으로 지우면 `… D6 …` 과 `LEN(TRIM(D1))`)
+    let corner = |sq: &str| {
+        refs::parse_sqref(sq)
+            .iter()
+            .map(|a| a.bounds())
+            .fold(None, |acc: Option<(u32, u32)>, b| {
+                Some(acc.map_or((b.0, b.1), |(r, c)| (r.min(b.0), c.min(b.1))))
+            })
+    };
+    let rebase = |f: &str, old: Option<(u32, u32)>, new: Option<(u32, u32)>| -> String {
+        match (old, new) {
+            (Some(o), Some(n)) if o != n => crate::formula_text::shift_references(
+                f,
+                n.0 as i64 - o.0 as i64,
+                n.1 as i64 - o.1 as i64,
+            ),
+            _ => f.to_string(),
+        }
+    };
     for cf in &mut sheet.conditional_formats {
+        let old = corner(&cf.sqref);
         cf.sqref = fix(&cf.sqref);
+        let new = corner(&cf.sqref);
+        for r in &mut cf.rules {
+            for f in &mut r.formulas {
+                *f = rebase(f, old, new);
+            }
+        }
     }
     sheet.conditional_formats.retain(|c| !c.sqref.is_empty());
     for dv in &mut sheet.data_validations {
+        let old = corner(&dv.sqref);
         dv.sqref = fix(&dv.sqref);
+        let new = corner(&dv.sqref);
+        for f in [&mut dv.formula1, &mut dv.formula2].into_iter().flatten() {
+            *f = rebase(f, old, new);
+        }
     }
     sheet.data_validations.retain(|d| !d.sqref.is_empty());
     // 넣을 때만 틀 고정 범위와 페이지 나누기를 행·열을 넣은 것처럼 옮긴다 (한셀 — 지울 때는 그대로)
@@ -472,7 +505,8 @@ pub fn shift_cells(
 fn band_sqref(sq: &str, op: Shift, band: (u32, u32), insert: bool, area: CellRange) -> String {
     let rows = op.on_rows();
     let in_band = |x: u32| x >= band.0 && x <= band.1;
-    let mut out: Vec<(u32, String)> = Vec::new();
+    // (첫 행, 글, 갈래: 0 손대지 않음, 1 옮긴 몫, 2 남은 몫)
+    let mut out: Vec<(u32, String, u8)> = Vec::new();
     for a in refs::parse_sqref(sq) {
         let (r0, c0, r1, c1) = a.bounds();
         if insert {
@@ -512,7 +546,7 @@ fn band_sqref(sq: &str, op: Shift, band: (u32, u32), insert: bool, area: CellRan
                     a1 + 1
                 )
             };
-            out.push((a0.min(a1), text));
+            out.push((a0.min(a1), text, 0));
             continue;
         }
         // 삭제: 움직이는 자리(띠 × 지운 곳부터 끝까지)를 뺀 몫 + 그 안의 몫을 줄인 것
@@ -524,11 +558,11 @@ fn band_sqref(sq: &str, op: Shift, band: (u32, u32), insert: bool, area: CellRan
         let rect = (r0, c0, r1, c1);
         let overl = !(rect.2 < zone.0 || zone.2 < rect.0 || rect.3 < zone.1 || zone.3 < rect.1);
         if !overl {
-            out.push((r0, a.text()));
+            out.push((r0, a.text(), 0));
             continue;
         }
         for p in super::clip::subtract_rect(rect, zone) {
-            out.push((p.0, Area::rect(p.0, p.1, p.2, p.3).text()));
+            out.push((p.0, Area::rect(p.0, p.1, p.2, p.3).text(), 2));
         }
         let inner = (
             rect.0.max(zone.0),
@@ -544,11 +578,17 @@ fn band_sqref(sq: &str, op: Shift, band: (u32, u32), insert: bool, area: CellRan
                 .map(|(x, y)| (inner.0, x, inner.2, y))
         };
         if let Some(m) = moved {
-            out.push((m.0, Area::rect(m.0, m.1, m.2, m.3).text()));
+            out.push((m.0, Area::rect(m.0, m.1, m.2, m.3).text(), 1));
         }
     }
     if !insert {
-        out.sort_by_key(|x| x.0);
+        // 한셀: 손대지 않은 범위는 원래 차례로 앞에. 왼쪽으로 지우면 옮긴 몫 → 남은 몫 (`H1:H3 D6 F1:F5 F7:F12`),
+        // 위로 지우면 남은 몫 → 옮긴 몫 (`D3:D8 C3:C6`)
+        out.sort_by_key(|x| match (rows, x.2) {
+            (_, 0) => 0,
+            (true, 2) | (false, 1) => 1,
+            _ => 2,
+        });
     }
     out.into_iter().map(|x| x.1).collect::<Vec<_>>().join(" ")
 }
