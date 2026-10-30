@@ -728,6 +728,10 @@ pub fn large_small(v: &[f64], k: f64, large: bool) -> Value {
 }
 
 fn pct(ctx: &mut Ctx, a: &[Value], f: fn(&[f64], f64) -> Value) -> Value {
+    // 낱 글 (숫자로 읽히지 않는) 은 #VALUE! (PERCENTILE.INC(글,…), 대조 실험 rand)
+    if matches!(&a[0], Value::Text(s) if value::parse_number(s, ctx.date1904()).is_none()) {
+        return Value::Error(ErrorKind::Value);
+    }
     let v = try_v!(array_numbers(ctx, &a[0]));
     let k = try_v!(num_arg(ctx, a, 1));
     f(&v, k)
@@ -882,7 +886,9 @@ fn rank(ctx: &mut Ctx, a: &[Value], average: bool) -> Value {
             }
         }
         Value::Error(e) => return Value::Error(*e),
-        // 참조도 배열도 아닌 낱값은 #N/A (RANK(5,5), RANK(3.14159,-255), 대조 실험 typing·refargs)
+        // 참조도 배열도 아닌 낱값은 #N/A, 글이면 #VALUE! (RANK(5,5), RANK(3.14159,-255) = #N/A, RANK(3,"a") = #VALUE!,
+        // 대조 실험 typing·refargs·rand)
+        Value::Text(_) => return Value::Error(ErrorKind::Value),
         _ => return Value::Error(ErrorKind::NA),
     }
     if let Some(e) = first_err {
@@ -945,7 +951,9 @@ fn countif(ctx: &mut Ctx, a: &[Value]) -> Value {
     let c = crate::calc::criteria::Criterion::parse(&crit, ctx.date1904());
     match &a[0] {
         // 여러 영역 참조는 #VALUE! (대조 실험 stat)
-        Value::Ref(r) if r.len() > 1 => Value::Error(ErrorKind::Value),
+        Value::Ref(r) if r.len() > 1 || r.iter().any(|x| x.sheet != x.sheet_last) => {
+            Value::Error(ErrorKind::Value)
+        }
         Value::Ref(r) => {
             let mut n = 0f64;
             let mut total = 0f64;
@@ -985,8 +993,11 @@ fn countifs(ctx: &mut Ctx, a: &[Value]) -> Value {
 }
 
 fn averageif(ctx: &mut Ctx, a: &[Value]) -> Value {
-    // 범위가 참조가 아니면 #VALUE! (AVERAGEIF(1,1), 말뭉치 probe3)
-    if !matches!(a[0], Value::Ref(_)) {
+    // 범위가 참조가 아니면 #VALUE! (AVERAGEIF(1,1), 말뭉치 probe3). 평균 범위도 참조여야 한다 (AVERAGEIF(…,{""}))
+    if !matches!(a[0], Value::Ref(_))
+        || a.get(2)
+            .is_some_and(|t| !matches!(t, Value::Ref(_) | Value::Empty))
+    {
         return Value::Error(ErrorKind::Value);
     }
     let target = match opt(a, 2) {

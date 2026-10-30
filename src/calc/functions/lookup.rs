@@ -671,7 +671,8 @@ fn row_col(ctx: &mut Ctx, a: &[Value], row: bool) -> Value {
             return Value::Number(if row { ctx.row } else { ctx.col } as f64 + 1.0);
         }
         Some(Value::Ref(r)) => {
-            if r.len() != 1 {
+            // 여러 영역·여러 시트에 걸친 참조는 #REF! (ROW('S1:S3'!A1), 대조 실험 rand)
+            if r.len() != 1 || r[0].sheet != r[0].sheet_last {
                 return Value::Error(ErrorKind::Ref);
             }
             r[0]

@@ -319,6 +319,10 @@ fn dec2(ctx: &mut Ctx, a: &[Value], radix: u32) -> Value {
     if raw > hi || raw < lo {
         return Value::Error(ErrorKind::Num);
     }
+    // 음수 소수가 0 이 되면 자릿수를 채우지 않는다 (DEC2OCT(-0.5,5) = "0", 대조 실험 rand)
+    if raw < 0.0 && x == 0.0 {
+        return Value::from("0");
+    }
     match fmt_radix(x as i64, radix, places) {
         Ok(s) => Value::from(s),
         Err(e) => Value::Error(e),
