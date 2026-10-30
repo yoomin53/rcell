@@ -255,6 +255,27 @@ fn cycles_are_reported() {
     assert_eq!(calc(&w, "C1"), n(5.0));
 }
 
+/// BINOM.DIST 확률 질량: 조합 수를 e^{lnΓ 차이} 로 구한다 (대조 실험 dist4, 한셀 값과 끝자리까지)
+#[test]
+fn binom_pmf_uses_gammaln() {
+    assert_eq!(
+        one("BINOM.DIST(10,20,0.5,FALSE)"),
+        n(0.176_197_052_001_953_24)
+    );
+    assert_eq!(
+        one("BINOM.DIST(5,10,0.1,FALSE)"),
+        n(0.001_488_034_800_000_000_8)
+    );
+    assert_eq!(
+        one("BINOM.DIST(50,100,0.3,TRUE)"),
+        n(0.999_990_965_313_804_3)
+    );
+    assert_eq!(
+        one("BINOM.DIST(170,171,0.9,TRUE)"),
+        n(0.999_999_985_021_472_7)
+    );
+}
+
 /// 반복 계산 (calcPr iterate): 파일 값에서 시작해 2×iterateCount 번, 행 차례로 (대조 실험 circ)
 #[test]
 fn iterative_calculation() {

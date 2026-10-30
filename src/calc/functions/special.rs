@@ -558,21 +558,22 @@ pub fn binom_coef(n: f64, k: f64) -> f64 {
     (ln_gamma(n + 1.0) - ln_gamma(k + 1.0) - ln_gamma(n - k + 1.0)).mexp()
 }
 
-/// 이항 확률 P(X = k)
+/// 이항 확률 P(X = k): 조합 수를 e^{GAMMALN 차이}로 구해 p^k·q^(n−k) 를 곱한다 (한셀 BINOM.DIST(…,FALSE) 가 n = 20–1000 의
+/// 6 경우 끝자리까지 같다; 정수 곱으로 구한 조합 수는 `BINOM.DIST(10,20,0.5,FALSE)` 의 끝자리가 다르다, 대조 실험 dist4·c3).
+/// 조합 수가 넘치는 큰 n 은 로그 꼴 e^{ln C + k ln p + (n−k) ln q} (누적에서만 쓴다)
 pub fn binom_pmf(k: f64, n: f64, p: f64) -> f64 {
+    use crate::calc::hcmath::lgamma;
     if p == 0.0 {
         return if k == 0.0 { 1.0 } else { 0.0 };
     }
     if p == 1.0 {
         return if k == n { 1.0 } else { 0.0 };
     }
-    if n <= 1029.0 {
-        return binom_coef(n, k) * p.mpow(k) * (1.0 - p).mpow(n - k);
+    let lc = lgamma(n + 1.0) - lgamma(k + 1.0) - lgamma(n - k + 1.0);
+    if lc <= 709.782_712_893_384 {
+        return lc.mexp() * p.mpow(k) * (1.0 - p).mpow(n - k);
     }
-    (ln_gamma(n + 1.0) - ln_gamma(k + 1.0) - ln_gamma(n - k + 1.0)
-        + k * p.mln()
-        + (n - k) * (1.0 - p).mln())
-    .mexp()
+    (lc + k * p.mln() + (n - k) * (1.0 - p).mln()).mexp()
 }
 
 /// t 분포 오른쪽 꼬리 P(T > t) (t ≥ 0)
