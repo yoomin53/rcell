@@ -325,3 +325,47 @@ fn corpus_xls_matches_legacy() {
     eprintln!("레거시 ↔ xls: {checked}개");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// 웹 페이지(.htm·.mht): 말뭉치의 레거시 문서를 모두 쓰고, 틀(프레임 묶음·시트 쪽·탭)과 mht 의 MIME 꼴을 확인한다.
+/// 한셀과 바이트 단위로 맞춘 것은 `docs/format/other-formats.md` 9절
+#[test]
+fn corpus_web_pages_are_well_formed() {
+    let Some(root) = std::env::var_os("RCELL_CORPUS").map(PathBuf::from) else {
+        eprintln!("RCELL_CORPUS 미설정 — 건너뜀");
+        return;
+    };
+    let mut checked = 0;
+    for dir in [root.clone(), root.join("craft"), root.join("templates")] {
+        for legacy in files_with_suffix(&dir, ".legacy.cell") {
+            let wb = rcell::open(&legacy).expect("열기");
+            let visible = wb
+                .sheets
+                .iter()
+                .filter(|s| s.state == rcell::model::SheetState::Visible)
+                .count();
+            let files = rcell::webpage::write_htm(&wb, "x");
+            let sheets = files
+                .iter()
+                .filter(|f| f.path.starts_with("x.files/sheet"))
+                .count();
+            assert_eq!(sheets, visible, "{}", legacy.display());
+            let main = String::from_utf8(files[0].data.clone()).unwrap();
+            assert!(main.contains("<frameset"), "{}", legacy.display());
+            assert!(files.iter().any(|f| f.path == "x.files/tabs.htm"));
+            for f in files.iter().filter(|f| f.path.ends_with(".htm")) {
+                let t = String::from_utf8(f.data.clone()).unwrap();
+                assert!(
+                    t.ends_with("</html>\n") || t.ends_with("</html>"),
+                    "{}",
+                    f.path
+                );
+            }
+            let mht = rcell::webpage::write_mht(&wb);
+            let t = String::from_utf8_lossy(&mht);
+            assert!(t.starts_with("Mime-Version:1.0\r\n"));
+            assert!(t.trim_end().ends_with("--"), "{}", legacy.display());
+            checked += 1;
+        }
+    }
+    eprintln!("웹 페이지: {checked}개");
+}
