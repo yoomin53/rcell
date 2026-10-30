@@ -1690,17 +1690,31 @@ fn binom_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     if cum {
-        let mut s = 0.0;
-        let mut i = 0.0;
-        while i <= k {
-            s += sp::binom_pmf(i, n, p);
-            i += 1.0;
+        // 평균 n·p 보다 위의 k 는 1 − 위쪽 꼬리 (k+1…n 을 차례로 더한다) — 한셀과 끝자리까지 같다
+        // (BINOM.DIST(50,100,0.3,TRUE) = 0.9999909653138043 따위 3 경우, 대조 실험 dist4); 그 밖은 0…k 를 더한다
+        if k > n * p {
+            let mut s = 0.0;
+            let mut i = k + 1.0;
+            while i <= n {
+                s += sp::binom_pmf(i, n, p);
+                i += 1.0;
+            }
+            num((1.0 - s).clamp(0.0, 1.0))
+        } else {
+            let mut s = 0.0;
+            let mut i = 0.0;
+            while i <= k {
+                s += sp::binom_pmf(i, n, p);
+                i += 1.0;
+            }
+            num(s.min(1.0))
         }
-        num(s.min(1.0))
     } else {
         // 조합 수가 넘치면 #NUM! (BINOM.DIST(1000,2000,0.5,FALSE), 대조 실험 dist·c3)
         let kk = k.min(n - k);
-        if sp::ln_gamma(n + 1.0) - sp::ln_gamma(kk + 1.0) - sp::ln_gamma(n - kk + 1.0)
+        if crate::calc::hcmath::lgamma(n + 1.0)
+            - crate::calc::hcmath::lgamma(kk + 1.0)
+            - crate::calc::hcmath::lgamma(n - kk + 1.0)
             > 709.782712893384
         {
             return Value::Error(ErrorKind::Num);
