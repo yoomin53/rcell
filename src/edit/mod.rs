@@ -26,6 +26,7 @@ mod cfpaste;
 pub mod clip;
 pub mod collate;
 mod collate_data;
+mod collate_kana;
 pub mod fill;
 mod filter;
 pub mod find;
