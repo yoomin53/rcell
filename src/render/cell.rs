@@ -253,11 +253,37 @@ fn rich_html(v: &CellView, text: &str, theme: &Theme) -> String {
     match v.rich {
         Some(rt) if text == rt.text => {
             for run in &rt.runs {
-                let css = run
+                let mut css = run
                     .font
                     .as_ref()
                     .map(|f| font_css(Some(f), theme, None))
                     .unwrap_or_default();
+                // 조각의 위·아래 첨자도 칸 전체와 같게: 60% 글꼴을 기준선에서 올리거나 내린다
+                if let Some(f) = run.font.as_ref()
+                    && let Some(va) = f.vert_align.as_deref()
+                {
+                    let size = f
+                        .size
+                        .or_else(|| v.font.and_then(|c| c.size))
+                        .unwrap_or(metrics::DEFAULT_SIZE);
+                    let dy = match va {
+                        "superscript" => -0.45,
+                        "subscript" => 0.19,
+                        _ => 0.0,
+                    } * size
+                        * 4.0
+                        / 3.0;
+                    if dy != 0.0 {
+                        css = css
+                            .replace("vertical-align:super;font-size:smaller;", "")
+                            .replace("vertical-align:sub;font-size:smaller;", "");
+                        let _ = write!(
+                            css,
+                            "font-size:{:.2}pt;position:relative;top:{dy:.1}px;",
+                            size * 0.6
+                        );
+                    }
+                }
                 if css.is_empty() {
                     s.push_str(&esc(&run.text));
                 } else {

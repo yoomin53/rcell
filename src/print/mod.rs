@@ -20,7 +20,9 @@ mod pdf;
 mod pdfimage;
 
 pub use font::FontDb;
-pub use paginate::{Area, Page, Scaling, Settings, SheetPrint, settings, sheet_print, used_end};
+pub use paginate::{
+    Area, Page, Scaling, Settings, SheetPrint, settings, sheet_print, sheet_print_with, used_end,
+};
 
 use crate::model::Workbook;
 use crate::render::page::{
@@ -43,6 +45,97 @@ pub struct PdfOptions {
     pub max_pages: Option<usize>,
     /// 흑백 인쇄·간단히 인쇄 설정을 따른다 (한셀 PDF 저장은 둘 다 따르지 않는다 — 기본 거짓)
     pub quality_settings: bool,
+    /// 한셀이 문서를 열 때 다시 계산하는 칸 ([`open_recalc`]). 기본은 저장된 값 그대로
+    pub recalc: OpenRecalc,
+}
+
+/// 한셀이 문서를 열 때 다시 계산하는 범위 (값을 0·틀린 값으로 적은 문서 20 칸 실험 — 형식·계산 엔진 번호별)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenRecalc {
+    /// 저장된 값 그대로 (휘발성 함수도, 값이 없는 수식도 — XML·xlsx 의 엔진 번호가 한셀 2024 의 904 이상)
+    #[default]
+    None,
+    /// 휘발성 함수(NOW·TODAY·RAND·RANDBETWEEN·OFFSET·INDIRECT)를 쓰거나 그런 칸에 기대는 칸만 (레거시·xls 의 904)
+    Volatile,
+    /// 모두 (엔진 번호가 없거나 낮은 XML·레거시, ODS)
+    Full,
+}
+
+/// 한셀 2024 계산 엔진 번호 (`calcPr/@hs:hclCalcId`, 레거시 0xA101)
+pub const HCELL_CALC_ID: u32 = 904;
+
+/// 문서 바이트와 읽은 모델로 한셀이 열 때 다시 계산하는 범위를 정한다.
+/// XML·xlsx: 엔진 번호(`hs:hclCalcId`, 없으면 Excel 의 `calcId`)가 904 보다 작거나 없으면 모두, 아니면 하지 않는다
+/// (904 → 하지 않음, 903 → 모두, Excel 191029 → 하지 않음, 둘 다 없음 → 모두). 레거시·xls: 0xA101 이 904 이상이면
+/// 휘발성 칸만, 아니면 모두. ODS: 모두. 바이너리 .cell 은 한셀 COM 이 열지 못해 재지 못했다 — 저장된 값 그대로
+pub fn open_recalc(bytes: &[u8], wb: &Workbook) -> OpenRecalc {
+    let id = wb.hancom.calc_id.or_else(|| {
+        wb.calc_attrs
+            .iter()
+            .find(|(k, _)| k == "calcId")
+            .and_then(|(_, v)| v.trim().parse().ok())
+    });
+    let current = id.is_some_and(|i| i >= HCELL_CALC_ID);
+    match crate::detect(bytes) {
+        crate::FileKind::Cfb => {
+            let encrypted = crate::container::list_entries(bytes).is_ok_and(|e| {
+                e.iter()
+                    .any(|(n, _)| n.eq_ignore_ascii_case("/EncryptionInfo"))
+            });
+            if encrypted {
+                // 암호화된 OOXML: 안은 XML 패키지
+                if current {
+                    OpenRecalc::None
+                } else {
+                    OpenRecalc::Full
+                }
+            } else if wb.hancom.calc_id.is_some_and(|i| i >= HCELL_CALC_ID) {
+                OpenRecalc::Volatile
+            } else {
+                OpenRecalc::Full
+            }
+        }
+        crate::FileKind::Zip if crate::ods::is_ods(bytes) => OpenRecalc::Full,
+        crate::FileKind::Zip => {
+            let binary = crate::Package::from_bytes(bytes.to_vec())
+                .is_ok_and(|p| p.has_part("xl/workbook.bin"));
+            if binary || current {
+                OpenRecalc::None
+            } else {
+                OpenRecalc::Full
+            }
+        }
+        crate::FileKind::Unknown => OpenRecalc::None,
+    }
+}
+
+/// [`OpenRecalc`] 대로 칸 값을 다시 계산한다. 순환 참조·구현하지 않은 함수·해석하지 못한 수식의 칸은 저장된 값
+/// (한셀 CalculateFull 은 순환 참조에서 멈춘다)
+pub fn apply_open_recalc(wb: &mut Workbook, mode: OpenRecalc) {
+    if mode == OpenRecalc::None {
+        return;
+    }
+    use crate::calc::CellStatus;
+    let (results, _) = crate::calc::evaluate(wb, &crate::calc::CalcOptions::default());
+    let mut new: std::collections::HashMap<(usize, u32, u32), crate::model::CellValue> =
+        std::collections::HashMap::new();
+    for r in results {
+        let take = match r.status {
+            CellStatus::Volatile => true,
+            CellStatus::Computed => mode == OpenRecalc::Full,
+            _ => false,
+        };
+        if take {
+            new.insert((r.sheet, r.cell.row, r.cell.col), r.value);
+        }
+    }
+    for (si, sheet) in wb.sheets.iter_mut().enumerate() {
+        for cell in &mut sheet.cells {
+            if let Some(v) = new.remove(&(si, cell.r.row, cell.r.col)) {
+                cell.value = v;
+            }
+        }
+    }
 }
 
 /// PDF 페이지 수 기본 한도
@@ -128,17 +221,9 @@ pub fn frame_with(
     let z = if sp.tall { 100 } else { sp.print_scale };
     PageFrame {
         cols: bounds(x0 + dx + (hw * 6.25).round(), &cols),
-        col_x100: {
-            let mut acc = 0.0;
-            cols.iter()
-                .map(|&(c, _)| {
-                    let at = acc;
-                    acc += sp.col_px.get(c as usize).copied().unwrap_or(0) as f64;
-                    (c, at)
-                })
-                .collect()
-        },
         origin_x: x0 + dx + (hw * 6.25).round(),
+        col_abs: cumulative(&sp.col_px),
+        row_abs: cumulative(&sp.row_px),
         rows: bounds(y0 + dy + (hh * 6.25).round(), &rows),
         row_dev: (0..sp.row_px.len() as u32)
             .map(|r| sp.row_print_px(r) * 6.25)
@@ -153,6 +238,18 @@ pub fn frame_with(
         draft: false,
         errors: ErrorPrint::Displayed,
     }
+}
+
+/// 화면 px 의 누적 시작 자리 (번호마다, 끝에 전체)
+fn cumulative(px: &[u32]) -> Vec<f64> {
+    let mut acc = 0.0;
+    let mut out = Vec::with_capacity(px.len() + 1);
+    for &v in px {
+        out.push(acc);
+        acc += v as f64;
+    }
+    out.push(acc);
+    out
 }
 
 /// 행·열 머리글 (가는 선 상자, 가운데 글자: 열 이름·행 번호)
@@ -322,6 +419,15 @@ fn hf_ops(
 
 /// 통합 문서를 PDF 로 (보이는 시트들, 페이지 순서대로)
 pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
+    let calculated;
+    let wb = if opts.recalc == OpenRecalc::None {
+        wb
+    } else {
+        let mut w = wb.clone();
+        apply_open_recalc(&mut w, opts.recalc);
+        calculated = w;
+        &calculated
+    };
     let fonts = FontSet::new(db);
     let sheets: Vec<usize> = opts.sheets.clone().unwrap_or_else(|| {
         wb.sheets
@@ -341,11 +447,14 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
         f0.and_then(|f| f.size).unwrap_or(11.0),
     );
     let mut pages: Vec<(PageSize, Vec<Op>)> = Vec::new();
+    // 키 큰 모드가 아닌 시트가 이미 나왔는가 (배율 100 의 99 는 그 첫째에만)
+    let mut untall_seen = false;
     for si in sheets {
         let Some(sheet) = wb.sheets.get(si) else {
             continue;
         };
-        let sp = sheet_print(wb, si);
+        let sp = paginate::sheet_print_with(wb, si, !untall_seen);
+        untall_seen |= !sp.tall && matches!(sp.settings.scaling, Scaling::Zoom(100));
         let size = page_size(&sp.settings);
         let po = sheet.page.print_options.as_ref();
         let setup = sheet.page.setup.as_ref();
