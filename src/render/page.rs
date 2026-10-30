@@ -105,6 +105,15 @@ pub enum Op {
         /// 기준선 왼쪽 끝을 중심으로 돌린 각도 (도, 시계 방향 — 장치 좌표는 아래가 +)
         angle: f64,
     },
+    /// 상자 안을 장치 해상도 그림으로 그릴 묶음 (차트 — 한셀 PDF 는 차트를 비트맵으로 인쇄한다). PDF 가 그림으로 못 그리면
+    /// 안의 ops 를 벡터로 그린다
+    Raster {
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        ops: Vec<Op>,
+    },
     /// 사각형으로 자르기 시작 / 끝
     Clip {
         x0: f64,
@@ -1642,7 +1651,19 @@ fn object_ops(
                     super::draw::draw_color(c, theme)
                 });
                 let m = box_matrix(x, y, w, h, 6.25, rot, fh, fv);
-                super::svgops::svg_ops(&svg, m, &mw, ops);
+                if rot == 0.0 && !fh && !fv {
+                    let mut sub = Vec::new();
+                    super::svgops::svg_ops(&svg, m, &mw, &mut sub);
+                    ops.push(Op::Raster {
+                        x0: x,
+                        y0: y,
+                        x1: x + w,
+                        y1: y + h,
+                        ops: sub,
+                    });
+                } else {
+                    super::svgops::svg_ops(&svg, m, &mw, ops);
+                }
             }
         }
         _ => {

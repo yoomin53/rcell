@@ -18,6 +18,7 @@ mod paginate;
 pub mod paper;
 mod pdf;
 mod pdfimage;
+mod raster;
 
 pub use font::FontDb;
 pub use paginate::{

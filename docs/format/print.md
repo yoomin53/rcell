@@ -197,7 +197,7 @@ z 는 모든 페이지가 1:1 쓸 자리 (용지 − 여백)/0.75pt 에 들어�
 
 ## 12. PDF
 
-- 순수 Rust: `pdf-writer`(PDF 객체), `ttf-parser`(글꼴 읽기), `subsetter`(부분 집합) — 모두 MIT OR Apache-2.0.
+- 순수 Rust: `pdf-writer`(PDF 객체), `ttf-parser`(글꼴 읽기), `subsetter`(부분 집합), `zeno`(차트 비트맵의 윤곽 래스터라이저) — 모두 MIT OR Apache-2.0 (zeno 는 Apache-2.0 OR MIT).
 - 글꼴은 TrueType 부분 집합을 CIDFontType2 + Identity-H + ToUnicode 로 넣는다 (한셀 PDF 와 같은 꼴). 웹 어셈블리처럼 글꼴
   파일이 없으면 한국어 표준 CID 글꼴(`HYGoThic-Medium`, UniKS-UCS2-H)을 이름만 적는다.
 - 선·채우기는 pt 좌표, 글자만 장치 단위 변환 아래 (한셀 PDF 처럼 — 같은 렌더러에서 선 굵기가 같게 그려진다).

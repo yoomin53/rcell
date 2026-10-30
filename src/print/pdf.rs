@@ -27,6 +27,12 @@ struct Images {
 }
 
 impl Images {
+    /// 이미 풀린 그림 (그려 낸 비트맵)
+    fn push(&mut self, img: PdfImage) -> usize {
+        self.list.push(img);
+        self.list.len() - 1
+    }
+
     fn add(&mut self, data: &std::sync::Arc<Vec<u8>>) -> Option<usize> {
         let key = std::sync::Arc::as_ptr(data) as usize;
         if let Some(&k) = self.by_ptr.get(&key) {
@@ -118,6 +124,57 @@ pub struct Run {
     pub text: String,
 }
 
+/// 글리프 외곽선 → 경로 조각 (글꼴 단위 → 장치 단위, y 뒤집기)
+struct Outline {
+    segs: Vec<Seg>,
+    at: (f64, f64),
+    k: f64,
+    stretch: f64,
+    shear: f64,
+    pen: f64,
+}
+
+impl Outline {
+    fn pt(&self, x: f32, y: f32) -> (f64, f64) {
+        let (x, y) = (x as f64 * self.k, y as f64 * self.k);
+        (self.pen + (x + y * self.shear) * self.stretch, -y)
+    }
+}
+
+impl ttf_parser::OutlineBuilder for Outline {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let p = self.pt(x, y);
+        self.at = p;
+        self.segs.push(Seg::Move(p.0, p.1));
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        let p = self.pt(x, y);
+        self.at = p;
+        self.segs.push(Seg::Line(p.0, p.1));
+    }
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let (c, p, a) = (self.pt(x1, y1), self.pt(x, y), self.at);
+        // 2차 → 3차 베지어
+        self.segs.push(Seg::Cubic(
+            a.0 + 2.0 / 3.0 * (c.0 - a.0),
+            a.1 + 2.0 / 3.0 * (c.1 - a.1),
+            p.0 + 2.0 / 3.0 * (c.0 - p.0),
+            p.1 + 2.0 / 3.0 * (c.1 - p.1),
+            p.0,
+            p.1,
+        ));
+        self.at = p;
+    }
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let (a, b, p) = (self.pt(x1, y1), self.pt(x2, y2), self.pt(x, y));
+        self.segs.push(Seg::Cubic(a.0, a.1, b.0, b.1, p.0, p.1));
+        self.at = p;
+    }
+    fn close(&mut self) {
+        self.segs.push(Seg::Close);
+    }
+}
+
 /// 글꼴 파일이 없을 때 글자 폭 (1/1000 em): 전각 1000, 그 밖 500
 fn plain_width(ch: char) -> f64 {
     if crate::render::is_wide(ch) {
@@ -152,6 +209,45 @@ impl<'a> FontSet<'a> {
             });
         st.by_face.insert(face, e);
         e
+    }
+
+    /// 글자 모양: 글자마다 글리프 외곽선 (기준선 왼쪽 끝이 (0, 0), 장치 단위, 아래가 +). 글꼴 파일이 없는 글자가 있거나
+    /// 외곽선을 못 읽으면 None. 비트맵으로 그릴 때 쓴다
+    pub fn glyph_paths(
+        &self,
+        key: &FontKey,
+        text: &str,
+        size: f64,
+        stretch: f64,
+    ) -> Option<Vec<Vec<Seg>>> {
+        let runs = self.runs(key, text, false);
+        let st = self.state.borrow();
+        let mut pen = 0.0;
+        let mut out = Vec::new();
+        for run in &runs {
+            let emb = &st.fonts[run.font?];
+            let face = ttf_parser::Face::parse(&emb.face.data, emb.face.index).ok()?;
+            let k = size / face.units_per_em() as f64;
+            let shear = if run.synth_italic { 0.21 } else { 0.0 };
+            for (ch, gid) in run.text.chars().zip(&run.glyphs) {
+                let gid = ttf_parser::GlyphId(*gid);
+                let mut b = Outline {
+                    segs: Vec::new(),
+                    at: (0.0, 0.0),
+                    k,
+                    stretch,
+                    shear,
+                    pen,
+                };
+                if face.outline_glyph(gid, &mut b).is_some() {
+                    out.push(b.segs);
+                } else if ch != ' ' {
+                    out.push(Vec::new());
+                }
+                pen += face.glyph_hor_advance(gid).unwrap_or(0) as f64 * k * stretch;
+            }
+        }
+        Some(out)
     }
 
     /// 글자들을 글꼴 토막으로 (없는 글자는 대체 글꼴). `keep` 이면 글리프를 부분 집합에 넣는다
@@ -452,6 +548,32 @@ fn content(
                 };
                 let _ = writeln!(s, "{pre}{d}{op}");
             }
+            Op::Raster {
+                x0,
+                y0,
+                x1,
+                y1,
+                ops: sub,
+            } => match super::raster::render(sub, (*x0, *y0, *x1, *y1), fonts) {
+                Some(img) => {
+                    let (ox, oy) = (x0.round(), y0.round());
+                    let (w, h) = (img.width as f64, img.height as f64);
+                    let k = images.push(img);
+                    let _ = writeln!(
+                        s,
+                        "q {} 0 0 {} {} {} cm /Im{k} Do Q",
+                        num(w * 0.12 * sx),
+                        num(h * 0.12 * sy),
+                        num(px(ox)),
+                        num(py(oy + h))
+                    );
+                }
+                None => {
+                    let (c, p) = content(sub, size, fonts, images, hatches);
+                    s.push_str(&String::from_utf8_lossy(&c));
+                    plain |= p;
+                }
+            },
             Op::Image {
                 x0,
                 y0,
