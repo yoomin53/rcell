@@ -51,7 +51,23 @@ const LEG_LINE: (f64, f64, f64, f64) = (16.0, 1.5, 11.5, 9.5);
 
 /// 차트 하나를 `w × h` 픽셀 SVG 로.
 pub fn chart_svg(ch: &Chart, w: f64, h: f64, theme: &Theme, color: ColorFn) -> String {
-    let cx = Ctx { theme, color };
+    chart_svg_at(ch, w, h, theme, color, false)
+}
+
+/// [`chart_svg`] 에 시트 맨 위(y 0)에 붙은 차트인지 알려 준다
+pub fn chart_svg_at(
+    ch: &Chart,
+    w: f64,
+    h: f64,
+    theme: &Theme,
+    color: ColorFn,
+    at_top: bool,
+) -> String {
+    let cx = Ctx {
+        theme,
+        color,
+        at_top,
+    };
     let mut out = Svg::new(w, h);
     // 차트 영역
     let mut area = cx.shape(ch.sp_pr.as_ref(), Some("#FFFFFF"), Some((AXIS_GRAY, 1.0)));
@@ -475,6 +491,8 @@ fn calibri_em(c: char) -> Option<f64> {
 struct Ctx<'a> {
     theme: &'a Theme,
     color: ColorFn<'a>,
+    /// 시트 맨 위(y 0)에 붙은 XML 차트인가 — 한셀 화면은 그림 영역 위가 1.2px 가깝다 (눈금 높이 실험)
+    at_top: bool,
 }
 
 impl Ctx<'_> {
@@ -1058,7 +1076,11 @@ fn legacy_layout(
                     right = kx - 18.0;
                 }
             }
-            for (it, (kx, ky)) in items.iter().zip(keys) {
+            // 세로 범례의 글 줄: 한셀은 줄 간격 23.02px 로 가운데에 놓고 정수로 내린다 (첫 줄은 2px 위) — 항목 3·4·5·6개의
+            // 글 윗변 12줄이 모두 맞는 값 (차트 종류 실험의 레거시 범례)
+            let vertical_legend = !matches!(pos, "t" | "b");
+            let cyl = (top + fb) / 2.0;
+            for (k, (it, (kx, ky))) in items.iter().zip(keys).enumerate() {
                 if let Some(f) = &it.fill {
                     out.rect(kx, ky, kw, 15.0, &Style::fill(f));
                 } else if let Some(st) = &it.stroke {
@@ -1073,7 +1095,17 @@ fn legacy_layout(
                         draw_marker(out, &m.sym, kx + kw / 2.0, y + 0.5, m.size, &ms);
                     }
                 }
-                out.text(kx + kw + gap, ky + 9.5, &it.name, &font, "start");
+                let ty = if vertical_legend && n <= 1.0 {
+                    // 항목 하나는 글이 1px 위
+                    ky + 8.5
+                } else if vertical_legend {
+                    let top_row = (cyl - 23.02 * (n - 1.0) / 2.0 - 7.87 + 23.02 * k as f64).floor()
+                        - if k == 0 { 2.0 } else { 0.0 };
+                    top_row + 8.5
+                } else {
+                    ky + 9.5
+                };
+                out.text(kx + kw + gap, ty, &it.name, &font, "start");
             }
         }
     }
@@ -1902,7 +1934,17 @@ fn draw_axis_chart(
                     8.0 - PAD.2,
                 )
             } else {
-                (val_label_w, cat_label_h, val_font.px() * 0.35)
+                (
+                    val_label_w,
+                    cat_label_h,
+                    // 시트 맨 위에 붙은 제목 없는 차트는 그림 영역 위가 틀에서 3px (그 밖에는 4.2px)
+                    val_font.px()
+                        * if cx.at_top && title_of(ch, cx, base).is_none() {
+                            0.25
+                        } else {
+                            0.35
+                        },
+                )
             };
             Rect {
                 x: inner.x + left + tl,
@@ -2601,7 +2643,15 @@ fn draw_axis_chart(
 /// 눈금선 하나. `snap` 이면 화소 가운데에 (레거시), 아니면 계산한 자리 그대로 (한셀 XML 차트는 흐리게 그린다 —
 /// 한 화소에 걸치면 진한 회색, 두 화소에 걸치면 연한 회색 둘)
 fn grid_line(out: &mut Svg, vertical: bool, p: f64, plot: &Rect, st: &Stroke, snap: bool) {
-    let p = if snap { p.round() + 0.5 } else { p + 0.5 };
+    // XML 차트의 가로 눈금선(값 축)은 한셀이 1/4 픽셀 위쪽으로 올려 그린다 (눈금 높이 실험: 선 가운데가 계산한 자리에서 다음
+    // 1/4 픽셀 — 이론 59.875 → 60.0, 142.625 → 142.75, 225.375 → 225.5; 눈금 높이 실험 1.28 → 1.23%)
+    let p = if snap {
+        p.round() + 0.5
+    } else if !vertical {
+        ((p + 0.5) * 4.0 - 1e-6).ceil() / 4.0
+    } else {
+        p + 0.5
+    };
     if vertical {
         out.line(p, plot.y, p, plot.y + plot.h, st);
     } else {
@@ -3218,6 +3268,17 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
                         } else {
                             (c0, c0 + slot, va, vb)
                         };
+                        // 원기둥·원뿔·피라미드 (레거시 계열 모양)
+                        let shape = ch
+                            .legacy
+                            .as_ref()
+                            .and_then(|l| l.bar_shapes.get(g.offset + i))
+                            .copied()
+                            .unwrap_or((false, false));
+                        if shape != (false, false) {
+                            draw_shaped_bar(out, &v, shape, [bx0, bx1, ya, yb, z0, z1], hz, front);
+                            continue;
+                        }
                         let sx = if v.sb >= 0.0 { bx1 } else { bx0 };
                         out.path(
                             &v.path(&[(sx, ya, z0), (sx, yb, z0), (sx, yb, z1), (sx, ya, z1)]),
@@ -3376,6 +3437,102 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
                 }
             }
         }
+    }
+}
+
+/// 레거시 3차원 막대의 둥근·뾰족한 모양 (원기둥 = 둥글고 위도 같은 폭, 원뿔 = 둥글고 뾰족, 피라미드 = 모나고 뾰족): 상자
+/// [x0, x1, y0, y1, z0, z1] 안에 밑면(막대 시작)과 윗면(끝) 고리를 놓고 (뾰족하면 윗면은 한 점) 화면 윤곽(볼록 껍질)을
+/// 왼쪽은 계열 색, 오른쪽은 × 0.65 로 칠한다 (한셀 화면: 왼쪽 밝고 오른쪽 어둡다). 원기둥은 윗면 타원을 × 0.97 로 덮는다
+fn draw_shaped_bar(
+    out: &mut Svg,
+    v: &View3,
+    (round, apex): (bool, bool),
+    [x0, x1, y0, y1, z0, z1]: [f64; 6],
+    horizontal: bool,
+    color: &str,
+) {
+    let (cxm, cym, czm) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0, (z0 + z1) / 2.0);
+    let (rx, ry, rz) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0, (z1 - z0) / 2.0);
+    let n = if round { 24 } else { 4 };
+    let ring = |t: f64, top: bool| -> Vec<(f64, f64, f64)> {
+        (0..n)
+            .map(|i| {
+                let a = if round {
+                    std::f64::consts::TAU * i as f64 / n as f64
+                } else {
+                    std::f64::consts::FRAC_PI_4 + std::f64::consts::FRAC_PI_2 * i as f64
+                };
+                // 모난 고리는 네 모서리 (cos·sin 을 √2 배 늘린다)
+                let k = if round { 1.0 } else { std::f64::consts::SQRT_2 };
+                let (c, s) = (a.cos() * k * t, a.sin() * k * t);
+                if horizontal {
+                    (if top { x1 } else { x0 }, cym + ry * c, czm + rz * s)
+                } else {
+                    (cxm + rx * c, if top { y1 } else { y0 }, czm + rz * s)
+                }
+            })
+            .collect()
+    };
+    let base = ring(1.0, false);
+    let top = ring(if apex { 0.0 } else { 1.0 }, true);
+    let proj: Vec<(f64, f64)> = base
+        .iter()
+        .chain(top.iter())
+        .map(|&(x, y, z)| v.p(x, y, z))
+        .collect();
+    // 볼록 껍질 (Andrew 단조 사슬)
+    let mut pts = proj.clone();
+    pts.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    pts.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6);
+    let cross = |o: (f64, f64), a: (f64, f64), b: (f64, f64)| {
+        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+    };
+    let mut hull: Vec<(f64, f64)> = Vec::new();
+    for pass in 0..2 {
+        let start = hull.len();
+        let it: Box<dyn Iterator<Item = &(f64, f64)>> = if pass == 0 {
+            Box::new(pts.iter())
+        } else {
+            Box::new(pts.iter().rev())
+        };
+        for &p in it {
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop();
+    }
+    if hull.len() < 3 {
+        return;
+    }
+    let (minx, maxx) = hull.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| {
+        (lo.min(p.0), hi.max(p.0))
+    });
+    let id = format!("rcb{:.0}x{:.0}", minx * 10.0, hull[0].1 * 10.0);
+    let _ = write!(
+        out.defs,
+        "<linearGradient id=\"{id}\" gradientUnits=\"userSpaceOnUse\" x1=\"{minx:.2}\" y1=\"0\" x2=\"{maxx:.2}\" y2=\"0\"><stop offset=\"0\" stop-color=\"{c0}\"/><stop offset=\"0.45\" stop-color=\"{c0}\"/><stop offset=\"0.55\" stop-color=\"{c1}\"/><stop offset=\"1\" stop-color=\"{c1}\"/></linearGradient>",
+        c0 = color,
+        c1 = scale_rgb(color, 0.65)
+    );
+    let mut d = String::new();
+    for (i, (x, y)) in hull.iter().enumerate() {
+        let _ = write!(d, "{}{x:.2},{y:.2}", if i == 0 { "M" } else { "L" });
+    }
+    d.push('Z');
+    let _ = write!(out.s, "<path d=\"{d}\" fill=\"url(#{id})\"/>");
+    // 원기둥의 윗면
+    if round && !apex {
+        let mut d = String::new();
+        for (i, &(x, y, z)) in top.iter().enumerate() {
+            let (px, py) = v.p(x, y, z);
+            let _ = write!(d, "{}{px:.2},{py:.2}", if i == 0 { "M" } else { "L" });
+        }
+        d.push('Z');
+        out.path(&d, &Style::fill(&scale_rgb(color, 0.97)));
     }
 }
 
@@ -4284,8 +4441,13 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
         draw_pie3d(out, ch, g, cx, plot);
         return;
     }
-    let (cx0, cy0) = (plot.x + plot.w / 2.0, plot.y + plot.h / 2.0);
-    let r_out = (plot.w.min(plot.h) / 2.0).max(4.0);
+    let (mut cx0, cy0) = (plot.x + plot.w / 2.0, plot.y + plot.h / 2.0);
+    let mut r_out = (plot.w.min(plot.h) / 2.0).max(4.0);
+    // 레거시 2차원 원은 한셀이 가운데 1.5px 오른쪽, 반지름 0.6px 크다 (차트 종류 실험의 원형 둘: 잉크 24~293 대 23~291)
+    if legacy.is_some() {
+        cx0 += 1.5;
+        r_out += 0.6;
+    }
     // 레거시 화면: 원 위 가운데에 계열 이름 (chart_pie: 글자 아랫변이 원 위 14px)
     if legacy.is_some()
         && !doughnut
@@ -4293,6 +4455,13 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
     {
         let font = cx.font(ch.legend_props.tx_pr.as_ref(), None, base.size, false);
         out.text(cx0, cy0 - r_out - 14.0, name, &font, "middle");
+    }
+    if g.three_d
+        && !doughnut
+        && let Some(l) = legacy
+    {
+        draw_pie3d_legacy(out, ch, g, cx, (cx0, cy0, r_out), l.rotation, l.elevation);
+        return;
     }
     let first_ang = g.props.first_slice_ang.unwrap_or(0) as f64;
     let rings: Vec<&ChartSeries> = if doughnut {
@@ -4421,6 +4590,155 @@ fn draw_pies(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font,
     }
 }
 
+/// 레거시(VtChart) 3차원 원형 (한셀 화면, 차트 종류 실험의 pie3d·pie3dexp): 윗면은 가로 반지름 rx (2차원 원 반지름 + 1px, 가운데
+/// 1px 오른쪽), 세로 rx·sin(높이각, 기본 30도 = 0.5) 인 타원, 옆면 두께 0.288·rx, 둘을 합친 높이는 그림 자리 가운데에서 1.35px 위.
+/// 조각은 회전각(기본 20도)에서 위로부터 시계 방향. 윗면 색 = 조각 색 × 0.636. 옆면은 앞쪽 반(방위 90~270도)만 보이고 조각 색
+/// 그대로이되 방위 166도(앞) 에서 143도(오른쪽 앞)로 갈수록 어두워져 × 0.6 (왼쪽에서 빛을 받는다). 쪼갠 조각은 옆으로 옮긴다
+fn draw_pie3d_legacy(
+    out: &mut Svg,
+    ch: &Chart,
+    g: &Group,
+    cx: &Ctx,
+    (cx0, cy0, r_out): (f64, f64, f64),
+    rotation: f64,
+    elevation: f64,
+) {
+    let Some(s) = g.series.first() else { return };
+    let vals: Vec<f64> = s.values.iter().map(|v| v.unwrap_or(0.0).abs()).collect();
+    let total: f64 = vals.iter().sum();
+    if total <= 0.0 {
+        return;
+    }
+    let max_ex = s
+        .d_pts
+        .iter()
+        .filter_map(|d| d.explosion)
+        .chain(s.explosion)
+        .max()
+        .unwrap_or(0) as f64
+        / 100.0;
+    let rx = (r_out + 0.4) / (1.0 + max_ex);
+    let el = if (10.0..=80.0).contains(&elevation) {
+        elevation.to_radians().sin()
+    } else {
+        0.5
+    };
+    let ry = rx * el;
+    let th = rx * 0.288;
+    let ccx = cx0 + 1.0 - 1.5;
+    // 위 타원 가운데: 높이 (2·ry + th) 의 가운데가 그림 자리 가운데에서 1.35px 위
+    let ccy = cy0 - 1.35 - th / 2.0;
+    let start = rotation.to_radians();
+    let mut slices = Vec::new();
+    let mut a0 = start;
+    for (k, v) in vals.iter().enumerate() {
+        let a1 = a0 + v / total * std::f64::consts::TAU;
+        let base_c = pie_color(ch, cx, k);
+        let st0 = point_style(s, 0, k, cx, &base_c);
+        let color = st0.fill.map_or(base_c, |f| f.0);
+        let ex = s
+            .d_pts
+            .iter()
+            .find(|d| d.idx as usize == k)
+            .and_then(|d| d.explosion)
+            .or(s.explosion)
+            .unwrap_or(0) as f64
+            / 100.0
+            * rx;
+        slices.push((a0, a1, color, ex));
+        a0 = a1;
+    }
+    // 방위각 t (위에서 시계 방향) → 윗면 타원 위 점, 조각이 쪼개졌으면 가운데 방향으로
+    let pt = |t: f64, ex: f64, mid: f64, dy: f64| {
+        (
+            ccx + ex * mid.sin() + rx * t.sin(),
+            ccy - ex * el * mid.cos() - ry * t.cos() + dy,
+        )
+    };
+    // 옆면 밝기: 방위 θ (도, 앞 = 180)
+    let shade = |t: f64| {
+        let deg = t.to_degrees().rem_euclid(360.0);
+        if deg >= 166.0 {
+            1.0
+        } else if deg > 143.0 {
+            1.0 - 0.4 * (166.0 - deg) / 23.0
+        } else {
+            0.6
+        }
+    };
+    let pi = std::f64::consts::PI;
+    // 쪼갠 조각은 뒤(위)에 있는 것부터 겹쳐 그린다
+    let mut order: Vec<usize> = (0..slices.len()).collect();
+    order.sort_by(|&i, &j| {
+        let key = |k: usize| -((slices[k].0 + slices[k].1) / 2.0).cos();
+        key(i).total_cmp(&key(j))
+    });
+    for k in order {
+        let (a0, a1, color, ex) = &slices[k];
+        let mid = (a0 + a1) / 2.0;
+        // 잘린 면 (쪼갠 조각만): 시작 변은 방위 a0 − 90°, 끝 변은 a1 + 90° 쪽을 보고, 앞(방위 90°..270°)을 보면 그린다
+        if max_ex > 0.0 {
+            for (a, normal) in [(*a0, *a0 - pi / 2.0), (*a1, *a1 + pi / 2.0)] {
+                let nd = normal.to_degrees().rem_euclid(360.0);
+                if nd <= 90.0 || nd >= 270.0 {
+                    continue;
+                }
+                let c0 = (ccx + ex * mid.sin(), ccy - ex * el * mid.cos());
+                let r1 = pt(a, *ex, mid, 0.0);
+                let d = format!(
+                    "M{:.2},{:.2}L{:.2},{:.2}L{:.2},{:.2}L{:.2},{:.2}Z",
+                    c0.0,
+                    c0.1,
+                    r1.0,
+                    r1.1,
+                    r1.0,
+                    r1.1 + th,
+                    c0.0,
+                    c0.1 + th
+                );
+                let f = scale_rgb(color, shade(normal));
+                let _ = write!(out.s, "<path d=\"{d}\" fill=\"{f}\"/>");
+            }
+        }
+        // 옆면: 앞쪽 반 (방위 90°..270°, 한 바퀴 넘으면 다음 바퀴도)
+        for shift in [0.0, 2.0 * pi] {
+            let (lo, hi) = ((*a0).max(pi / 2.0 + shift), (*a1).min(1.5 * pi + shift));
+            if hi <= lo {
+                continue;
+            }
+            let steps = (((hi - lo).to_degrees()).ceil() as usize).max(1);
+            for i in 0..steps {
+                let t0 = lo + (hi - lo) * i as f64 / steps as f64;
+                let t1 = lo + (hi - lo) * (i + 1) as f64 / steps as f64;
+                // 이웃 띠와 틈이 보이지 않게 조금 겹친다
+                let t1o = (t1 + 0.012).min(hi.max(t1));
+                let (p0, p1) = (pt(t0, *ex, mid, 0.0), pt(t1o, *ex, mid, 0.0));
+                let (q1, q0) = (pt(t1o, *ex, mid, th), pt(t0, *ex, mid, th));
+                let d = format!(
+                    "M{:.2},{:.2}L{:.2},{:.2}L{:.2},{:.2}L{:.2},{:.2}Z",
+                    p0.0, p0.1, p1.0, p1.1, q1.0, q1.1, q0.0, q0.1
+                );
+                let f = scale_rgb(color, shade((t0 + t1) / 2.0));
+                let _ = write!(out.s, "<path d=\"{d}\" fill=\"{f}\"/>");
+            }
+        }
+        // 윗면
+        let steps = (((a1 - a0).to_degrees() / 2.0).ceil() as usize).max(1);
+        let mut d = format!(
+            "M{:.2},{:.2}",
+            ccx + ex * mid.sin(),
+            ccy - ex * el * mid.cos()
+        );
+        for i in 0..=steps {
+            let t = a0 + (a1 - a0) * i as f64 / steps as f64;
+            let (x, y) = pt(t, *ex, mid, 0.0);
+            let _ = write!(d, "L{x:.2},{y:.2}");
+        }
+        d.push('Z');
+        out.path(&d, &Style::fill(&scale_rgb(color, 0.636)));
+    }
+}
+
 /// 3차원 원형 (한셀 화면, c2_e4_pie3d — rotX 30): 윗면은 가로 반지름 rx, 세로 0.519·rx 의 타원 (rotX 에 따라
 /// sin·1.04), 옆면 두께 0.233·rx. rx 는 2차원 원 자리 높이의 0.65 배와 너비의 0.456 배 중 작은 것, 가운데는 5px 왼쪽·
 /// 3px 위. 옆면은 앞쪽 반만 보이고 위(× 0.58)에서 아래(× 0.95)로 밝아진다. 조각 경계선은 없다
@@ -4510,6 +4828,100 @@ fn draw_pie3d(out: &mut Svg, ch: &Chart, g: &Group, cx: &Ctx, plot: Rect) {
 // 방사형
 // ---------------------------------------------------------------------------
 
+/// 레거시(VtChart) 방사형 (한셀 화면, 차트 종류 실험의 radar·radarmk·radarfill): 바깥 원 반지름 r = (안쪽 영역 높이 − 56)/2 가 값의
+/// 최대 (눈금 없이 데이터 최댓값), 안쪽에 r/3·2r/3 원 둘, 살은 가운데에서 바깥 원까지, 모두 808080 1px. 값 레이블은 없다. 항목
+/// 이름은 바깥 원에서 14px 밖, 가운데는 안쪽 영역 가운데에서 2px 오른쪽·8.2px 아래. 선은 3px, 채운 방사형이 아니면 표식을 그린다
+fn draw_radar_legacy(
+    out: &mut Svg,
+    g: &Group,
+    n: usize,
+    cats: &[String],
+    cx: &Ctx,
+    font: &Font,
+    inner: Rect,
+) {
+    let r = ((inner.h - 56.0) / 2.0).max(10.0);
+    let (cx0, cy0) = (inner.x + inner.w / 2.0 + 2.0, inner.y + inner.h / 2.0 + 8.2);
+    let vmax = g
+        .series
+        .iter()
+        .flat_map(|s| s.values.iter().flatten().copied())
+        .fold(0.0, f64::max)
+        .max(f64::MIN_POSITIVE);
+    let ang = |k: usize| -std::f64::consts::FRAC_PI_2 + k as f64 * std::f64::consts::TAU / n as f64;
+    let pt = |k: usize, v: f64| {
+        let rr = (v / vmax).clamp(0.0, 1.0) * r;
+        (cx0 + rr * ang(k).cos(), cy0 + rr * ang(k).sin())
+    };
+    let gray = Stroke::new(LEGACY_GRAY, 1.0);
+    for q in 1..=3 {
+        let rr = r * q as f64 / 3.0;
+        out.path(
+            &format!(
+                "M{:.2},{:.2}A{rr:.2},{rr:.2} 0 1 1 {:.2},{:.2}A{rr:.2},{rr:.2} 0 1 1 {:.2},{:.2}Z",
+                cx0 - rr,
+                cy0,
+                cx0 + rr,
+                cy0,
+                cx0 - rr,
+                cy0
+            ),
+            &Style {
+                fill: None,
+                stroke: Some(gray.clone()),
+            },
+        );
+    }
+    for (k, c) in cats.iter().enumerate().take(n) {
+        out.line(
+            cx0,
+            cy0,
+            cx0 + r * ang(k).cos(),
+            cy0 + r * ang(k).sin(),
+            &gray,
+        );
+        let (lx, ly) = (
+            cx0 + (r + 14.0) * ang(k).cos(),
+            cy0 + (r + 14.0) * ang(k).sin(),
+        );
+        out.text(lx, ly + font.px() * 0.35, c, font, "middle");
+    }
+    let filled = g.props.radar_style.as_deref() == Some("filled");
+    for (i, s) in g.series.iter().enumerate() {
+        let color = series_color(s, g.offset + i, cx);
+        let mut d = String::new();
+        let mut pts = Vec::new();
+        for k in 0..n {
+            let v = s.values.get(k).copied().flatten().unwrap_or(0.0);
+            let (x, y) = pt(k, v);
+            pts.push((x, y));
+            let _ = write!(d, "{}{x:.2},{y:.2}", if k == 0 { "M" } else { "L" });
+        }
+        d.push('Z');
+        let st = if filled {
+            cx.shape(s.sp_pr.as_ref(), Some(&color), None)
+        } else {
+            let mut stroke =
+                series_stroke(s, &color, cx).unwrap_or_else(|| Stroke::new(&color, 3.0));
+            stroke.width = 3.0;
+            Style {
+                fill: None,
+                stroke: Some(stroke),
+            }
+        };
+        out.path(&d, &st);
+        if !filled {
+            const AUTO: [&str; 7] = [
+                "diamond", "square", "triangle", "x", "star", "circle", "plus",
+            ];
+            let ms = Style::fill(&color);
+            for (x, y) in pts {
+                draw_marker(out, AUTO[(g.offset + i) % AUTO.len()], x, y, 7.7, &ms);
+            }
+        }
+    }
+}
+
 fn draw_radar(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font, inner: Rect) {
     let g = &groups[0];
     let n = g
@@ -4526,6 +4938,10 @@ fn draw_radar(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font
         .map(|s| s.categories.clone())
         .unwrap_or_else(|| (1..=n).map(|i| i.to_string()).collect());
     let font = cx.font(None, Some(base), base.size, false);
+    if ch.legacy.is_some() {
+        draw_radar_legacy(out, g, n, &cats, cx, &font, inner);
+        return;
+    }
     let label_r = font.px() * 2.5;
     let r = ((inner.w.min(inner.h)) / 2.0 - label_r).max(10.0);
     let (cx0, cy0) = (inner.x + inner.w / 2.0, inner.y + inner.h / 2.0);
