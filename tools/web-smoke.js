@@ -277,6 +277,15 @@ async function main() {
     await cdp.eval("rcellEditor.edit({ op: \"subtotal\", range: \"AA1\", groupBy: 1, func: \"sum\", totals: [2] })");
     check("부분합", String(await cdp.eval("rcellEditor.cell(\"AA3\").input")).endsWith("합계"), await cdp.eval("rcellEditor.cell(\"AA3\").input"));
 
+    // 자동 필터·표·보기·쪽 설정·시트 복사 (AA 열 데이터)
+    await cdp.eval("rcellEditor.edit({ op: \"autoFilter\", range: \"AA1:AB4\", field: 1, criteria1: \"b\" })");
+    check("자동 필터", (await cdp.eval("!!rcellEditor.edit({ op: \"showAllData\" })")) === true);
+    await cdp.eval("rcellEditor.edit({ op: \"setView\", zoom: 120, gridlines: false })");
+    await cdp.eval("rcellEditor.edit({ op: \"pageSetup\", orientation: \"landscape\", printArea: \"A1:C5\" })");
+    const sheetsBefore = await cdp.eval("rcellEditor.edit({ op: \"setView\", zoom: 120 }).sheets.length");
+    const sheetsAfter = await cdp.eval("rcellEditor.edit({ op: \"copySheet\" }).sheets.length");
+    check("시트 복사", sheetsAfter === sheetsBefore + 1, [sheetsBefore, sheetsAfter]);
+
     const shot1 = await cdp.send("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(outDir, "smoke-edit.png"), Buffer.from(shot1.data, "base64"));
 

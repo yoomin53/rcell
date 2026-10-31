@@ -271,7 +271,7 @@ impl<T: Into<Value>> From<Result<T, ErrorKind>> for Value {
 /// 숫자 결과: NaN·무한대는 #NUM!
 pub fn num(v: f64) -> Value {
     if v.is_finite() {
-        Value::Number(if v == 0.0 { 0.0 } else { v })
+        Value::Number(v)
     } else {
         Value::Error(ErrorKind::Num)
     }
@@ -387,6 +387,10 @@ pub fn number_to_text_rounded(v: f64) -> String {
 }
 
 fn format_general(v: f64, round_large: bool) -> String {
+    // 음의 영(-0.0) 은 "-0" 으로 나온다 (CONCATENATE(CEILING(-4,2^53)) = "-0", 대조 실험 syntax)
+    if v == 0.0 && v.is_sign_negative() && v.is_finite() {
+        return "-0".into();
+    }
     if v == 0.0 || !v.is_finite() {
         return "0".into();
     }
@@ -404,41 +408,16 @@ fn format_general(v: f64, round_large: bool) -> String {
     };
     let (r_digits, r_exp) = split(format!("{a:.14e}"), 15);
     let (digits, exp) = if a >= 1e15 && !round_large {
-        if v < 0.0 {
-            // 음수는 15자리 아래를 올림 (-(2^50) → -1125899906842630, 부호 있는 값의 내림이라 크기는 올림 —
-            // 대조 실험 conv5)
-            let (d16, e) = split(format!("{a:.15e}"), 16);
-            let mut d15: Vec<u8> = d16.bytes().collect();
-            let last = d15.get(15).copied().unwrap_or(b'0');
-            d15.truncate(15);
-            while d15.len() < 15 {
-                d15.push(b'0');
-            }
-            let mut e = e;
-            if last != b'0' {
-                let mut i = 14;
-                loop {
-                    if d15[i] == b'9' {
-                        d15[i] = b'0';
-                        if i == 0 {
-                            d15.insert(0, b'1');
-                            d15.truncate(15);
-                            e += 1;
-                            break;
-                        }
-                        i -= 1;
-                    } else {
-                        d15[i] += 1;
-                        break;
-                    }
-                }
-            }
-            let d: String = String::from_utf8(d15).unwrap_or_default();
-            let d = d.trim_end_matches('0').to_string();
-            (if d.is_empty() { "0".to_string() } else { d }, e)
-        } else {
-            split(format!("{a:.15e}"), 15)
-        }
+        // 큰 수: 자릿수 n = ⌊log10 a⌋ + 1 (부동소수점 log10 이라 99999999999999904 는 17 로 반올림되어 한 자리 크게 센다),
+        // 앞 15자리 = ⌊v / 10^(n−15)⌋ (부호 있는 값의 내림 — 음수는 크기가 올라간다), 나머지는 0. 두 부호와
+        // 99999999999999999 → 99999999999999000, (-(2^50)) → -1125899906842630 이 모두 이 식이다 (대조 실험 conv5·fp2)
+        let n = a.mlog10().floor() as i32 + 1;
+        let shift = 10f64.mpowi(n - 15);
+        let q = (v / shift).floor().abs();
+        let qs = format!("{q:.0}");
+        let exp = qs.len() as i32 - 1 + (n - 15);
+        let d = qs.trim_end_matches('0').to_string();
+        (if d.is_empty() { "0".to_string() } else { d }, exp)
     } else {
         (r_digits.clone(), r_exp)
     };

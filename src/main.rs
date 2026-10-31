@@ -108,6 +108,16 @@ enum Cmd {
         /// 저장할 문서의 암호 (XML·바이너리 .cell, .xlsx, .xlsm, .xlsb — 한셀과 같은 표준 암호화)
         #[arg(long)]
         out_password: Option<String>,
+        /// 텍스트 파일 가져오기: 칸 구분 문자 (쉼표로 나눈 이름 tab, semicolon, comma, space, 또는 other=글자 — 예: tab,other=|).
+        /// 생략하면 확장자의 기본 (.csv 쉼표, 그 밖은 탭)
+        #[arg(long)]
+        delimiters: Option<String>,
+        /// 텍스트 파일 가져오기: 글로 읽을 열 (1부터, 쉼표로 나눔 — 값 해석 없이 글자 서식)
+        #[arg(long)]
+        text_columns: Option<String>,
+        /// 텍스트 파일 가져오기: 첫 줄을 놓을 행 (1부터)
+        #[arg(long)]
+        start_row: Option<u32>,
     },
     /// 편집 대본(JSON — docs/editing.md)을 실행해 저장한다. 편집 뒤 수식을 다시 계산한다
     Edit {
@@ -317,6 +327,9 @@ fn main() -> ExitCode {
             abs_path,
             exact,
             out_password,
+            delimiters,
+            text_columns,
+            start_row,
         } => convert(
             &input,
             &output,
@@ -324,6 +337,7 @@ fn main() -> ExitCode {
             abs_path,
             exact,
             out_password.as_deref(),
+            (delimiters, text_columns, start_row),
         ),
         Cmd::Edit {
             input,
@@ -820,6 +834,56 @@ fn patch(input: &Path, output: &Path, parts: &[String]) -> rcell::Result<()> {
     Ok(())
 }
 
+/// 텍스트 가져오기 선택 (--delimiters, --text-columns, --start-row) → 옵션. 하나도 없으면 None
+fn text_options(
+    input: &Path,
+    (delims, cols, start): &(Option<String>, Option<String>, Option<u32>),
+) -> rcell::Result<Option<rcell::csv::TextOptions>> {
+    if delims.is_none() && cols.is_none() && start.is_none() {
+        return Ok(None);
+    }
+    let bad = |what: &str, v: &str| rcell::Error::InvalidValue {
+        context: what.into(),
+        value: v.into(),
+    };
+    let mut o = match rcell::csv::Delimiter::from_path(input) {
+        Some(d) => rcell::csv::TextOptions::for_delimiter(d),
+        None => {
+            return Err(bad(
+                "텍스트 가져오기 옵션은 텍스트 파일(.csv .txt .tsv .out .prn)에만",
+                &input.display().to_string(),
+            ));
+        }
+    };
+    if let Some(list) = delims {
+        o.delimiters.clear();
+        for name in list.split(',') {
+            match name.trim() {
+                "tab" => o.delimiters.push('\t'),
+                "semicolon" => o.delimiters.push(';'),
+                "comma" => o.delimiters.push(','),
+                "space" => o.delimiters.push(' '),
+                t if t.starts_with("other=") => {
+                    if let Some(c) = t[6..].chars().next() {
+                        o.delimiters.push(c);
+                    }
+                }
+                t => return Err(bad("--delimiters", t)),
+            }
+        }
+    }
+    if let Some(list) = cols {
+        for c in list.split(',') {
+            let n: u32 = c.trim().parse().map_err(|_| bad("--text-columns", c))?;
+            o.text_columns.push(n.saturating_sub(1));
+        }
+    }
+    if let Some(r) = start {
+        o.start_row = r.saturating_sub(1);
+    }
+    Ok(Some(o))
+}
+
 fn convert(
     input: &Path,
     output: &Path,
@@ -827,6 +891,7 @@ fn convert(
     abs_path: Option<String>,
     exact: bool,
     out_password: Option<&str>,
+    import: (Option<String>, Option<String>, Option<u32>),
 ) -> rcell::Result<()> {
     let format = match format.map(str::to_ascii_lowercase).as_deref() {
         None => rcell::SaveFormat::from_path(output),
@@ -851,7 +916,10 @@ fn convert(
             });
         }
     };
-    let wb = open_doc(input)?;
+    let wb = match text_options(input, &import)? {
+        Some(o) => rcell::open_text_with(input, &o)?,
+        None => open_doc(input)?,
+    };
     if let Some(pw) = out_password {
         return rcell::save_as_encrypted(&wb, output, format, pw);
     }

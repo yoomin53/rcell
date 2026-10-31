@@ -544,7 +544,8 @@ fn modulo(ctx: &mut Ctx, a: &[Value]) -> Value {
     if r != 0.0 && (r < 0.0) != (d < 0.0) {
         return num(r + d);
     }
-    num(r)
+    // 나머지 0 은 늘 +0 (MOD(-4,2) = 0)
+    num(if r == 0.0 { 0.0 } else { r })
 }
 
 pub fn fact(x: f64) -> Result<f64, ErrorKind> {

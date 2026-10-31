@@ -1812,7 +1812,7 @@ fn encode_charts(
 ) -> Vec<Vec<u8>> {
     let names = tables.sheet_names.clone();
     let mut out = Vec::new();
-    for shape in &sheet.shapes {
+    for shape in super::chart_shapes(&sheet.shapes) {
         let (Some(c), crate::model::ShapeKind::Chart) = (&shape.chart, shape.kind) else {
             continue;
         };

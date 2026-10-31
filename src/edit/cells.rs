@@ -490,11 +490,12 @@ pub fn shift_cells(
     {
         let new = crate::render::sheet_geometry(wb, &wb.sheets[si], ext.0 + 64, ext.1 + 32);
         let sheet = &mut wb.sheets[si];
+        let cap = super::structure::box_cap(sheet);
         for i in moved {
             let c = &mut sheet.comments[i];
             let cell = c.cell;
             if let Some(s) = &mut c.shape {
-                s.anchor = super::structure::moved_comment_box(&old, &new, s.anchor, cell);
+                s.anchor = super::structure::moved_comment_box(&old, &new, s.anchor, cell, cap);
             }
         }
     }

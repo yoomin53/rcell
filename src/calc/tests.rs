@@ -431,6 +431,27 @@ fn database_unknown_criteria_header_matches_nothing() {
     assert_eq!(calc(&w, "B8"), e("#DIV/0!"));
 }
 
+/// 영의 부호와 문법 대조 실험(syntax·negzero·dyn)에서 찾은 몇 가지
+#[test]
+fn zero_sign_and_syntax_rules() {
+    // 곱셈·반올림의 -0 은 글로 "-0", 단항 - 와 MOD 는 +0
+    assert_eq!(one("(0*-1)&\"\""), t("-0"));
+    assert_eq!(one("ROUND(-0.4,0)&\"\""), t("-0"));
+    assert_eq!(one("CEILING(-4,2^53)&\"\""), t("-0"));
+    assert_eq!(one("-ABS(0)&\"\""), t("0"));
+    assert_eq!(one("-(1-1)&\"\""), t("0"));
+    assert_eq!(one("MOD(-4,2)&\"\""), t("0"));
+    // ROW·COLUMN 의 인수가 참조가 아니면 오류 값이라도 #REF!
+    assert_eq!(one("ROW(#NAME?)"), e("#REF!"));
+    assert_eq!(one("COLUMN(1/0)"), e("#REF!"));
+    // INDEX 의 글·논리·빈 첫 인수는 #VALUE!, 숫자 낱값은 한 칸
+    assert_eq!(one("INDEX(\"a\",1)"), e("#VALUE!"));
+    assert_eq!(one("INDEX(TRUE,1)"), e("#VALUE!"));
+    assert_eq!(one("INDEX(5,1)"), n(5.0));
+    // 큰 수의 글: 자릿수는 부동소수점 log10 으로 센다
+    assert_eq!(one("99999999999999999&\"\""), t("99999999999999000"));
+}
+
 /// 반복 계산 (calcPr iterate): 파일 값에서 시작해 2×iterateCount 번, 행 차례로 (대조 실험 circ)
 #[test]
 fn iterative_calculation() {

@@ -30,13 +30,13 @@ impl Rng {
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     }
-    fn below(&mut self, n: usize) -> usize {
+    pub fn below(&mut self, n: usize) -> usize {
         (self.next() % n.max(1) as u64) as usize
     }
-    fn chance(&mut self, percent: usize) -> bool {
+    pub fn chance(&mut self, percent: usize) -> bool {
         self.below(100) < percent
     }
-    fn pick<'a, T: ?Sized>(&mut self, v: &[&'a T]) -> &'a T {
+    pub fn pick<'a, T: ?Sized>(&mut self, v: &[&'a T]) -> &'a T {
         v[self.below(v.len())]
     }
 }

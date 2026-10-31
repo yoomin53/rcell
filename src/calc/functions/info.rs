@@ -59,6 +59,8 @@ pub const FNS: &[FnSpec] = &[
             }
         }
         match &a[0] {
+            // 여러 시트에 걸친 참조는 0 (N('S1:S2'!A1) = 0, 대조 실험 syntax)
+            Value::Ref(r) if r[0].is_3d() => Value::Number(0.0),
             Value::Ref(r) => {
                 let ar = r[0];
                 one(&c.engine().cell_value(ar.book, ar.sheet, ar.r0, ar.c0))
@@ -138,7 +140,8 @@ fn sheet(ctx: &mut Ctx, a: &[Value]) -> Value {
     match a.first() {
         None | Some(Value::Empty) => Value::Number(ctx.sheet as f64 + 1.0),
         Some(Value::Ref(r)) => match r.first() {
-            Some(x) if x.book == 0 => Value::Number(x.sheet as f64 + 1.0),
+            // 여러 시트에 걸친 참조는 #N/A (SHEET('S1:S3'!A1), 대조 실험 rand)
+            Some(x) if x.book == 0 && !x.is_3d() => Value::Number(x.sheet as f64 + 1.0),
             _ => Value::Error(ErrorKind::NA),
         },
         Some(Value::Text(t)) => {

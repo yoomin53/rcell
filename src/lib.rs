@@ -36,6 +36,8 @@ pub mod edit;
 pub mod error;
 pub mod formula_text;
 pub mod image;
+pub mod import;
+pub mod jpeg;
 pub mod legacy;
 pub mod model;
 pub mod ns;
@@ -302,12 +304,23 @@ pub fn open(path: impl AsRef<Path>) -> Result<Workbook> {
 
 fn open_path(path: &Path, password: Option<&str>) -> Result<Workbook> {
     let bytes = std::fs::read(path)?;
-    if detect(&bytes) == FileKind::Unknown
-        && let Some(d) = csv::Delimiter::from_path(path)
-    {
-        return csv::read(&bytes, d, &csv::sheet_name_for(path));
+    if detect(&bytes) == FileKind::Unknown {
+        if let Some(d) = csv::Delimiter::from_path(path) {
+            return csv::read(&bytes, d, &csv::sheet_name_for(path));
+        }
+        // HTML·XML 스프레드시트 2003·dBASE: 한셀이 칸으로 읽는 그 밖의 형식 (docs/format/other-formats.md 15절)
+        if let Some(kind) = import::sniff(&bytes, Some(path)) {
+            return import::open(&bytes, kind, path);
+        }
     }
     from_bytes_with_password(bytes, password)
+}
+
+/// 텍스트 파일을 가져오기 선택([`csv::TextOptions`])과 함께 연다 (한셀 `Workbooks.OpenText`)
+pub fn open_text_with(path: impl AsRef<Path>, opts: &csv::TextOptions) -> Result<Workbook> {
+    let path = path.as_ref();
+    let bytes = std::fs::read(path)?;
+    csv::read_with(&bytes, opts, &csv::sheet_name_for(path))
 }
 
 /// 암호화된 OLE2 컨테이너면 풀어서 안의 ZIP 패키지를, 아니면 그대로 돌려준다 (분석 도구용).

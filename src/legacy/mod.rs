@@ -104,7 +104,41 @@ pub fn chart_dumps_with(bytes: &[u8], offsets: bool) -> Result<Vec<String>> {
         .collect())
 }
 
-/// 통합 문서를 Excel 97-2003 `.xls` (BIFF8) 로 쓴다: 레거시로 쓴 `/Workbook` 을 [`xls::to_biff8`] 로 바꾸고 문서
+/// 차트 도형들을 그리기 차례(묶음은 안으로, 앞에서 뒤로)로 — .xls 에서 차트 부분 스트림이 차트 OBJ 차례로 이어진다
+pub(crate) fn chart_shapes(shapes: &[crate::model::Shape]) -> Vec<&crate::model::Shape> {
+    // 쓰는 차례: 시트 바로 아래 차트가 먼저, 그다음 묶음 안 차트 (그리기 차례)
+    fn nested<'a>(s: &'a crate::model::Shape, out: &mut Vec<&'a crate::model::Shape>) {
+        for c in &s.children {
+            if c.kind == crate::model::ShapeKind::Chart {
+                out.push(c);
+            }
+            nested(c, out);
+        }
+    }
+    let mut out: Vec<&crate::model::Shape> = shapes
+        .iter()
+        .filter(|s| s.kind == crate::model::ShapeKind::Chart)
+        .collect();
+    for s in shapes {
+        nested(s, &mut out);
+    }
+    out
+}
+
+fn chart_shapes_mut<'a>(
+    shapes: &'a mut [crate::model::Shape],
+    out: &mut Vec<&'a mut crate::model::Shape>,
+) {
+    for s in shapes {
+        if s.kind == crate::model::ShapeKind::Chart {
+            out.push(s);
+        } else {
+            chart_shapes_mut(&mut s.children, out);
+        }
+    }
+}
+
+/// 통합 문서를 Excel 97-2003 .xls (BIFF8) 로 쓴다: 레거시로 쓴 `/Workbook` 을 [`xls::to_biff8`] 로 바꾸고 문서
 /// 속성과 함께 담는다 (매크로 프로젝트·피벗 캐시는 담지 않는다)
 pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)> {
     let mut o = opts.clone();
@@ -120,10 +154,8 @@ pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)
         .map(|(si, s)| xls::SheetHints {
             summary_above: s.summary_above,
             summary_left: s.summary_left,
-            charts: s
-                .shapes
-                .iter()
-                .filter(|x| x.kind == crate::model::ShapeKind::Chart)
+            charts: chart_shapes(&s.shapes)
+                .into_iter()
                 .filter_map(|x| x.chart.as_ref())
                 .map(|ch| {
                     let of = |name: Option<&str>| -> Option<u16> {
@@ -153,21 +185,6 @@ pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)
         })
         .collect();
     let out = xls_file(&bytes, &hints, &tips)?;
-    fn has_chart(s: &[crate::model::Shape]) -> bool {
-        s.iter()
-            .any(|x| x.chart.is_some() || has_chart(&x.children))
-    }
-    if wb.sheets.iter().any(|s| {
-        s.shapes.iter().any(|x| {
-            x.children
-                .iter()
-                .any(|c| has_chart(std::slice::from_ref(c)))
-        })
-    }) {
-        report
-            .warnings
-            .push(".xls: 묶음 안의 차트는 쓰지 않는다".into());
-    }
     if wb.raw_parts.iter().any(|p| p.name.contains("pivotTable")) {
         report
             .warnings
@@ -350,11 +367,9 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
             palette: &xc.palette,
         };
         for (sheet, charts) in wb.sheets.iter_mut().zip(&xc.sheets) {
-            let shapes = sheet
-                .shapes
-                .iter_mut()
-                .filter(|s| s.kind == crate::model::ShapeKind::Chart);
-            for (shape, recs) in shapes.zip(charts) {
+            let mut shapes = Vec::new();
+            chart_shapes_mut(&mut sheet.shapes, &mut shapes);
+            for (shape, recs) in shapes.into_iter().zip(charts) {
                 // 한셀은 .xls 의 차트 도형 잠금을 읽지 않는다
                 shape.locks.clear();
                 shape.chart = xls_chart::read(recs, &ctx);

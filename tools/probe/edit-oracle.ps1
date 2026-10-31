@@ -141,6 +141,15 @@ function Invoke-Edit($wb, $e) {
                 else { $ws.Move($wb.Worksheets.Item($to + 1)) | Out-Null }
             }
         }
+        "copySheet" {
+            # 시트 복사 (Worksheet.Copy): to = 복사본이 놓일 자리(0부터, 원본 기준 목록에서)
+            $to = if ($null -ne $e.to) { [int]$e.to } else { $ws.Index }
+            $count = $wb.Worksheets.Count
+            if ($to -ge $count) { $ws.Copy([Type]::Missing, $wb.Worksheets.Item($count)) | Out-Null }
+            else { $ws.Copy($wb.Worksheets.Item($to + 1)) | Out-Null }
+            # 구조가 보호된 문서는 한셀이 복사하지 않는다 — 복사본이 생겼을 때만 이름을 바꾼다
+            if ($e.name -and $wb.Worksheets.Count -gt $count) { $wb.ActiveSheet.Name = [string]$e.name }
+        }
         "copy" {
             $dst = Get-Sheet $wb $(if ($e.toSheet) { $e.toSheet } else { $e.sheet })
             $ws.Range([string]$e.from).Copy($dst.Range([string]$e.to)) | Out-Null
@@ -222,6 +231,14 @@ function Invoke-Edit($wb, $e) {
             }
         }
         "addComment" { [void]$ws.Range([string]$e.cell).AddComment([string]$e.text) }
+        "commentBox" {
+            # 메모 상자 자리 (Comment.Shape.Left/Top/Width/Height — 포인트, 준 것만)
+            $sh = $ws.Range([string]$e.cell).Comment.Shape
+            if ($null -ne $e.left) { $sh.Left = [double]$e.left }
+            if ($null -ne $e.top) { $sh.Top = [double]$e.top }
+            if ($null -ne $e.width) { $sh.Width = [double]$e.width }
+            if ($null -ne $e.height) { $sh.Height = [double]$e.height }
+        }
         "editComment" { [void]$ws.Range([string]$e.cell).Comment.Text([string]$e.text) }
         "deleteComment" { [void]$ws.Range([string]$e.range).ClearComments() }
         "addHyperlink" {
@@ -307,6 +324,12 @@ function Invoke-Edit($wb, $e) {
             if ($null -ne $e.width) { $sh.Width = [double]$e.width }
             if ($null -ne $e.height) { $sh.Height = [double]$e.height }
         }
+        "addShape" {
+            # 도형 더하기 (Shapes.AddShape / AddTextbox)
+            $k = [string]$e.kind
+            if ($k -eq "textbox") { [void]$ws.Shapes.AddTextbox(1, [double]$e.left, [double]$e.top, [double]$e.width, [double]$e.height) }
+            else { [void]$ws.Shapes.AddShape(@{ "rect" = 1; "diamond" = 4; "roundRect" = 5; "triangle" = 7; "ellipse" = 9 }[$k], [double]$e.left, [double]$e.top, [double]$e.width, [double]$e.height) }
+        }
         "deleteShape" { $ws.Shapes.Item([int]$e.shape).Delete() }
         "consolidate" {
             # 통합 (Range.Consolidate — 원본은 R1C1 글, 함수 sum count average max min product countNums stdev stdevp var varp)
@@ -326,6 +349,7 @@ function Invoke-Edit($wb, $e) {
             })
             [void]$ws.Range([string]$e.dest).Consolidate($srcs, $fn, [bool]$e.topRow, [bool]$e.leftColumn, $false)
         }
+        "sleep" { Start-Sleep -Milliseconds ([int]([double]$e.seconds * 1000)) }
         "autoFitRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.AutoFit() }
         "insertCells" {
             # 셀 삽입 (아래로 -4121, 오른쪽으로 -4161)
@@ -356,6 +380,123 @@ function Invoke-Edit($wb, $e) {
             if ($w.FreezePanes) { $w.FreezePanes = $false }
             [void]$ws.Range([string]$e.cell).Select()
             $w.FreezePanes = $true
+            $a.Visible = $false
+        }
+        "pageSetup" {
+            # 쪽 설정 (PageSetup): Edit 의 pageSetup 필드를 COM 속성으로 옮긴다
+            $ps = $ws.PageSetup
+            if ($null -ne $e.marginLeft) { $ps.LeftMargin = [double]$e.marginLeft }
+            if ($null -ne $e.marginRight) { $ps.RightMargin = [double]$e.marginRight }
+            if ($null -ne $e.marginTop) { $ps.TopMargin = [double]$e.marginTop }
+            if ($null -ne $e.marginBottom) { $ps.BottomMargin = [double]$e.marginBottom }
+            if ($null -ne $e.marginHeader) { $ps.HeaderMargin = [double]$e.marginHeader }
+            if ($null -ne $e.marginFooter) { $ps.FooterMargin = [double]$e.marginFooter }
+            if ($null -ne $e.orientation) { $ps.Orientation = @{ "portrait" = 1; "landscape" = 2 }[[string]$e.orientation] }
+            if ($null -ne $e.paperSize) { $ps.PaperSize = [int]$e.paperSize }
+            if ($null -ne $e.zoom) { $ps.Zoom = [int]$e.zoom }
+            if ($null -ne $e.fitWide -or $null -ne $e.fitTall) {
+                $ps.Zoom = $false
+                if ($null -ne $e.fitWide) { $ps.FitToPagesWide = $(if ([int]$e.fitWide -eq 0) { $false } else { [int]$e.fitWide }) }
+                if ($null -ne $e.fitTall) { $ps.FitToPagesTall = $(if ([int]$e.fitTall -eq 0) { $false } else { [int]$e.fitTall }) }
+            }
+            if ($null -ne $e.centerH) { $ps.CenterHorizontally = [bool]$e.centerH }
+            if ($null -ne $e.centerV) { $ps.CenterVertically = [bool]$e.centerV }
+            if ($null -ne $e.gridLines) { $ps.PrintGridlines = [bool]$e.gridLines }
+            if ($null -ne $e.headings) { $ps.PrintHeadings = [bool]$e.headings }
+            if ($null -ne $e.blackAndWhite) { $ps.BlackAndWhite = [bool]$e.blackAndWhite }
+            if ($null -ne $e.draft) { $ps.Draft = [bool]$e.draft }
+            if ($null -ne $e.order) { $ps.Order = @{ "downThenOver" = 1; "overThenDown" = 2 }[[string]$e.order] }
+            if ($null -ne $e.firstPageNumber) { $ps.FirstPageNumber = $(if ([int]$e.firstPageNumber -eq 0) { -4105 } else { [int]$e.firstPageNumber }) }
+            if ($null -ne $e.printArea) { $ps.PrintArea = [string]$e.printArea }
+            if ($null -ne $e.printTitleRows) { $ps.PrintTitleRows = [string]$e.printTitleRows }
+            if ($null -ne $e.printTitleCols) { $ps.PrintTitleColumns = [string]$e.printTitleCols }
+            if ($null -ne $e.headerLeft) { $ps.LeftHeader = [string]$e.headerLeft }
+            if ($null -ne $e.headerCenter) { $ps.CenterHeader = [string]$e.headerCenter }
+            if ($null -ne $e.headerRight) { $ps.RightHeader = [string]$e.headerRight }
+            if ($null -ne $e.footerLeft) { $ps.LeftFooter = [string]$e.footerLeft }
+            if ($null -ne $e.footerCenter) { $ps.CenterFooter = [string]$e.footerCenter }
+            if ($null -ne $e.footerRight) { $ps.RightFooter = [string]$e.footerRight }
+            if ($null -ne $e.comments) { $ps.PrintComments = @{ "none" = -4142; "atEnd" = 1; "inPlace" = 16 }[[string]$e.comments] }
+            if ($null -ne $e.errors) { $ps.PrintErrors = @{ "displayed" = 0; "blank" = 1; "dash" = 2; "na" = 3 }[[string]$e.errors] }
+        }
+        "protectSheet" {
+            # 시트 보호 (Worksheet.Protect): password, drawingObjects, contents, scenarios 와 allow* 이름
+            $M = [Type]::Missing
+            $pw = if ($null -ne $e.password) { [string]$e.password } else { $M }
+            $b = { param($v, $d) if ($null -ne $v) { [bool]$v } else { $d } }
+            $do = & $b $e.drawingObjects $true
+            $ct = & $b $e.contents $true
+            $sc = & $b $e.scenarios $true
+            $args2 = @($pw, $do, $ct, $sc, $M)
+            foreach ($n in "formattingCells","formattingColumns","formattingRows","insertingColumns","insertingRows","insertingHyperlinks","deletingColumns","deletingRows","sorting","filtering","usingPivotTables") {
+                $args2 += $(if ($null -ne $e.$n) { [bool]$e.$n } else { $M })
+            }
+            [void][System.__ComObject].InvokeMember("Protect", [Reflection.BindingFlags]::InvokeMethod, $null, $ws, $args2)
+        }
+        "unprotectSheet" {
+            if ($null -ne $e.password) { [void]$ws.Unprotect([string]$e.password) } else { [void]$ws.Unprotect() }
+        }
+        "protectWorkbook" {
+            $M = [Type]::Missing
+            $pw = if ($null -ne $e.password) { [string]$e.password } else { $M }
+            $st = if ($null -ne $e.structure) { [bool]$e.structure } else { $true }
+            $wi = if ($null -ne $e.windows) { [bool]$e.windows } else { $false }
+            [void]$wb.Protect($pw, $st, $wi)
+        }
+        "unprotectWorkbook" {
+            if ($null -ne $e.password) { [void]$wb.Unprotect([string]$e.password) } else { [void]$wb.Unprotect() }
+        }
+        "autoFilter" {
+            # 자동 필터 (Range.AutoFilter): range 만 주면 켠다(이미 켜져 있으면 끈다), field(1부터)·criteria1·operator·criteria2·values 로 조건
+            $M = [Type]::Missing
+            $rg = $ws.Range([string]$e.range)
+            if ($null -eq $e.field) { [void]$rg.AutoFilter() }
+            else {
+                $c1 = if ($null -ne $e.values) { [object[]]@($e.values | ForEach-Object { [string]$_ }) } elseif ($null -ne $e.criteria1) { [string]$e.criteria1 } else { $M }
+                $op = if ($null -ne $e.operator) { @{ "and" = 1; "or" = 2; "top" = 3; "bottom" = 4; "topPercent" = 5; "bottomPercent" = 6 }[[string]$e.operator] } elseif ($null -ne $e.values) { 7 } else { $M }
+                $c2 = if ($null -ne $e.criteria2) { [string]$e.criteria2 } else { $M }
+                [void]$rg.AutoFilter([int]$e.field, $c1, $op, $c2)
+            }
+        }
+        "showAllData" { if ($ws.FilterMode) { $ws.ShowAllData() } }
+        "addTable" {
+            # 표 만들기 (ListObjects.Add — COM 이 객체를 돌려주지 않아 번호로 다시 얻는다): headers 1 있음·2 없음·0 알아서
+            $M = [Type]::Missing
+            $hd = if ($null -ne $e.headers) { [int]$e.headers } else { 1 }
+            [void][System.__ComObject].InvokeMember("Add", [Reflection.BindingFlags]::InvokeMethod, $null, $ws.ListObjects, @(1, $ws.Range([string]$e.range), $M, $hd))
+            $lo = $ws.ListObjects.Item($ws.ListObjects.Count)
+            if ($e.name) { $lo.Name = [string]$e.name }
+            if ($e.style) { $lo.TableStyle = [string]$e.style }
+            if ($null -ne $e.showTotals) { $lo.ShowTotals = [bool]$e.showTotals }
+            if ($null -ne $e.showHeaders) { $lo.ShowHeaders = [bool]$e.showHeaders }
+            if ($null -ne $e.stripes) { $lo.ShowTableStyleRowStripes = [bool]$e.stripes }
+            if ($null -ne $e.firstColumn) { $lo.ShowTableStyleFirstColumn = [bool]$e.firstColumn }
+            if ($null -ne $e.lastColumn) { $lo.ShowTableStyleLastColumn = [bool]$e.lastColumn }
+            if ($null -ne $e.columnStripes) { $lo.ShowTableStyleColumnStripes = [bool]$e.columnStripes }
+        }
+        "tableOp" {
+            # 표 고치기: table(번호 1부터) 에 resize(범위)·name·style·showTotals·showHeaders·unlist·delete
+            $lo = $ws.ListObjects.Item([int]$e.table)
+            if ($e.resize) { $lo.Resize($ws.Range([string]$e.resize)) }
+            if ($e.name) { $lo.Name = [string]$e.name }
+            if ($e.style) { $lo.TableStyle = [string]$e.style }
+            if ($null -ne $e.showTotals) { $lo.ShowTotals = [bool]$e.showTotals }
+            if ($null -ne $e.showHeaders) { $lo.ShowHeaders = [bool]$e.showHeaders }
+            if ($e.unlist) { $lo.Unlist() }
+            if ($e.delete) { $lo.Delete() }
+        }
+        "setView" {
+            # 보기 설정 (ActiveWindow — 창이 보여야 적용된다): 확대율·눈금선·머리글·0 표시·수식 보기·보기 방식
+            $a = $wb.Application
+            $a.Visible = $true
+            $ws.Activate()
+            $w = $a.ActiveWindow
+            if ($null -ne $e.view) { $w.View = @{ "normal" = 1; "pageBreakPreview" = 2; "pageLayout" = 3 }[[string]$e.view] }
+            if ($null -ne $e.zoom) { $w.Zoom = [int]$e.zoom }
+            if ($null -ne $e.gridlines) { $w.DisplayGridlines = [bool]$e.gridlines }
+            if ($null -ne $e.headings) { $w.DisplayHeadings = [bool]$e.headings }
+            if ($null -ne $e.zeros) { $w.DisplayZeros = [bool]$e.zeros }
+            if ($null -ne $e.formulas) { $w.DisplayFormulas = [bool]$e.formulas }
             $a.Visible = $false
         }
         "unfreeze" {
