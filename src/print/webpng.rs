@@ -298,14 +298,42 @@ fn draw_image(
 }
 
 /// 그리기 목록(장치 단위)을 `w × h`(px) 투명 바탕 RGBA 바이트로
-pub fn draw(ops: &[Op], w: u32, h: u32, fonts: &FontSet) -> Vec<u8> {
+/// `bilevel` 이면 작은 글자(16px 이하)를 안티앨리어싱 없이 두 색으로 그린다 — 한셀 도형 그림의 글 상자 본문이 그렇다
+/// (차트의 글자는 안티앨리어싱). 한셀의 글꼴 힌팅까지는 따라가지 못해 모양은 같지 않다
+pub fn draw(ops: &[Op], w: u32, h: u32, fonts: &FontSet, bilevel: bool) -> Vec<u8> {
     let mut px = Vec::new();
     let mut images = Vec::new();
     scaled(ops, K, fonts, &mut px, &mut images);
+    let limit = if bilevel { 16.0 } else { 0.0 };
+    let thr = 128u8;
+    let (small, rest): (Vec<Op>, Vec<Op>) = if limit > 0.0 {
+        px.into_iter()
+            .partition(|o| matches!(o, Op::Text { size, .. } if *size <= limit))
+    } else {
+        (Vec::new(), px)
+    };
+    let px = rest;
     let mut buf = match raster::render(&px, (0.0, 0.0, w as f64, h as f64), None, fonts) {
         Some(img) if img.width == w && img.height == h => rgba(&img),
         _ => vec![0; (w as usize) * (h as usize) * 4],
     };
+    if !small.is_empty()
+        && let Some(img) = raster::render(&small, (0.0, 0.0, w as f64, h as f64), None, fonts)
+        && img.width == w
+        && img.height == h
+    {
+        let t = rgba(&img);
+        for (d, sp) in buf
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(t.as_chunks::<4>().0)
+        {
+            if sp[3] >= thr {
+                d.copy_from_slice(&[sp[0], sp[1], sp[2], 255]);
+            }
+        }
+    }
     for (x0, y0, x1, y1, data) in &images {
         draw_image(&mut buf, (w, h), (*x0, *y0, *x1, *y1), data);
     }
@@ -401,7 +429,7 @@ mod tests {
             y1: 37.5,
             color: [255, 0, 0],
         }];
-        let buf = draw(&ops, 10, 10, &fonts);
+        let buf = draw(&ops, 10, 10, &fonts, false);
         let at = |x: usize, y: usize| &buf[(y * 10 + x) * 4..(y * 10 + x) * 4 + 4];
         assert_eq!(at(3, 3), &[255, 0, 0, 255]);
         assert_eq!(at(0, 0), &[0, 0, 0, 0]);
