@@ -553,6 +553,8 @@ fn node(cx: &Ctx, e: &Element, m: Mat, st: &Style, ops: &mut Vec<Op>) {
                 )
             }),
             even_odd: st.even_odd,
+            caps: None,
+            hatch: None,
         });
         let _ = cx.unit;
     };

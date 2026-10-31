@@ -42,8 +42,9 @@ $count = 0
 function Emit([string]$line) { $script:writer.WriteLine($line); $script:count++ }
 Emit "#dir`t$((Resolve-Path $InDir).Path)"
 $files = Get-ChildItem $InDir -File -Filter $Filter |
-    Where-Object { $_.Name -notmatch '\.(as|rcell|bin)\.' -and -not $_.Name.StartsWith('~$') -and (-not $Only -or $_.Name -match $Only) } | Sort-Object Name
-# 바이너리 판은 한셀 COM 이 다시 열지 못한다 (.bin. 은 뺀다). ~$ 로 시작하는 것은 한셀 잠금 파일
+    Where-Object { $_.Name -notmatch '\.(as|rcell)\.' -and -not $_.Name.StartsWith('~$') -and (-not $Only -or $_.Name -match $Only) } | Sort-Object Name
+# 바이너리 판(.bin.)은 .xlsb 이름의 사본으로 연다 (한셀은 .bin.cell 이름으로는 열지 못하고 .xlsb 로는 연다 — bin-as.ps1 과
+# 같은 길). ~$ 로 시작하는 것은 한셀 잠금 파일
 function NewApp {
     $a = New-Object -ComObject HCell.Application
     try { $a.Visible = $false } catch {}
@@ -59,7 +60,13 @@ try {
     foreach ($f in $files) {
         $wb = $null
         try {
-            $wb = Retry { $app.Workbooks.Open($f.FullName) }
+            $path = $f.FullName
+            if ($f.Name -match '\.bin\.cell$') {
+                $tmpx = Join-Path ([IO.Path]::GetTempPath()) ("rcell-oracle-" + [Guid]::NewGuid().ToString("N") + ".xlsb")
+                Copy-Item $f.FullName $tmpx -Force
+                $path = $tmpx
+            }
+            $wb = Retry { $app.Workbooks.Open($path) }
             $k = 0
             $huge = $false
             foreach ($ws in @($wb.Worksheets)) {

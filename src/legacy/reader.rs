@@ -2271,6 +2271,7 @@ fn read_sheet(
                 v.show_formulas = grbit & 0x0001 != 0;
                 v.show_row_col_headers = grbit & 0x0004 != 0;
                 v.show_zeros = grbit & 0x0010 != 0;
+                v.right_to_left = grbit & 0x0040 != 0;
                 v.tab_selected = grbit & 0x0200 != 0;
                 if grbit & 0x0800 != 0 {
                     v.view = Some("pageBreakPreview".into());

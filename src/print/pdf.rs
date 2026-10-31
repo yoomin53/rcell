@@ -11,11 +11,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
-use pdf_writer::types::{CidFontType, FontFlags, SystemInfo, UnicodeCmap};
+use pdf_writer::types::{CidFontType, FontFlags, PaintType, SystemInfo, TilingType, UnicodeCmap};
 use pdf_writer::{Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 
 use super::font::{FaceRef, FontDb, LoadedFace};
 use super::pdfimage::{PdfImage, decode};
+use crate::render::metafile::Hatch;
 use crate::render::page::{FontKey, Op, Seg, TextMeasure};
 
 /// 페이지들이 쓴 그림 (같은 바이트는 한 번만)
@@ -26,6 +27,12 @@ struct Images {
 }
 
 impl Images {
+    /// 이미 풀린 그림 (그려 낸 비트맵)
+    fn push(&mut self, img: PdfImage) -> usize {
+        self.list.push(img);
+        self.list.len() - 1
+    }
+
     fn add(&mut self, data: &std::sync::Arc<Vec<u8>>) -> Option<usize> {
         let key = std::sync::Arc::as_ptr(data) as usize;
         if let Some(&k) = self.by_ptr.get(&key) {
@@ -38,6 +45,48 @@ impl Images {
         self.by_ptr.insert(key, k);
         k
     }
+}
+
+/// 페이지들이 쓴 빗금 무늬 (같은 것은 한 번만)
+#[derive(Default)]
+struct Hatches {
+    list: Vec<Hatch>,
+}
+
+impl Hatches {
+    fn add(&mut self, h: Hatch) -> usize {
+        match self.list.iter().position(|x| *x == h) {
+            Some(k) => k,
+            None => {
+                self.list.push(h);
+                self.list.len() - 1
+            }
+        }
+    }
+}
+
+/// 빗금 무늬 8×8 칸의 내용 (PDF 의 y 는 위). 한셀 PDF 의 Tiling 무늬와 같은 꼴: 칸으로 자르고, 불투명이면 바탕색을
+/// 깔고, 1 굵기 둥근 선. 무늬 번호 0 가로·1 세로·2 \·3 /·4 +·5 x (선이 칸 밖으로 나가는 것은 이웃 칸과 이어지게)
+fn hatch_tile(h: &Hatch) -> String {
+    let (style, fg, bg) = h;
+    let lines = match style {
+        0 => "0 4 m 8 4 l",
+        1 => "4 0 m 4 8 l",
+        2 => "0 0 m 8 -8 l 0 8 m 8 0 l 8 8 m 16 0 l",
+        3 => "0 0 m 8 8 l 0 -8 m 8 0 l 0 8 m 8 16 l",
+        4 => "0 4 m 8 4 l 4 0 m 4 8 l",
+        _ => "0 0 m 8 -8 l 0 8 m 8 0 l 8 8 m 16 0 l 0 0 m 8 8 l 0 -8 m 8 0 l 0 8 m 8 16 l",
+    };
+    let mut s = String::from("q\n1 i\n0 0 8 8 re\nW n\n");
+    if let Some(b) = bg {
+        let _ = write!(s, "{} rg\n0 0 8 8 re\nf\n", color(*b));
+    }
+    let _ = write!(
+        s,
+        "{} RG\n1 J 1 j 1 w 10 M []0 d\n{lines}\nS\nQ\n",
+        color(*fg)
+    );
+    s
 }
 
 /// 넣은 글꼴 하나 (얼굴 + 쓴 글리프)
@@ -75,6 +124,57 @@ pub struct Run {
     pub text: String,
 }
 
+/// 글리프 외곽선 → 경로 조각 (글꼴 단위 → 장치 단위, y 뒤집기)
+struct Outline {
+    segs: Vec<Seg>,
+    at: (f64, f64),
+    k: f64,
+    stretch: f64,
+    shear: f64,
+    pen: f64,
+}
+
+impl Outline {
+    fn pt(&self, x: f32, y: f32) -> (f64, f64) {
+        let (x, y) = (x as f64 * self.k, y as f64 * self.k);
+        (self.pen + (x + y * self.shear) * self.stretch, -y)
+    }
+}
+
+impl ttf_parser::OutlineBuilder for Outline {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let p = self.pt(x, y);
+        self.at = p;
+        self.segs.push(Seg::Move(p.0, p.1));
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        let p = self.pt(x, y);
+        self.at = p;
+        self.segs.push(Seg::Line(p.0, p.1));
+    }
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let (c, p, a) = (self.pt(x1, y1), self.pt(x, y), self.at);
+        // 2차 → 3차 베지어
+        self.segs.push(Seg::Cubic(
+            a.0 + 2.0 / 3.0 * (c.0 - a.0),
+            a.1 + 2.0 / 3.0 * (c.1 - a.1),
+            p.0 + 2.0 / 3.0 * (c.0 - p.0),
+            p.1 + 2.0 / 3.0 * (c.1 - p.1),
+            p.0,
+            p.1,
+        ));
+        self.at = p;
+    }
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let (a, b, p) = (self.pt(x1, y1), self.pt(x2, y2), self.pt(x, y));
+        self.segs.push(Seg::Cubic(a.0, a.1, b.0, b.1, p.0, p.1));
+        self.at = p;
+    }
+    fn close(&mut self) {
+        self.segs.push(Seg::Close);
+    }
+}
+
 /// 글꼴 파일이 없을 때 글자 폭 (1/1000 em): 전각 1000, 그 밖 500
 fn plain_width(ch: char) -> f64 {
     if crate::render::is_wide(ch) {
@@ -109,6 +209,45 @@ impl<'a> FontSet<'a> {
             });
         st.by_face.insert(face, e);
         e
+    }
+
+    /// 글자 모양: 글자마다 글리프 외곽선 (기준선 왼쪽 끝이 (0, 0), 장치 단위, 아래가 +). 글꼴 파일이 없는 글자가 있거나
+    /// 외곽선을 못 읽으면 None. 비트맵으로 그릴 때 쓴다
+    pub fn glyph_paths(
+        &self,
+        key: &FontKey,
+        text: &str,
+        size: f64,
+        stretch: f64,
+    ) -> Option<Vec<Vec<Seg>>> {
+        let runs = self.runs(key, text, false);
+        let st = self.state.borrow();
+        let mut pen = 0.0;
+        let mut out = Vec::new();
+        for run in &runs {
+            let emb = &st.fonts[run.font?];
+            let face = ttf_parser::Face::parse(&emb.face.data, emb.face.index).ok()?;
+            let k = size / face.units_per_em() as f64;
+            let shear = if run.synth_italic { 0.21 } else { 0.0 };
+            for (ch, gid) in run.text.chars().zip(&run.glyphs) {
+                let gid = ttf_parser::GlyphId(*gid);
+                let mut b = Outline {
+                    segs: Vec::new(),
+                    at: (0.0, 0.0),
+                    k,
+                    stretch,
+                    shear,
+                    pen,
+                };
+                if face.outline_glyph(gid, &mut b).is_some() {
+                    out.push(b.segs);
+                } else if ch != ' ' {
+                    out.push(Vec::new());
+                }
+                pen += face.glyph_hor_advance(gid).unwrap_or(0) as f64 * k * stretch;
+            }
+        }
+        Some(out)
     }
 
     /// 글자들을 글꼴 토막으로 (없는 글자는 대체 글꼴). `keep` 이면 글리프를 부분 집합에 넣는다
@@ -205,6 +344,27 @@ impl TextMeasure for FontSet<'_> {
         (a / 1000.0, d / 1000.0)
     }
 
+    fn device_ascent_descent(&self, font: &FontKey, ppem: u32) -> (f64, f64) {
+        let mut st = self.state.borrow_mut();
+        let st = &mut *st;
+        let fr = *st
+            .select
+            .entry(font.clone())
+            .or_insert_with(|| self.db.select(&font.name, font.bold, font.italic));
+        let face = fr.and_then(|fr| Self::embedded(st, self.db, fr.face));
+        if let Some(v) = face.and_then(|e| st.fonts[e].face.vdmx(ppem)) {
+            return v;
+        }
+        let (a, d) = face.map_or((880.0, 120.0), |e| {
+            let m = &st.fonts[e].face.metrics;
+            (m.ascent, -m.descent)
+        });
+        (
+            (a * ppem as f64 / 1000.0).round(),
+            (d * ppem as f64 / 1000.0).round(),
+        )
+    }
+
     fn width(&self, font: &FontKey, size: f64, text: &str) -> f64 {
         self.runs(font, text, false)
             .iter()
@@ -250,7 +410,13 @@ fn color(c: [u8; 3]) -> String {
 }
 
 /// 그리기 목록 → 내용 스트림 (장치 단위). 글꼴은 `/F{n}` (넣은 글꼴 번호), 표준 CID 글꼴은 `/FK`
-fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> (Vec<u8>, bool) {
+fn content(
+    ops: &[Op],
+    size: PageSize,
+    fonts: &FontSet,
+    images: &mut Images,
+    hatches: &mut Hatches,
+) -> (Vec<u8>, bool) {
     let mut s = String::new();
     let sx = size.width / (size.dev_w * 0.12);
     let sy = size.height / (size.dev_h * 0.12);
@@ -330,6 +496,8 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> 
                 fill,
                 stroke,
                 even_odd,
+                caps,
+                hatch,
             } => {
                 let mut d = String::new();
                 for sg in segs {
@@ -360,8 +528,18 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> 
                         .collect::<Vec<_>>()
                         .join(" ");
                     let _ = write!(pre, "{} RG {} w [{dd}] 0 d ", color(*c), num(w * 0.12));
+                    if let Some((cap, join)) = caps {
+                        let _ = write!(pre, "{cap} J {join} j 10 M ");
+                    }
                 }
-                let op = match (fill.is_some(), stroke.is_some(), even_odd) {
+                if let Some(h) = hatch {
+                    let _ = write!(pre, "/Pattern cs /Pa{} scn ", hatches.add(*h));
+                }
+                let op = match (
+                    fill.is_some() || hatch.is_some(),
+                    stroke.is_some(),
+                    even_odd,
+                ) {
                     (true, true, false) => "B",
                     (true, true, true) => "B*",
                     (true, false, false) => "f",
@@ -370,6 +548,32 @@ fn content(ops: &[Op], size: PageSize, fonts: &FontSet, images: &mut Images) -> 
                 };
                 let _ = writeln!(s, "{pre}{d}{op}");
             }
+            Op::Raster {
+                x0,
+                y0,
+                x1,
+                y1,
+                ops: sub,
+            } => match super::raster::render(sub, (*x0, *y0, *x1, *y1), fonts) {
+                Some(img) => {
+                    let (ox, oy) = (x0.round(), y0.round());
+                    let (w, h) = (img.width as f64, img.height as f64);
+                    let k = images.push(img);
+                    let _ = writeln!(
+                        s,
+                        "q {} 0 0 {} {} {} cm /Im{k} Do Q",
+                        num(w * 0.12 * sx),
+                        num(h * 0.12 * sy),
+                        num(px(ox)),
+                        num(py(oy + h))
+                    );
+                }
+                None => {
+                    let (c, p) = content(sub, size, fonts, images, hatches);
+                    s.push_str(&String::from_utf8_lossy(&c));
+                    plain |= p;
+                }
+            },
             Op::Image {
                 x0,
                 y0,
@@ -520,8 +724,9 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
     let mut contents = Vec::new();
     let mut any_plain = false;
     let mut images = Images::default();
+    let mut hatches = Hatches::default();
     for (size, ops) in pages {
-        let (c, plain) = content(ops, *size, fonts, &mut images);
+        let (c, plain) = content(ops, *size, fonts, &mut images, &mut hatches);
         any_plain |= plain;
         contents.push(c);
     }
@@ -533,6 +738,7 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
         .iter()
         .map(|im| (alloc(), im.alpha.as_ref().map(|_| alloc())))
         .collect();
+    let hatch_refs: Vec<Ref> = hatches.list.iter().map(|_| alloc()).collect();
     let page_refs: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
     let content_refs: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
 
@@ -563,6 +769,13 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
                 x.pair(Name(format!("Im{k}").as_bytes()), *r);
             }
             x.finish();
+        }
+        if !hatch_refs.is_empty() {
+            let mut pd = res.patterns();
+            for (k, r) in hatch_refs.iter().enumerate() {
+                pd.pair(Name(format!("Pa{k}").as_bytes()), *r);
+            }
+            pd.finish();
         }
         res.finish();
         page.finish();
@@ -639,6 +852,20 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
         let buf = cmap.finish();
         pdf.cmap(tu, buf.as_slice());
     }
+    // 빗금 무늬
+    for (h, r) in hatches.list.iter().zip(&hatch_refs) {
+        let z = deflate(hatch_tile(h).as_bytes());
+        let mut t = pdf.tiling_pattern(*r, &z);
+        t.paint_type(PaintType::Colored)
+            .tiling_type(TilingType::NoDistortion)
+            .bbox(Rect::new(0.0, 0.0, 8.0, 8.0))
+            .x_step(8.0)
+            .y_step(8.0)
+            .matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        t.filter(Filter::FlateDecode);
+        t.resources().finish();
+        t.finish();
+    }
     // 그림
     for (im, (r, mask)) in images.list.iter().zip(&image_refs) {
         let z;
@@ -712,6 +939,27 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 빗금 무늬 칸: 한셀 PDF 의 Tiling 무늬와 같은 내용 (불투명이면 바탕색을 깐다)
+    #[test]
+    fn hatch_tile_content() {
+        let h: Hatch = (0, [0, 0, 192], Some([255, 255, 255]));
+        let s = hatch_tile(&h);
+        assert!(s.contains(
+            "0 0 8 8 re
+W n
+1 1 1 rg
+0 0 8 8 re
+f
+"
+        ));
+        assert!(s.contains(
+            "1 J 1 j 1 w 10 M []0 d
+0 4 m 8 4 l
+S"
+        ));
+        assert!(!hatch_tile(&(1, [0, 0, 0], None)).contains(" rg"));
+    }
 
     #[test]
     fn numbers_are_short() {

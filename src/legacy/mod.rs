@@ -179,12 +179,71 @@ pub fn write_xls(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)
 /// 통합 문서를 넥셀 `.nxl` (한셀 -2003) 로 쓴다: 레거시로 쓴 `/Workbook` 을 [`xls::to_nxl`] 로 바꾼다 (차트는 레거시와 같은
 /// 한컴 차트 레코드, 매크로 프로젝트는 담지 않는다)
 pub fn write_nxl(wb: &Workbook, opts: &WriteOptions) -> Result<(Vec<u8>, Report)> {
+    // 레거시에서 읽은 글상자의 `noRot` 잠금은 읽기가 더한 것이다 (한셀이 레거시를 읽을 때 붙인다) — 한셀은 넥셀을 읽을 때
+    // 붙이지 않으므로 그대로 쓰면 다시 읽을 때 남는다
+    let stripped;
+    let wb = if wb.styles.from_legacy && wb.sheets.iter().any(|s| has_legacy_lock(&s.shapes)) {
+        let mut w = wb.clone();
+        for s in &mut w.sheets {
+            strip_legacy_lock(&mut s.shapes);
+        }
+        stripped = w;
+        &stripped
+    } else {
+        wb
+    };
     let (bytes, report) = write_with_options(wb, opts)?;
     let tips = link_tips(wb);
     let stream = container::read_entry(&bytes, "/Workbook")?;
-    let wbs = xls::to_nxl(&stream, &tips)?;
+    // 시트마다 CF 로 쓰는 규칙이 든 조건부 서식 묶음 (넥셀 CONDFMT 의 ccf 와 CF 의 종류)
+    let cf_groups: Vec<Vec<xls::CfGroup>> = wb
+        .sheets
+        .iter()
+        .map(|s| {
+            s.conditional_formats
+                .iter()
+                .filter_map(|cf| {
+                    let mut cfs: Vec<&crate::model::CfRule> = cf
+                        .rules
+                        .iter()
+                        .filter(|r| {
+                            !matches!(r.kind.as_str(), "colorScale" | "dataBar" | "iconSet")
+                        })
+                        .collect();
+                    if cfs.is_empty() {
+                        return None;
+                    }
+                    cfs.sort_by_key(|r| r.priority);
+                    Some((
+                        cf.rules.len() as u16,
+                        cfs.iter().map(|r| r.kind == "top10").collect(),
+                    ))
+                })
+                .collect()
+        })
+        .collect();
+    let wbs = xls::to_nxl(&stream, &tips, &cf_groups)?;
     let macros = wb.hancom.vbs_project.as_deref().and_then(vbs::to_nexcel);
     Ok((with_summary(&bytes, &wbs, macros.as_deref()), report))
+}
+
+fn is_textbox(s: &crate::model::Shape) -> bool {
+    s.kind == crate::model::ShapeKind::Shape && s.text.is_some()
+}
+
+fn has_legacy_lock(shapes: &[crate::model::Shape]) -> bool {
+    shapes.iter().any(|s| {
+        (is_textbox(s) && s.locks.iter().any(|l| l == "noRot")) || has_legacy_lock(&s.children)
+    })
+}
+
+fn strip_legacy_lock(shapes: &mut [crate::model::Shape]) {
+    for s in shapes {
+        if is_textbox(s) {
+            s.locks.retain(|l| l != "noRot");
+        }
+        strip_legacy_lock(&mut s.children);
+    }
 }
 
 /// 시트마다 하이퍼링크 도구 설명 (`.xls`·`.nxl` 의 HLINK 표시 이름 자리)

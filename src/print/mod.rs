@@ -18,6 +18,8 @@ mod paginate;
 pub mod paper;
 mod pdf;
 mod pdfimage;
+mod raster;
+mod webpng;
 
 pub use font::FontDb;
 pub use paginate::{
@@ -26,7 +28,7 @@ pub use paginate::{
 
 use crate::model::Workbook;
 use crate::render::page::{
-    ErrorPrint, FontKey, Op, PageFrame, SheetPainter, TextMeasure, objects_ops,
+    ErrorPrint, FontKey, Op, PageFrame, Seg, SheetPainter, TextMeasure, objects_ops,
 };
 use pdf::{FontSet, PageSize};
 
@@ -64,18 +66,18 @@ pub enum OpenRecalc {
 /// 한셀 2024 계산 엔진 번호 (`calcPr/@hs:hclCalcId`, 레거시 0xA101)
 pub const HCELL_CALC_ID: u32 = 904;
 
-/// 문서 바이트와 읽은 모델로 한셀이 열 때 다시 계산하는 범위를 정한다.
-/// XML·xlsx: 엔진 번호(`hs:hclCalcId`, 없으면 Excel 의 `calcId`)가 904 보다 작거나 없으면 모두, 아니면 하지 않는다
-/// (904 → 하지 않음, 903 → 모두, Excel 191029 → 하지 않음, 둘 다 없음 → 모두). 레거시·xls: 0xA101 이 904 이상이면
-/// 휘발성 칸만, 아니면 모두. ODS: 모두. 바이너리 .cell 은 한셀 COM 이 열지 못해 재지 못했다 — 저장된 값 그대로
+/// 문서 바이트와 읽은 모델로 한셀이 열 때 다시 계산하는 범위를 정한다 (값을 틀리게 적은 20 칸 문서를 형식·엔진 번호별로 한셀에서
+/// 읽은 값). XML·xlsx: `hs:hclCalcId` 가 904 이상이면 하지 않고 903 이하면 모두; 그 번호가 없으면 Excel 의 `calcId` 가 있는
+/// 문서(값 100·904·191029 모두)는 하지 않고, 둘 다 없으면 모두. 레거시·xls: 0xA101 이 904 이상이면 휘발성 칸만, 아니면
+/// (2·100·903 도) 모두. 바이너리 .cell(`.xlsb` 이름으로 연다): BrtCalcProp 의 recalcID 가 0·1 이면 모두, 2 이상(10·100·903·904·
+/// 191029)이면 휘발성 칸만. ODS: 모두
 pub fn open_recalc(bytes: &[u8], wb: &Workbook) -> OpenRecalc {
-    let id = wb.hancom.calc_id.or_else(|| {
-        wb.calc_attrs
-            .iter()
-            .find(|(k, _)| k == "calcId")
-            .and_then(|(_, v)| v.trim().parse().ok())
-    });
-    let current = id.is_some_and(|i| i >= HCELL_CALC_ID);
+    let xml_id = wb.hancom.calc_id;
+    let excel_id = wb.calc_attrs.iter().any(|(k, _)| k == "calcId");
+    let xml_current = match xml_id {
+        Some(i) => i >= HCELL_CALC_ID,
+        None => excel_id,
+    };
     match crate::detect(bytes) {
         crate::FileKind::Cfb => {
             let encrypted = crate::container::list_entries(bytes).is_ok_and(|e| {
@@ -84,12 +86,12 @@ pub fn open_recalc(bytes: &[u8], wb: &Workbook) -> OpenRecalc {
             });
             if encrypted {
                 // 암호화된 OOXML: 안은 XML 패키지
-                if current {
+                if xml_current {
                     OpenRecalc::None
                 } else {
                     OpenRecalc::Full
                 }
-            } else if wb.hancom.calc_id.is_some_and(|i| i >= HCELL_CALC_ID) {
+            } else if xml_id.is_some_and(|i| i >= HCELL_CALC_ID) {
                 OpenRecalc::Volatile
             } else {
                 OpenRecalc::Full
@@ -97,9 +99,32 @@ pub fn open_recalc(bytes: &[u8], wb: &Workbook) -> OpenRecalc {
         }
         crate::FileKind::Zip if crate::ods::is_ods(bytes) => OpenRecalc::Full,
         crate::FileKind::Zip => {
-            let binary = crate::Package::from_bytes(bytes.to_vec())
-                .is_ok_and(|p| p.has_part("xl/workbook.bin"));
-            if binary || current {
+            let mut pkg = match crate::Package::from_bytes(bytes.to_vec()) {
+                Ok(p) => p,
+                Err(_) => return OpenRecalc::None,
+            };
+            if pkg.has_part("xl/workbook.bin") {
+                let recalc_id = pkg
+                    .read_bytes("xl/workbook.bin")
+                    .ok()
+                    .flatten()
+                    .and_then(|part| {
+                        crate::binary::biff12::records(&part)
+                            .into_iter()
+                            .find(|r| r.rtype == 157)
+                            .and_then(|r| {
+                                r.data
+                                    .get(..4)
+                                    .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                            })
+                    });
+                return if recalc_id.is_some_and(|i| i >= 2) {
+                    OpenRecalc::Volatile
+                } else {
+                    OpenRecalc::Full
+                };
+            }
+            if xml_current {
                 OpenRecalc::None
             } else {
                 OpenRecalc::Full
@@ -449,18 +474,37 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
     let mut pages: Vec<(PageSize, Vec<Op>)> = Vec::new();
     // 키 큰 모드가 아닌 시트가 이미 나왔는가 (배율 100 의 99 는 그 첫째에만)
     let mut untall_seen = false;
+    let mut prints = Vec::new();
     for si in sheets {
-        let Some(sheet) = wb.sheets.get(si) else {
+        if wb.sheets.get(si).is_none() {
             continue;
-        };
+        }
         let sp = paginate::sheet_print_with(wb, si, !untall_seen);
         untall_seen |= !sp.tall && matches!(sp.settings.scaling, Scaling::Zoom(100));
+        prints.push((si, sp));
+    }
+    // 쪽 번호 (한셀 통합 문서 PDF — 시트 셋 실험): `&P` 는 PDF 의 쪽 차례 (시트가 바뀌어도 이어진다), `&N` 은 PDF 전체
+    // 쪽 수. 시트가 `firstPageNumber` (useFirstPageNumber) 를 주면 그 시트는 `&P` 에 (값 − 1) 을 더하고 `&N` 에도 더한다
+    // (첫 쪽 번호 5 인 시트: 5·6·7 / 14, 이어지는 시트는 4·5·6 / 10)
+    let counts: Vec<(usize, u32)> = prints
+        .iter()
+        .map(|(_, sp)| {
+            (
+                sp.pages.len(),
+                sp.settings
+                    .first_page_number
+                    .map_or(0, |n| n.saturating_sub(1)),
+            )
+        })
+        .collect();
+    let numbers = page_numbers(&counts);
+    let mut job_index = 0usize;
+    for (si, sp) in prints {
+        let sheet = &wb.sheets[si];
         let size = page_size(&sp.settings);
         let po = sheet.page.print_options.as_ref();
         let setup = sheet.page.setup.as_ref();
         let hfd = sheet.page.header_footer.as_ref();
-        let total = sp.pages.len() as u32;
-        let first_no = sp.settings.first_page_number.unwrap_or(1);
         // 그릴 범위 (모든 페이지의 행·열)
         let max_r = sp
             .pages
@@ -477,11 +521,13 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
             .max()
             .unwrap_or(0);
         let painter = SheetPainter::new(wb, sheet, max_r, max_c);
-        for (pi, page) in sp.pages.iter().enumerate() {
+        for page in sp.pages.iter() {
             // 아주 큰 범위(마지막 칸에 값이 있는 문서 — 80만 페이지)는 앞 페이지들만
             if pages.len() >= opts.max_pages.unwrap_or(MAX_PAGES) {
                 break;
             }
+            let (no, pages_total) = numbers.get(job_index).copied().unwrap_or((1, 1));
+            job_index += 1;
             let headings = po.is_some_and(|o| o.headings);
             let z = if sp.tall { 100 } else { sp.print_scale };
             let hpx = headings.then(|| heading_px(wb, z));
@@ -502,17 +548,17 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
             }
             // 머리글·바닥글
             if let Some(h) = hfd {
-                let no = first_no + pi as u32;
                 let fields = hf::HfFields {
                     page: no,
-                    pages: total + first_no - 1,
+                    pages: pages_total,
                     sheet: sheet.name.clone(),
                     file: opts.file_name.clone(),
                     path: opts.path.clone(),
                     date: opts.date.clone(),
                     time: opts.time.clone(),
                 };
-                let (head, foot) = if h.different_first && pi == 0 {
+                // 첫 쪽 머리글은 PDF 의 첫 쪽에만 (시트 셋 실험: 둘째·셋째 시트의 첫 쪽은 쪽 번호의 홀짝을 따른다)
+                let (head, foot) = if h.different_first && job_index == 1 {
                     (h.first_header.as_deref(), h.first_footer.as_deref())
                 } else if h.different_odd_even && no.is_multiple_of(2) {
                     (h.even_header.as_deref(), h.even_footer.as_deref())
@@ -566,7 +612,23 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
     pdf::write_pdf(&pages, &fonts, &opts.file_name)
 }
 
-/// 지금 날짜·시간을 한셀 머리글 꼴로 (`2026-10-28`, `06:13 오후`). 시간대는 `RCELL_TZ`(분, 예: 540) 가 없으면 UTC
+/// 쪽마다 (`&P`, `&N`): 시트마다 (쪽 수, 첫 쪽 번호 − 1 — 정하지 않으면 0). `&P` = PDF 의 쪽 차례 + 그 시트의 값, `&N` =
+/// 전체 쪽 수 + 그 시트의 값 (한셀 통합 문서 PDF: 첫 쪽 번호 5 인 시트 셋 3·3·4 쪽 → 5·6·7 / 14, 4·5·6 / 10, 7·8·9·10 / 10)
+pub fn page_numbers(sheets: &[(usize, u32)]) -> Vec<(u32, u32)> {
+    let total: usize = sheets.iter().map(|s| s.0).sum();
+    let total = total.min(u32::MAX as usize) as u32;
+    let mut out = Vec::new();
+    let mut index = 0u32;
+    for &(n, offset) in sheets {
+        for _ in 0..n.min(MAX_PAGES + 1) {
+            index += 1;
+            out.push((index + offset, total + offset));
+        }
+    }
+    out
+}
+
+/// 지금 날짜·시간을 한셀 머리글 꼴로 (`2026-10-28`, `06:13 오후`). 시간대는 `RCELL_TZ`(분, 예: 540) 가 없으면 +9:00 (한국 표준시)
 pub fn now_strings() -> (String, String) {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -574,7 +636,8 @@ pub fn now_strings() -> (String, String) {
     let tz: i64 = std::env::var("RCELL_TZ")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+        // 표준 라이브러리로는 지역 시간대를 알 수 없다 — 기본 +9:00 (한국 표준시, 계산 엔진의 NOW 와 같다)
+        .unwrap_or(9 * 60);
     let t = secs + tz * 60;
     let days = t.div_euclid(86_400);
     let sod = t.rem_euclid(86_400);
@@ -622,5 +685,99 @@ fn settings_default() -> Settings {
         row_breaks: Vec::new(),
         col_breaks: Vec::new(),
         first_page_number: None,
+    }
+}
+
+/// 개체 하나(도형·차트)를 PNG 그림으로 그린다 (웹 페이지 저장 — 한셀은 도형·차트를 RGBA PNG 로 넣는다). 개체 크기는
+/// w × h (px), 그림 크기는 png_w × png_h (테두리·그림자 몫 한 줄 더). 바탕은 투명이고 글꼴이 없으면 글자는 빠진다.
+/// 그리는 일은 인쇄의 차트 비트맵과 같은 raster::render 를 쓴다 (webpng 는 그 앞뒤)
+pub fn shape_png(
+    wb: &Workbook,
+    sh: &crate::model::Shape,
+    (w, h): (f64, f64),
+    (png_w, png_h): (u32, u32),
+    db: &FontDb,
+) -> Vec<u8> {
+    let fonts = FontSet::new(db);
+    let mut ops = crate::render::page::shape_ops(wb, sh, w, h, &fonts);
+    // 그림자: 같은 모양을 옮겨 그림자 색 한 가지로 먼저 깐다
+    if let Some((dx, dy, color)) = crate::render::page::shape_shadow(wb, sh) {
+        let (ox, oy) = (dx as f64 * 6.25, dy as f64 * 6.25);
+        let mut shadow: Vec<Op> = Vec::new();
+        for op in &ops {
+            match op {
+                Op::Rect { x0, y0, x1, y1, .. } => shadow.push(Op::Rect {
+                    x0: x0 + ox,
+                    y0: y0 + oy,
+                    x1: x1 + ox,
+                    y1: y1 + oy,
+                    color,
+                }),
+                Op::Path {
+                    segs,
+                    fill: Some(_),
+                    even_odd,
+                    ..
+                } => shadow.push(Op::Path {
+                    segs: segs
+                        .iter()
+                        .map(|s| match *s {
+                            Seg::Move(x, y) => Seg::Move(x + ox, y + oy),
+                            Seg::Line(x, y) => Seg::Line(x + ox, y + oy),
+                            Seg::Cubic(a, b, c, d, e, f) => {
+                                Seg::Cubic(a + ox, b + oy, c + ox, d + oy, e + ox, f + oy)
+                            }
+                            Seg::Close => Seg::Close,
+                        })
+                        .collect(),
+                    fill: Some(color),
+                    stroke: None,
+                    even_odd: *even_odd,
+                    caps: None,
+                    hatch: None,
+                }),
+                _ => {}
+            }
+        }
+        shadow.extend(ops);
+        ops = shadow;
+    }
+    webpng::encode_png(png_w, png_h, &webpng::draw(&ops, png_w, png_h, &fonts))
+}
+
+/// 그림(PNG·BMP)을 w × h 크기 PNG 로 다시 그린다 (한셀 웹 저장은 그림도 크기에 맞춘 RGBA PNG 로 넣는다).
+/// 풀 수 없는 형식(JPEG 등)이면 None
+pub fn picture_png(data: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    webpng::picture(data, w, h).map(|b| webpng::encode_png(w, h, &b))
+}
+
+/// 투명한 w × h PNG
+pub fn transparent_png(w: u32, h: u32) -> Vec<u8> {
+    webpng::encode_png(w, h, &vec![0u8; (w as usize) * (h as usize) * 4])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 한셀 통합 문서 PDF (시트 셋, 3·3·4 쪽, 첫 시트만 첫 쪽 번호 5)의 머리글 쪽 번호
+    #[test]
+    fn page_numbers_continue_across_sheets() {
+        let n = page_numbers(&[(3, 4), (3, 0), (4, 0)]);
+        let want = [
+            (5, 14),
+            (6, 14),
+            (7, 14),
+            (4, 10),
+            (5, 10),
+            (6, 10),
+            (7, 10),
+            (8, 10),
+            (9, 10),
+            (10, 10),
+        ];
+        assert_eq!(n, want);
+        // 첫 쪽 번호가 없으면 1 부터 이어진다
+        assert_eq!(page_numbers(&[(2, 0), (1, 0)]), [(1, 3), (2, 3), (3, 3)]);
     }
 }
