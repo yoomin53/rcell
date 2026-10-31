@@ -6,7 +6,7 @@
 //! 표(ListObject) 만들기 (한셀 COM `ListObjects.Add` 대조 실험 tb1·tb2 — docs/editing.md 24절).
 //!
 //! 한셀 COM 은 `ListObjects.Add` 를 `InvokeMember` 로 불러야 하고(PowerShell 직접 호출은 실패) 객체를 돌려주지 않는다.
-//! - 이름은 `표N`(쓰지 않은 가장 작은 N), 번호는 가장 큰 번호 + 1, 스타일 `TableStyleMedium2`(줄무늬 행만), 열 이름은 머리글 칸 글.
+//! - 이름은 `표N`(쓰지 않은 가장 작은 N), 번호는 가장 큰 번호 + 1, 스타일 `TableStyleMedium2`(줄무늬 행만), 열 이름은 머리글 칸 글 (글이 아닌 머리글은 보이는 글로 바꾸고 빈 머리글은 `열1`… 을 써 넣는다).
 //! - 범위가 한 행(머리글뿐)이면 그 아래에 빈 칸 한 행을 끼워 넣는다 (`A1` → `A1:A2`, 아래 칸은 한 칸씩 밀린다). 표를 만들면 그 범위의 시트 자동 필터는 없어진다.
 //! - 표 안 테두리 서식: 요약 행 테두리 `totalsRowBorderDxfId`, 데이터 행이 둘 이상이면 열마다 `dataDxfId` — 둘 다 가로 안쪽선
 //!   검정 차등 서식이고 문서에 이미 있으면 그 번호를 쓴다. 첫 열에는 `요약` 글(`totalsRowLabel`)이 붙는다.
@@ -120,16 +120,39 @@ pub fn add_table(
     if overlaps {
         return Err(err("표가 겹칩니다"));
     }
-    // 열 이름: 머리글 칸 글
+    // 열 이름: 머리글 칸 글. 글이 아닌 머리글(수·논리값·수식 결과)은 보이는 글로 바꾸고, 빈 머리글은 `열1`, `열2`… (빈 것끼리 차례로) 를 써 넣는다
     let mut cols: Vec<String> = Vec::new();
+    let mut blank = 0;
+    let mut fixes: Vec<(CellRef, String)> = Vec::new();
     for c in c0..=c1 {
-        let t = super::find::display_text(wb, si, CellRef { row: r0, col: c })
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| err("머리글 칸이 비어 있어 표를 만들 수 없습니다"))?;
+        let at = CellRef { row: r0, col: c };
+        let is_text = wb.sheets[si].cell(at).is_some_and(|x| {
+            x.formula.is_none()
+                && matches!(&x.value, crate::model::CellValue::Text(t) if !t.is_empty())
+        });
+        let t = match super::find::display_text(wb, si, at).filter(|t| !t.is_empty()) {
+            Some(t) => {
+                if !is_text {
+                    fixes.push((at, t.clone()));
+                }
+                t
+            }
+            None => {
+                blank += 1;
+                let t = format!("열{blank}");
+                fixes.push((at, t.clone()));
+                t
+            }
+        };
         if cols.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
             return Err(err("머리글이 겹쳐 표를 만들 수 없습니다"));
         }
         cols.push(t);
+    }
+    for (at, t) in fixes {
+        let cell = super::cell_mut(&mut wb.sheets[si], at);
+        cell.value = crate::model::CellValue::Text(t);
+        cell.formula = None;
     }
     let id = wb
         .sheets
