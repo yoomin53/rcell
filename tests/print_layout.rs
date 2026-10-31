@@ -752,3 +752,37 @@ fn pdf_has_hcell_shell() {
         assert!(s.contains(key), "{key}");
     }
 }
+
+/// 칸 무늬 채우기(darkGrid, 빨강/흰색)는 8×8 무늬 칸 그림을 되풀이하는 Tiling 무늬로 찍힌다 (한셀 PDF: 무늬 칸 그림 8×8,
+/// BBox 가로세로 4pt)
+#[test]
+fn pattern_fill_is_a_tiling_pattern() {
+    let mut wb = base();
+    fill(&mut wb, "A1:A2");
+    wb.styles.fills.push(Fill {
+        pattern_type: Some("darkGrid".into()),
+        fg_color: Some(rcell::model::Color {
+            rgb: Some("ffff0000".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    wb.styles.cell_xfs.push(Xf {
+        fill_id: 1,
+        apply_fill: Some(true),
+        ..Default::default()
+    });
+    wb.sheets[0].cells[0].style = 1;
+    let bytes = rcell::print::workbook_pdf(
+        &wb,
+        &rcell::print::FontDb::new(),
+        &rcell::print::PdfOptions::default(),
+    );
+    let s = String::from_utf8_lossy(&bytes);
+    assert!(s.contains("/PatternType 1"), "tiling pattern");
+    assert!(s.contains("/BBox [0 0 4 4]"), "4pt tile");
+    assert!(
+        s.contains("/Width 8") && s.contains("/Height 8"),
+        "8x8 tile image"
+    );
+}

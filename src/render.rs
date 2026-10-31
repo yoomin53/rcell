@@ -524,6 +524,7 @@ impl<'a> Views<'a> {
                 css: format!("background:{c};"),
                 color: Some(c),
                 tiled: false,
+                pat: None,
             })
             .or(fill)
             .or_else(|| {
@@ -531,6 +532,7 @@ impl<'a> Views<'a> {
                     css: format!("background:{c};"),
                     color: Some(c),
                     tiled: false,
+                    pat: None,
                 })
             });
         // 표 스타일 테두리는 칸 자체의 테두리가 없는 변에만

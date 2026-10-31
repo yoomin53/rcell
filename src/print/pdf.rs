@@ -69,6 +69,10 @@ impl Hatches {
 /// 깔고, 1 굵기 둥근 선. 무늬 번호 0 가로·1 세로·2 \·3 /·4 +·5 x (선이 칸 밖으로 나가는 것은 이웃 칸과 이어지게)
 fn hatch_tile(h: &Hatch) -> String {
     let (style, fg, bg) = h;
+    // 칸 무늬 채우기: 8×8 픽셀 그림 한 장을 가로·세로 4pt 로 (한셀 PDF 의 무늬 칸 — 그림이 보는 쪽에서 부드럽게 보정된다)
+    if *style >= crate::render::page::PATTERN_BASE {
+        return "q\n4 0 0 4 0 0 cm\n/Im1 Do\nQ\n".to_string();
+    }
     let lines = match style {
         0 => "0 4 m 8 4 l",
         1 => "4 0 m 4 8 l",
@@ -87,6 +91,22 @@ fn hatch_tile(h: &Hatch) -> String {
         color(*fg)
     );
     s
+}
+
+/// 칸 무늬 채우기의 8×8 RGB 픽셀 (전경·배경 색을 구워 둔다)
+fn pattern_pixels(h: &Hatch) -> Vec<u8> {
+    let (style, fg, bg) = h;
+    let bg = bg.unwrap_or([255, 255, 255]);
+    let rows =
+        crate::render::page::pattern_rows((*style - crate::render::page::PATTERN_BASE) as usize)
+            .unwrap_or([[false; 8]; 8]);
+    let mut out = Vec::with_capacity(192);
+    for row in rows {
+        for on in row {
+            out.extend_from_slice(if on { fg } else { &bg });
+        }
+    }
+    out
 }
 
 /// 넣은 글꼴 하나 (얼굴 + 쓴 글리프)
@@ -575,11 +595,23 @@ fn content(
                 y0,
                 x1,
                 y1,
+                px: bitmap_px,
                 ops: sub,
-            } => match super::raster::render(sub, (*x0, *y0, *x1, *y1), fonts).map(stencil_image) {
+            } => match super::raster::render(sub, (*x0, *y0, *x1, *y1), *bitmap_px, fonts)
+                .map(stencil_image)
+            {
                 Some(img) => {
-                    let (ox, oy) = (x0.round(), y0.round());
-                    let (w, h) = (img.width as f64, img.height as f64);
+                    let (ox, oy) = if bitmap_px.is_some() {
+                        (*x0, *y0)
+                    } else {
+                        (x0.round(), y0.round())
+                    };
+                    // 그림이 상자에 늘어나게 찍는다 (픽셀 크기를 정했으면 상자 크기, 아니면 그림 크기)
+                    let (w, h) = if bitmap_px.is_some() {
+                        (x1 - x0, y1 - y0)
+                    } else {
+                        (img.width as f64, img.height as f64)
+                    };
                     let k = images.push(img);
                     let _ = writeln!(
                         s,
@@ -761,6 +793,12 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
         .map(|im| (alloc(), im.alpha.as_ref().map(|_| alloc())))
         .collect();
     let hatch_refs: Vec<Ref> = hatches.list.iter().map(|_| alloc()).collect();
+    // 칸 무늬 채우기마다 8×8 그림
+    let hatch_imgs: Vec<Option<Ref>> = hatches
+        .list
+        .iter()
+        .map(|h| (h.0 >= crate::render::page::PATTERN_BASE).then(&mut alloc))
+        .collect();
     let page_refs: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
     let content_refs: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
 
@@ -881,18 +919,38 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
         pdf.cmap(tu, buf.as_slice());
     }
     // 빗금 무늬
-    for (h, r) in hatches.list.iter().zip(&hatch_refs) {
+    for ((h, r), img) in hatches.list.iter().zip(&hatch_refs).zip(&hatch_imgs) {
         let z = deflate(hatch_tile(h).as_bytes());
         let mut t = pdf.tiling_pattern(*r, &z);
+        // 빗금 칸은 8pt, 칸 무늬 채우기는 4pt
+        let size = if h.0 >= crate::render::page::PATTERN_BASE {
+            4.0
+        } else {
+            8.0
+        };
         t.paint_type(PaintType::Colored)
             .tiling_type(TilingType::NoDistortion)
-            .bbox(Rect::new(0.0, 0.0, 8.0, 8.0))
-            .x_step(8.0)
-            .y_step(8.0)
+            .bbox(Rect::new(0.0, 0.0, size, size))
+            .x_step(size)
+            .y_step(size)
             .matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         t.filter(Filter::FlateDecode);
-        t.resources().finish();
+        let mut res = t.resources();
+        if let Some(im) = img {
+            res.x_objects().pair(Name(b"Im1"), *im);
+        }
+        res.finish();
         t.finish();
+        if let Some(im) = img {
+            let z = deflate(&pattern_pixels(h));
+            let mut x = pdf.image_xobject(*im, &z);
+            x.filter(Filter::FlateDecode);
+            x.width(8);
+            x.height(8);
+            x.bits_per_component(8);
+            x.color_space().device_rgb();
+            x.finish();
+        }
     }
     // 그림
     for (im, (r, mask)) in images.list.iter().zip(&image_refs) {

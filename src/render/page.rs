@@ -112,6 +112,8 @@ pub enum Op {
         y0: f64,
         x1: f64,
         y1: f64,
+        /// 그림의 픽셀 크기 — 없으면 상자 크기 (장치 단위 = 픽셀). 있으면 상자에 늘여 찍는다 (조건부 서식 아이콘 20×20)
+        px: Option<(u32, u32)>,
         ops: Vec<Op>,
     },
     /// 사각형으로 자르기 시작 / 끝
@@ -264,6 +266,14 @@ pub(crate) fn aligned_px(right: bool, cell_w: f64, text_w: f64, indent: f64, zoo
     } else {
         (x * zoom as f64 / 100.0 - k).round()
     }
+}
+
+/// 칸 무늬 채우기의 `Hatch` 번호 바닥: 0–5 는 GDI 빗금, 이 번호부터는 [`paint::PATTERNS`] 의 무늬
+pub const PATTERN_BASE: u8 = 16;
+
+/// 칸 무늬의 8×8 칸 (전경이 true) — 인쇄 PDF 가 무늬 칸을 그릴 때
+pub fn pattern_rows(index: usize) -> Option<[[bool; 8]; 8]> {
+    paint::pattern_rows(index)
 }
 
 /// 칸 상자가 경계에서 들어가는 거리 (장치 단위): 화면에서 칸의 마지막 픽셀이 격자선 자리인 것과 같다
@@ -563,15 +573,37 @@ fn page_body(
             let Some(v) = views.get(&(r, c)) else {
                 continue;
             };
+            let Some((x0, y0, x1, y1)) = cell_rect(r, c) else {
+                continue;
+            };
+            // 무늬 채우기: 한셀은 8×8 무늬 칸(가로 4pt, 페이지 원점 기준)을 되풀이해 칠한다
+            if let Some((name, fg, bg)) = v.fill.as_ref().and_then(|f| f.pat.as_ref())
+                && let Some(i) = paint::PATTERNS.iter().position(|n| n == name)
+                && let (Some(fg), Some(bg)) = (rgb(fg), rgb(bg))
+            {
+                let (a, b, cc, d) = (x0 - SHIFT, y0 - SHIFT, x1 - SHIFT, y1 - SHIFT);
+                ops.push(Op::Path {
+                    segs: vec![
+                        Seg::Move(a, b),
+                        Seg::Line(cc, b),
+                        Seg::Line(cc, d),
+                        Seg::Line(a, d),
+                        Seg::Close,
+                    ],
+                    fill: None,
+                    stroke: None,
+                    even_odd: false,
+                    caps: None,
+                    hatch: Some((PATTERN_BASE + i as u8, fg, Some(bg))),
+                });
+                continue;
+            }
             let Some(color) = v
                 .fill
                 .as_ref()
                 .and_then(|f| f.color.as_deref())
                 .and_then(rgb)
             else {
-                continue;
-            };
-            let Some((x0, y0, x1, y1)) = cell_rect(r, c) else {
                 continue;
             };
             ops.push(Op::Rect {
@@ -581,6 +613,27 @@ fn page_body(
                 y1: y1 - SHIFT,
                 color,
             });
+        }
+    }
+    // 1b. 조건부 서식의 데이터 막대·아이콘 (초안 인쇄·흑백 인쇄는 그리지 않는다)
+    if !frame.draft && !mono {
+        for &(r, c) in &draw {
+            let Some(cf) = ctx.cfx.get(&(r, c)) else {
+                continue;
+            };
+            if cf.bar.is_none() && cf.icon.is_none() {
+                continue;
+            }
+            let Some((x0, y0, x1, y1)) = cell_rect(r, c) else {
+                continue;
+            };
+            let rect = (x0 - SHIFT, y0 - SHIFT, x1 - SHIFT, y1 - SHIFT);
+            if let Some(b) = &cf.bar {
+                data_bar_ops(b, rect, &mut ops);
+            }
+            if let (Some((set, idx, _)), Some(v)) = (&cf.icon, views.get(&(r, c))) {
+                cf_icon_ops(set, *idx, v.v, rect, frame.px, &mut ops);
+            }
         }
     }
     // 2. 격자선 (인쇄 옵션): 그린 행·열의 모든 경계
@@ -1661,6 +1714,7 @@ fn object_ops(
                         y0: y,
                         x1: x + w,
                         y1: y + h + 2.0,
+                        px: None,
                         ops: sub,
                     });
                 } else {
@@ -1733,6 +1787,139 @@ pub fn shape_shadow(wb: &Workbook, sh: &crate::model::Shape) -> Option<(i32, i32
         (dist * ang.sin()).trunc() as i32,
     );
     Some((dx, dy, [r, g, b]))
+}
+
+/// 조건부 서식 데이터 막대 (한셀 PDF: 계단 모양 직각삼각형 — 세로 변이 시작 쪽, 아래가 넓다). 칸 안 자리는 화면과 같은 규칙
+/// (`cell.rs` data_bar_svg: 영역 [1, 1 + (폭 − 4)), 위 3px, 아래 높이 − 3px) 을 인쇄 px (6.25 장치 단위) 로
+fn data_bar_ops(
+    b: &crate::cf_eval::BarDraw,
+    (x0, y0, x1, y1): (f64, f64, f64, f64),
+    ops: &mut Vec<Op>,
+) {
+    const S: f64 = 6.25;
+    let (w, h) = ((x1 - x0) / S + 1.0, (y1 - y0) / S + 1.0);
+    let iw = w - 1.0;
+    let area = (w - 4.0).max(1.0);
+    let (top, bot) = (3.0, (h - 3.0).max(4.0));
+    let ax = b.axis.as_ref().map(|(a, _)| (1.0 + area * a).floor());
+    let (xs, xe) = match ax {
+        Some(ax) => {
+            let xs = ax + 1.0;
+            if b.leftward {
+                (xs, xs - (xs - 1.0) * b.len)
+            } else {
+                (xs, xs + (1.0 + area - xs) * b.len)
+            }
+        }
+        None => (1.0, 1.0 + area * b.len),
+    };
+    let flip = |x: f64| if b.rtl { iw - x } else { x };
+    if (xe - xs).abs() < 0.5 {
+        return;
+    }
+    let (p, q) = (flip(xs).min(flip(xe)), flip(xs).max(flip(xe)));
+    let (v, t) = if b.leftward { (q, p) } else { (p, q) };
+    let Some(color) = rgb(&b.fill) else {
+        return;
+    };
+    // 한셀 PDF 의 막대는 화면 규칙보다 1px 오른쪽 (칸 D1 막대: 한셀 왼쪽 214.265pt, 화면 규칙 213.515)
+    let pt = |x: f64, y: f64| (x0 + (x + 1.0) * S, y0 + y * S);
+    let tri = |c: [u8; 3], a: (f64, f64), bb: (f64, f64), cc: (f64, f64)| Op::Path {
+        segs: vec![
+            Seg::Move(a.0, a.1),
+            Seg::Line(bb.0, bb.1),
+            Seg::Line(cc.0, cc.1),
+            Seg::Close,
+        ],
+        fill: Some(c),
+        stroke: None,
+        even_odd: false,
+        caps: None,
+        hatch: None,
+    };
+    if b.gradient {
+        // 세로 변의 색에서 끝의 흰색까지: 한 픽셀 폭 조각마다 그 자리의 색 (삼각형을 세로로 자른 사다리꼴)
+        let n = ((t - v).abs().ceil() as usize).max(1);
+        let dir = if t >= v { 1.0 } else { -1.0 };
+        for i in 0..n {
+            let (a, bb) = (v + dir * i as f64, v + dir * (i + 1) as f64);
+            let bb = if dir > 0.0 { bb.min(t) } else { bb.max(t) };
+            let mid = ((a + bb) / 2.0 - v) / (t - v);
+            let c = [
+                (color[0] as f64 + (255.0 - color[0] as f64) * mid).round() as u8,
+                (color[1] as f64 + (255.0 - color[1] as f64) * mid).round() as u8,
+                (color[2] as f64 + (255.0 - color[2] as f64) * mid).round() as u8,
+            ];
+            // 위 변: 삼각형 빗변 위의 높이
+            let ya = top + (bot - top) * (1.0 - (a - v) / (t - v));
+            let yb = top + (bot - top) * (1.0 - (bb - v) / (t - v));
+            let (p0, p1, p2, p3) = (pt(a, ya), pt(bb, yb), pt(bb, bot), pt(a, bot));
+            ops.push(Op::Path {
+                segs: vec![
+                    Seg::Move(p0.0, p0.1),
+                    Seg::Line(p1.0, p1.1),
+                    Seg::Line(p2.0, p2.1),
+                    Seg::Line(p3.0, p3.1),
+                    Seg::Close,
+                ],
+                fill: Some(c),
+                stroke: None,
+                even_odd: false,
+                caps: None,
+                hatch: None,
+            });
+        }
+    } else {
+        ops.push(tri(color, pt(v, top), pt(v, bot), pt(t, bot)));
+    }
+}
+
+/// 조건부 서식 아이콘: 화면 아이콘(16px SVG)을 20×20 비트맵으로 찍는다 (한셀 PDF — 아이콘마다 20×20 그림 + 1비트 마스크를
+/// 칸 왼쪽에 놓는다). 상자는 20.35 인쇄 px, 칸 안 자리는 세로 맞춤대로
+fn cf_icon_ops(
+    set: &str,
+    idx: usize,
+    valign: VAlign,
+    (x0, y0, _x1, y1): (f64, f64, f64, f64),
+    k: f64,
+    ops: &mut Vec<Op>,
+) {
+    let size = 20.365 * k;
+    let h = y1 - y0;
+    let top = match valign {
+        VAlign::Top => y0 + 2.0 * k,
+        VAlign::Center => y0 + (h - size) / 2.0 + 6.5,
+        VAlign::Bottom => y1 - size - 2.0 * k,
+    };
+    let left = x0 + 12.0;
+    let svg = super::icons::icon_svg(set, idx, 0.0);
+    // 한셀 아이콘 그림은 20×20 칸 가운데쯤 15×15 에 그림 (왼쪽 2·위 3 칸 띄움) — 화면 16px 아이콘을 그만큼 줄여 놓는다
+    let sc = size / 20.0 * 15.0 / 16.0;
+    let mut sub = Vec::new();
+    let nomeasure = |_: &FontKey, size: f64, text: &str| size * text.chars().count() as f64 * 0.5;
+    super::svgops::svg_ops(
+        &svg,
+        [
+            sc,
+            0.0,
+            0.0,
+            sc,
+            left + size * 2.0 / 20.0,
+            top + size * 3.0 / 20.0,
+        ],
+        &nomeasure,
+        &mut sub,
+    );
+    if !sub.is_empty() {
+        ops.push(Op::Raster {
+            x0: left,
+            y0: top,
+            x1: left + size,
+            y1: top + size,
+            px: Some((20, 20)),
+            ops: sub,
+        });
+    }
 }
 
 /// 바깥 그림자 비트맵 (한셀 PDF 실험 — 효과 있는 도형을 여러 가지로 만들어 인쇄): 도형의 채운 모양과 선을 그림자 색 한 가지로,
@@ -1834,6 +2021,7 @@ fn shadow_raster(
         y0: y0.floor(),
         x1: x1.ceil(),
         y1: y1.ceil(),
+        px: None,
         ops: sil,
     })
 }
@@ -2029,6 +2217,30 @@ mod tests {
             })
             .collect();
         assert_eq!(ys, [113.0, 100.0, 96.0]);
+    }
+
+    /// 조건부 서식 데이터 막대: 직각삼각형 (세로 변이 시작 쪽, 아래가 넓다), 화면 규칙 + 오른쪽으로 1px (한셀 PDF 대조)
+    #[test]
+    fn data_bar_is_a_right_triangle() {
+        let b = crate::cf_eval::BarDraw {
+            axis: None,
+            len: 1.0,
+            leftward: false,
+            fill: "#638EC6".into(),
+            border: None,
+            gradient: false,
+            rtl: false,
+        };
+        let mut ops = Vec::new();
+        data_bar_ops(&b, (0.0, 0.0, 443.75, 137.5), &mut ops);
+        let [Op::Path { segs, fill, .. }] = &ops[..] else {
+            panic!("{ops:?}")
+        };
+        assert_eq!(*fill, Some([0x63, 0x8E, 0xC6]));
+        // (세로 변 위) (세로 변 아래) (꼭짓점 아래): 칸 22px → 높이 23px (격자선 포함), 위 3px · 아래 3px; 폭 72px → 영역 68px, 왼쪽 1px + 1px
+        assert_eq!(segs[0], Seg::Move(12.5, 18.75));
+        assert_eq!(segs[1], Seg::Line(12.5, 125.0));
+        assert_eq!(segs[2], Seg::Line(437.5, 125.0));
     }
 
     /// 한셀 PDF 에서 잰 그림·도형 상자 (원점 449·591, 배율 99 = k 6.1875): 그림 off (133, 200) ext (200, 400) → 왼쪽 1264,
