@@ -23,6 +23,9 @@ struct Cli {
     /// 암호가 걸린 문서의 암호 (생략하면 보호만 걸린 문서의 기본 암호를 쓴다)
     #[arg(long, global = true)]
     password: Option<String>,
+    /// .xls 를 한셀처럼 잃지 않고 원본대로 읽는다 (기본은 한셀이 여는 대로: 도형 글을 비우고 조건부 서식 일부를 잃는다)
+    #[arg(long, global = true)]
+    keep_original: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -35,12 +38,15 @@ fn read_plain(path: &Path) -> rcell::Result<Vec<u8>> {
     rcell::decrypt_if_needed(std::fs::read(path)?, PASSWORD.get().map(String::as_str))
 }
 
+/// --keep-original
+static KEEP_ORIGINAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 문서 열기 (암호를 받았으면 그것으로)
 fn open_doc(path: &Path) -> rcell::Result<rcell::Workbook> {
-    match PASSWORD.get() {
-        Some(p) => rcell::open_with_password(path, p),
-        None => rcell::open(path),
-    }
+    let opts = rcell::OpenOptions {
+        keep_original: KEEP_ORIGINAL.load(std::sync::atomic::Ordering::Relaxed),
+    };
+    rcell::open_with_options(path, PASSWORD.get().map(String::as_str), &opts)
 }
 
 #[derive(Subcommand)]
@@ -105,6 +111,9 @@ enum Cmd {
         /// 바이너리 저장에서 한셀이 잃는 값도 똑같이 잃는다 (한셀과 같은 결과를 볼 때)
         #[arg(long)]
         exact: bool,
+        /// .ods 를 한셀 호환으로 쓰지 않고 rcell 이 아는 것을 모두 쓴다 (표시 형식·아래 맞춤·점선·정확한 행 높이와 열 너비·여백·눈금선·확대율)
+        #[arg(long)]
+        ods_lossless: bool,
         /// 저장할 문서의 암호 (XML·바이너리 .cell, .xlsx, .xlsm, .xlsb — 한셀과 같은 표준 암호화)
         #[arg(long)]
         out_password: Option<String>,
@@ -278,6 +287,7 @@ fn main() -> ExitCode {
     if let Some(p) = cli.password {
         let _ = PASSWORD.set(p);
     }
+    KEEP_ORIGINAL.store(cli.keep_original, std::sync::atomic::Ordering::Relaxed);
     let result = match cli.cmd {
         Cmd::Info { file } => info(&file),
         Cmd::Dump { file, no_cells } => dump(&file, no_cells),
@@ -326,6 +336,7 @@ fn main() -> ExitCode {
             format,
             abs_path,
             exact,
+            ods_lossless,
             out_password,
             delimiters,
             text_columns,
@@ -334,8 +345,7 @@ fn main() -> ExitCode {
             &input,
             &output,
             format.as_deref(),
-            abs_path,
-            exact,
+            (abs_path, exact, ods_lossless),
             out_password.as_deref(),
             (delimiters, text_columns, start_row),
         ),
@@ -888,8 +898,7 @@ fn convert(
     input: &Path,
     output: &Path,
     format: Option<&str>,
-    abs_path: Option<String>,
-    exact: bool,
+    (abs_path, exact, ods_lossless): (Option<String>, bool, bool),
     out_password: Option<&str>,
     import: (Option<String>, Option<String>, Option<u32>),
 ) -> rcell::Result<()> {
@@ -944,6 +953,13 @@ fn convert(
                 eprintln!("경고: {w}");
             }
             std::fs::write(output, bytes)?;
+            Ok(())
+        }
+        rcell::SaveFormat::Ods if ods_lossless => {
+            let opts = rcell::ods::WriteOptions {
+                hcell_compatible: false,
+            };
+            std::fs::write(output, rcell::ods::write_with(&wb, &opts)?)?;
             Ok(())
         }
         _ => rcell::save_as(&wb, output, format),
