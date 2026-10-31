@@ -1757,8 +1757,13 @@ fn draw_axis_chart(
     } else {
         TickRule::Horizontal { room }
     };
-    let legacy_wide_cats =
-        legacy && !horizontal && cats.iter().any(|c| c.chars().any(crate::render::is_wide));
+    // 한글에 공백이 낀 항목 이름("항목 2")은 레이블 자리가 16px 더 높다 (두 줄로 갈 수 있다) — 공백 없는 이름("1월")은
+    // 높지 않다 (차트 종류 실험의 레거시 7개: 틀 아래 − 36 에 축. c2_e10_str_cat 은 − 52)
+    let legacy_wide_cats = legacy
+        && !horizontal
+        && cats
+            .iter()
+            .any(|c| c.contains(' ') && c.chars().any(crate::render::is_wide));
     let probe = make_scale(vlo, vhi, val_ax, inner.h.max(inner.w) * 0.8, !xy, vrule);
     let val_labels: Vec<String> = probe
         .ticks()

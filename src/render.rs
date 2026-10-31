@@ -971,18 +971,15 @@ pub fn sheet_table_grid(
                         m
                     });
                 let span = ov.span.get(&(r, c)).copied().unwrap_or((0, 0));
-                inner = cell::cell_content(v, merged.as_ref().or(cf), theme, w, h, span);
+                // 오른쪽에서 왼쪽 시트: 표를 통째로 뒤집었으니 칸 안 글·아이콘은 한 번 더 뒤집어 바로 세운다 (데이터 막대는
+                // 뒤집힌 채, 테두리도 — 왼쪽 테두리가 물리적 오른쪽에 그려진다)
+                inner = cell::cell_content(v, merged.as_ref().or(cf), theme, w, h, span, rtl);
             }
             if tlooks.get(&(r, c)).is_some_and(|t| t.handle) {
                 inner.push_str(&table::handle_svg(w, h));
             }
             if tlooks.get(&(r, c)).is_some_and(|t| t.button) {
                 inner.push_str(&table::button_svg(w, h));
-            }
-            // 오른쪽에서 왼쪽 시트: 표를 통째로 뒤집었으니 칸 안 내용(글·아이콘·막대)은 한 번 더 뒤집어 바로 세운다
-            // (테두리는 뒤집힌 채 둔다 — 왼쪽 테두리가 물리적 오른쪽에 그려진다)
-            if rtl && !inner.is_empty() {
-                inner = format!("<div class=\"rc-flip\">{inner}</div>");
             }
             // 테두리: 병합 영역은 가장자리 칸들의 테두리 (위·왼쪽은 왼쪽 위 칸, 오른쪽은 오른쪽 위 칸,
             // 아래는 왼쪽 아래 칸). 넘친 글자가 지나가는 세로 경계는 지운다 (한셀 화면: 위·아래 선은 남는다)
@@ -1049,14 +1046,20 @@ pub fn sheet_table_grid(
                 && let Some(g) = spark_groups.get(*gi)
             {
                 let lohi = sparkline::group_range(&sparks, *gi);
-                inner.push_str(&sparkline::svg(
+                let sp = sparkline::svg(
                     g,
                     vals,
                     lohi,
                     w.saturating_sub(1) as f64,
                     h.saturating_sub(1) as f64,
                     theme,
-                ));
+                );
+                // 오른쪽에서 왼쪽 시트의 스파크라인은 칸 자리만 거울이고 자료 방향은 그대로다 (한셀 화면)
+                if rtl {
+                    let _ = write!(inner, "<div class=\"rc-flip\">{sp}</div>");
+                } else {
+                    inner.push_str(&sp);
+                }
             }
             if css.is_empty() {
                 let _ = write!(s, "<td{attrs}>{inner}</td>");
@@ -1067,9 +1070,13 @@ pub fn sheet_table_grid(
         s.push_str("</tr>");
     }
     s.push_str("</tbody></table>");
-    s.push_str(&draw::shapes_html(
-        wb, sheet, lay, header_w, header_h, theme,
-    ));
+    // 한셀 화면은 오른쪽에서 왼쪽 시트의 그리기 개체(도형·차트)를 그리지 않는다 (거울 자리에도 없다 — 화면 복사·PrintWindow 둘 다,
+    // 가로 스크롤해도 없다)
+    if !rtl {
+        s.push_str(&draw::shapes_html(
+            wb, sheet, lay, header_w, header_h, theme,
+        ));
+    }
     s.push_str(&note::notes_html(sheet, lay, header_w, header_h, theme));
     s.push_str("</div>");
     (s, info)
