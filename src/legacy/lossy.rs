@@ -717,6 +717,10 @@ pub(crate) fn hcell_xls_open(wb: &mut Workbook) {
     fn shapes(list: &mut [Shape]) {
         for s in list {
             if s.kind == ShapeKind::Shape {
+                // 글이 없는 글상자에는 회전 잠금을 더하지 않는다 (한셀 .xls 열기 대조 — 레거시 .cell 은 더한다)
+                if s.text.is_some() && !super::art::shape_has_text(s) {
+                    s.locks.retain(|l| l != "noRot");
+                }
                 let had = s.text.is_some();
                 let t = s.text.get_or_insert_with(Default::default);
                 t.paragraphs = vec![crate::model::DrawingPara::default()];

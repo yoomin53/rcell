@@ -273,7 +273,11 @@ fn corpus_xls_matches_legacy() {
                     continue;
                 }
             };
-            let mut b = match rcell::from_bytes(xls) {
+            // 원본대로 읽는다 — 기본 열기는 한셀처럼 잃는 것을 잃는다 (비교 대상은 레거시 읽기)
+            let keep = rcell::OpenOptions {
+                keep_original: true,
+            };
+            let mut b = match rcell::from_bytes_with_options(xls, None, &keep) {
                 Ok(b) => b,
                 Err(e) => {
                     failures.push(format!("{}: 읽기 {e}", legacy.display()));
