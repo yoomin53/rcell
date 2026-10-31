@@ -821,7 +821,8 @@ fn digit_px(font_pt: f64) -> f64 {
 
 fn width_chars(cm: f64, font_pt: f64) -> f64 {
     let px = cm / 2.54 * 96.0;
-    let w = (px - 5.0) / digit_px(font_pt) - 0.772342;
+    // 한셀은 단정밀도로 셈한다 (한셀 .ods 열 너비 93쌍 가운데 92쌍이 이 식과 같다)
+    let w = f64::from(((px - 5.0) / digit_px(font_pt) - 0.772_343_3) as f32);
     (w.max(0.0) * 256.0).trunc() / 256.0
 }
 
@@ -1402,7 +1403,13 @@ fn read_meta(bytes: &[u8], wb: &mut Workbook) {
         .map(date);
 }
 
+/// `.ods` 읽기. 한셀이 .ods 를 읽는 대로 읽는다: 논리값 칸은 `ISLOGICAL(값)` 수식(값은 늘 TRUE)이 된다 (한셀의 .ods 읽기 결함)
 pub fn read(bytes: &[u8]) -> Result<Workbook> {
+    read_with(bytes, false)
+}
+
+/// [`read`] 와 같고, `keep_original` 이면 한셀이 잃는 것을 잃지 않고 원본대로 읽는다 (논리값 칸)
+pub fn read_with(bytes: &[u8], keep_original: bool) -> Result<Workbook> {
     let content = entry(bytes, "content.xml")?;
     let root = crate::xml::parse_raw(&content, "content.xml")?;
     // 자동 스타일: 열 너비, 행 높이
@@ -1740,6 +1747,23 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
                     let formula = attr(c, NS_TABLE, "formula")
                         .filter(|_| !covered)
                         .map(formula_from_odf);
+                    // 한셀은 논리값 칸을 `ISLOGICAL(값)` 수식으로 읽는다 (값은 늘 TRUE)
+                    let hcell_bool = !keep_original && vt == Some("boolean");
+                    let formula = if hcell_bool {
+                        Some(match formula {
+                            Some(f) => format!("ISLOGICAL({f})"),
+                            None => format!(
+                                "ISLOGICAL({})",
+                                if attr(c, NS_OFFICE, "boolean-value") == Some("true") {
+                                    "TRUE"
+                                } else {
+                                    "FALSE"
+                                }
+                            ),
+                        })
+                    } else {
+                        formula
+                    };
                     // 칸 스타일: 칸 → 행 기본 → 열 기본 → "Default"
                     let own_style = attr(c, NS_TABLE, "style-name");
                     let style_name = own_style
@@ -1766,9 +1790,9 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
                             Some("time") => attr(c, NS_OFFICE, "time-value")
                                 .and_then(duration_days)
                                 .map_or(CellValue::Empty, CellValue::Number),
-                            Some("boolean") => {
-                                CellValue::Bool(attr(c, NS_OFFICE, "boolean-value") == Some("true"))
-                            }
+                            Some("boolean") => CellValue::Bool(
+                                hcell_bool || attr(c, NS_OFFICE, "boolean-value") == Some("true"),
+                            ),
                             Some("string") => CellValue::Text(
                                 attr(c, NS_OFFICE, "string-value")
                                     .map(str::to_string)

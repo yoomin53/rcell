@@ -81,7 +81,7 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 - **Legacy `.cell`** — Hancom Cell 2010 and earlier (OLE2 compound file + a BIFF8 variant: 32-bit row numbers, UTF-16 strings, Hancom-specific records)
 - **Encrypted documents** — ECMA-376 standard encryption (AES-128); the default password Hancom Cell uses for protected documents is handled automatically, user passwords via `--password` (saving: `convert … --out-password` for XML/binary `.cell`, `.xlsx`, legacy `.cell`, `.nxl`)
 - `.xlsx` / `.xlsb` are read too
-- Excel 97-2003 `.xls`, Nexcel `.nxl`, ODF `.ods` (values, formulas, structure, cell formats, shapes, pictures, charts), CSV and text (`.csv` `.txt` `.prn` — opened with Hancom Cell's rules) — [other formats](docs/format/other-formats.md)
+- Excel 97-2003 `.xls` (opened the way HCell opens it, losing shape text etc. — `--keep-original` reads it as stored), Nexcel `.nxl`, ODF `.ods` (values, formulas, structure, cell formats, shapes, pictures, charts), CSV and text (`.csv` `.txt` `.prn` — opened with Hancom Cell's rules) — [other formats](docs/format/other-formats.md)
 
 ### Document model
 

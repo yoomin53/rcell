@@ -79,7 +79,7 @@ XML, 바이너리, 한셀 2010 이하의 레거시 — 을 모두 읽고, 한셀
 - **레거시 `.cell`** — 한셀 2010 이하 계열 (OLE2 복합 문서 + BIFF8 변형: 32비트 행 번호, UTF-16 문자열, 한컴 전용 레코드)
 - **암호화 문서** — ECMA-376 표준 암호화(AES-128). 한셀이 보호 문서에 거는 기본 암호는 자동으로 풀고, 사용자 암호는 `--password` 로 받습니다 (저장은 `convert … --out-password` — XML·바이너리 `.cell`, `.xlsx`, 레거시 `.cell`, `.nxl`)
 - `.xlsx` / `.xlsb` 도 읽습니다
-- Excel 97-2003 `.xls`, 넥셀 `.nxl`, ODF `.ods` (값·수식·구조·칸 서식·도형·그림·차트), CSV·텍스트 (`.csv` `.txt` `.prn` — 한셀이 여는 규칙 그대로) — [그 밖의 형식](docs/format/other-formats.md)
+- Excel 97-2003 `.xls` (열 때 한셀처럼 도형 글 등을 잃는다 — `--keep-original` 이면 원본대로), 넥셀 `.nxl`, ODF `.ods` (값·수식·구조·칸 서식·도형·그림·차트), CSV·텍스트 (`.csv` `.txt` `.prn` — 한셀이 여는 규칙 그대로) — [그 밖의 형식](docs/format/other-formats.md)
 
 ### Document Model (문서 모델)
 

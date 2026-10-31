@@ -47,6 +47,17 @@ fn cm(emu: i64) -> String {
     format!("{}cm", if s.is_empty() || s == "-0" { "0" } else { s })
 }
 
+/// 칸 안 오프셋 (cm 글) → EMU: 한셀은 96dpi 픽셀로 올려 읽는다 (`0.291042cm` → 12px — 한셀 .ods 열기 대조)
+fn offset_emu(v: &str) -> Option<i64> {
+    let v = v.trim();
+    let cm = match v.strip_suffix("cm") {
+        Some(n) => n.trim().parse::<f64>().ok()?,
+        None => emu(v)? as f64 / EMU_CM,
+    };
+    let px = (cm * 96.0 / 2.54 - 1e-9).ceil().max(0.0);
+    Some(px as i64 * 9_525)
+}
+
 /// 길이 (`1.5cm`·`3pt`·`2mm`·`1in`) → EMU
 fn emu(v: &str) -> Option<i64> {
     let v = v.trim();
@@ -1222,9 +1233,17 @@ fn read_shape(
         edit_as: None,
         from: Marker {
             col,
-            col_off: if child || absolute.is_some() { 0 } else { x },
+            col_off: if child || absolute.is_some() {
+                0
+            } else {
+                attr(e, NS_SVG, "x").and_then(offset_emu).unwrap_or(0)
+            },
             row,
-            row_off: if child || absolute.is_some() { 0 } else { y },
+            row_off: if child || absolute.is_some() {
+                0
+            } else {
+                attr(e, NS_SVG, "y").and_then(offset_emu).unwrap_or(0)
+            },
         },
         to: None,
         ext: Some((w, h)),
@@ -1240,9 +1259,9 @@ fn read_shape(
     {
         anchor.to = Some(Marker {
             col: c,
-            col_off: attr(e, NS_TABLE, "end-x").and_then(emu).unwrap_or(0),
+            col_off: attr(e, NS_TABLE, "end-x").and_then(offset_emu).unwrap_or(0),
             row: r,
-            row_off: attr(e, NS_TABLE, "end-y").and_then(emu).unwrap_or(0),
+            row_off: attr(e, NS_TABLE, "end-y").and_then(offset_emu).unwrap_or(0),
         });
         anchor.ext = None;
     } else if !child {
@@ -1449,17 +1468,14 @@ fn apply_graphic(s: &mut Shape, e: &Element, cx: &ReadCtx) {
         return;
     };
     // 선
-    let width = g.get("svg:stroke-width").and_then(emu).unwrap_or(9525);
+    // (한셀이 읽은 선: 두께만 있고 끝·겹선·이음은 비어 있다)
     let mut line = Outline {
-        width: Some(width),
         dash: Some("solid".into()),
-        cap: Some("flat".into()),
-        compound: Some("sng".into()),
-        join: Some("round".into()),
         ..Default::default()
     };
     match g.get("draw:stroke") {
         Some("solid") | Some("dash") => {
+            line.width = Some(g.get("svg:stroke-width").and_then(emu).unwrap_or(9525));
             let c = g.get("svg:stroke-color").and_then(hex_color);
             line.fill = Some(c.map_or(Paint::None, Paint::Solid));
             if g.get("draw:stroke") == Some("dash") {
@@ -1519,7 +1535,7 @@ fn apply_graphic(s: &mut Shape, e: &Element, cx: &ReadCtx) {
             dist,
             dir: dir.rem_euclid(21_600_000),
             blur: 0,
-            align: Some("ctr".into()),
+            align: Some("tl".into()),
             rot_with_shape: false,
             color,
         });

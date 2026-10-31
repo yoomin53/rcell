@@ -140,7 +140,7 @@ pub fn from_bytes_with_options(
             }
             legacy::read_with(&bytes, opts.keep_original)
         }
-        _ if ods::is_ods(&bytes) => ods::read(&bytes),
+        _ if ods::is_ods(&bytes) => ods::read_with(&bytes, opts.keep_original),
         _ => {
             let mut pkg = open_package(bytes)?;
             parser::read_workbook(&mut pkg)
