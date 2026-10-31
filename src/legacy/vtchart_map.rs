@@ -1085,6 +1085,15 @@ pub(crate) fn map(rec: &VtRecord, book: &Book<'_>) -> Chart {
                 .iter()
                 .map(|e| e.and_then(|e| e.u16("u16_d")).unwrap_or(1) != 0)
                 .collect(),
+            bar_shapes: pool
+                .iter()
+                .map(|e| {
+                    (
+                        e.and_then(|e| e.u16("u16_g")) == Some(45),
+                        e.and_then(|e| e.f32("f32_a")) == Some(0.0),
+                    )
+                })
+                .collect(),
             // 3차원 막대·꺾은선·영역: 모델은 standard 지만 한셀 화면은 누적·100% 로 그린다 (차트 종류 실험)
             screen_grouping: (k.three_d && !pie && chart_type != 12 && (stacked || percent)).then(
                 || {
