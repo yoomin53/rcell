@@ -21,7 +21,7 @@ mod advance;
 mod advance_data;
 mod advance_hint;
 mod cell;
-mod draw;
+pub(crate) mod draw;
 mod icons;
 mod layout;
 pub mod metafile;
@@ -31,7 +31,7 @@ mod numfit;
 pub mod page;
 mod paint;
 mod shape;
-mod shape_trace;
+mod shape_guides;
 mod sparkline;
 mod svgops;
 mod table;
@@ -136,21 +136,63 @@ pub fn overflow_end_col(wb: &Workbook, sheet: &Sheet, max_r: u32) -> Option<u32>
     }
     let (lay_r, lay_c) = (max_r + 1, 16_384);
     let ctx = Views::new(wb, sheet, lay_r, lay_c);
-    let mut views = HashMap::new();
-    for c in sheet.cells.iter().filter(|c| c.r.row < lay_r) {
-        if let Some(v) = ctx.view(c.r.row, c.r.col) {
-            views.insert((c.r.row, c.r.col), v);
+    let lay = &ctx.lay;
+    let show_formulas = sheet.view.show_formulas;
+    // 넘칠 수 있는 칸은 글이거나 (수식 표시면 수식 칸도) 값이 없는 칸 (선택 영역 가운데의 빈 이웃). 수·논리값·날짜·오류 칸은
+    // 이웃의 넘침을 막기만 하므로 그릴 내용(화면 글)을 만들지 않는다 — 행 수십만 개 시트에서 칸마다 서식 글을 만드는 시간과
+    // 메모리를 아낀다
+    let needs_view = |c: &crate::model::Cell| {
+        matches!(c.value, CellValue::Text(_) | CellValue::Empty)
+            || (show_formulas && c.formula.is_some())
+    };
+    // 값이 있어 이웃의 넘침을 막는 칸: 그릴 내용이 있는 칸 (숨긴 행·열은 내용이 없다), 0 숨김이면 0 은 비운다
+    let filled = |r: u32, c: u32| -> bool {
+        let Some(x) = ctx.cells.get(&(r, c)) else {
+            return false;
+        };
+        if lay.row_h(r) == 0 || lay.col_w(c) == 0 || lay.covered.contains(&(r, c)) {
+            return false;
+        }
+        if show_formulas && x.formula.as_ref().is_some_and(|f| !f.text.is_empty()) {
+            return true;
+        }
+        match &x.value {
+            CellValue::Number(n) if *n == 0.0 && !sheet.view.show_zeros => false,
+            v => !v.is_empty(),
+        }
+    };
+    // 행 묶음마다 만들고 버린다 (넘침은 같은 행 안에서만 정해진다)
+    const WINDOW: u32 = 4096;
+    let mut order: Vec<&crate::model::Cell> = sheet
+        .cells
+        .iter()
+        .filter(|c| c.r.row < lay_r && needs_view(c))
+        .collect();
+    order.sort_by_key(|c| c.r.row);
+    let mut max_col: Option<u32> = None;
+    let mut i = 0;
+    while i < order.len() {
+        let end_row = (order[i].r.row / WINDOW + 1) * WINDOW;
+        let mut views = HashMap::new();
+        while i < order.len() && order[i].r.row < end_row {
+            let c = order[i];
+            if let Some(v) = ctx.view(c.r.row, c.r.col) {
+                views.insert((c.r.row, c.r.col), v);
+            }
+            i += 1;
+        }
+        let blocked = |r: u32, c: u32| -> bool {
+            lay.covered.contains(&(r, c))
+                || lay.span.contains_key(&(r, c))
+                || filled(r, c)
+                || ctx.cells.get(&(r, c)).is_some_and(|x| x.formula.is_some())
+        };
+        let ov = overflow_spans(lay, &views, &blocked, lay_c, sheet.view.right_to_left);
+        if !ov.span.is_empty() {
+            max_col = Some(max_col.map_or(ov.max_col, |m| m.max(ov.max_col)));
         }
     }
-    let lay = &ctx.lay;
-    let blocked = |r: u32, c: u32| -> bool {
-        lay.covered.contains(&(r, c))
-            || lay.span.contains_key(&(r, c))
-            || views.get(&(r, c)).is_some_and(|v| v.has_value())
-            || ctx.cells.get(&(r, c)).is_some_and(|x| x.formula.is_some())
-    };
-    let ov = overflow_spans(lay, &views, &blocked, lay_c, sheet.view.right_to_left);
-    (!ov.span.is_empty()).then_some(ov.max_col)
+    max_col
 }
 
 /// 시트의 화면 배치 (행 `max_rows`, 열 `max_cols` 개). 한셀 화면과 같은 규칙으로 계산한다

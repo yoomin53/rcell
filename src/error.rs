@@ -45,6 +45,10 @@ pub enum Error {
     /// 편집할 수 없음 (배열 수식의 일부, 잘못된 시트 이름 …)
     #[error("편집할 수 없습니다: {0}")]
     Edit(String),
+
+    /// 문서가 너무 커서 인쇄할 수 없음 (칸 수·쪽 수 한도 — `rcell::print::PdfOptions`)
+    #[error("문서가 너무 커서 인쇄할 수 없습니다: {0}")]
+    TooLarge(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

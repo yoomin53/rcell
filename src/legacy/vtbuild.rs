@@ -826,7 +826,8 @@ fn data_grid(d: &GridData, pie: bool) -> WObj {
         for r in 0..height {
             // 이름 행 (있으면 0행), 그 아래 데이터 행
             let name_row = label_rows == 1 && r == 0;
-            let row = (r - label_rows) as usize;
+            // (이름 행에서는 쓰지 않는다 — 디버그 빌드에서 뺄셈이 넘치지 않게)
+            let row = r.saturating_sub(label_rows) as usize;
             let cell = if c < label_cols {
                 // 항목 이름표 열
                 if name_row {

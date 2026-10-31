@@ -953,6 +953,9 @@ pub struct LegacyChartView {
     pub fills: Vec<String>,
     /// 계열 목록마다 표식이 자동인가 (`VtSeries.u16_d` 1 — 모델에는 `none` 으로 옮기지만 한셀 화면은 자동 표식을 그린다)
     pub auto_markers: Vec<bool>,
+    /// 계열마다 막대 모양 (`VtSeries.u16_g` 가 45 면 둥근 (원기둥·원뿔), 4 면 모난 것, `f32_a` 가 0 이면 위가 뾰족한 (원뿔·피라미드),
+    /// 1 이면 위도 같은 폭) — 한셀이 원기둥·원뿔·피라미드 차트를 레거시로 저장하면 종류는 3차원 막대(0·10·12)이고 이 값만 다르다
+    pub bar_shapes: Vec<(bool, bool)>,
     /// 화면의 묶음 방식 (모델의 `grouping` 과 다를 때 — 3차원 누적은 XML 로 옮기면 standard)
     pub screen_grouping: Option<String>,
     /// 3차원 회전·높이 (도, `VtChartPlot.rotation`·`elevation`)

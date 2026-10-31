@@ -45,6 +45,11 @@ pub struct PdfOptions {
     pub time: String,
     /// 쓸 페이지 수 한도 (None 이면 [`MAX_PAGES`])
     pub max_pages: Option<usize>,
+    /// 인쇄할 시트들의 칸 수 합이 이보다 많으면 [`try_workbook_pdf`] 가 오류 (None = 한도 없음). 브라우저(웹 어셈블리)처럼
+    /// 메모리가 모자란 곳에서 문서를 불러온 뒤 배치에 들어가기 전에 거른다
+    pub max_cells: Option<usize>,
+    /// 쪽 수 한도를 넘으면 앞 쪽들만 만드는 대신 [`try_workbook_pdf`] 가 오류 (기본 거짓 — 앞 쪽들만)
+    pub error_over_pages: bool,
     /// 흑백 인쇄·간단히 인쇄 설정을 따른다 (한셀 PDF 저장은 둘 다 따르지 않는다 — 기본 거짓)
     pub quality_settings: bool,
     /// 한셀이 문서를 열 때 다시 계산하는 칸 ([`open_recalc`]). 기본은 저장된 값 그대로
@@ -247,15 +252,11 @@ pub fn frame_with(
     PageFrame {
         cols: bounds(x0 + dx + (hw * 6.25).round(), &cols),
         origin_x: x0 + dx + (hw * 6.25).round(),
-        col_abs: cumulative(&sp.col_px),
-        row_abs: cumulative(&sp.row_px),
+        col_abs: sp.frame_tables.col_abs.clone(),
+        row_abs: sp.frame_tables.row_abs.clone(),
         rows: bounds(y0 + dy + (hh * 6.25).round(), &rows),
-        row_dev: (0..sp.row_px.len() as u32)
-            .map(|r| sp.row_print_px(r) * 6.25)
-            .collect(),
-        col_dev: (0..sp.col_px.len() as u32)
-            .map(|c| sp.col_print_px(c) * 6.25)
-            .collect(),
+        row_dev: sp.frame_tables.row_dev.clone(),
+        col_dev: sp.frame_tables.col_dev.clone(),
         px: 6.25 * z as f64 / 100.0,
         zoom: z,
         gridlines: false,
@@ -263,18 +264,6 @@ pub fn frame_with(
         draft: false,
         errors: ErrorPrint::Displayed,
     }
-}
-
-/// 화면 px 의 누적 시작 자리 (번호마다, 끝에 전체)
-fn cumulative(px: &[u32]) -> Vec<f64> {
-    let mut acc = 0.0;
-    let mut out = Vec::with_capacity(px.len() + 1);
-    for &v in px {
-        out.push(acc);
-        acc += v as f64;
-    }
-    out.push(acc);
-    out
 }
 
 /// 행·열 머리글 (가는 선 상자, 가운데 글자: 열 이름·행 번호)
@@ -442,8 +431,31 @@ fn hf_ops(
     }
 }
 
-/// 통합 문서를 PDF 로 (보이는 시트들, 페이지 순서대로)
+/// [`try_workbook_pdf`] 의 결과
+#[derive(Debug, Clone)]
+pub struct PdfOutput {
+    pub bytes: Vec<u8>,
+    /// 만든 쪽 수
+    pub pages: usize,
+    /// 쪽 수 한도에서 뒤를 잘랐는가
+    pub truncated: bool,
+}
+
+/// 통합 문서를 PDF 로 (보이는 시트들, 페이지 순서대로). 한도(`max_cells`·`max_pages`)를 넘는 문서는 오류 없이 앞 쪽들만
 pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
+    let o = PdfOptions {
+        max_cells: None,
+        error_over_pages: false,
+        ..opts.clone()
+    };
+    try_workbook_pdf(wb, db, &o)
+        .map(|o| o.bytes)
+        .unwrap_or_default()
+}
+
+/// 통합 문서를 PDF 로. `opts.max_cells` 를 넘는 문서와 (`opts.error_over_pages` 일 때) 쪽 수 한도를 넘는 문서는
+/// [`Error::TooLarge`] — 100만 행 시트처럼 한셀도 멈추는 문서를 메모리가 모자란 곳에서 죽지 않고 알리게
+pub fn try_workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> crate::Result<PdfOutput> {
     let calculated;
     let wb = if opts.recalc == OpenRecalc::None {
         wb
@@ -471,6 +483,19 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
             .unwrap_or_else(|| "맑은 고딕".into()),
         f0.and_then(|f| f.size).unwrap_or(11.0),
     );
+    if let Some(limit) = opts.max_cells {
+        let cells: usize = sheets
+            .iter()
+            .filter_map(|&i| wb.sheets.get(i))
+            .map(|s| s.cells.len())
+            .sum();
+        if cells > limit {
+            return Err(crate::Error::TooLarge(format!(
+                "칸이 {cells} 개로 한도 {limit} 개를 넘습니다"
+            )));
+        }
+    }
+    let mut truncated = false;
     let mut pages: Vec<(PageSize, Vec<Op>)> = Vec::new();
     // 키 큰 모드가 아닌 시트가 이미 나왔는가 (배율 100 의 99 는 그 첫째에만)
     let mut untall_seen = false;
@@ -523,7 +548,14 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
         let painter = SheetPainter::new(wb, sheet, max_r, max_c);
         for page in sp.pages.iter() {
             // 아주 큰 범위(마지막 칸에 값이 있는 문서 — 80만 페이지)는 앞 페이지들만
-            if pages.len() >= opts.max_pages.unwrap_or(MAX_PAGES) {
+            let limit = opts.max_pages.unwrap_or(MAX_PAGES);
+            if pages.len() >= limit {
+                if opts.error_over_pages {
+                    return Err(crate::Error::TooLarge(format!(
+                        "쪽 수가 한도 {limit} 쪽을 넘습니다"
+                    )));
+                }
+                truncated = true;
                 break;
             }
             let (no, pages_total) = numbers.get(job_index).copied().unwrap_or((1, 1));
@@ -609,7 +641,12 @@ pub fn workbook_pdf(wb: &Workbook, db: &FontDb, opts: &PdfOptions) -> Vec<u8> {
         });
         pages.push((size, Vec::new()));
     }
-    pdf::write_pdf(&pages, &fonts, &opts.file_name)
+    let count = pages.len();
+    Ok(PdfOutput {
+        bytes: pdf::write_pdf(&pages, &fonts, &opts.file_name),
+        pages: count,
+        truncated,
+    })
 }
 
 /// 쪽마다 (`&P`, `&N`): 시트마다 (쪽 수, 첫 쪽 번호 − 1 — 정하지 않으면 0). `&P` = PDF 의 쪽 차례 + 그 시트의 값, `&N` =

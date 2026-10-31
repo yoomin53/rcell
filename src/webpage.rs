@@ -825,8 +825,7 @@ fn sheet_page(
     let table_xf = sheet
         .cols
         .iter()
-        .min_by_key(|c| c.min)
-        .filter(|c| c.min == 1)
+        .max_by_key(|c| c.min)
         .and_then(|c| c.style)
         .unwrap_or(0);
     // 쓰인 클래스: (클래스 번호, 서식 번호) — 병합 시작 칸은 파생 번호
@@ -883,6 +882,14 @@ fn sheet_page(
             while j + 1 < dcw.len() && record_of(j + 1) == record_of(k) {
                 j += 1;
             }
+            // 16384 열까지 이어지는 너비를 정하지 않은 끝 열 정보는 쓰지 않는다 (한셀 웹 저장 대조)
+            if let Some(rec) = record_of(k).and_then(|i| sheet.cols.get(i))
+                && rec.max >= 16384
+                && !rec.custom_width
+                && !rec.hidden
+            {
+                break;
+            }
             let w = col_w[k];
             let _ = writeln!(
                 body,
@@ -904,6 +911,19 @@ fn sheet_page(
     };
     let row_class = |r: u32| match row_style(r) {
         Some(xf) => format!(" class=\"hcx{}\"", class_of(wb, xf)),
+        None => String::new(),
+    };
+    // 메모 칸: 글 뒤에 메모 표지 `<a class="memoa">[번호]</a>` (한셀 웹 저장 — 번호는 시트의 메모 차례)
+    let memo_no: HashMap<(u32, u32), usize> = sheet
+        .comments
+        .iter()
+        .enumerate()
+        .map(|(i, c)| ((c.cell.row, c.cell.col), i + 1))
+        .collect();
+    let memo_anchor = |r: u32, c: u32| match memo_no.get(&(r, c)) {
+        Some(n) => {
+            format!("          <a class=\"memoa\" href=\"#_hncmemo_{n}\">\n[{n}]          </a>\n")
+        }
         None => String::new(),
     };
     for r in 0..nrows {
@@ -957,14 +977,15 @@ fn sheet_page(
             }
             let _ = writeln!(body, "        <td {attrs}>");
             if let Some(list) = pics.get(&(r, c)) {
+                // 한 칸에 개체가 여럿이면 개체를 모두 쓴 뒤 채움 글 조각은 하나 (한셀 웹 저장 대조)
                 for p in list {
                     body.push_str(p);
-                    let _ = writeln!(
-                        body,
-                        "          <span class=\"hcx_t_s\" style='height:{}px; width:{}px; vertical-align:middle'>\n          </span>",
-                        row_h[r as usize], col_w[c as usize]
-                    );
                 }
+                let _ = writeln!(
+                    body,
+                    "          <span class=\"hcx_t_s\" style='height:{}px; width:{}px; vertical-align:middle'>\n          </span>",
+                    row_h[r as usize], col_w[c as usize]
+                );
             }
             if let Some(cell) = cell_at.get(&(r, c)) {
                 let txt = crate::csv::shown(wb, cell);
@@ -1031,6 +1052,9 @@ fn sheet_page(
                         let _ = writeln!(body, "          </{tag}>");
                     }
                     None => body.push_str(&inner),
+                }
+                if !txt.is_empty() {
+                    body.push_str(&memo_anchor(r, c));
                 }
                 body.push_str("        </td>\n");
                 continue;
@@ -1247,9 +1271,10 @@ fn shape_span(
     let (ml, mt) = if absolute {
         (1, 1)
     } else {
+        // 여백은 적어도 1 (칸 테두리 — 한셀은 좌표 0 도 1 로 쓴다)
         (
-            (xf.x as f64 / 9525.0 * z).round() as i64,
-            (xf.y as f64 / 9525.0 * z).round() as i64,
+            ((xf.x as f64 / 9525.0 * z).round() as i64).max(1),
+            ((xf.y as f64 / 9525.0 * z).round() as i64).max(1),
         )
     };
     let db = png.db.get_or_init(crate::print::FontDb::system);

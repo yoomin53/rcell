@@ -3,9 +3,9 @@
 #
 # rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
 #
-# 도형 윤곽 따라 그리기 (1/3): 한셀 화면 갈무리(screen-capture.ps1)에서 도형 하나를 칠 종류별로 벡터화한다.
+# 도형 윤곽 살펴보기 (1/2): 한셀 화면 갈무리(screen-capture.ps1)에서 도형 하나를 칠 종류별로 벡터화한다.
 # 도형은 make-shapes-big.ps1 이 만든 큰 모양 (240×240pt)이고, 갈무리에서 타일 하나(영역)를 잘라 윤곽을 낸다.
-#   -Tiles "x,y,w,h,이름;..." 이면 $Out\이름.txt 로 모두 쓴다. 2/3 = shape-trace-gen.js (Rust 표 만들기)
+#   -Tiles "x,y,w,h,이름;..." 이면 $Out\이름.txt 로 모두 쓴다. 가이드 수식 정의와 맞는지 보는 데 쓴다 (shape-guides-gen.js)
 param([string]$Png, [int]$X, [int]$Y, [int]$W, [int]$H, [string]$Out, [double]$Eps = 1.0, [int]$MinArea = 30, [string]$Tiles = "")
 # vectorize one shape in a HCell capture. Output per fill class: rings (px, region-relative, corner coordinates), `S` when the class is stroked
 # (its mask is then c + stroke pixels, pulled in by half a pixel to the stroke centre line)

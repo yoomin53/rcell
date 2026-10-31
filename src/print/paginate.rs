@@ -95,9 +95,52 @@ pub struct SheetPrint {
     pub col_px: Vec<u32>,
     /// 열의 한셀 안 너비 (px 소수 — COM `Range.Width` × 4/3). 그릴 때의 열 너비는 이 값에 배율을 곱해 반올림한다
     pub col_exact: Vec<f64>,
+    /// 쪽 틀(`PageFrame`)에 들어가는 행·열 표 — 쪽마다 새로 짓지 않고 쪽들이 나눠 쓴다
+    pub frame_tables: FrameTables,
+}
+
+/// 쪽 틀의 행·열 표 (시트 전체)
+#[derive(Debug, Clone, Default)]
+pub struct FrameTables {
+    /// 행·열의 절대 화면 px 누적 (개체 자리)
+    pub col_abs: std::sync::Arc<Vec<f64>>,
+    pub row_abs: std::sync::Arc<Vec<f64>>,
+    /// 행·열의 인쇄 크기 (장치 단위)
+    pub row_dev: std::sync::Arc<Vec<f64>>,
+    pub col_dev: std::sync::Arc<Vec<f64>>,
+}
+
+/// 앞에서부터 더한 값 (끝에 합계 하나 더)
+fn cumulative(px: &[u32]) -> Vec<f64> {
+    let mut acc = 0.0;
+    let mut out = Vec::with_capacity(px.len() + 1);
+    for &v in px {
+        out.push(acc);
+        acc += v as f64;
+    }
+    out.push(acc);
+    out
 }
 
 impl SheetPrint {
+    /// 쪽 틀의 행·열 표 (시트 전체 — 한 번만 짓는다)
+    fn tables(&self) -> FrameTables {
+        FrameTables {
+            col_abs: std::sync::Arc::new(cumulative(&self.col_px)),
+            row_abs: std::sync::Arc::new(cumulative(&self.row_px)),
+            row_dev: std::sync::Arc::new(
+                (0..self.row_px.len() as u32)
+                    .map(|r| self.row_print_px(r) * 6.25)
+                    .collect(),
+            ),
+            col_dev: std::sync::Arc::new(
+                (0..self.col_px.len() as u32)
+                    .map(|c| self.col_print_px(c) * 6.25)
+                    .collect(),
+            ),
+        }
+    }
+
     /// 행 하나의 인쇄 높이 (화면 px, 배율 반영). 키 큰 모드는 6.25 배
     pub fn row_print_px(&self, r: u32) -> f64 {
         let px = self.row_px.get(r as usize).copied().unwrap_or(0);
@@ -730,7 +773,7 @@ pub fn sheet_print_with(wb: &Workbook, sheet_index: usize, first_untall: bool) -
             z -= 1;
         }
     }
-    SheetPrint {
+    let mut sp = SheetPrint {
         settings: s,
         pages,
         page_scale,
@@ -741,7 +784,10 @@ pub fn sheet_print_with(wb: &Workbook, sheet_index: usize, first_untall: bool) -
         row_px,
         col_px,
         col_exact: col_exact.clone(),
-    }
+        frame_tables: FrameTables::default(),
+    };
+    sp.frame_tables = sp.tables();
+    sp
 }
 
 #[cfg(test)]
