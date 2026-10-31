@@ -342,8 +342,13 @@ pub fn legacy_from_xls_file(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(crate::cfb_write::write_with_storages(&streams, &[], 0))
 }
 
-/// OLE2 바이트에서 레거시 통합 문서를 읽는다.
+/// OLE2 바이트에서 레거시 통합 문서를 읽는다. `.xls` 는 한셀이 여는 것처럼 잃는 것을 잃는다 ([`lossy::hcell_xls_open`]).
 pub fn read(bytes: &[u8]) -> Result<Workbook> {
+    read_with(bytes, false)
+}
+
+/// [`read`] 와 같고, `keep_original` 이면 `.xls` 를 한셀처럼 잃지 않고 원본대로 읽는다 (도형 글 등)
+pub fn read_with(bytes: &[u8], keep_original: bool) -> Result<Workbook> {
     let entries = container::list_entries(bytes)?;
     let has = |n: &str| entries.iter().any(|(e, _)| e.eq_ignore_ascii_case(n));
     if has("/EncryptionInfo") || has("/EncryptedPackage") {
@@ -380,6 +385,9 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
         xls_chart::apply_cell_formats(&mut wb);
     }
     if xls {
+        if !keep_original {
+            lossy::hcell_xls_open(&mut wb);
+        }
         wb.application = Some("Excel".into());
         // 표 스타일 표(TABLESTYLES)가 없는 파일 (넥셀 .nxl 등): 한셀은 새 문서의 기본 표·피벗 스타일을 쓴다
         if wb.styles.table_styles.is_none() {

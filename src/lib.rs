@@ -104,6 +104,22 @@ pub fn from_bytes(bytes: Vec<u8>) -> Result<Workbook> {
 /// 암호화된 문서(OLE2 안의 `EncryptionInfo`/`EncryptedPackage`)는 주어진 암호로, 없으면
 /// 기본 암호(`VelvetSweatshop` — 보호만 걸린 문서)로 풀어서 읽는다.
 pub fn from_bytes_with_password(bytes: Vec<u8>, password: Option<&str>) -> Result<Workbook> {
+    from_bytes_with_options(bytes, password, &OpenOptions::default())
+}
+
+/// 열기 선택
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenOptions {
+    /// `.xls` 를 한셀처럼 (도형 글·조건부 서식 일부를 잃고) 열지 않고 원본대로 읽는다
+    pub keep_original: bool,
+}
+
+/// [`from_bytes_with_password`] 에 열기 선택을 더한 것
+pub fn from_bytes_with_options(
+    bytes: Vec<u8>,
+    password: Option<&str>,
+    opts: &OpenOptions,
+) -> Result<Workbook> {
     match detect(&bytes) {
         FileKind::Cfb => {
             let entries = container::list_entries(&bytes)?;
@@ -115,14 +131,14 @@ pub fn from_bytes_with_password(bytes: Vec<u8>, password: Option<&str>) -> Resul
                     Some(p) => crypto::decrypt_package(&info, &package, p)?,
                     None => crypto::decrypt_package(&info, &package, crypto::DEFAULT_PASSWORD)?,
                 };
-                return from_bytes_with_password(plain, None);
+                return from_bytes_with_options(plain, None, opts);
             }
             // 한셀이 암호를 걸어 저장한 레거시 `.cell`·`.nxl`: `/HCellCrypto` 와 암호화한 `/Workbook`
             if has("/HCellCrypto") {
                 let plain = decrypt_legacy_container(&bytes, password)?;
-                return legacy::read(&plain);
+                return legacy::read_with(&plain, opts.keep_original);
             }
-            legacy::read(&bytes)
+            legacy::read_with(&bytes, opts.keep_original)
         }
         _ if ods::is_ods(&bytes) => ods::read(&bytes),
         _ => {
@@ -301,10 +317,19 @@ pub fn save_legacy(wb: &Workbook, path: impl AsRef<Path>) -> Result<()> {
 /// 파일에서 통합 문서를 읽는다. ZIP·OLE2 가 아니고 확장자가 `.csv`·`.txt`·`.tsv`·`.out`·`.prn` 이면
 /// 텍스트 파일로 연다 (시트 이름은 파일 이름 — [`csv::read`]).
 pub fn open(path: impl AsRef<Path>) -> Result<Workbook> {
-    open_path(path.as_ref(), None)
+    open_path(path.as_ref(), None, &OpenOptions::default())
 }
 
-fn open_path(path: &Path, password: Option<&str>) -> Result<Workbook> {
+/// [`open`] 에 암호와 열기 선택을 더한 것
+pub fn open_with_options(
+    path: impl AsRef<Path>,
+    password: Option<&str>,
+    opts: &OpenOptions,
+) -> Result<Workbook> {
+    open_path(path.as_ref(), password, opts)
+}
+
+fn open_path(path: &Path, password: Option<&str>, opts: &OpenOptions) -> Result<Workbook> {
     let bytes = std::fs::read(path)?;
     if detect(&bytes) == FileKind::Unknown {
         if let Some(d) = csv::Delimiter::from_path(path) {
@@ -315,7 +340,7 @@ fn open_path(path: &Path, password: Option<&str>) -> Result<Workbook> {
             return import::open(&bytes, kind, path);
         }
     }
-    from_bytes_with_password(bytes, password)
+    from_bytes_with_options(bytes, password, opts)
 }
 
 /// 텍스트 파일을 가져오기 선택([`csv::TextOptions`])과 함께 연다 (한셀 `Workbooks.OpenText`)
@@ -371,7 +396,7 @@ fn decrypt_legacy_container(bytes: &[u8], password: Option<&str>) -> Result<Vec<
 
 /// 암호가 걸린 파일을 연다.
 pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> Result<Workbook> {
-    open_path(path.as_ref(), Some(password))
+    open_path(path.as_ref(), Some(password), &OpenOptions::default())
 }
 
 /// 복합 문서의 `/Workbook` 을 암호화한다 (`/HCellCrypto` 를 더한다)

@@ -604,3 +604,35 @@ fn ods_shapes_charts_pictures_round_trip() {
     );
     assert_eq!(s[1].geometry.as_deref(), Some("ellipse"));
 }
+
+/// `.xls` 열기: 한셀처럼 도형 글을 비운다, `keep_original` 이면 원본대로 (docs/format/other-formats.md 5.3절)
+#[test]
+fn xls_open_loses_shape_text_like_hcell_unless_keep_original() {
+    use rcell::model::{DrawingPara, DrawingRun, Shape, ShapeKind, TextBody};
+    let mut wb = sample();
+    wb.sheets[0].shapes.push(Shape {
+        kind: ShapeKind::Shape,
+        name: "상자".into(),
+        id: 2,
+        geometry: Some("rect".into()),
+        text: Some(TextBody {
+            paragraphs: vec![DrawingPara {
+                align: None,
+                runs: vec![DrawingRun {
+                    text: "안녕".into(),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let (bytes, _) = rcell::legacy::write_xls(&wb, &Default::default()).unwrap();
+    let hcell = rcell::from_bytes(bytes.clone()).unwrap();
+    assert_eq!(hcell.sheets[0].shapes[0].plain_text(), "");
+    let opts = rcell::OpenOptions {
+        keep_original: true,
+    };
+    let kept = rcell::from_bytes_with_options(bytes, None, &opts).unwrap();
+    assert_eq!(kept.sheets[0].shapes[0].plain_text(), "안녕");
+}

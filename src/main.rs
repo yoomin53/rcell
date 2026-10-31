@@ -23,6 +23,9 @@ struct Cli {
     /// 암호가 걸린 문서의 암호 (생략하면 보호만 걸린 문서의 기본 암호를 쓴다)
     #[arg(long, global = true)]
     password: Option<String>,
+    /// .xls 를 한셀처럼 잃지 않고 원본대로 읽는다 (기본은 한셀이 여는 대로: 도형 글을 비우고 조건부 서식 일부를 잃는다)
+    #[arg(long, global = true)]
+    keep_original: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -35,12 +38,15 @@ fn read_plain(path: &Path) -> rcell::Result<Vec<u8>> {
     rcell::decrypt_if_needed(std::fs::read(path)?, PASSWORD.get().map(String::as_str))
 }
 
+/// --keep-original
+static KEEP_ORIGINAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 문서 열기 (암호를 받았으면 그것으로)
 fn open_doc(path: &Path) -> rcell::Result<rcell::Workbook> {
-    match PASSWORD.get() {
-        Some(p) => rcell::open_with_password(path, p),
-        None => rcell::open(path),
-    }
+    let opts = rcell::OpenOptions {
+        keep_original: KEEP_ORIGINAL.load(std::sync::atomic::Ordering::Relaxed),
+    };
+    rcell::open_with_options(path, PASSWORD.get().map(String::as_str), &opts)
 }
 
 #[derive(Subcommand)]
@@ -278,6 +284,7 @@ fn main() -> ExitCode {
     if let Some(p) = cli.password {
         let _ = PASSWORD.set(p);
     }
+    KEEP_ORIGINAL.store(cli.keep_original, std::sync::atomic::Ordering::Relaxed);
     let result = match cli.cmd {
         Cmd::Info { file } => info(&file),
         Cmd::Dump { file, no_cells } => dump(&file, no_cells),

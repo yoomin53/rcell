@@ -3786,7 +3786,12 @@ fn legacy_shape(
     if matches!(prop(0x033F), Some(v) if v & 0x08 != 0 && v & 0x80000 != 0) {
         locks.push("noChangeShapeType".into());
     }
-    if e.has_textbox && kind == ShapeKind::Shape && !locks.iter().any(|l| l == "noRot") {
+    // (글이 없는 글상자에는 붙이지 않는다 — 한셀 .xls 열기 대조)
+    let has_text = obj
+        .and_then(|o| o.text.as_ref())
+        .is_some_and(|(t, _)| !t.is_empty());
+    if e.has_textbox && has_text && kind == ShapeKind::Shape && !locks.iter().any(|l| l == "noRot")
+    {
         locks.push("noRot".into());
     }
     // 종류마다 XML 에 있는 잠금만 (a:picLocks·a:cxnSpLocks 에는 noTextEdit 가 없고, noCrop 은 그림만, 그룹은 다섯 가지)

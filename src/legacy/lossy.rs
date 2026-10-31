@@ -721,3 +721,145 @@ mod tests {
         );
     }
 }
+
+/// 한셀이 `.xls` 를 열 때 잃는 것 (한셀이 저장한 `.xls` 61개를 한셀로 다시 열어 `.cell` 로 저장한 것과 맞대 본 결과 —
+/// docs/format/other-formats.md 5.3절). 기본 열기가 이 손실을 그대로 따른다; 원본을 그대로 읽으려면 열기 선택 `keep_original`.
+///
+/// - 도형 글상자의 글은 비운다 (문단 하나, 글 조각 없음), 글 넘침은 늘 자름, 줄 바꿈 자동·가로쓰기
+/// - 조건부 서식의 차등 서식은 세로 맞춤과 가로 분산을 잃고, 그래서 같아진 이웃 규칙은 하나로 합쳐진다
+/// - 평균 규칙은 늘 '위', 데이터 막대의 x14 확장(방향·음수 색 같음·축)은 읽지 않는다
+/// - 자동 필터 상위·하위의 백분율은 잃는다
+/// - 잃은 참조(`#REF!`) 수식은 다시 계산한다
+pub(crate) fn hcell_xls_open(wb: &mut Workbook) {
+    fn shapes(list: &mut [Shape]) {
+        for s in list {
+            if s.kind == ShapeKind::Shape {
+                let had = s.text.is_some();
+                let t = s.text.get_or_insert_with(Default::default);
+                t.paragraphs = vec![crate::model::DrawingPara::default()];
+                t.vert_overflow = Some("clip".into());
+                t.horz_overflow = Some("clip".into());
+                t.wrap = Some("square".into());
+                if had {
+                    t.vert = Some("horz".into());
+                }
+            }
+            shapes(&mut s.children);
+        }
+    }
+    for s in &mut wb.sheets {
+        shapes(&mut s.shapes);
+    }
+    // 차등 서식: 세로 맞춤·가로 분산을 잃는다
+    let mut lost = vec![false; wb.styles.dxfs.len()];
+    for (i, d) in wb.styles.dxfs.iter_mut().enumerate() {
+        if let Some(a) = &mut d.alignment {
+            if a.vertical.take().is_some() {
+                lost[i] = true;
+            }
+            if a.horizontal.as_deref() == Some("distributed") {
+                a.horizontal = None;
+                lost[i] = true;
+            }
+        }
+    }
+    for s in &mut wb.sheets {
+        for cf in &mut s.conditional_formats {
+            for r in &mut cf.rules {
+                if r.kind == "aboveAverage" && r.above_average == Some(false) {
+                    r.above_average = Some(true);
+                }
+                if let Some(b) = r.data_bar.as_mut() {
+                    let mut e = b.ext.take().unwrap_or_else(|| crate::model::DataBarExt {
+                        cfvos: b.cfvos.clone(),
+                        ..Default::default()
+                    });
+                    e.direction = None;
+                    e.negative_same_as_positive = true;
+                    e.axis_position = Some("none".into());
+                    b.ext = Some(e);
+                }
+            }
+        }
+        // 잃어서 같아진 이웃 규칙은 하나로 (범위를 합친다, 우선순위는 뒤의 것)
+        let mut out: Vec<crate::model::ConditionalFormat> = Vec::new();
+        for cf in std::mem::take(&mut s.conditional_formats) {
+            if let Some(prev) = out.last_mut()
+                && prev.rules.len() == 1
+                && cf.rules.len() == 1
+                && lost_dxf(&prev.rules[0], &lost) | lost_dxf(&cf.rules[0], &lost)
+                && same_rule(&prev.rules[0], &cf.rules[0], &wb.styles.dxfs)
+            {
+                prev.sqref = union_sqref(&prev.sqref, &cf.sqref);
+                prev.rules[0].priority = cf.rules[0].priority;
+                continue;
+            }
+            out.push(cf);
+        }
+        s.conditional_formats = out;
+        for f in s.auto_filter.iter_mut().flat_map(|f| f.columns.iter_mut()) {
+            if let Some(t) = f.top10.as_mut() {
+                t.1 = false;
+            }
+        }
+        for c in &mut s.cells {
+            if c.formula.as_ref().is_some_and(|f| f.text.contains("#REF!")) {
+                c.value = crate::model::CellValue::Error("#REF!".into());
+            }
+        }
+    }
+}
+
+fn lost_dxf(r: &crate::model::CfRule, lost: &[bool]) -> bool {
+    r.dxf_id
+        .and_then(|d| lost.get(d as usize))
+        .copied()
+        .unwrap_or(false)
+}
+
+/// 우선순위와 차등 서식 번호를 뺀 두 규칙이 같은가 (차등 서식은 내용으로)
+fn same_rule(
+    a: &crate::model::CfRule,
+    b: &crate::model::CfRule,
+    dxfs: &[crate::model::Dxf],
+) -> bool {
+    let dxf = |r: &crate::model::CfRule| {
+        r.dxf_id
+            .and_then(|d| dxfs.get(d as usize))
+            .map(|d| format!("{d:?}"))
+    };
+    let (mut x, mut y) = (a.clone(), b.clone());
+    (x.priority, y.priority) = (0, 0);
+    (x.dxf_id, y.dxf_id) = (None, None);
+    x == y && dxf(a) == dxf(b)
+}
+
+/// 이웃한 두 범위(한 칸씩 이어진 같은 모양)는 한 범위로, 아니면 공백으로 잇는다
+fn union_sqref(a: &str, b: &str) -> String {
+    let parse = |s: &str| -> Option<(u32, u32, u32, u32)> {
+        let (x, y) = s.split_once(':').unwrap_or((s, s));
+        let p = |c: &str| {
+            let r = crate::model::CellRef::parse(c)?;
+            Some((r.row, r.col))
+        };
+        let (r1, c1) = p(x)?;
+        let (r2, c2) = p(y)?;
+        Some((r1, c1, r2, c2))
+    };
+    if let (Some(p), Some(q)) = (parse(a), parse(b)) {
+        let same_cols = p.1 == q.1 && p.3 == q.3;
+        let same_rows = p.0 == q.0 && p.2 == q.2;
+        let merged = if same_cols && q.0 == p.2 + 1 {
+            Some((p.0, p.1, q.2, p.3))
+        } else if same_rows && q.1 == p.3 + 1 {
+            Some((p.0, p.1, p.2, q.3))
+        } else {
+            None
+        };
+        if let Some((r1, c1, r2, c2)) = merged {
+            let name = |r: u32, c: u32| crate::model::CellRef { row: r, col: c }.to_string();
+            return format!("{}:{}", name(r1, c1), name(r2, c2));
+        }
+    }
+    format!("{a} {b}")
+}
