@@ -20,6 +20,7 @@
 
 mod cases;
 mod rand;
+mod syntax;
 
 use std::path::PathBuf;
 
@@ -457,6 +458,15 @@ fn main() {
     // --random N --seed S: 무작위 수식 N 개 (rand.rs), --emit 파일 이면 수식 목록을 글로도 남긴다
     let random: Option<usize> = opt("--random").and_then(|n| n.parse().ok());
     let seed: u64 = opt("--seed").and_then(|n| n.parse().ok()).unwrap_or(1);
+    // --syntax N --seed S --emit 파일: 수식 문법 시험용 목록만 쓰고 끝낸다 (문서 없음)
+    if let Some(n) = opt("--syntax").and_then(|n| n.parse::<usize>().ok()) {
+        let text = syntax::lines(n, seed).join("
+") + "
+";
+        let p = opt("--emit").expect("--syntax 는 --emit 파일이 필요합니다");
+        std::fs::write(p, text).expect("--emit 쓰기");
+        return;
+    }
     let catalog = if let Some(n) = random {
         let cases = rand::cases(n, seed);
         if let Some(p) = opt("--emit") {

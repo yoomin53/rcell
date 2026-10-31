@@ -1099,9 +1099,13 @@ pub fn normalize_checked(input: &str, canon: &dyn Fn(&str) -> Option<String>) ->
                                 invalid = true;
                             }
                             match w.parse::<f64>() {
-                                Ok(v) if v.is_finite() => {
-                                    T::Operand(crate::legacy::formula::number_text(v), false)
-                                }
+                                // 한셀은 숫자 글자를 15자리로 읽어 일반 서식 글로 다시 쓴다 (`1E-10` → `0.0000000001`,
+                                // `1E+15` → `1000000000000000`, `12345678901234567` → `12345678901234500`,
+                                // `1E+20` 은 그대로 — 수식 글 대조 실험)
+                                Ok(v) if v.is_finite() => T::Operand(
+                                    crate::calc::value::number_to_text_rounded(v),
+                                    false,
+                                ),
                                 _ => T::Operand(w.clone(), false),
                             }
                         } else if w.eq_ignore_ascii_case("TRUE") || w.eq_ignore_ascii_case("FALSE")
