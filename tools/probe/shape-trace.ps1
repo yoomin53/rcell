@@ -34,8 +34,10 @@ public static class ST {
             stride = d.Stride; buf = new byte[stride * b.Height]; Marshal.Copy(d.Scan0, buf, 0, buf.Length); b.UnlockBits(d);
         }
         var cls = new int[w, h];
+        var sm = new int[w, h];
         for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
             int o = (y0 + y) * stride + (x0 + x) * 4; int B = buf[o], G = buf[o + 1], R = buf[o + 2];
+            sm[x, y] = R + G + B;
             int best = -1, bd = 1000;
             for (int c = 0; c < Pal.Length; c++) {
                 int dd = Math.Max(Math.Abs(R - Pal[c][0]), Math.Max(Math.Abs(G - Pal[c][1]), Math.Abs(B - Pal[c][2])));
@@ -48,21 +50,27 @@ public static class ST {
             var mask = new bool[w, h];
             int n = 0, nb = 0, nbs = 0;
             for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) if (cls[x, y] == c) { mask[x, y] = true; n++; }
+            if (c == 0) FillHoles(mask, cls, w, h);
             bool stroked = false;
             if (c != 5 && n > 0) {
                 // boundary pixels of the class next to stroke pixels
                 for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) if (mask[x, y]) {
                     bool edge = false, st = false;
-                    for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -2; dx <= 2; dx++) for (int dy = -2; dy <= 2; dy++) {
                         if (dx == 0 && dy == 0) continue; int nx = x + dx, ny = y + dy;
                         if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-                        if (cls[nx, ny] != c) { edge = true; if (cls[nx, ny] == 5) st = true; }
+                        // 선 = 선 색이거나, 선과 칠이 섞여 어느 칠도 아닌 어두운 화소 (흰 배경과 섞인 화소는 밝다). 2px 안까지 본다
+                        // (선과 칠 사이에 섞인 화소가 끼어 있다)
+                        if (cls[nx, ny] != c) {
+                            if (Math.Abs(dx) <= 1 && Math.Abs(dy) <= 1) edge = true;
+                            if (cls[nx, ny] == 5 || (cls[nx, ny] == -1 && sm[nx, ny] < 400)) st = true;
+                        }
                     }
                     if (edge) { nb++; if (st) nbs++; }
                 }
                 stroked = nb > 0 && nbs * 2 > nb;
             }
-            sb.Append(Names[c]).Append(stroked ? " S" : "").Append(' ').Append(n).Append('\n');
+            sb.Append(Names[c]).Append(stroked ? " S" : "").Append(' ').Append(n).Append(" nb=").Append(nb).Append(" st=").Append(nbs).Append('\n');
             var rings = Rings(mask, w, h, minArea);
             foreach (var ring in rings) {
                 var simp = Simplify(ring, eps);
@@ -75,6 +83,34 @@ public static class ST {
             }
         }
         return sb.ToString();
+    }
+    // 보통 칠의 구멍 가운데 다른 칠(또는 선)이 채운 것은 메운다 — 그 위에 덮는 칠과 틈이 생기지 않게. 배경이 보이는 구멍(흰색 화소가
+    // 절반 넘는)은 남긴다
+    static void FillHoles(bool[,] mask, int[,] cls, int w, int h) {
+        var outside = new bool[w, h];
+        var st = new Stack<int[]>();
+        for (int x = 0; x < w; x++) { st.Push(new int[] { x, 0 }); st.Push(new int[] { x, h - 1 }); }
+        for (int y = 0; y < h; y++) { st.Push(new int[] { 0, y }); st.Push(new int[] { w - 1, y }); }
+        while (st.Count > 0) {
+            var p = st.Pop(); int x = p[0], y = p[1];
+            if (x < 0 || y < 0 || x >= w || y >= h || outside[x, y] || mask[x, y]) continue;
+            outside[x, y] = true;
+            st.Push(new int[] { x + 1, y }); st.Push(new int[] { x - 1, y }); st.Push(new int[] { x, y + 1 }); st.Push(new int[] { x, y - 1 });
+        }
+        var seen = new bool[w, h];
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) if (!mask[x, y] && !outside[x, y] && !seen[x, y]) {
+            var comp = new List<int[]>(); var s2 = new Stack<int[]>(); s2.Push(new int[] { x, y }); seen[x, y] = true;
+            int other = 0;
+            while (s2.Count > 0) {
+                var p = s2.Pop(); comp.Add(p); if (cls[p[0], p[1]] >= 0) other++;
+                int[][] nb = { new int[] { 1, 0 }, new int[] { -1, 0 }, new int[] { 0, 1 }, new int[] { 0, -1 } };
+                foreach (var d in nb) {
+                    int nx = p[0] + d[0], ny = p[1] + d[1];
+                    if (nx >= 0 && ny >= 0 && nx < w && ny < h && !mask[nx, ny] && !outside[nx, ny] && !seen[nx, ny]) { seen[nx, ny] = true; s2.Push(new int[] { nx, ny }); }
+                }
+            }
+            if (other * 2 > comp.Count) foreach (var p in comp) mask[p[0], p[1]] = true;
+        }
     }
     // move every edge 0.5 to the right (into the mask), miter joins
     static List<double[]> Inset(List<double[]> r, double d) {

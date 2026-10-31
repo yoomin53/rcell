@@ -33,15 +33,26 @@ pub struct Layer {
     pub rings: &'static [&'static [(f32, f32)]],
 }
 
-/// 윤곽 방식: 좌표를 상자 비율로 보나 (\`false\`), 가운데·ss 비율로 보나 (\`true\`)
+/// 가로세로 비율을 따르는 윤곽: 꼭짓점마다 (x = ax·w + bx·ss, y = ay·h + by·ss) 계수 (ss = 짧은 변)
+pub struct LayerLin {
+    pub fill: PathFill,
+    pub stroke: bool,
+    pub rings: &'static [&'static [(f32, f32, f32, f32)]],
+}
+
+/// 윤곽 방식: 좌표를 상자 비율로 보나 (\`false\`), 가운데·ss 비율로 보나 (\`true\`). \`lin\` 이 있으면 그것을 쓴다
 pub struct Traced {
     pub icon: bool,
     pub layers: &'static [Layer],
+    pub lin: &'static [LayerLin],
     /// 한셀이 쓰는 기본 조정값 (이름, 값) — 문서의 조정값이 모두 이와 같을 때만 이 윤곽을 쓴다
     pub adj: &'static [(&'static str, f64)],
 }
 `;
+out += "\nconst NO_LAYERS: &[Layer] = &[];\nconst NO_LIN: &[LayerLin] = &[];\n";
 const AV = JSON.parse(fs.readFileSync(dir + "/avdefaults.json", "utf8"));
+const FIT = fs.existsSync(dir + "/fit.json") ? JSON.parse(fs.readFileSync(dir + "/fit.json", "utf8")) : {};
+const LCLASS = { norm: "Norm", darkenLess: "DarkenLess", darken: "Darken", lighten: "Lighten", lightenLess: "LightenLess" };
 const tables = [];
 for (const sp of SPECS) {
   const txt = fs.readFileSync(`${dir}/trace/${sp.file}.txt`, "utf8").split(/\r?\n/);
@@ -53,7 +64,7 @@ for (const sp of SPECS) {
       const pts = l.slice(2).trim().split(/\s+/).map((p) => p.split(",").map(Number));
       cur.rings.push(pts);
     } else {
-      const m = l.match(/^(\w+)( S)? (\d+)$/);
+      const m = l.match(/^(\w+)( S)? (\d+)( .*)?$/);
       cur = { name: m[1], stroked: !!m[2], rings: [] };
       classes.push(cur);
     }
@@ -87,13 +98,28 @@ for (const sp of SPECS) {
     // 가장 큰 고리의 방향이 바깥, 반대는 구멍 (norm 의 구멍은 버린다 — 그 위에 다른 칠이 덮는다)
     const big = rings.reduce((a, b) => (Math.abs(area(a)) >= Math.abs(area(b)) ? a : b));
     const sgn = Math.sign(area(big));
-    if (c.name === "norm") rings = rings.filter((r) => Math.sign(area(r)) === sgn);
+    if (sp.dropHoles) rings = rings.filter((r) => Math.sign(area(r)) === sgn);
     if (sp.minArea) rings = rings.filter((r) => Math.abs(area(r)) >= sp.minArea);
     if (!rings.length) continue;
     layers.push({ fill: CLASSES[c.name], stroke: c.stroked || sp.stroke === true, rings: rings.map((r) => r.map(norm)) });
   }
   const id = sp.prst.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
   let s = "";
+  const lin = FIT[sp.prst];
+  if (lin) {
+    // 가로세로 비율을 따르는 윤곽 (shape-trace-fit.js 가 푼 계수)
+    lin.forEach((l, i) => {
+      s += `const ${id}_N${i}: &[&[(f32, f32, f32, f32)]] = &[\n`;
+      for (const r of l.rings) s += `    &[${r.map((p) => `(${p.map(fmt).join(", ")})`).join(", ")}],\n`;
+      s += `];\n`;
+    });
+    s += `const ${id}_LIN: &[LayerLin] = &[\n` + lin.map((l, i) => `    LayerLin { fill: PathFill::${LCLASS[l.name]}, stroke: ${l.stroked}, rings: ${id}_N${i} },`).join("\n") + `\n];\n`;
+    const adj2 = (AV[sp.prst] || [[]])[0];
+    s += `const ${id}_ADJ: &[(&str, f64)] = &[${adj2.map((g) => `("${g[0]}", ${g[1]}.0)`).join(", ")}];\n`;
+    out += "\n" + s;
+    tables.push({ prst: sp.prst, id, icon: false, lin: true });
+    continue;
+  }
   layers.forEach((l, i) => {
     s += `const ${id}_L${i}: &[&[(f32, f32)]] = &[\n`;
     for (const r of l.rings) s += `    &[${r.map((p) => `(${fmt(p[0])}, ${fmt(p[1])})`).join(", ")}],\n`;
@@ -106,11 +132,12 @@ for (const sp of SPECS) {
   tables.push({ prst: sp.prst, id, icon: !!sp.icon });
 }
 out += `\n/// 이름으로 찾는다\npub fn traced(prst: &str) -> Option<Traced> {\n    let t = match prst {\n`;
-for (const t of tables) out += `        "${t.prst}" => (${t.id}, ${t.icon}, ${t.id}_ADJ),\n`;
+for (const t of tables) out += `        "${t.prst}" => (${t.lin ? "NO_LAYERS" : t.id}, ${t.lin ? t.id + "_LIN" : "NO_LIN"}, ${t.icon}, ${t.id}_ADJ),\n`;
 out += `        _ => return None,\n    };\n    Some(Traced {
-        icon: t.1,
+        icon: t.2,
         layers: t.0,
-        adj: t.2,
+        lin: t.1,
+        adj: t.3,
     })\n}\n`;
 fs.writeFileSync(process.argv[2], out);
 console.log("ok", tables.length);

@@ -1786,6 +1786,19 @@ fn traced_preset(prst: &str, w: f64, h: f64) -> Option<Vec<PathSpec>> {
         }
         out.push(PathSpec::with(d, l.fill, l.stroke));
     }
+    // 가로세로 비율을 따르는 윤곽: x = ax·w + bx·ss, y = ay·h + by·ss
+    for l in t.lin {
+        let mut d = String::new();
+        for ring in l.rings {
+            for (i, &(ax, bx, ay, by)) in ring.iter().enumerate() {
+                let px = f64::from(ax) * w + f64::from(bx) * ss;
+                let py = f64::from(ay) * h + f64::from(by) * ss;
+                let _ = write!(d, "{}{},{}", if i == 0 { "M" } else { "L" }, f(px), f(py));
+            }
+            d.push('Z');
+        }
+        out.push(PathSpec::with(d, l.fill, l.stroke));
+    }
     // 소리 단추의 소리선 셋 (선만)
     if prst == "actionButtonSound" {
         let p = |x: f64, y: f64| (hc + x * ss, vc + y * ss);

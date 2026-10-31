@@ -249,5 +249,37 @@
  {
   "prst": "cornerTabs",
   "file": "cornerTabs"
+ },
+ {
+  "prst": "flowChartMultidocument",
+  "file": "flowChartMultidocument"
+ },
+ {
+  "prst": "noSmoking",
+  "file": "noSmoking"
+ },
+ {
+  "prst": "mathEqual",
+  "file": "mathEqual"
+ },
+ {
+  "prst": "leftUpArrow",
+  "file": "leftUpArrow"
+ },
+ {
+  "prst": "wedgeEllipseCallout",
+  "file": "wedgeEllipseCallout"
+ },
+ {
+  "prst": "smileyFace",
+  "file": "smileyFace"
+ },
+ {
+  "prst": "moon",
+  "file": "moon"
+ },
+ {
+  "prst": "lightningBolt",
+  "file": "lightningBolt"
  }
 ]
