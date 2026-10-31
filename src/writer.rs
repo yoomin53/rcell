@@ -1716,6 +1716,7 @@ fn sheet_view_xml(sheet: &Sheet, selected: bool) -> String {
     flag(&mut a, "showGridLines", sheet.show_grid_lines, true);
     flag(&mut a, "showRowColHeaders", v.show_row_col_headers, true);
     flag(&mut a, "showZeros", v.show_zeros, true);
+    flag(&mut a, "rightToLeft", v.right_to_left, false);
     flag(&mut a, "tabSelected", selected, false);
     if v.grid_color.is_some() {
         a.push_str(" defaultGridColor=\"0\"");

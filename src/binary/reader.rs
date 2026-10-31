@@ -2090,6 +2090,7 @@ fn read_sheet(
                 v.show_formulas = flags & 0x0002 != 0;
                 v.show_row_col_headers = flags & 0x0008 != 0;
                 v.show_zeros = flags & 0x0010 != 0;
+                v.right_to_left = flags & 0x0020 != 0;
                 v.tab_selected = flags & 0x0040 != 0;
                 let xl_view = r.u32().unwrap_or(0);
                 v.view = match xl_view {

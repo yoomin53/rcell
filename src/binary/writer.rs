@@ -1833,6 +1833,9 @@ impl SheetCtx<'_, '_> {
         if v.show_zeros {
             flags |= 0x10;
         }
+        if v.right_to_left {
+            flags |= 0x20;
+        }
         if selected {
             flags |= 0x40;
         }

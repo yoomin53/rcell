@@ -101,6 +101,8 @@ foreach ($line in $tsv) {
     if ($Skip -and ("{0}|{1}" -f $p[0], $p[2]) -match $Skip) { continue }
     $file, $k, $name, $png, $ax, $ay, $gw, $gh = $p[0], [int]$p[1], $p[2], $p[3], [int]$p[4], [int]$p[5], [int]$p[6], [int]$p[7]
     $zoom = if ($p.Count -gt 11 -and $p[11]) { [int]$p[11] } else { 100 }
+    # 오른쪽에서 왼쪽 시트(13번째 열): 격자가 거울이라 A1 의 오른쪽 위 모서리가 격자 영역(그림)의 오른쪽 위에 온다
+    $isRtl = $p.Count -gt 12 -and $p[12] -eq "True"
     $stem = "{0}.{1}" -f $file, $k
     $html = Join-Path $OutDir "$stem.html"
     if ($OldCli) {
@@ -117,7 +119,12 @@ foreach ($line in $tsv) {
     $t = [IO.File]::ReadAllText($html, [Text.Encoding]::UTF8)
     $zcss = if ($zoom -eq 100) { ".rc-canvas{zoom:100%!important}" } else { "" }
     $t = $t.Replace("<style>body{margin:16px;background:#fafafa}", "<style>body{margin:0;background:#fff;overflow:hidden}.rc-tabs{display:none}.rc-wrap{border:0!important;max-height:none!important;overflow:visible!important}$zcss")
-    $t = $t.Replace("</body>", "<script>(function(){var w=document.querySelector('.rc-wrap:not(.rc-hidden)');var td=w&&w.querySelector('tbody td');if(!td)return;var c=w.querySelector('.rc-canvas');c.style.position='relative';var z=parseFloat(getComputedStyle(c).zoom)||1;var r=td.getBoundingClientRect();var dx=-r.left/z,dy=-r.top/z;c.style.left=dx+'px';c.style.top=dy+'px';var q=td.getBoundingClientRect();var kx=dx?(q.left-r.left)/dx:1,ky=dy?(q.top-r.top)/dy:1;if(kx&&ky){c.style.left=(dx-q.left/kx)+'px';c.style.top=(dy-q.top/ky)+'px';}})();</script></body>")
+    # 가로 기준: 왼쪽 시트는 A1 의 왼쪽 가장자리를 0 에, 오른쪽에서 왼쪽 시트는 A1 의 오른쪽 가장자리를 그림 오른쪽 끝에 둔다
+    $edgeJs = if ($isRtl) { "r.right" } else { "r.left" }
+    $edgeJs2 = if ($isRtl) { "q.right" } else { "q.left" }
+    # (한셀 화면: 오른쪽에서 왼쪽 시트의 A 열 오른쪽 끝은 격자 영역 끝보다 1px 더 나간다 — 창 너비 − 격자선 위치로 잰 값)
+    $goalJs = if ($isRtl) { "$($gw + 1)" } else { "0" }
+    $t = $t.Replace("</body>", "<script>(function(){var w=document.querySelector('.rc-wrap:not(.rc-hidden)');var td=w&&w.querySelector('tbody td');if(!td)return;var c=w.querySelector('.rc-canvas');c.style.position='relative';var z=parseFloat(getComputedStyle(c).zoom)||1;var G=$goalJs;var r=td.getBoundingClientRect();var dx=(G-$edgeJs)/z,dy=-r.top/z;c.style.left=dx+'px';c.style.top=dy+'px';var q=td.getBoundingClientRect();var kx=dx?($edgeJs2-$edgeJs)/dx:1,ky=dy?(q.top-r.top)/dy:1;if(kx&&ky){c.style.left=(dx+(G-$edgeJs2)/kx)+'px';c.style.top=(dy-q.top/ky)+'px';}})();</script></body>")
     [IO.File]::WriteAllText($html, $t, (New-Object Text.UTF8Encoding $false))
     $shot = Join-Path $OutDir "$stem.rcell.png"
     if (Test-Path $shot) { Remove-Item $shot }
