@@ -200,13 +200,8 @@ pub fn preset_paths(
     h: f64,
     adj: &HashMap<String, f64>,
 ) -> Option<Vec<PathSpec>> {
-    // 기본 조정값이면 한셀 화면에서 따라 그린 윤곽을 먼저 쓴다 (조정값을 바꾼 도형은 아래 식)
-    if let Some(t) = super::shape_trace::traced(prst)
-        && adj
-            .iter()
-            .all(|(k, v)| t.adj.iter().any(|(n, d)| n == k && (d - v).abs() < 1.0))
-        && let Some(p) = traced_preset(prst, w, h)
-    {
+    // 가이드 수식으로 짠 모양 (조정값·가로세로 비율마다 식으로 — shape_guides.rs)
+    if let Some(p) = guide_paths(prst, w, h, adj) {
         return Some(p);
     }
     let ss = w.min(h);
@@ -1752,70 +1747,37 @@ pub fn preset_paths(
             )])
         }
         "cloud" | "cloudCallout" => one(ellipse(hc, vc, hc, vc)),
-        _ => traced_preset(prst, w, h),
+        _ => None,
     }
 }
 
-/// 한셀 화면에서 따라 그린 윤곽 (`shape_trace.rs`) → 경로들. 동작 단추는 사각형 바탕 위에 그림을 얹는다 (그림은 가운데·짧은
-/// 변 비율), 나머지는 상자 비율로 늘인다
-fn traced_preset(prst: &str, w: f64, h: f64) -> Option<Vec<PathSpec>> {
-    let t = super::shape_trace::traced(prst)?;
-    let ss = w.min(h);
-    let (hc, vc) = (w / 2.0, h / 2.0);
-    let mut out = Vec::new();
-    if prst.starts_with("actionButton") {
-        out.push(PathSpec::new(poly(&[
-            (0.0, 0.0),
-            (w, 0.0),
-            (w, h),
-            (0.0, h),
-        ])));
+/// 가이드 수식 모양 (`shape_guides.rs`) → 경로들. 정의는 처음 쓸 때 한 번만 읽는다. 조정값은 avLst 의 기본값 위에 문서의 값을 덮어쓴다
+fn guide_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> Option<Vec<PathSpec>> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<std::sync::Arc<Element>>>>> =
+        OnceLock::new();
+    let xml = super::shape_guides::definition(prst)?;
+    let geom = {
+        let mut cache = CACHE.get_or_init(Default::default).lock().ok()?;
+        cache
+            .entry(prst.to_string())
+            .or_insert_with(|| {
+                crate::xml::parse(xml, "shape_guides")
+                    .ok()
+                    .map(std::sync::Arc::new)
+            })
+            .clone()?
+    };
+    let emu = crate::units::EMU_PER_PX as f64;
+    let mut gd = Guides::new(w * emu, h * emu);
+    gd.define_list(geom.child_ns(A, "avLst"));
+    for (k, v) in adj {
+        gd.set(k, *v);
     }
-    for l in t.layers {
-        let mut d = String::new();
-        for ring in l.rings {
-            for (i, &(x, y)) in ring.iter().enumerate() {
-                let (px, py) = if t.icon {
-                    (hc + f64::from(x) * ss, vc + f64::from(y) * ss)
-                } else {
-                    (f64::from(x) * w, f64::from(y) * h)
-                };
-                let _ = write!(d, "{}{},{}", if i == 0 { "M" } else { "L" }, f(px), f(py));
-            }
-            d.push('Z');
-        }
-        out.push(PathSpec::with(d, l.fill, l.stroke));
-    }
-    // 가로세로 비율을 따르는 윤곽: x = ax·w + bx·ss, y = ay·h + by·ss
-    for l in t.lin {
-        let mut d = String::new();
-        for ring in l.rings {
-            for (i, &(ax, bx, ay, by)) in ring.iter().enumerate() {
-                let px = f64::from(ax) * w + f64::from(bx) * ss;
-                let py = f64::from(ay) * h + f64::from(by) * ss;
-                let _ = write!(d, "{}{},{}", if i == 0 { "M" } else { "L" }, f(px), f(py));
-            }
-            d.push('Z');
-        }
-        out.push(PathSpec::with(d, l.fill, l.stroke));
-    }
-    // 소리 단추의 소리선 셋 (선만)
-    if prst == "actionButtonSound" {
-        let p = |x: f64, y: f64| (hc + x * ss, vc + y * ss);
-        for (a, b) in [
-            ((0.1906, -0.1413), (0.3741, -0.28)),
-            ((0.1916, 0.0), (0.3716, 0.0)),
-            ((0.1925, 0.1438), (0.3741, 0.2791)),
-        ] {
-            let (p0, p1) = (p(a.0, a.1), p(b.0, b.1));
-            out.push(PathSpec::with(
-                format!("M{},{}L{},{}", f(p0.0), f(p0.1), f(p1.0), f(p1.1)),
-                PathFill::None,
-                true,
-            ));
-        }
-    }
-    Some(out)
+    gd.define_list(geom.child_ns(A, "gdLst"));
+    let list = geom.child_ns(A, "pathLst")?;
+    let out = paths_of(list, &gd, w, h, w * emu, h * emu);
+    (!out.is_empty()).then_some(out)
 }
 
 /// 미리 정의된 모양 → SVG 경로 하나 (경로들을 이어 붙인다). 모르는 모양은 None
@@ -1837,6 +1799,13 @@ impl Guides {
             vals: HashMap::new(),
             w,
             h,
+        }
+    }
+
+    /// 이미 정한 값(조정값)을 문서의 값으로 바꾼다
+    pub fn set(&mut self, name: &str, v: f64) {
+        if self.vals.contains_key(name) {
+            self.vals.insert(name.to_string(), v);
         }
     }
 
@@ -2008,13 +1977,14 @@ pub(super) fn paths_of(
                 }
                 "quadBezTo" if pts.len() == 2 => {
                     cur = pts[1];
+                    // 한셀은 이차 곡선을 제어점 둘이 같은 삼차 곡선으로 그린다 (진짜 이차 곡선보다 제어점 쪽으로 더 휜다)
                     let _ = write!(
                         d,
-                        "Q{},{} {},{}",
-                        f(pts[0].0),
-                        f(pts[0].1),
+                        "C{c0},{c1} {c0},{c1} {},{}",
                         f(cur.0),
-                        f(cur.1)
+                        f(cur.1),
+                        c0 = f(pts[0].0),
+                        c1 = f(pts[0].1)
                     );
                 }
                 "arcTo" => {
@@ -2023,8 +1993,8 @@ pub(super) fn paths_of(
                     let hr = gd.get(c.attr("hR").unwrap_or("0")) * sy;
                     let st = gd.get(c.attr("stAng").unwrap_or("0")) / 60000.0;
                     let sw = gd.get(c.attr("swAng").unwrap_or("0")) / 60000.0;
-                    d.push_str(&arc_svg(cur, wr, hr, st, sw));
-                    cur = arc_end(cur, wr, hr, st, sw);
+                    d.push_str(&arc_svg(cur, (wr, hr), (sx, sy), st, sw));
+                    cur = arc_end(cur, (wr, hr), (sx, sy), st, sw);
                 }
                 "close" => {
                     d.push('Z');
@@ -2051,24 +2021,27 @@ fn ellipse_param(wr: f64, hr: f64, deg: f64) -> f64 {
     (wr * a.sin()).atan2(hr * a.cos())
 }
 
-/// 호의 끝점 (현재 점이 시작각 위에 있다)
-fn arc_end(cur: (f64, f64), wr: f64, hr: f64, st: f64, sw: f64) -> (f64, f64) {
-    let t0 = ellipse_param(wr, hr, st);
-    let t1 = ellipse_param(wr, hr, st + sw);
+/// 호의 끝점 (현재 점이 시작각 위에 있다). 반지름 (wr, hr) 은 그릴 크기(px), 각도는 경로 좌표계의 실제 방향이므로
+/// 경로 → px 배율 (kx, ky) 로 되돌린 반지름으로 매개변수 각도를 구한다 (경로 크기가 상자와 다르면 원이 늘어난다)
+fn arc_end(cur: (f64, f64), r: (f64, f64), k: (f64, f64), st: f64, sw: f64) -> (f64, f64) {
+    let (wr, hr) = r;
+    let t0 = ellipse_param(wr / k.0, hr / k.1, st);
+    let t1 = ellipse_param(wr / k.0, hr / k.1, st + sw);
     let (cx, cy) = (cur.0 - wr * t0.cos(), cur.1 - hr * t0.sin());
     (cx + wr * t1.cos(), cy + hr * t1.sin())
 }
 
 /// 호 하나를 SVG 로 (거의 한 바퀴면 반씩 나눈다)
-fn arc_svg(cur: (f64, f64), wr: f64, hr: f64, st: f64, sw: f64) -> String {
+fn arc_svg(cur: (f64, f64), r: (f64, f64), k: (f64, f64), st: f64, sw: f64) -> String {
     if sw.abs() >= 359.9 {
         let half = sw / 2.0;
-        let mid = arc_end(cur, wr, hr, st, half);
-        return arc_svg(cur, wr, hr, st, half) + &arc_svg(mid, wr, hr, st + half, half);
+        let mid = arc_end(cur, r, k, st, half);
+        return arc_svg(cur, r, k, st, half) + &arc_svg(mid, r, k, st + half, half);
     }
-    let end = arc_end(cur, wr, hr, st, sw);
+    let end = arc_end(cur, r, k, st, sw);
     // 각도 방향의 큰 호 판단은 매개변수 각도로
-    let dt = ellipse_param(wr, hr, st + sw) - ellipse_param(wr, hr, st);
+    let (pw, ph) = (r.0 / k.0, r.1 / k.1);
+    let dt = ellipse_param(pw, ph, st + sw) - ellipse_param(pw, ph, st);
     let dt = if sw > 0.0 {
         dt.rem_euclid(std::f64::consts::TAU)
     } else {
@@ -2082,8 +2055,8 @@ fn arc_svg(cur: (f64, f64), wr: f64, hr: f64, st: f64, sw: f64) -> String {
     let sweep = if sw > 0.0 { 1 } else { 0 };
     format!(
         "A{},{} 0 {large} {sweep} {},{}",
-        f(wr.abs()),
-        f(hr.abs()),
+        f(r.0.abs()),
+        f(r.1.abs()),
         f(end.0),
         f(end.1)
     )
