@@ -194,6 +194,10 @@ rcell 의 `hcmath::lgamma` 는 반정수 k/2 (k ≤ 400) 는 한셀에서 잰 �
 | MEDIAN·MODE 의 오류 | 인수를 차례로 읽는다: 앞 인수의 오류가 뒤 인수의 배열 상수 #VALUE! 보다 먼저 (`MEDIAN(Data!H4,{1,2})` = #DIV/0!, `MODE(범위,{"a","b"},Data!H4)` = #VALUE!) |
 | GCD·LCM·MULTINOMIAL 의 차례 | 인수·칸을 차례로 읽는다: 앞의 음수 #NUM! 이 뒤의 글·오류보다 먼저 (`GCD(-1,"3")` = #NUM!, `GCD("3",-1)` = #VALUE!, `GCD(-1,NA())` = #NUM!) |
 | FREQUENCY | 구간 범위 안의 오류는 첫 번째가 그대로 (`FREQUENCY(Data!A1:A5,Data!H1:H5)` = #N/A); 자료 인수가 오류면 자료 없음 (모두 0) |
+| NEGBINOM.DIST | 확률 0 의 누적은 0 (`NEGBINOM.DIST(10,6,0,TRUE)`), 확률 질량은 #NUM! |
+| PERCENTRANK.EXC 의 차례 | 자료에 숫자가 없으면 유효 숫자 자리 검사보다 먼저 #N/A (`PERCENTRANK.EXC(빈 범위,5,-1)`; .INC 는 #NUM!) |
+| 재무 함수의 오류 인수 | 결제일·만기일을 쓰는 함수(PRICE·PRICEDISC·INTRATE·RECEIVED·TBILL*·YIELD* …)는 인수의 오류 값이 날짜 검사(결제일 ≥ 만기일 = #NUM!)보다 먼저 나온다 (`PRICE(366,1,NA(),0.06,100,2,0)` = #N/A). YEARFRAC 은 기준의 오류를 보지 않는다 (`YEARFRAC(366,1,NA())` = 1) |
+| SKEW 의 세제곱 | z·z·z (곱셈 두 번) — 정확히 반올림한 거듭제곱과 끝자리가 다르다 (`SKEW(1E7+0.1,1E7+0.2,1E7+0.3)` = 2.7874334090904895E-8) |
 | 따라 하지 못한 것 | C 런타임 sin·cos 가 정확한 반올림이 아닌 드문 경우 (`sin(2.5)`: 한셀 0.5984721441039564, 정확한 반올림 …565) — IMEXP·IMSINH·IMSIN 의 허수부가 15자리에서 1 다르다. ERF 는 대부분 정확한 반올림이지만 `ERF(0.01)`·`ERF(0.25)` 는 1 ulp 낮다 (`ERF(2.5)&""` 의 끝자리). XLOOKUP·MATCH 가 쓰레기를 내는 경우 |
 
 ## 5. 함수별 규칙

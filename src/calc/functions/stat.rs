@@ -712,7 +712,15 @@ fn skew(ctx: &mut Ctx, a: &[Value], population: bool) -> Value {
     if s == 0.0 {
         return Value::Error(ErrorKind::Div0);
     }
-    let sum3: f64 = v.iter().map(|x| ((x - m) / s).mpowi(3)).sum();
+    // 세제곱은 곱셈 두 번 (z·z·z) — 정확히 반올림한 거듭제곱과 끝자리가 다르다 (SKEW(1E7+0.1,1E7+0.2,1E7+0.3) =
+    // 2.7874334090904895E-8, 대조 실험 variance)
+    let sum3: f64 = v
+        .iter()
+        .map(|x| {
+            let z = (x - m) / s;
+            z * z * z
+        })
+        .sum();
     num(n / ((n - 1.0) * (n - 2.0)) * sum3)
 }
 
@@ -845,16 +853,16 @@ fn percentrank(ctx: &mut Ctx, a: &[Value], inclusive: bool) -> Value {
     let v = try_v!(array_numbers(ctx, &a[0]));
     let x = try_v!(num_arg(ctx, a, 1));
     let sig = try_v!(num_or(ctx, a, 2, 3.0)).trunc();
-    if sig < 1.0 {
-        return Value::Error(ErrorKind::Num);
-    }
-    // 숫자가 하나도 없으면 PERCENTRANK(.INC) 는 #NUM!, .EXC 는 #N/A (대조 실험 conv8)
+    // 숫자가 하나도 없으면 PERCENTRANK(.INC) 는 #NUM!, .EXC 는 #N/A — 유효 숫자 자리 검사보다 먼저 (대조 실험 conv8·conv10)
     if v.is_empty() {
         return Value::Error(if inclusive {
             ErrorKind::Num
         } else {
             ErrorKind::NA
         });
+    }
+    if sig < 1.0 {
+        return Value::Error(ErrorKind::Num);
     }
     let mut s = v;
     s.sort_by(f64::total_cmp);
@@ -1894,6 +1902,10 @@ fn negbinom(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
     };
     // 누적은 확률 1 도 받는다 (NEGBINOM.DIST(10,5,1,TRUE) = 1, 대조 실험 dist), 확률 질량은 #NUM!
     // (NEGBINOMDIST(0,1,1)·NEGBINOM.DIST(0,3,1,FALSE), 대조 실험 cmisc)
+    // 확률 0 의 누적은 0 (NEGBINOM.DIST(10,6,0,TRUE) = 0, 대조 실험 conv10)
+    if p == 0.0 && cum && fl >= 0.0 && s >= 1.0 {
+        return Value::Number(0.0);
+    }
     if fl < 0.0 || s < 1.0 || p <= 0.0 || p > 1.0 || (p == 1.0 && !cum) {
         return Value::Error(ErrorKind::Num);
     }

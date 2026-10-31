@@ -856,6 +856,10 @@ fn date_arg(ctx: &mut Ctx, a: &[Value], i: usize) -> Result<f64, ErrorKind> {
 
 /// (결제일, 만기일): 결제일 ≥ 만기일이면 #NUM!
 fn sm(ctx: &mut Ctx, a: &[Value]) -> Result<(f64, f64), ErrorKind> {
+    // 인수의 오류 값이 날짜 검사(결제일 ≥ 만기일 = #NUM!)보다 먼저 (PRICE(366,1,NA(),…) = #N/A, 대조 실험 conv10)
+    if let Some(Value::Error(e)) = a.iter().find(|v| matches!(v, Value::Error(_))) {
+        return Err(*e);
+    }
     let s = date_arg(ctx, a, 0)?;
     let m = date_arg(ctx, a, 1)?;
     if s >= m {
