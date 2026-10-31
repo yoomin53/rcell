@@ -1925,6 +1925,7 @@ fn draw_axis_chart(
             // 한셀 화면: 왼쪽은 레이블 + 14px, 위는 눈금 레이블 반 줄, 아래는 항목 레이블 한 줄 + 14px
             let tl = val_title.as_ref().map_or(0.0, |(_, f)| f.px() * 1.4);
             let tb = cat_title.as_ref().map_or(0.0, |(_, f)| f.px() * 1.4);
+            let has_title = title_of(ch, cx, base).is_some();
             let (left, bottom, top_half) = if horizontal {
                 (
                     if labels_on(cat_ax) {
@@ -1932,9 +1933,11 @@ fn draw_axis_chart(
                     } else {
                         0.0
                     },
-                    val_font.px() * 1.1 + VAL_GAP,
+                    // 제목이 있으면 그림 영역이 3.5px 아래에서 시작해 4.5px 아래에서 끝난다 (차트 종류 실험의 가로 막대: 위 눈금 50 → 46.5,
+                    // 아래 축 286 → 281.5)
+                    val_font.px() * 1.1 + VAL_GAP - if has_title { 1.0 } else { 0.0 },
                     // 한셀 화면 (chart_barh): 그림 영역 위가 틀에서 8px
-                    8.0 - PAD.2,
+                    8.0 - PAD.2 + if has_title { 3.5 } else { 0.0 },
                 )
             } else {
                 (
