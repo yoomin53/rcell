@@ -49,7 +49,8 @@ impl Delimiter {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         match ext.as_str() {
             "csv" => Some(Delimiter::Comma),
-            "txt" | "tsv" | "out" => Some(Delimiter::Tab),
+            // SYLK·DIF 는 한셀도 형식으로 읽지 않고 텍스트로 연다 (한 줄이 한 칸)
+            "txt" | "tsv" | "out" | "slk" | "dif" => Some(Delimiter::Tab),
             "prn" => Some(Delimiter::Space),
             _ => None,
         }
@@ -101,7 +102,11 @@ pub fn decode(bytes: &[u8]) -> String {
 
 /// 글을 칸으로 나눈다 → (행, 열, 글). 빈 필드는 빼고 돌려준다
 pub fn split(text: &str, delim: Delimiter) -> Vec<(u32, u32, String)> {
-    let d = delim.as_char();
+    split_with(text, &[delim.as_char()])
+}
+
+/// [`split`] 의 구분 문자 여럿 판
+pub fn split_with(text: &str, delims: &[char]) -> Vec<(u32, u32, String)> {
     let ch: Vec<char> = text.chars().collect();
     let n = ch.len();
     let mut out = Vec::new();
@@ -135,7 +140,7 @@ pub fn split(text: &str, delim: Delimiter) -> Vec<(u32, u32, String)> {
             }
             let quoted_over = len > MAX_QUOTED;
             // 닫은 뒤의 글은 구분 문자·줄 끝까지 이어 붙인다
-            while i < n && ch[i] != d && !is_eol(ch[i]) {
+            while i < n && !delims.contains(&ch[i]) && !is_eol(ch[i]) {
                 buf.push(ch[i]);
                 i += 1;
             }
@@ -147,7 +152,7 @@ pub fn split(text: &str, delim: Delimiter) -> Vec<(u32, u32, String)> {
             }
         } else {
             let start = i;
-            while i < n && ch[i] != d && !is_eol(ch[i]) {
+            while i < n && !delims.contains(&ch[i]) && !is_eol(ch[i]) {
                 i += 1;
             }
             let mut field = &ch[start..i];
@@ -162,7 +167,7 @@ pub fn split(text: &str, delim: Delimiter) -> Vec<(u32, u32, String)> {
             }
         }
         // 구분 문자면 다음 필드, 줄 끝이면 다음 행
-        if i < n && ch[i] == d {
+        if i < n && delims.contains(&ch[i]) {
             i += 1;
             col += 1;
             if i == n {
@@ -205,6 +210,34 @@ pub fn sheet_name_for(path: &Path) -> String {
 
 /// 텍스트 파일 바이트에서 통합 문서를 만든다 (한셀이 CSV·텍스트 파일을 여는 것처럼)
 pub fn read(bytes: &[u8], delim: Delimiter, sheet_name: &str) -> crate::Result<Workbook> {
+    read_with(bytes, &TextOptions::for_delimiter(delim), sheet_name)
+}
+
+/// 텍스트 가져오기 선택 (한셀 `Workbooks.OpenText` 와 대화 상자의 선택): 구분 문자 여럿, 따옴표 문자, 글자 열, 시작 행.
+/// 한셀 관찰 (docs/format/other-formats.md 3.3절): 선택한 구분 문자 모두로 나눈다, 선택이 없으면 확장자의 기본,
+/// "그 밖의 문자" 는 첫 글자만, 연속 구분 문자 합치기·열 건너뛰기·고정 폭은 한셀이 무시한다
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextOptions {
+    /// 칸 구분 문자들
+    pub delimiters: Vec<char>,
+    /// 글자로 읽을 열 (0부터): 값 해석 없이 글 + 글자 서식 `@`
+    pub text_columns: Vec<u32>,
+    /// 첫 줄을 놓을 행 (0부터)
+    pub start_row: u32,
+}
+
+impl TextOptions {
+    pub fn for_delimiter(d: Delimiter) -> TextOptions {
+        TextOptions {
+            delimiters: vec![d.as_char()],
+            text_columns: Vec::new(),
+            start_row: 0,
+        }
+    }
+}
+
+/// [`read`] 에 가져오기 선택을 더한 것
+pub fn read_with(bytes: &[u8], opts: &TextOptions, sheet_name: &str) -> crate::Result<Workbook> {
     let text = decode(bytes);
     let mut wb = crate::edit::new_workbook();
     wb.application = Some("rcell".into());
@@ -214,50 +247,15 @@ pub fn read(bytes: &[u8], delim: Delimiter, sheet_name: &str) -> crate::Result<W
         sheet_name
     };
     wb.sheets[0].name = name.to_string();
-    let mut styles: HashMap<StyleKey, u32> = HashMap::new();
+    let mut styles: StyleCache = HashMap::new();
     // 칸은 파일 차례(행 우선)로 나오므로 시트에 차례로 붙인다 — 수식의 표시 형식은 앞에 읽은 칸을 본다
     let mut last: Option<(u32, u32)> = None;
-    for (row, col, field) in split(&text, delim) {
+    for (row, col, field) in split_with(&text, &opts.delimiters) {
+        let row = row + opts.start_row;
         let r = CellRef { row, col };
-        let cell = match value(&field, wb.date1904) {
-            Input::Empty => continue,
-            Input::Formula(f) => match crate::edit::normalize_formula_strict(&wb, &f) {
-                Ok(text) => {
-                    let fmt = crate::edit::formula_format(&wb, 0, &text);
-                    let style = style_for(&mut wb, &mut styles, (fmt, false, false));
-                    Cell {
-                        r,
-                        style,
-                        value: CellValue::Empty,
-                        formula: Some(Formula {
-                            text,
-                            ..Default::default()
-                        }),
-                    }
-                }
-                // 고를 수 없는 수식은 글로
-                Err(_) => Cell {
-                    r,
-                    style: 0,
-                    value: CellValue::Text(field.clone()),
-                    formula: None,
-                },
-            },
-            Input::Value {
-                value,
-                num_fmt,
-                quote_prefix,
-            } => {
-                // 줄 바꿈(LF)이 든 글은 줄 바꿈 맞춤 (한셀 관찰 — CR 만 든 글은 그대로)
-                let wrap = matches!(&value, CellValue::Text(t) if t.contains('\n'));
-                let style = style_for(&mut wb, &mut styles, (num_fmt, quote_prefix, wrap));
-                Cell {
-                    r,
-                    style,
-                    value,
-                    formula: None,
-                }
-            }
+        let text_col = opts.text_columns.contains(&col);
+        let Some(cell) = field_cell(&mut wb, &mut styles, r, &field, None, text_col) else {
+            continue;
         };
         let cells = &mut wb.sheets[0].cells;
         if last.is_some_and(|l| l >= (row, col)) {
@@ -342,12 +340,171 @@ fn mixed_fraction(field: &str) -> Option<Input> {
 /// 이보다 긴 필드는 글자 서식(@)의 글
 const LONG_TEXT: usize = 256;
 
-/// (표시 형식, 글자 접두, 줄 바꿈)
-type StyleKey = (Option<u32>, bool, bool);
+/// (표시 형식, 글자 접두, 줄 바꿈, 더한 서식)
+type StyleKey = (Option<u32>, bool, bool, String);
 
-fn style_for(wb: &mut Workbook, cache: &mut HashMap<StyleKey, u32>, key: StyleKey) -> u32 {
-    let (num_fmt, quote_prefix, wrap) = key;
-    if num_fmt.is_none() && !quote_prefix && !wrap {
+/// 가져오기가 칸 서식을 만들 때 쓰는 기억 (같은 서식은 한 번만)
+pub(crate) type StyleCache = HashMap<StyleKey, u32>;
+
+/// 필드 글 하나로 칸을 만든다 (텍스트 가져오기와 HTML 가져오기가 같이 쓴다): 값 해석, 수식 고르기, 줄 바꿈 맞춤.
+/// `patch` 는 얹을 서식 (굵게·맞춤·채우기 …), `as_text` 면 값 해석 없이 글자 서식 글
+pub(crate) fn field_cell(
+    wb: &mut Workbook,
+    cache: &mut StyleCache,
+    r: CellRef,
+    field: &str,
+    patch: Option<&crate::edit::style::FormatPatch>,
+    as_text: bool,
+) -> Option<Cell> {
+    let input = if as_text {
+        if field.is_empty() {
+            return None;
+        }
+        // 맨 앞의 '(글자 접두)는 글자 열에서도 글자로 벗긴다 (한셀 관찰)
+        match field.strip_prefix('\'') {
+            Some(rest) if !rest.is_empty() => Input::Value {
+                value: CellValue::Text(rest.to_string()),
+                num_fmt: Some(49),
+                quote_prefix: true,
+            },
+            _ => Input::Value {
+                value: CellValue::Text(field.to_string()),
+                num_fmt: Some(49),
+                quote_prefix: false,
+            },
+        }
+    } else {
+        value(field, wb.date1904)
+    };
+    let pkey = patch.map(|p| format!("{p:?}")).unwrap_or_default();
+    Some(match input {
+        Input::Empty => return None,
+        // 함수 호출이 아닌 자리의 쉼표(합집합)는 양쪽이 참조일 때만 수식 — 숫자·글 사이 쉼표는 문법에 맞지 않아 글 (한셀 관찰)
+        Input::Formula(_) if bad_union(field) => {
+            let style = style_for(wb, cache, (None, false, false, pkey), patch);
+            Cell {
+                r,
+                style,
+                value: CellValue::Text(field.to_string()),
+                formula: None,
+            }
+        }
+        Input::Formula(f) => match crate::edit::normalize_formula_strict(wb, &f) {
+            Ok(text) => {
+                let fmt = crate::edit::formula_format(wb, 0, &text);
+                let style = style_for(wb, cache, (fmt, false, false, pkey), patch);
+                Cell {
+                    r,
+                    style,
+                    value: CellValue::Empty,
+                    formula: Some(Formula {
+                        text,
+                        ..Default::default()
+                    }),
+                }
+            }
+            // 고를 수 없는 수식은 글로
+            Err(_) => {
+                let style = style_for(wb, cache, (None, false, false, pkey), patch);
+                Cell {
+                    r,
+                    style,
+                    value: CellValue::Text(field.to_string()),
+                    formula: None,
+                }
+            }
+        },
+        Input::Value {
+            value,
+            num_fmt,
+            quote_prefix,
+        } => {
+            // 줄 바꿈(LF)이 든 글은 줄 바꿈 맞춤 (한셀 관찰 — CR 만 든 글은 그대로)
+            let wrap = matches!(&value, CellValue::Text(t) if t.contains('\n'));
+            let style = style_for(wb, cache, (num_fmt, quote_prefix, wrap, pkey), patch);
+            Cell {
+                r,
+                style,
+                value,
+                formula: None,
+            }
+        }
+    })
+}
+
+/// 수식 글의 합집합 쉼표(함수 인수 자리가 아닌 쉼표) 가운데 양쪽이 참조가 아닌 것이 있나. 따옴표 안은 건드리지 않는다
+fn bad_union(f: &str) -> bool {
+    let c: Vec<char> = f.chars().collect();
+    let mut stack: Vec<bool> = Vec::new(); // 괄호마다: 함수 호출인가
+    let mut i = 0;
+    let delim = |ch: char| ",()+-*/^&=<>%; ".contains(ch);
+    let refy = |t: &str| {
+        let t = t.trim_matches('$');
+        !t.is_empty()
+            && (t.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '\'' || ch == '_')
+                || t.contains('!'))
+    };
+    while i < c.len() {
+        match c[i] {
+            '"' => {
+                i += 1;
+                while i < c.len() && c[i] != '"' {
+                    i += 1;
+                }
+            }
+            '(' => stack
+                .push(i > 0 && (c[i - 1].is_alphanumeric() || c[i - 1] == '_' || c[i - 1] == '.')),
+            ')' => {
+                stack.pop();
+            }
+            ',' if stack.last().copied() != Some(true) => {
+                let l: String = {
+                    let mut j = i;
+                    while j > 0 && !delim(c[j - 1]) {
+                        j -= 1;
+                    }
+                    c[j..i].iter().collect()
+                };
+                let r: String = {
+                    let mut j = i + 1;
+                    while j < c.len() && !delim(c[j]) {
+                        j += 1;
+                    }
+                    c[i + 1..j].iter().collect()
+                };
+                if !refy(&l) || !refy(&r) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// 서식 바꿈 하나만 입힌 칸 서식 번호 (값 해석 없이)
+pub(crate) fn styled(
+    wb: &mut Workbook,
+    cache: &mut StyleCache,
+    patch: &crate::edit::style::FormatPatch,
+) -> u32 {
+    style_for(
+        wb,
+        cache,
+        (None, false, false, format!("{patch:?}")),
+        Some(patch),
+    )
+}
+
+fn style_for(
+    wb: &mut Workbook,
+    cache: &mut StyleCache,
+    key: StyleKey,
+    patch: Option<&crate::edit::style::FormatPatch>,
+) -> u32 {
+    let (num_fmt, quote_prefix, wrap) = (key.0, key.1, key.2);
+    if num_fmt.is_none() && !quote_prefix && !wrap && patch.is_none() {
         return 0;
     }
     if let Some(&s) = cache.get(&key) {
@@ -364,6 +521,12 @@ fn style_for(wb: &mut Workbook, cache: &mut HashMap<StyleKey, u32>, key: StyleKe
             x.apply_alignment = Some(true);
         }
     });
+    let s = match patch {
+        Some(p) => crate::edit::style::Restyler::default().apply(&mut wb.styles, s, &|st, x| {
+            crate::edit::style::patch_xf(st, x, p);
+        }),
+        None => s,
+    };
     cache.insert(key, s);
     s
 }
