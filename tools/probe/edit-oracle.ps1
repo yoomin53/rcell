@@ -367,6 +367,57 @@ function Invoke-Edit($wb, $e) {
             $w.FreezePanes = $true
             $a.Visible = $false
         }
+        "pageSetup" {
+            # 쪽 설정 (PageSetup): Edit 의 pageSetup 필드를 COM 속성으로 옮긴다
+            $ps = $ws.PageSetup
+            if ($null -ne $e.marginLeft) { $ps.LeftMargin = [double]$e.marginLeft }
+            if ($null -ne $e.marginRight) { $ps.RightMargin = [double]$e.marginRight }
+            if ($null -ne $e.marginTop) { $ps.TopMargin = [double]$e.marginTop }
+            if ($null -ne $e.marginBottom) { $ps.BottomMargin = [double]$e.marginBottom }
+            if ($null -ne $e.marginHeader) { $ps.HeaderMargin = [double]$e.marginHeader }
+            if ($null -ne $e.marginFooter) { $ps.FooterMargin = [double]$e.marginFooter }
+            if ($null -ne $e.orientation) { $ps.Orientation = @{ "portrait" = 1; "landscape" = 2 }[[string]$e.orientation] }
+            if ($null -ne $e.paperSize) { $ps.PaperSize = [int]$e.paperSize }
+            if ($null -ne $e.zoom) { $ps.Zoom = [int]$e.zoom }
+            if ($null -ne $e.fitWide -or $null -ne $e.fitTall) {
+                $ps.Zoom = $false
+                if ($null -ne $e.fitWide) { $ps.FitToPagesWide = $(if ([int]$e.fitWide -eq 0) { $false } else { [int]$e.fitWide }) }
+                if ($null -ne $e.fitTall) { $ps.FitToPagesTall = $(if ([int]$e.fitTall -eq 0) { $false } else { [int]$e.fitTall }) }
+            }
+            if ($null -ne $e.centerH) { $ps.CenterHorizontally = [bool]$e.centerH }
+            if ($null -ne $e.centerV) { $ps.CenterVertically = [bool]$e.centerV }
+            if ($null -ne $e.gridLines) { $ps.PrintGridlines = [bool]$e.gridLines }
+            if ($null -ne $e.headings) { $ps.PrintHeadings = [bool]$e.headings }
+            if ($null -ne $e.blackAndWhite) { $ps.BlackAndWhite = [bool]$e.blackAndWhite }
+            if ($null -ne $e.draft) { $ps.Draft = [bool]$e.draft }
+            if ($null -ne $e.order) { $ps.Order = @{ "downThenOver" = 1; "overThenDown" = 2 }[[string]$e.order] }
+            if ($null -ne $e.firstPageNumber) { $ps.FirstPageNumber = $(if ([int]$e.firstPageNumber -eq 0) { -4105 } else { [int]$e.firstPageNumber }) }
+            if ($null -ne $e.printArea) { $ps.PrintArea = [string]$e.printArea }
+            if ($null -ne $e.printTitleRows) { $ps.PrintTitleRows = [string]$e.printTitleRows }
+            if ($null -ne $e.printTitleCols) { $ps.PrintTitleColumns = [string]$e.printTitleCols }
+            if ($null -ne $e.headerLeft) { $ps.LeftHeader = [string]$e.headerLeft }
+            if ($null -ne $e.headerCenter) { $ps.CenterHeader = [string]$e.headerCenter }
+            if ($null -ne $e.headerRight) { $ps.RightHeader = [string]$e.headerRight }
+            if ($null -ne $e.footerLeft) { $ps.LeftFooter = [string]$e.footerLeft }
+            if ($null -ne $e.footerCenter) { $ps.CenterFooter = [string]$e.footerCenter }
+            if ($null -ne $e.footerRight) { $ps.RightFooter = [string]$e.footerRight }
+            if ($null -ne $e.comments) { $ps.PrintComments = @{ "none" = -4142; "atEnd" = 1; "inPlace" = 16 }[[string]$e.comments] }
+            if ($null -ne $e.errors) { $ps.PrintErrors = @{ "displayed" = 0; "blank" = 1; "dash" = 2; "na" = 3 }[[string]$e.errors] }
+        }
+        "setView" {
+            # 보기 설정 (ActiveWindow — 창이 보여야 적용된다): 확대율·눈금선·머리글·0 표시·수식 보기·보기 방식
+            $a = $wb.Application
+            $a.Visible = $true
+            $ws.Activate()
+            $w = $a.ActiveWindow
+            if ($null -ne $e.view) { $w.View = @{ "normal" = 1; "pageBreakPreview" = 2; "pageLayout" = 3 }[[string]$e.view] }
+            if ($null -ne $e.zoom) { $w.Zoom = [int]$e.zoom }
+            if ($null -ne $e.gridlines) { $w.DisplayGridlines = [bool]$e.gridlines }
+            if ($null -ne $e.headings) { $w.DisplayHeadings = [bool]$e.headings }
+            if ($null -ne $e.zeros) { $w.DisplayZeros = [bool]$e.zeros }
+            if ($null -ne $e.formulas) { $w.DisplayFormulas = [bool]$e.formulas }
+            $a.Visible = $false
+        }
         "unfreeze" {
             $a = $wb.Application
             $a.Visible = $true

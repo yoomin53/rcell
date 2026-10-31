@@ -1797,3 +1797,72 @@ fn newline_input_turns_on_wrap_like_hcell() {
     assert!(!wrap(&wb, "A2"));
     assert!(!wrap(&wb, "A3"));
 }
+
+// 쪽 설정 대조 실험(ps1–ps5): 여백 포인트, 인쇄 영역·반복 제목 이름, 머리글 글꼴, 페이지 맞추기 배율
+#[test]
+fn page_setup_like_hcell() {
+    let mut wb = hcell_book();
+    let edit: Edit = serde_json::from_str(
+        r#"{"op":"pageSetup","marginLeft":36,"orientation":"landscape","printArea":"A1:C10,E1:F5","printTitleRows":"1:2","headerCenter":"&A 쪽 &P","centerH":true}"#,
+    )
+    .unwrap();
+    apply(&mut wb, &edit).unwrap();
+    let p = &wb.sheets[0].page;
+    assert!((p.margins.as_ref().unwrap().left - 0.5).abs() < 1e-9);
+    assert_eq!(
+        p.setup.as_ref().unwrap().orientation.as_deref(),
+        Some("landscape")
+    );
+    assert!(p.print_options.as_ref().unwrap().horizontal_centered);
+    assert!(
+        p.header_footer
+            .as_ref()
+            .unwrap()
+            .odd_header
+            .as_deref()
+            .unwrap()
+            .starts_with("&C&\"")
+    );
+    let n = wb.sheets[0].name.clone();
+    let find = |name: &str| {
+        wb.defined_names
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.formula.clone())
+    };
+    assert_eq!(
+        find("_xlnm.Print_Area").unwrap(),
+        format!("{n}!$A$1:$C$10,{n}!$E$1:$F$5")
+    );
+    assert_eq!(find("_xlnm.Print_Titles").unwrap(), format!("{n}!$1:$2"));
+    // 지우기
+    let edit: Edit = serde_json::from_str(r#"{"op":"pageSetup","printArea":""}"#).unwrap();
+    apply(&mut wb, &edit).unwrap();
+    assert!(
+        !wb.defined_names
+            .iter()
+            .any(|d| d.name == "_xlnm.Print_Area")
+    );
+}
+
+// 보기 설정 대조 실험(vw1–vw3): 일반·미리 보기 확대율을 따로 두고 12 아래는 12
+#[test]
+fn set_view_like_hcell() {
+    let mut wb = hcell_book();
+    let e = |j: &str| serde_json::from_str::<Edit>(j).unwrap();
+    apply(
+        &mut wb,
+        &e(r#"{"op":"setView","zoom":130,"gridlines":false}"#),
+    )
+    .unwrap();
+    let s = &wb.sheets[0];
+    assert!(!s.show_grid_lines);
+    assert_eq!(s.view.zoom_scale, Some(130));
+    apply(&mut wb, &e(r#"{"op":"setView","view":"pageBreakPreview"}"#)).unwrap();
+    // 미리 보기 확대율 기본은 75, 일반 확대율은 그대로 130
+    assert_eq!(wb.sheets[0].view.zoom_scale, Some(75));
+    assert_eq!(wb.sheets[0].view.zoom_scale_normal, Some(130));
+    apply(&mut wb, &e(r#"{"op":"setView","view":"normal","zoom":10}"#)).unwrap();
+    assert_eq!(wb.sheets[0].view.zoom_scale, Some(12));
+    assert!(wb.sheets[0].view.view.is_none());
+}

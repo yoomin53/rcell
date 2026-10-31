@@ -33,6 +33,7 @@ mod filter;
 pub mod find;
 pub mod input;
 pub mod objects;
+pub mod page;
 pub mod refs;
 pub mod shapes;
 pub mod sort;
@@ -692,6 +693,28 @@ pub enum Edit {
     Unfreeze {
         #[serde(default)]
         sheet: Option<SheetSel>,
+    },
+    /// 쪽 설정 (여백·용지·방향·확대·페이지 맞추기·인쇄 영역·반복 제목·머리글/바닥글 …, 준 것만 바꾼다 — 20절)
+    PageSetup {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        #[serde(flatten)]
+        p: Box<page::PageSetupEdit>,
+    },
+    /// 보기 설정 (확대율 12–400, 눈금선·머리글·0 표시, 보기 방식 `normal`/`pageBreakPreview`) — 그 시트가 활성이 된다
+    SetView {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        #[serde(default)]
+        zoom: Option<u32>,
+        #[serde(default)]
+        gridlines: Option<bool>,
+        #[serde(default)]
+        headings: Option<bool>,
+        #[serde(default)]
+        zeros: Option<bool>,
+        #[serde(default)]
+        view: Option<String>,
     },
     /// 시트 탭 색 (`RRGGBB`, 빈 글이면 없앤다)
     TabColor {
@@ -1463,6 +1486,23 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
         Edit::Unfreeze { sheet } => {
             let i = si(wb, sheet)?;
             view::unfreeze(wb, i)?;
+            Ok(i)
+        }
+        Edit::PageSetup { sheet, p } => {
+            let i = si(wb, sheet)?;
+            page::page_setup(wb, i, p)?;
+            Ok(i)
+        }
+        Edit::SetView {
+            sheet,
+            zoom,
+            gridlines,
+            headings,
+            zeros,
+            view,
+        } => {
+            let i = si(wb, sheet)?;
+            view::set_view(wb, i, *zoom, *gridlines, *headings, *zeros, view.as_deref())?;
             Ok(i)
         }
         Edit::TabColor { sheet, color } => {
