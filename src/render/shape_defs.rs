@@ -56,6 +56,10 @@ pub fn def(prst: &str) -> Option<Def> {
             xf: [0.0, 1.0, 1.0, 0.0],
             reverse: false,
         },
+        "sun" => plain(SUN),
+        "noSmoking" => plain(NO_SMOKING),
+        "mathNotEqual" => plain(MATH_NOT_EQUAL),
+        "mathDivide" => plain(MATH_DIVIDE),
         "quadArrow" => plain(QUAD_ARROW),
         "leftRightUpArrow" => plain(LEFT_RIGHT_UP_ARROW),
         "leftUpArrow" => plain(LEFT_UP_ARROW),
@@ -70,6 +74,264 @@ pub fn def(prst: &str) -> Option<Def> {
         _ => return None,
     })
 }
+
+/// 같지 않음 기호: 위아래 두 막대(두께 dy1 = h·조정값1, 사이 간격 2·dy2)와 이를 가로지르는 기울어진 띠 (두께 dy1 의 직사각형,
+/// 가운데는 도형 가운데, 세로로 상자를 꽉 채우고, 기울기 = 조정값2 각도 − 90도, 양 끝은 띠에 수직)
+const MATH_NOT_EQUAL: &str = "
+av adj1 23520
+av adj2 6600000
+av adj3 11760
+gd crAng pin 4200000 adj2 6600000
+gd a3 pin 0 adj3 100000
+gd hq */ a3 1 2
+gd maxAdj1 +- 50000 0 hq
+gd a1 pin 0 adj1 maxAdj1
+gd dy1 */ h a1 100000
+gd dy2 */ h a3 200000
+gd dx1 */ w 73490 200000
+gd x1 +- hc 0 dx1
+gd x8 +- hc dx1 0
+gd y2 +- vc 0 dy2
+gd y3 +- vc dy2 0
+gd y1 +- y2 0 dy1
+gd y4 +- y3 dy1 0
+gd cadj2 +- crAng 0 cd4
+gd sn sin 100000 cadj2
+gd cs cos 100000 cadj2
+gd hT */ dy1 1 2
+gd hTs */ hT sn 100000
+gd hTc */ hT cs 100000
+gd l1 +- hd2 0 hTs
+gd ell */ l1 100000 cs
+gd ls1 */ ell sn 100000
+gd lc1 */ ell cs 100000
+gd tx0 +- hc ls1 0
+gd tlx +- tx0 0 hTc
+gd trx +- tx0 hTc 0
+gd ty0 +- vc 0 lc1
+gd tly +- ty0 0 hTs
+gd try +- ty0 hTs 0
+gd bx0 +- hc 0 ls1
+gd brx +- bx0 hTc 0
+gd blx +- bx0 0 hTc
+gd by0 +- vc lc1 0
+gd bry +- by0 hTs 0
+gd bly +- by0 0 hTs
+gd dr1 +- y1 0 try
+gd dr2 +- y2 0 try
+gd dr3 +- y3 0 try
+gd dr4 +- y4 0 try
+gd ex1 */ dr1 sn cs
+gd ex2 */ dr2 sn cs
+gd ex3 */ dr3 sn cs
+gd ex4 */ dr4 sn cs
+gd xr1 +- trx 0 ex1
+gd xr2 +- trx 0 ex2
+gd xr3 +- trx 0 ex3
+gd xr4 +- trx 0 ex4
+gd dl1 +- y1 0 tly
+gd dl2 +- y2 0 tly
+gd dl3 +- y3 0 tly
+gd dl4 +- y4 0 tly
+gd fl1 */ dl1 sn cs
+gd fl2 */ dl2 sn cs
+gd fl3 */ dl3 sn cs
+gd fl4 */ dl4 sn cs
+gd xl1 +- tlx 0 fl1
+gd xl2 +- tlx 0 fl2
+gd xl3 +- tlx 0 fl3
+gd xl4 +- tlx 0 fl4
+path
+M x1 y1
+L xl1 y1
+L tlx tly
+L trx try
+L xr1 y1
+L x8 y1
+L x8 y2
+L xr2 y2
+L xr3 y3
+L x8 y3
+L x8 y4
+L xr4 y4
+L brx bry
+L blx bly
+L xl4 y4
+L x1 y4
+L x1 y3
+L xl3 y3
+L xl2 y2
+L x1 y2
+Z
+";
+
+/// 해: 가운데 타원(반지름 w·g0, h·g0)과 둘레의 삼각형 광선 여덟 (끝 위치와 밑변은 w, h 에 비례한다)
+const SUN: &str = "
+av adj 25000
+gd a pin 12500 adj 46875
+gd g0 +- 50000 0 a
+gd g1 */ g0 30274 32768
+gd g2 */ g0 12540 32768
+gd g5 +- 50000 0 g1
+gd g6 +- 50000 0 g2
+gd g10 */ g5 3 4
+gd g11 */ g6 3 4
+gd g12 +- g10 3662 0
+gd g13 +- g11 3662 0
+gd g14 +- g11 12500 0
+gd g15 +- 100000 0 g10
+gd g16 +- 100000 0 g12
+gd g17 +- 100000 0 g13
+gd g18 +- 100000 0 g14
+gd ox1 */ w 18436 21600
+gd oy1 */ h 3163 21600
+gd ox2 */ w 3163 21600
+gd oy2 */ h 18436 21600
+gd x10 */ w g10 100000
+gd x12 */ w g12 100000
+gd x13 */ w g13 100000
+gd x14 */ w g14 100000
+gd x15 */ w g15 100000
+gd x16 */ w g16 100000
+gd x17 */ w g17 100000
+gd x18 */ w g18 100000
+gd y10 */ h g10 100000
+gd y12 */ h g12 100000
+gd y13 */ h g13 100000
+gd y14 */ h g14 100000
+gd y15 */ h g15 100000
+gd y16 */ h g16 100000
+gd y17 */ h g17 100000
+gd y18 */ h g18 100000
+gd wR */ w g0 100000
+gd hR */ h g0 100000
+gd xd +- hc 0 wR
+path
+M r vc
+L x15 y18
+L x15 y14
+Z
+M ox1 oy1
+L x16 y13
+L x17 y12
+Z
+M hc t
+L x18 y10
+L x14 y10
+Z
+M ox2 oy1
+L x13 y12
+L x12 y13
+Z
+M l vc
+L x10 y14
+L x10 y18
+Z
+M ox2 oy2
+L x13 y16
+L x12 y17
+Z
+M hc b
+L x14 y15
+L x18 y15
+Z
+M ox1 oy2
+L x17 y16
+L x16 y17
+Z
+M xd vc
+A wR hR cd2 21600000
+Z
+";
+
+/// 금지 기호: 바깥 타원에서 안쪽 타원(테두리 두께 dr = ss·조정값)을 뺀 고리와, 안쪽 타원을 가로지르는 두께 dr 의 띠.
+/// 띠 가장자리의 끝은 안쪽 타원 위의 점 — 안쪽 타원 위 시선 각도 (대각선 각도 ± dang, +180도)이고
+/// dang 은 대각선 방향 안쪽 타원 반지름 n 과 두께의 반 dr/2 가 이루는 각이다
+const NO_SMOKING: &str = "
+av adj 18750
+gd a pin 0 adj 50000
+gd dr */ ss a 100000
+gd iwd2 +- wd2 0 dr
+gd ihd2 +- hd2 0 dr
+gd ang at2 w h
+gd ct cos ihd2 ang
+gd st sin iwd2 ang
+gd m mod ct st 0
+gd n */ iwd2 ihd2 m
+gd drd2 */ dr 1 2
+gd dang at2 n drd2
+gd dang2 */ dang 2 1
+gd swA +- cd2 0 dang2
+gd swN +- 0 0 swA
+gd s1 +- ang cd2 dang
+gd s4 +- ang 0 dang
+gd c1 cos ihd2 s1
+gd d1 sin iwd2 s1
+gd m1 mod c1 d1 0
+gd r1 */ iwd2 ihd2 m1
+gd u1 cos r1 s1
+gd v1 sin r1 s1
+gd x1 +- hc u1 0
+gd y1 +- vc v1 0
+gd c4 cos ihd2 s4
+gd d4 sin iwd2 s4
+gd m4 mod c4 d4 0
+gd r4 */ iwd2 ihd2 m4
+gd u4 cos r4 s4
+gd v4 sin r4 s4
+gd x4 +- hc u4 0
+gd y4 +- vc v4 0
+path
+M l vc
+A wd2 hd2 cd2 21600000
+Z
+M x1 y1
+A iwd2 ihd2 s1 swN
+Z
+M x4 y4
+A iwd2 ihd2 s4 swN
+Z
+";
+
+/// 나누기 기호: 가운데 막대(두께 2·dy1)와 위아래 동그라미(반지름 rad, 막대와의 간격 yg)
+const MATH_DIVIDE: &str = "
+av adj1 23520
+av adj2 5880
+av adj3 11760
+gd a1 pin 1000 adj1 36745
+gd ma1 +- 0 0 a1
+gd q1 +/ 73490 ma1 4
+gd ma3w */ 36745 w h
+gd maxAdj3 min q1 ma3w
+gd a3 pin 1000 adj3 maxAdj3
+gd m4a3 */ a3 -4 1
+gd maxAdj2 +- 73490 m4a3 a1
+gd a2 pin 0 adj2 maxAdj2
+gd dy1 */ h a1 200000
+gd yg */ h a2 100000
+gd rad */ h a3 100000
+gd dx1 */ w 73490 200000
+gd y3 +- vc 0 dy1
+gd y4 +- vc dy1 0
+gd x1 +- hc 0 dx1
+gd x3 +- hc dx1 0
+gd y2 +- y3 0 yg
+gd yt +- y2 0 rad
+gd yt0 +- yt 0 rad
+gd y5 +- y4 yg 0
+path
+M x1 y3
+L x3 y3
+L x3 y4
+L x1 y4
+Z
+M hc yt0
+A rad rad 3cd4 21600000
+Z
+M hc y5
+A rad rad 3cd4 21600000
+Z
+";
 
 /// 네 방향 화살표: 화살촉 폭의 반 dx2 = ss·조정값2, 띠 두께의 반 dx3 = ss·조정값1/2, 촉 길이 x1 = ss·조정값3
 const QUAD_ARROW: &str = "
