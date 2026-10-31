@@ -19,6 +19,7 @@ pub mod paper;
 mod pdf;
 mod pdfimage;
 mod raster;
+mod webpng;
 
 pub use font::FontDb;
 pub use paginate::{
@@ -688,7 +689,8 @@ fn settings_default() -> Settings {
 }
 
 /// 개체 하나(도형·차트)를 PNG 그림으로 그린다 (웹 페이지 저장 — 한셀은 도형·차트를 RGBA PNG 로 넣는다). 개체 크기는
-/// `w × h`(px), 그림 크기는 `png_w × png_h`(그림자 몫 한 줄 더). 바탕은 투명이고 글꼴이 없으면 글자는 빠진다
+/// w × h (px), 그림 크기는 png_w × png_h (테두리·그림자 몫 한 줄 더). 바탕은 투명이고 글꼴이 없으면 글자는 빠진다.
+/// 그리는 일은 인쇄의 차트 비트맵과 같은 raster::render 를 쓴다 (webpng 는 그 앞뒤)
 pub fn shape_png(
     wb: &Workbook,
     sh: &crate::model::Shape,
@@ -740,33 +742,18 @@ pub fn shape_png(
         shadow.extend(ops);
         ops = shadow;
     }
-    let bm = raster::draw(&ops, png_w, png_h, &fonts);
-    raster::encode_png(png_w, png_h, &bm.rgba())
+    webpng::encode_png(png_w, png_h, &webpng::draw(&ops, png_w, png_h, &fonts))
 }
 
-/// 그림(PNG·BMP)을 `w × h` 크기 PNG 로 다시 그린다 (한셀 웹 저장은 그림도 크기에 맞춘 RGBA PNG 로 넣는다).
+/// 그림(PNG·BMP)을 w × h 크기 PNG 로 다시 그린다 (한셀 웹 저장은 그림도 크기에 맞춘 RGBA PNG 로 넣는다).
 /// 풀 수 없는 형식(JPEG 등)이면 None
 pub fn picture_png(data: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
-    let img = pdfimage::decode(data)?;
-    if img.dct {
-        return None;
-    }
-    let db = FontDb::new();
-    let fonts = FontSet::new(&db);
-    let ops = vec![Op::Image {
-        x0: 0.0,
-        y0: 0.0,
-        x1: w as f64 * 6.25,
-        y1: h as f64 * 6.25,
-        data: std::sync::Arc::new(data.to_vec()),
-    }];
-    let bm = raster::draw(&ops, w, h, &fonts);
-    Some(raster::encode_png(w, h, &bm.rgba()))
+    webpng::picture(data, w, h).map(|b| webpng::encode_png(w, h, &b))
 }
 
-/// 투명한 `w × h` PNG
+/// 투명한 w × h PNG
 pub fn transparent_png(w: u32, h: u32) -> Vec<u8> {
-    raster::encode_png(w, h, &vec![0u8; (w as usize) * (h as usize) * 4])
+    webpng::encode_png(w, h, &vec![0u8; (w as usize) * (h as usize) * 4])
 }
 
 #[cfg(test)]
