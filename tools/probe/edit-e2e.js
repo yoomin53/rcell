@@ -125,6 +125,20 @@ const SCRIPTS = {
     { op: "removeDuplicates", sheet: 0, range: "B2:F40", columns: [1, 2], header: true },
     { op: "textToColumns", sheet: 0, range: "C3:C30", dest: "AK3", comma: true, space: true },
   ],
+  view: [
+    { op: "setView", sheet: 0, zoom: 130, gridlines: false, headings: false },
+    { op: "setView", sheet: 0, view: "pageBreakPreview", zoom: 90 },
+  ],
+  page: [
+    { op: "pageSetup", sheet: 0, marginLeft: 30, marginTop: 50, orientation: "landscape", printArea: "A1:C10,E1:F5", printTitleRows: "1:2", centerH: true, gridLines: true },
+    { op: "pageSetup", sheet: 0, headerCenter: "&A 쪽 &P", footerRight: "&P/&N", comments: "atEnd", errors: "blank" },
+    { op: "pageSetup", sheet: 0, fitWide: 1, fitTall: 0 },
+  ],
+  protect: [
+    { op: "protectSheet", sheet: 0, password: "pw", formattingCells: true, sorting: true },
+    { op: "unprotectSheet", sheet: 0, password: "bad" },
+    { op: "protectWorkbook", password: "pw" },
+  ],
   shapes: [
     { op: "moveShape", sheet: 0, shape: 1, left: 100.5, top: 60, width: 300 },
     { op: "moveShape", sheet: 0, shape: 2, left: 20, top: 200 },

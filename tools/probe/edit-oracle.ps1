@@ -404,6 +404,33 @@ function Invoke-Edit($wb, $e) {
             if ($null -ne $e.comments) { $ps.PrintComments = @{ "none" = -4142; "atEnd" = 1; "inPlace" = 16 }[[string]$e.comments] }
             if ($null -ne $e.errors) { $ps.PrintErrors = @{ "displayed" = 0; "blank" = 1; "dash" = 2; "na" = 3 }[[string]$e.errors] }
         }
+        "protectSheet" {
+            # 시트 보호 (Worksheet.Protect): password, drawingObjects, contents, scenarios 와 allow* 이름
+            $M = [Type]::Missing
+            $pw = if ($null -ne $e.password) { [string]$e.password } else { $M }
+            $b = { param($v, $d) if ($null -ne $v) { [bool]$v } else { $d } }
+            $do = & $b $e.drawingObjects $true
+            $ct = & $b $e.contents $true
+            $sc = & $b $e.scenarios $true
+            $args2 = @($pw, $do, $ct, $sc, $M)
+            foreach ($n in "formattingCells","formattingColumns","formattingRows","insertingColumns","insertingRows","insertingHyperlinks","deletingColumns","deletingRows","sorting","filtering","usingPivotTables") {
+                $args2 += $(if ($null -ne $e.$n) { [bool]$e.$n } else { $M })
+            }
+            [void][System.__ComObject].InvokeMember("Protect", [Reflection.BindingFlags]::InvokeMethod, $null, $ws, $args2)
+        }
+        "unprotectSheet" {
+            if ($null -ne $e.password) { [void]$ws.Unprotect([string]$e.password) } else { [void]$ws.Unprotect() }
+        }
+        "protectWorkbook" {
+            $M = [Type]::Missing
+            $pw = if ($null -ne $e.password) { [string]$e.password } else { $M }
+            $st = if ($null -ne $e.structure) { [bool]$e.structure } else { $true }
+            $wi = if ($null -ne $e.windows) { [bool]$e.windows } else { $false }
+            [void]$wb.Protect($pw, $st, $wi)
+        }
+        "unprotectWorkbook" {
+            if ($null -ne $e.password) { [void]$wb.Unprotect([string]$e.password) } else { [void]$wb.Unprotect() }
+        }
         "setView" {
             # 보기 설정 (ActiveWindow — 창이 보여야 적용된다): 확대율·눈금선·머리글·0 표시·수식 보기·보기 방식
             $a = $wb.Application

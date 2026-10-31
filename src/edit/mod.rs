@@ -34,6 +34,7 @@ pub mod find;
 pub mod input;
 pub mod objects;
 pub mod page;
+pub mod protect;
 pub mod refs;
 pub mod shapes;
 pub mod sort;
@@ -700,6 +701,34 @@ pub enum Edit {
         sheet: Option<SheetSel>,
         #[serde(flatten)]
         p: Box<page::PageSetupEdit>,
+    },
+    /// 시트 보호 걸기 (암호는 16비트 해시로 둔다, 허용할 동작은 `formattingCells` … — 21절)
+    ProtectSheet {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        #[serde(flatten)]
+        o: Box<protect::ProtectOptions>,
+    },
+    /// 시트 보호 풀기 (암호가 있으면 맞아야 한다)
+    UnprotectSheet {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        #[serde(default)]
+        password: Option<String>,
+    },
+    /// 통합 문서 구조 보호 걸기 (`windows` 는 한셀이 저장하지 않는다)
+    ProtectWorkbook {
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default = "yes")]
+        structure: bool,
+        #[serde(default)]
+        windows: bool,
+    },
+    /// 통합 문서 보호 풀기
+    UnprotectWorkbook {
+        #[serde(default)]
+        password: Option<String>,
     },
     /// 보기 설정 (확대율 12–400, 눈금선·머리글·0 표시, 보기 방식 `normal`/`pageBreakPreview`) — 그 시트가 활성이 된다
     SetView {
@@ -1492,6 +1521,28 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             let i = si(wb, sheet)?;
             page::page_setup(wb, i, p)?;
             Ok(i)
+        }
+        Edit::ProtectSheet { sheet, o } => {
+            let i = si(wb, sheet)?;
+            protect::protect_sheet(wb, i, o)?;
+            Ok(i)
+        }
+        Edit::UnprotectSheet { sheet, password } => {
+            let i = si(wb, sheet)?;
+            protect::unprotect_sheet(wb, i, password)?;
+            Ok(i)
+        }
+        Edit::ProtectWorkbook {
+            password,
+            structure,
+            windows: _,
+        } => {
+            protect::protect_workbook(wb, password, *structure)?;
+            Ok(0)
+        }
+        Edit::UnprotectWorkbook { password } => {
+            protect::unprotect_workbook(wb, password)?;
+            Ok(0)
         }
         Edit::SetView {
             sheet,
