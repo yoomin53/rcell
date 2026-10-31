@@ -1735,6 +1735,109 @@ pub fn shape_shadow(wb: &Workbook, sh: &crate::model::Shape) -> Option<(i32, i32
     Some((dx, dy, [r, g, b]))
 }
 
+/// 바깥 그림자 비트맵 (한셀 PDF 실험 — 효과 있는 도형을 여러 가지로 만들어 인쇄): 도형의 채운 모양과 선을 그림자 색 한 가지로,
+/// 거리·방향만큼 옮겨 장치 해상도 비트맵 하나로 그린다 (도형 자체는 벡터로 그 위에). 옮기는 거리 = 거리(px) × 배율 × (cos, sin) 에
+/// 장치 1.2 쯤 더 (8 가지 시험에서 한셀과의 오차 ±1.4). 투명도가 있으면 흰 바탕에 섞은 색으로, 흐림은 아직 따르지 않는다.
+/// 한셀은 1비트 마스크(알파 없음)를 쓰기 때문이다
+fn shadow_raster(
+    body: &[Op],
+    sd: &crate::model::ShapeShadow,
+    theme: &crate::theme::Theme,
+    k: f64,
+) -> Option<Op> {
+    let (r, g, b) = super::draw::draw_rgb(&sd.color, theme).unwrap_or((0, 0, 0));
+    let alpha = sd
+        .color
+        .mods
+        .iter()
+        .find(|(n, _)| n == "alpha")
+        .map_or(1.0, |(_, v)| (*v as f64 / 100_000.0).clamp(0.0, 1.0));
+    let mix = |c: u8| (255.0 - (255.0 - c as f64) * alpha).round() as u8;
+    let color = [mix(r), mix(g), mix(b)];
+    let dist = sd.dist as f64 / 9525.0 * k;
+    let ang = (sd.dir as f64 / 60000.0).to_radians();
+    let (dx, dy) = (dist * ang.cos() + 1.2, dist * ang.sin() + 1.2);
+    let mv = |segs: &[Seg]| -> Vec<Seg> {
+        segs.iter()
+            .map(|s| match *s {
+                Seg::Move(x, y) => Seg::Move(x + dx, y + dy),
+                Seg::Line(x, y) => Seg::Line(x + dx, y + dy),
+                Seg::Cubic(a, b, c, d, e, f) => {
+                    Seg::Cubic(a + dx, b + dy, c + dx, d + dy, e + dx, f + dy)
+                }
+                Seg::Close => Seg::Close,
+            })
+            .collect()
+    };
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    let mut grow = |x: f64, y: f64, pad: f64| {
+        x0 = x0.min(x - pad);
+        y0 = y0.min(y - pad);
+        x1 = x1.max(x + pad);
+        y1 = y1.max(y + pad);
+    };
+    let mut sil = Vec::new();
+    for op in body {
+        match op {
+            Op::Path {
+                segs,
+                fill,
+                stroke,
+                even_odd,
+                caps,
+                ..
+            } if fill.is_some() || stroke.is_some() => {
+                let segs = mv(segs);
+                let pad = stroke.as_ref().map_or(0.0, |s| s.0 / 2.0);
+                for sg in &segs {
+                    match *sg {
+                        Seg::Move(x, y) | Seg::Line(x, y) => grow(x, y, pad),
+                        Seg::Cubic(a, b, c, d, e, f) => {
+                            grow(a, b, pad);
+                            grow(c, d, pad);
+                            grow(e, f, pad);
+                        }
+                        Seg::Close => {}
+                    }
+                }
+                sil.push(Op::Path {
+                    segs,
+                    fill: fill.map(|_| color),
+                    stroke: stroke.as_ref().map(|(w, _, d)| (*w, color, d.clone())),
+                    even_odd: *even_odd,
+                    caps: *caps,
+                    hatch: None,
+                });
+            }
+            Op::Rect {
+                x0: a,
+                y0: b,
+                x1: c,
+                y1: d,
+                ..
+            } => {
+                grow(a + dx, b + dy, 0.0);
+                grow(c + dx, d + dy, 0.0);
+                sil.push(Op::Rect {
+                    x0: a + dx,
+                    y0: b + dy,
+                    x1: c + dx,
+                    y1: d + dy,
+                    color,
+                });
+            }
+            _ => {}
+        }
+    }
+    (!sil.is_empty() && x1 > x0 && y1 > y0).then(|| Op::Raster {
+        x0: x0.floor(),
+        y0: y0.floor(),
+        x1: x1.ceil(),
+        y1: y1.ceil(),
+        ops: sil,
+    })
+}
+
 /// 페이지에 걸친 그리기 개체들을 그린다 (페이지 영역으로 자른다)
 pub fn objects_ops(
     wb: &Workbook,
@@ -1822,6 +1925,7 @@ pub fn objects_ops(
             continue;
         }
         let obj = sh.raw.as_deref().and_then(super::shape::object_element);
+        let mut body = Vec::new();
         object_ops(
             wb,
             sh,
@@ -1830,8 +1934,16 @@ pub fn objects_ops(
             frame,
             &theme,
             measure,
-            &mut inner,
+            &mut body,
         );
+        // 바깥 그림자가 있는 도형: 한셀은 그림자를 비트맵으로 먼저 깔고 도형은 벡터로 그 위에 그린다
+        if sh.kind == crate::model::ShapeKind::Shape
+            && let Some(sd) = &sh.shadow
+            && let Some(r) = shadow_raster(&body, sd, &theme, k)
+        {
+            inner.push(r);
+        }
+        inner.extend(body);
     }
     if !inner.is_empty() {
         ops.push(Op::Clip {
