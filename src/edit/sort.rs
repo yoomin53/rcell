@@ -274,6 +274,7 @@ pub fn sort(
         }
     }
     // 메모: 칸을 따라가고 상자는 한 칸 왼쪽·위로. 옮긴 메모는 목록 끝에 새 자리 차례로
+    let cap = super::structure::box_cap(sheet);
     let mut kept = Vec::new();
     let mut moved = Vec::new();
     for mut c in std::mem::take(&mut sheet.comments) {
@@ -281,7 +282,7 @@ pub fn sort(
             Some(to) => {
                 c.cell = to;
                 if let (Some(s), Some((g, _))) = (&mut c.shape, &geo) {
-                    s.anchor = sorted_box(g, s.anchor);
+                    s.anchor = sorted_box(g, s.anchor, cap);
                 }
                 moved.push(c);
             }
@@ -466,7 +467,7 @@ fn rename_moved(
 /// 정렬로 옮겨진 메모의 상자 (정렬 대조 실험): 앵커의 칸마다 한 칸 앞(숨긴 행·열은 건너뛴다)으로, 오프셋은 1px
 /// 줄인 뒤 앵커 좌표(열 너비·행 높이 − 1px)로 넘치거나 모자란 오프셋을 이웃 칸으로 옮긴다. 앞 칸이 없으면 첫 칸에
 /// 두고 왼쪽·위는 2px, 오른쪽·아래는 첫 칸 너비 + 1px 줄인다. 기본 너비가 아닌 열에서는 1px 다를 수 있다 (docs/editing.md 13절)
-fn sorted_box(g: &crate::render::Geometry, a: [u32; 8]) -> [u32; 8] {
+fn sorted_box(g: &crate::render::Geometry, a: [u32; 8], cap: bool) -> [u32; 8] {
     let size = |list: &[(u32, u32)]| -> Vec<i64> {
         list.iter().map(|p| (p.1 as i64 - 1).max(0)).collect()
     };
@@ -514,8 +515,23 @@ fn sorted_box(g: &crate::render::Geometry, a: [u32; 8]) -> [u32; 8] {
     };
     let (lc, lo) = back(&cols, a[0], a[1], true);
     let (tr, to) = back(&rows, a[2], a[3], true);
-    let (rc, ro) = back(&cols, a[4], a[5], false);
+    let (mut rc, mut ro) = back(&cols, a[4], a[5], false);
     let (br, bo) = back(&rows, a[6], a[7], false);
+    // A 열에서 시작한 상자의 너비는 A 열 너비 − 1px − 14px 를 넘지 못한다 (한셀 — 옛 끝이 69 든 70 이든 `0, 68`; 대조 실험 cb1)
+    if cap && a[0] == 0 && cols.len() > 1 {
+        let x = |c: u32| cols.iter().take(c as usize).sum::<i64>();
+        let (s0, e0) = (x(lc) + lo as i64, x(rc) + ro as i64);
+        let max = (cols[0] - 1 - 14).max(0);
+        if e0 > s0 + max {
+            let mut p = s0 + max;
+            let mut c = 0usize;
+            while c + 1 < cols.len() && p >= cols[c] && cols[c] > 0 {
+                p -= cols[c];
+                c += 1;
+            }
+            (rc, ro) = (c as u32, p.max(0) as u32);
+        }
+    }
     [lc, lo, tr, to, rc, ro, br, bo]
 }
 
@@ -853,24 +869,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            sorted_box(&g, [0, 14, 0, 10, 1, 69, 3, 23]),
+            sorted_box(&g, [0, 14, 0, 10, 1, 69, 3, 23], true),
             [0, 12, 0, 8, 0, 68, 3, 1]
         );
         assert_eq!(
-            sorted_box(&g, [2, 14, 3, 10, 3, 69, 6, 5]),
+            sorted_box(&g, [2, 14, 3, 10, 3, 69, 6, 5], true),
             [1, 13, 2, 9, 2, 68, 5, 4]
         );
         assert_eq!(
-            sorted_box(&g, [5, 14, 0, 10, 6, 69, 3, 22]),
+            sorted_box(&g, [5, 14, 0, 10, 6, 69, 3, 22], true),
             [4, 13, 0, 8, 5, 68, 3, 0]
         );
         assert_eq!(
-            sorted_box(&g, [3, 14, 10, 10, 4, 69, 14, 1]),
+            sorted_box(&g, [3, 14, 10, 10, 4, 69, 14, 1], true),
             [2, 13, 9, 9, 3, 68, 13, 0]
         );
         // 두 번째 정렬: 오른쪽이 첫 열에 있으면 첫 열 너비 + 1px 만큼
         assert_eq!(
-            sorted_box(&g, [0, 12, 0, 8, 0, 68, 3, 1]),
+            sorted_box(&g, [0, 12, 0, 8, 0, 68, 3, 1], true),
             [0, 10, 0, 6, 0, 0, 2, 0]
         );
     }

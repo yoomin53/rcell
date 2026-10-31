@@ -205,59 +205,69 @@ fn transposed_cf(c: &Clip, at: CellRef) -> Vec<Vec<crate::model::ConditionalForm
     out
 }
 
-/// 행/열 바꿔 붙일 때 유효성 범위 목록 (유효성 대조 실험 12가지): 한셀은 원본 칸마다(행 차례) 붙이고 — 칸이 유효성 범위
-/// 안이면 바꾼 자리의 한 칸을 목록 끝에 더하고 — 칸마다(범위 밖 칸도) 목록의 차례를 뒤집는다 (범위가 둘 이상이던 유효성만). 끝나면 맞닿은 칸을 하나로
-/// 이어 붙인다 (먼저 이은 자리에). 그래서 칸이 홀수 개면 뒤집힌 채, 짝수 개면 원래 차례다
+/// 행/열 바꿔 붙일 때 유효성 범위 목록 (유효성 대조 실험 g1–g12·h1–h16): 한셀은 원본 칸마다(행 차례) 붙이고 — 칸이 유효성 범위
+/// 안이면 바꾼 자리의 한 칸을 목록 끝에 더한다. 범위가 둘 이상이던 유효성은 칸마다(범위 밖 칸도) 목록의 차례를 뒤집으므로 칸이
+/// 홀수 개면 뒤집힌 채, 짝수 개면 원래 차례다. 범위가 하나뿐이던 유효성은 뒤집지 않고, 마지막으로 범위 안이던 칸 뒤에 이어진
+/// 칸이 짝수 개(0 포함)일 때만 끝에 한 번 뒤집는다. 끝나면 맞닿은 더한 칸을 하나로 이어 붙이는데 그 자리는 나중에 더한
+/// 칸의 자리다
 fn transposed_dv_sqref(old: &str, origin: CellRef, rows: u32, cols: u32, at: CellRef) -> String {
     type R = (u32, u32, u32, u32);
-    let mut list: Vec<(R, bool)> = refs::parse_sqref(old)
+    // (범위, 더한 칸인가, 더한 차례)
+    let mut list: Vec<(R, bool, u32)> = refs::parse_sqref(old)
         .iter()
-        .map(|a| (a.bounds(), false))
+        .map(|a| (a.bounds(), false, 0))
         .collect();
-    let inside = |list: &[(R, bool)], r: u32, c: u32| {
-        list.iter()
-            .any(|&((r0, c0, r1, c1), piece)| !piece && r >= r0 && r <= r1 && c >= c0 && c <= c1)
+    let orig: Vec<(R, bool, u32)> = list.clone();
+    let inside = |r: u32, c: u32| {
+        orig.iter()
+            .any(|&((r0, c0, r1, c1), _, _)| r >= r0 && r <= r1 && c >= c0 && c <= c1)
     };
-    let orig: Vec<(R, bool)> = list.clone();
+    let (mut trailing, mut any_inside, mut seq) = (0u32, false, 0u32);
     for dr in 0..rows {
         for dc in 0..cols {
-            if inside(&orig, origin.row + dr, origin.col + dc) {
+            if inside(origin.row + dr, origin.col + dc) {
                 let (r, c) = (at.row + dc, at.col + dr);
-                list.push(((r, c, r, c), true));
+                seq += 1;
+                list.push(((r, c, r, c), true, seq));
+                any_inside = true;
+                trailing = 0;
+            } else {
+                trailing += 1;
             }
-            // 범위가 하나뿐이던 유효성은 뒤집지 않는다 (한셀 — 더한 칸이 끝에 이어진다)
             if orig.len() > 1 {
                 list.reverse();
             }
         }
     }
-    // 더한 칸 중 맞닿은 것은 먼저 이은 자리에 하나로
-    let mut out: Vec<(R, bool)> = Vec::new();
-    for (rect, piece) in list {
-        if piece {
-            let mut cur = rect;
-            let mut at_i: Option<usize> = None;
-            while let Some(i) = out.iter().position(|&(a, p)| {
-                p && (super::cfpaste::join(a, cur).is_some()
-                    || super::cfpaste::join(cur, a).is_some())
-            }) {
-                let (a, _) = out.remove(i);
-                cur = super::cfpaste::join(a, cur)
-                    .or_else(|| super::cfpaste::join(cur, a))
-                    .unwrap_or(cur);
-                at_i = Some(at_i.map_or(i, |x: usize| x.min(i)));
-            }
-            match at_i {
-                Some(i) => out.insert(i, (cur, true)),
-                None => out.push((cur, true)),
-            }
-        } else {
-            out.push((rect, false));
-        }
+    if orig.len() == 1 && any_inside && trailing % 2 == 0 {
+        list.reverse();
     }
-    let areas: Vec<Area> = out
+    // 더한 칸 중 맞닿은 것은 나중에 더한 칸의 자리에 하나로
+    loop {
+        let pair = (0..list.len()).find_map(|a| {
+            (a + 1..list.len()).find_map(|b| {
+                let (x, y) = (list[a], list[b]);
+                (x.1 && y.1)
+                    .then(|| {
+                        super::cfpaste::join(x.0, y.0).or_else(|| super::cfpaste::join(y.0, x.0))
+                    })
+                    .flatten()
+                    .map(|m| (a, b, m))
+            })
+        });
+        let Some((a, b, m)) = pair else { break };
+        let (keep, drop) = if list[a].2 > list[b].2 {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        list[keep].0 = m;
+        list[keep].2 = list[a].2.max(list[b].2);
+        list.remove(drop);
+    }
+    let areas: Vec<Area> = list
         .iter()
-        .map(|&((a, b, c, d), _)| Area::rect(a, b, c, d))
+        .map(|&((a, b, c, d), _, _)| Area::rect(a, b, c, d))
         .collect();
     refs::sqref_text(&areas)
 }

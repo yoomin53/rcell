@@ -496,6 +496,7 @@ pub fn paste_with(
     }
     // 메모 (채우기는 빼고): 붙인 칸의 메모를 바꾼다. 상자는 칸이 옮겨진 메모처럼 다시 둔다
     if !filling && !clip.comments.is_empty() {
+        let cap = super::structure::box_cap(&wb.sheets[si]);
         let geo = super::structure::comment_geometry(wb, si, total_r.max(total_c) + 8)
             .map(|(g, _)| g)
             .unwrap_or_else(|| {
@@ -527,7 +528,8 @@ pub fn paste_with(
                     let mut c = cc.comment.clone();
                     c.cell = to;
                     if let Some(s) = &mut c.shape {
-                        s.anchor = super::structure::moved_comment_box(&geo, &geo, s.anchor, to);
+                        s.anchor =
+                            super::structure::moved_comment_box(&geo, &geo, s.anchor, to, cap);
                         if s.name.is_some() {
                             next += 1;
                             s.name = Some(format!("메모 {next}"));

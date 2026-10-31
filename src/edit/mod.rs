@@ -29,16 +29,19 @@ mod collate_data;
 mod collate_kana;
 pub mod data;
 pub mod fill;
-mod filter;
+pub mod filter;
 pub mod find;
 pub mod input;
 pub mod objects;
+pub mod page;
+pub mod protect;
 pub mod refs;
 pub mod shapes;
 pub mod sort;
 pub mod special;
 pub mod structure;
 pub mod style;
+pub mod table;
 pub mod view;
 
 use std::str::FromStr;
@@ -553,6 +556,16 @@ pub enum Edit {
         #[serde(default = "yes")]
         summary_below: bool,
     },
+    /// 도형 더하기 (`kind`: `rect` `diamond` `roundRect` `triangle` `ellipse` `textbox`, 위치·크기는 포인트 — 19절)
+    AddShape {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        kind: String,
+        left: f64,
+        top: f64,
+        width: f64,
+        height: f64,
+    },
     /// 도형·그림·차트 옮기기·크기 바꾸기 (`shape`: 번호 1부터 또는 이름, 위치·크기는 포인트)
     MoveShape {
         #[serde(default)]
@@ -692,6 +705,94 @@ pub enum Edit {
     Unfreeze {
         #[serde(default)]
         sheet: Option<SheetSel>,
+    },
+    /// 자동 필터 켜기·끄기·조건 걸기 (`field` 없이 `range` 만이면 켜고 이미 켜져 있으면 끈다, `field`(1부터)와 `criteria1` 로
+    /// 조건, `criteria1` 없이 `field` 만이면 그 열 조건 지우기 — 22절)
+    AutoFilter {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(default)]
+        field: Option<u32>,
+        #[serde(default)]
+        criteria1: Option<String>,
+        /// `and`(기본) / `or` / `top` / `bottom` / `topPercent` / `bottomPercent`
+        #[serde(default)]
+        operator: Option<String>,
+        #[serde(default)]
+        criteria2: Option<String>,
+    },
+    /// 필터 조건을 모두 지우고 숨긴 행을 보인다 (자동 필터는 그대로)
+    ShowAllData {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+    },
+    /// 표(ListObject) 만들기 (`range` 첫 행이 머리글 — 24절)
+    AddTable {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(flatten)]
+        o: table::TableEdit,
+    },
+    /// 쪽 설정 (여백·용지·방향·확대·페이지 맞추기·인쇄 영역·반복 제목·머리글/바닥글 …, 준 것만 바꾼다 — 20절)
+    PageSetup {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        #[serde(flatten)]
+        p: Box<page::PageSetupEdit>,
+    },
+    /// 시트 보호 걸기 (암호는 16비트 해시로 둔다, 허용할 동작은 `formattingCells` … — 21절)
+    ProtectSheet {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        #[serde(flatten)]
+        o: Box<protect::ProtectOptions>,
+    },
+    /// 시트 보호 풀기 (암호가 있으면 맞아야 한다)
+    UnprotectSheet {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        #[serde(default)]
+        password: Option<String>,
+    },
+    /// 통합 문서 구조 보호 걸기 (`windows` 는 한셀이 저장하지 않는다)
+    ProtectWorkbook {
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default = "yes")]
+        structure: bool,
+        #[serde(default)]
+        windows: bool,
+    },
+    /// 통합 문서 보호 풀기
+    UnprotectWorkbook {
+        #[serde(default)]
+        password: Option<String>,
+    },
+    /// 보기 설정 (확대율 12–400, 눈금선·머리글·0 표시, 보기 방식 `normal`/`pageBreakPreview`) — 그 시트가 활성이 된다
+    SetView {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        #[serde(default)]
+        zoom: Option<u32>,
+        #[serde(default)]
+        gridlines: Option<bool>,
+        #[serde(default)]
+        headings: Option<bool>,
+        #[serde(default)]
+        zeros: Option<bool>,
+        #[serde(default)]
+        view: Option<String>,
+    },
+    /// 시트 복사 (`to`: 복사본이 놓일 자리 — 원본 목록 기준 0부터, 기본은 원본 바로 뒤. 23절)
+    CopySheet {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        #[serde(default)]
+        to: Option<usize>,
+        #[serde(default)]
+        name: Option<String>,
     },
     /// 시트 탭 색 (`RRGGBB`, 빈 글이면 없앤다)
     TabColor {
@@ -1381,6 +1482,18 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             shapes::move_shape(wb, i, shape, *left, *top, *width, *height)?;
             Ok(i)
         }
+        Edit::AddShape {
+            sheet,
+            kind,
+            left,
+            top,
+            width,
+            height,
+        } => {
+            let i = si(wb, sheet)?;
+            shapes::add_shape(wb, i, kind, *left, *top, *width, *height)?;
+            Ok(i)
+        }
         Edit::DeleteShape { sheet, shape } => {
             let i = si(wb, sheet)?;
             shapes::delete_shape(wb, i, shape)?;
@@ -1464,6 +1577,79 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             let i = si(wb, sheet)?;
             view::unfreeze(wb, i)?;
             Ok(i)
+        }
+        Edit::AutoFilter {
+            sheet,
+            range,
+            field,
+            criteria1,
+            operator,
+            criteria2,
+        } => {
+            let i = si(wb, sheet)?;
+            filter::auto_filter(
+                wb,
+                i,
+                parse_range(range)?,
+                *field,
+                criteria1.as_deref(),
+                operator.as_deref(),
+                criteria2.as_deref(),
+            )?;
+            Ok(i)
+        }
+        Edit::ShowAllData { sheet } => {
+            let i = si(wb, sheet)?;
+            filter::show_all_data(wb, i)?;
+            Ok(i)
+        }
+        Edit::AddTable { sheet, range, o } => {
+            let i = si(wb, sheet)?;
+            table::add_table(wb, i, parse_range(range)?, o)?;
+            Ok(i)
+        }
+        Edit::PageSetup { sheet, p } => {
+            let i = si(wb, sheet)?;
+            page::page_setup(wb, i, p)?;
+            Ok(i)
+        }
+        Edit::ProtectSheet { sheet, o } => {
+            let i = si(wb, sheet)?;
+            protect::protect_sheet(wb, i, o)?;
+            Ok(i)
+        }
+        Edit::UnprotectSheet { sheet, password } => {
+            let i = si(wb, sheet)?;
+            protect::unprotect_sheet(wb, i, password)?;
+            Ok(i)
+        }
+        Edit::ProtectWorkbook {
+            password,
+            structure,
+            windows: _,
+        } => {
+            protect::protect_workbook(wb, password, *structure)?;
+            Ok(0)
+        }
+        Edit::UnprotectWorkbook { password } => {
+            protect::unprotect_workbook(wb, password)?;
+            Ok(0)
+        }
+        Edit::SetView {
+            sheet,
+            zoom,
+            gridlines,
+            headings,
+            zeros,
+            view,
+        } => {
+            let i = si(wb, sheet)?;
+            view::set_view(wb, i, *zoom, *gridlines, *headings, *zeros, view.as_deref())?;
+            Ok(i)
+        }
+        Edit::CopySheet { sheet, to, name } => {
+            let i = si(wb, sheet)?;
+            copy_sheet(wb, i, *to, name.as_deref())
         }
         Edit::TabColor { sheet, color } => {
             let i = si(wb, sheet)?;
@@ -2388,7 +2574,7 @@ pub(crate) fn one_cell_before(wb: &Workbook, si: usize) -> Before {
     }
 }
 
-/// 행·열을 숨기거나 보인 뒤: 크기를 지키는 그림의 끝 표지만 다시 정한다 (한셀 — 7·8행을 숨기면 그 행에 걸친 그림
+/// 행·열을 숨기거나 보인 뒤: 크기를 지키는 그림의 끝 표지와 메모 상자를 다시 정한다 (한셀 — 7·8행을 숨기면 그 행에 걸친 그림
 /// 끝이 8행에서 10행으로)
 pub(crate) fn one_cell_pictures_after(wb: &mut Workbook, si: usize, before: &Before) {
     if before.old.is_none() {
@@ -2397,6 +2583,10 @@ pub(crate) fn one_cell_pictures_after(wb: &mut Workbook, si: usize, before: &Bef
     let g = crate::render::sheet_geometry(wb, &wb.sheets[si], before.ext.0, before.ext.1);
     structure::keep_one_cell_sizes(&mut wb.sheets[si], &before.sizes, &g);
     structure::snap_from_hidden(&mut wb.sheets[si], &before.sizes, &g);
+    // 메모 상자는 화면 자리를 지킨다 (숨긴 행·열 때문에 칸 표지만 바뀐다 — 한셀 대조 실험 cb2)
+    if let Some(old) = &before.old {
+        structure::keep_comment_boxes(&mut wb.sheets[si], old, &g);
+    }
 }
 
 fn one_cell_after(wb: &mut Workbook, si: usize, before: &Before) {
@@ -3436,6 +3626,169 @@ pub fn add_sheet(wb: &mut Workbook, name: Option<&str>, at: usize) -> crate::Res
     wb.sheets.insert(at, sheet);
     remap_sheet_indexes(wb, &|i| Some(if i >= at { i + 1 } else { i }));
     // 한셀 자동화는 새 시트를 선택하지 않는다 (시트 대조 실험 — 화면에서 더하면 웹 편집기가 새 시트로 간다)
+    Ok(at)
+}
+
+/// 시트 복사 (한셀 `Worksheet.Copy` 대조 실험 cs1 — docs/editing.md 23절): 복사본은 `원본 (2)` 처럼 `(N)` 을 붙인 이름(가장 작은
+/// N ≥ 2) 으로 `at`(원본 목록 기준 자리, 기본은 원본 바로 뒤) 앞에 놓이고 선택된다. 그 시트의 지역 이름과 그 시트를 가리키는
+/// 전역 이름은 복사본의 지역 이름으로도 두며 (참조는 복사본으로), 복사본 안의 수식은 그대로다.
+pub fn copy_sheet(
+    wb: &mut Workbook,
+    si: usize,
+    at: Option<usize>,
+    name: Option<&str>,
+) -> crate::Result<usize> {
+    if si >= wb.sheets.len() {
+        return Err(err("시트가 없습니다"));
+    }
+    // 구조가 보호된 통합 문서에서 한셀의 시트 복사는 아무 일도 하지 않는다 (시트 추가는 되지만 — 대조 실험)
+    if wb.protection.as_ref().is_some_and(|p| p.lock_structure) {
+        return Ok(si);
+    }
+    ensure_code_names(wb);
+    let src = wb.sheets[si].clone();
+    let name = match name {
+        Some(n) => {
+            check_sheet_name(wb, n, None)?;
+            n.to_string()
+        }
+        None => (2..)
+            .map(|n| format!("{} ({n})", src.name))
+            .find(|n| !wb.sheets.iter().any(|s| refs::same_sheet(&s.name, n)))
+            .unwrap_or_default(),
+    };
+    let at = at.unwrap_or(si + 1).min(wb.sheets.len());
+    let sheet_id = wb.sheets.iter().map(|s| s.sheet_id).max().unwrap_or(0) + 1;
+    let part = (1..)
+        .map(|n| format!("xl/worksheets/sheet{}.xml", sheet_id + n - 1))
+        .find(|p| !wb.sheets.iter().any(|s| &s.part == p))
+        .unwrap_or_default();
+    let code_name = src.code_name.as_ref().map(|_| {
+        (1..)
+            .map(|n| format!("Sheet{n}"))
+            .find(|n| {
+                !wb.sheets.iter().any(|s| {
+                    s.code_name
+                        .as_deref()
+                        .is_some_and(|c| refs::same_sheet(c, n))
+                })
+            })
+            .unwrap_or_default()
+    });
+    let mut copy = src.clone();
+    copy.name = name.clone();
+    copy.sheet_id = sheet_id;
+    copy.part = part;
+    copy.code_name = code_name;
+    copy.view.tab_selected = false;
+    // 복사본의 메모 상자 이름은 `메모 0` 이 된다 (한셀 — 가끔 쓰레기 값이 들어가기도 한다, corpus 대조)
+    for c in &mut copy.comments {
+        if let Some(sh) = &mut c.shape
+            && sh.name.is_some()
+        {
+            sh.name = Some("메모 0".into());
+        }
+    }
+    // 복사본 안에서 원본 시트를 이름으로 가리키는 수식은 복사본을 가리키게 한다 (다른 시트를 가리키는 참조는 그대로)
+    for c in &mut copy.cells {
+        if let Some(f) = &mut c.formula {
+            f.text = refs::rename_sheet(&f.text, &src.name, &name);
+        }
+    }
+    // 차트: 복사본의 차트는 파트를 따로 두고 (계열 참조 중 원본 시트는 복사본으로)
+    let retarget = |x: &str| refs::rename_sheet(x, &src.name, &name);
+    let mut new_parts: Vec<crate::model::RawPart> = Vec::new();
+    {
+        fn chart_no(n: &str) -> Option<u32> {
+            n.rsplit("charts/chart")
+                .next()
+                .and_then(|t| t.strip_suffix(".xml"))
+                .and_then(|t| t.parse().ok())
+        }
+        let mut next = wb
+            .raw_parts
+            .iter()
+            .filter_map(|p| chart_no(&p.name))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        fn walk(
+            list: &mut [crate::model::Shape],
+            wb: &Workbook,
+            next: &mut u32,
+            new_parts: &mut Vec<crate::model::RawPart>,
+            f: &dyn Fn(&str) -> String,
+        ) {
+            for sh in list {
+                if let Some(c) = &mut sh.chart {
+                    structure::map_chart(c, f);
+                }
+                for rel in &mut sh.raw_rels {
+                    if !rel.1.ends_with("/chart") {
+                        continue;
+                    }
+                    let file = rel.2.rsplit('/').next().unwrap_or("").to_string();
+                    let Some(part) = wb
+                        .raw_parts
+                        .iter()
+                        .find(|p| p.name.ends_with(&format!("charts/{file}")))
+                    else {
+                        continue;
+                    };
+                    let new_file = format!("chart{next}.xml");
+                    let new_name = format!("xl/charts/{new_file}");
+                    let data = structure::patch_chart_formulas(&part.data, f)
+                        .unwrap_or_else(|| part.data.clone());
+                    new_parts.push(crate::model::RawPart {
+                        name: new_name.clone(),
+                        content_type: part.content_type.clone(),
+                        data,
+                    });
+                    // 차트 파트의 관계 파일도 같이
+                    if let Some(rp) = wb
+                        .raw_parts
+                        .iter()
+                        .find(|p| p.name == format!("xl/charts/_rels/{file}.rels"))
+                    {
+                        new_parts.push(crate::model::RawPart {
+                            name: format!("xl/charts/_rels/{new_file}.rels"),
+                            content_type: rp.content_type.clone(),
+                            data: rp.data.clone(),
+                        });
+                    }
+                    rel.2 = rel.2.replacen(&file, &new_file, 1);
+                    if let Some(t) = &mut sh.target {
+                        *t = t.replacen(&file, &new_file, 1);
+                    }
+                    *next += 1;
+                }
+                walk(&mut sh.children, wb, next, new_parts, f);
+            }
+        }
+        walk(&mut copy.shapes, wb, &mut next, &mut new_parts, &retarget);
+    }
+    wb.raw_parts.extend(new_parts);
+    // 이름: 원본의 지역 이름과 원본을 가리키는 전역 이름
+    let mut extra: Vec<crate::model::DefinedName> = Vec::new();
+    for d in &wb.defined_names {
+        let mine = d.local_sheet_id == Some(si as u32);
+        let refers = d.local_sheet_id.is_none()
+            && !d.name.starts_with("_xlnm.")
+            && refs::rename_sheet(&d.formula, &src.name, &name) != d.formula;
+        if mine || refers {
+            let mut n = d.clone();
+            n.formula = refs::rename_sheet(&d.formula, &src.name, &name);
+            extra.push(n);
+        }
+    }
+    wb.sheets.insert(at, copy);
+    remap_sheet_indexes(wb, &|i| Some(if i >= at { i + 1 } else { i }));
+    for mut d in extra {
+        d.local_sheet_id = Some(at as u32);
+        wb.defined_names.push(d);
+    }
+    // 한셀 자동화의 복사는 복사본을 선택한다
+    select_sheet(wb, at);
     Ok(at)
 }
 

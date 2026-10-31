@@ -296,6 +296,79 @@ pub fn group_cols(
     Ok(())
 }
 
+/// 보기 설정 (한셀 `ActiveWindow` 대조 실험 vw1–vw3): 시트를 활성으로 만들고 눈금선·머리글·0 표시·보기 방식·확대율을 바꾼다.
+/// 한셀은 보기 방식마다 확대율(일반·쪽 나누기 미리 보기)을 따로 두고 저장할 때 `zoomScaleNormal` 에 미리 보기 확대율을,
+/// `zoomScaleSheetLayoutView` 에 일반 확대율을 쓴다 (엑셀 이름과 반대). 열 때는 일반 보기 문서면 일반 = `zoomScale`(기본 100),
+/// 미리 보기 = `zoomScaleSheetLayoutView`(기본 75), 미리 보기 문서면 미리 보기 = `zoomScale`(기본 100),
+/// 일반 = `zoomScaleNormal`(기본 100) 으로 읽는다 — 그래서 rcell 은 엑셀 이름대로 쓴다. `zoomScale` 은 지금 보기의 것(100 이면
+/// 쓰지 않는다). 확대율은 12–400.
+pub fn set_view(
+    wb: &mut Workbook,
+    si: usize,
+    zoom: Option<u32>,
+    gridlines: Option<bool>,
+    headings: Option<bool>,
+    zeros: Option<bool>,
+    mode: Option<&str>,
+) -> crate::Result<()> {
+    if si >= wb.sheets.len() {
+        return Err(err("시트가 없습니다"));
+    }
+    if let Some(z) = zoom
+        && !(10..=400).contains(&z)
+    {
+        return Err(err("확대율은 10 이상 400 이하여야 합니다"));
+    }
+    let want_pbp = match mode {
+        None => None,
+        Some("normal") => Some(false),
+        Some("pageBreakPreview") => Some(true),
+        Some(m) => return Err(err(format!("지원하지 않는 보기 방식입니다: {m}"))),
+    };
+    super::select_sheet(wb, si);
+    let sheet = &mut wb.sheets[si];
+    if let Some(g) = gridlines {
+        sheet.show_grid_lines = g;
+    }
+    let v = &mut sheet.view;
+    if let Some(h) = headings {
+        v.show_row_col_headers = h;
+    }
+    if let Some(z) = zeros {
+        v.show_zeros = z;
+    }
+    let cur_pbp = v.view.as_deref() == Some("pageBreakPreview");
+    let (mut normal_z, mut pbp_z) = if cur_pbp {
+        (
+            v.zoom_scale_normal.unwrap_or(100),
+            v.zoom_scale.unwrap_or(100),
+        )
+    } else {
+        (
+            v.zoom_scale.unwrap_or(100),
+            v.zoom_scale_sheet_layout_view.unwrap_or(75),
+        )
+    };
+    let pbp = want_pbp.unwrap_or(cur_pbp);
+    if let Some(z) = zoom {
+        // 한셀의 가장 작은 확대율은 12
+        let z = z.max(12);
+        if pbp {
+            pbp_z = z;
+        } else {
+            normal_z = z;
+        }
+    }
+    v.view = pbp.then(|| "pageBreakPreview".to_string());
+    // 한셀이 읽는 꼴로 쓴다 (엑셀 이름 그대로 — `zoomScaleNormal` = 일반, `zoomScaleSheetLayoutView` = 미리 보기): 한셀이 저장한
+    // 문서는 둘이 바뀌어 있어 다시 열면 한 번 더 바뀐다 (대조 실험 vw3)
+    v.zoom_scale_sheet_layout_view = Some(pbp_z);
+    v.zoom_scale_normal = Some(normal_z);
+    let cur = if pbp { pbp_z } else { normal_z };
+    v.zoom_scale = (cur != 100).then_some(cur);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
