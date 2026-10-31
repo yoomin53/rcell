@@ -260,7 +260,16 @@ fn match_fn(ctx: &mut Ctx, a: &[Value]) -> Value {
     if matches!(a[1], Value::Number(_) | Value::Text(_) | Value::Bool(_)) {
         return Value::Error(ErrorKind::NA);
     }
-    let arr = try_v!(lookup_array(ctx, &a[1]));
+    // 찾을 범위가 3차원 참조면 시트마다 읽어 한 열로 (MATCH("",'S1:S3'!A1) = #N/A, 대조 실험 rand)
+    let arr = if let Value::Ref(r) = &a[1]
+        && r.len() == 1
+        && r[0].is_3d()
+    {
+        let data = super::flatten(ctx, &a[1]);
+        Rc::new(Array::new(data.len(), 1, data))
+    } else {
+        try_v!(lookup_array(ctx, &a[1]))
+    };
     let vals = try_v!(vector(&arr));
     let mt = try_v!(num_or(ctx, a, 2, 1.0));
     let found = if mt == 0.0 {
@@ -458,6 +467,10 @@ fn xlookup(ctx: &mut Ctx, a: &[Value]) -> Value {
         && let Value::Ref(r) = &a[0]
         && (r.len() > 1 || r.iter().any(|x| !x.is_cell()))
     {
+        return Value::Error(ErrorKind::Value);
+    }
+    // 찾을 값이 오류면 #VALUE! (XLOOKUP(NA(),…), XLOOKUP(#NULL!,…) — 한셀은 오류 값을 찾지 않는다)
+    if let Value::Error(_) = &a[0] {
         return Value::Error(ErrorKind::Value);
     }
     let x = try_v!(scalar_key(ctx, &a[0]));

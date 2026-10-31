@@ -440,7 +440,7 @@ VALUETOTEXT, VSTACK, WON, XMATCH. rcell 은 `CalcOptions::excel_functions` 를 �
 ## 7. 맞춘 정도
 
 - 말뭉치 (`tests/calc_corpus.rs`): 한셀이 저장한 1617 문서의 수식 칸 31297 개 모두 일치 (캐시를 믿을 수 없는 80 문서 제외).
-- 함수 대조 실험 (`tests/calc_oracle.rs`, 휘발성 제외 22642 경우): 22520 일치 (99.46%), 503 함수 가운데 485 개는 모든
+- 함수 대조 실험 (`tests/calc_oracle.rs`, 휘발성 제외 22642 경우): 22522 일치 (99.47%), 503 함수 가운데 485 개는 모든
   경우가 같다. 남은 122 경우는 위 표의 것이다: BESSELY·BESSELI 77, CHISQ.INV 6, XLOOKUP·MINVERSE(특이 행렬, 한셀의
   오류) 21, 재무 반복 7, C 런타임 반올림 3, 그 밖 8 (수식 글을 다시 쓰는 데서 생긴 3 경우 포함). `CalcOptions::hcell_bugs` 를 켜면 MINVERSE 10 경우도 같다.
 - 넓힌 대조 실험 (2026 round5, 같은 도구, 결과 문서는 저장소 밖): 기본 초월 함수 11 116 경우(끝자리 비교, 위 1장),
