@@ -111,6 +111,9 @@ enum Cmd {
         /// 바이너리 저장에서 한셀이 잃는 값도 똑같이 잃는다 (한셀과 같은 결과를 볼 때)
         #[arg(long)]
         exact: bool,
+        /// .ods 를 한셀 호환으로 쓰지 않고 rcell 이 아는 것을 모두 쓴다 (표시 형식·아래 맞춤·점선·정확한 행 높이와 열 너비·여백·눈금선·확대율)
+        #[arg(long)]
+        ods_lossless: bool,
         /// 저장할 문서의 암호 (XML·바이너리 .cell, .xlsx, .xlsm, .xlsb — 한셀과 같은 표준 암호화)
         #[arg(long)]
         out_password: Option<String>,
@@ -333,6 +336,7 @@ fn main() -> ExitCode {
             format,
             abs_path,
             exact,
+            ods_lossless,
             out_password,
             delimiters,
             text_columns,
@@ -341,8 +345,7 @@ fn main() -> ExitCode {
             &input,
             &output,
             format.as_deref(),
-            abs_path,
-            exact,
+            (abs_path, exact, ods_lossless),
             out_password.as_deref(),
             (delimiters, text_columns, start_row),
         ),
@@ -895,8 +898,7 @@ fn convert(
     input: &Path,
     output: &Path,
     format: Option<&str>,
-    abs_path: Option<String>,
-    exact: bool,
+    (abs_path, exact, ods_lossless): (Option<String>, bool, bool),
     out_password: Option<&str>,
     import: (Option<String>, Option<String>, Option<u32>),
 ) -> rcell::Result<()> {
@@ -951,6 +953,13 @@ fn convert(
                 eprintln!("경고: {w}");
             }
             std::fs::write(output, bytes)?;
+            Ok(())
+        }
+        rcell::SaveFormat::Ods if ods_lossless => {
+            let opts = rcell::ods::WriteOptions {
+                hcell_compatible: false,
+            };
+            std::fs::write(output, rcell::ods::write_with(&wb, &opts)?)?;
             Ok(())
         }
         _ => rcell::save_as(&wb, output, format),

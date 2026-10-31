@@ -177,6 +177,11 @@ fn range_address(a: &str) -> String {
 /// 셀 수식 글 → ODF (한셀 꼴: `of:=` + A1 참조 그대로, 인수 구분 `;`). 다른 시트 참조 `시트!A1:B2` 는 ODF 표준
 /// `[시트.A1:.B2]` 로 (한셀은 `#REF.` 로 잃는다)
 pub fn formula_to_odf(f: &str) -> String {
+    formula_to_odf_with(f, false)
+}
+
+/// [`formula_to_odf`] 에 한셀 호환 선택을 더한 것: 한셀은 다른 시트 참조를 `시트.A1` (대괄호 없이)로, `#REF!` 를 `#REF.` 로 쓴다
+pub fn formula_to_odf_with(f: &str, compat: bool) -> String {
     let mut out = String::from("of:=");
     let chars: Vec<char> = f.chars().collect();
     let mut i = 0;
@@ -196,6 +201,7 @@ pub fn formula_to_odf(f: &str) -> String {
                 continue;
             }
             ',' => out.push(';'),
+            '!' if compat && out.ends_with("#REF") => out.push('.'),
             '!' => {
                 // 앞의 시트 이름 (따옴표 이름 또는 낱말) 을 out 에서 떼어 [이름.참조] 로
                 let sheet_start = if out.ends_with('\'') {
@@ -220,6 +226,11 @@ pub fn formula_to_odf(f: &str) -> String {
                         let sheet = out[s..].to_string();
                         out.truncate(s);
                         let r: String = chars[i + 1..j].iter().collect();
+                        if compat {
+                            out.push_str(&format!("{sheet}.{r}"));
+                            i = j;
+                            continue;
+                        }
                         let r = r.replace(':', ":.");
                         out.push_str(&format!("[{sheet}.{r}]"));
                         i = j;
@@ -1355,6 +1366,42 @@ fn paragraphs(cell: &Element) -> String {
 }
 
 /// `.ods` 바이트 → 통합 문서
+/// `meta.xml` → 문서 속성 (한셀이 읽는 대로: 만든 이는 `meta:initial-creator`, 마지막 저장은 `dc:creator`, 인쇄한 때는
+/// `meta:printed-by` 나 `meta:print-date` 의 날짜)
+fn read_meta(bytes: &[u8], wb: &mut Workbook) {
+    const NS_META: &str = "urn:oasis:names:tc:opendocument:xmlns:meta:1.0";
+    const NS_DC: &str = "http://purl.org/dc/elements/1.1/";
+    let Ok(xml) = entry(bytes, "meta.xml") else {
+        return;
+    };
+    let Ok(root) = crate::xml::parse_raw(&xml, "meta.xml") else {
+        return;
+    };
+    let Some(meta) = root.child_ns(NS_OFFICE, "meta") else {
+        return;
+    };
+    let get = |ns: &str, name: &str| {
+        meta.child_ns(ns, name)
+            .map(|e| e.text())
+            .filter(|t| !t.is_empty())
+    };
+    let date = |t: String| t.trim_end_matches('Z').to_string();
+    let p = &mut wb.properties;
+    p.title = get(NS_DC, "title");
+    p.subject = get(NS_DC, "subject");
+    p.description = get(NS_DC, "description");
+    p.creator = get(NS_META, "initial-creator");
+    p.last_modified_by = get(NS_DC, "creator");
+    p.keywords = get(NS_META, "keyword");
+    p.revision = get(NS_META, "editing-cycles");
+    p.created = get(NS_META, "creation-date").map(date);
+    p.last_printed = get(NS_META, "print-date")
+        .or_else(|| {
+            get(NS_META, "printed-by").filter(|t| t.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .map(date);
+}
+
 pub fn read(bytes: &[u8]) -> Result<Workbook> {
     let content = entry(bytes, "content.xml")?;
     let root = crate::xml::parse_raw(&content, "content.xml")?;
@@ -1518,6 +1565,7 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
     }
     let mut wb = crate::edit::new_workbook();
     wb.application = Some("ODF".into());
+    read_meta(bytes, &mut wb);
     // 기본 글꼴: "Default" 칸 스타일의 글자 속성 (한셀이 문서의 기본 글꼴로 삼는다)
     let base = resolved_props(&cell_styles.raw, "Default");
     if let Some(f0) = wb.styles.fonts.first_mut() {
@@ -1878,7 +1926,11 @@ fn text_props(f: &crate::model::Font, theme: &crate::theme::Theme) -> String {
 }
 
 /// 테두리 변 → ODF 테두리. 한셀처럼 굵기로만 (가는 선 0.002cm, 중간·굵은 선 0.088cm, 이중선 0.039cm)
-fn odf_edge(e: Option<&crate::model::BorderEdge>, theme: &crate::theme::Theme) -> Option<String> {
+fn odf_edge(
+    e: Option<&crate::model::BorderEdge>,
+    theme: &crate::theme::Theme,
+    compat: bool,
+) -> Option<String> {
     let e = e?;
     let style = e.style.as_deref().filter(|s| *s != "none")?;
     let w = match style {
@@ -1887,8 +1939,8 @@ fn odf_edge(e: Option<&crate::model::BorderEdge>, theme: &crate::theme::Theme) -
             "0.088cm solid"
         }
         // 한셀은 쓸 때 점선·파선을 실선으로 잃지만 읽을 때는 dashed·dotted 를 안다
-        "dashed" => "0.002cm dashed",
-        "dotted" | "hair" => "0.002cm dotted",
+        "dashed" if !compat => "0.002cm dashed",
+        "dotted" | "hair" if !compat => "0.002cm dotted",
         _ => "0.002cm solid",
     };
     let color = css(e.color.as_ref(), theme).unwrap_or_else(|| "#000000".into());
@@ -1902,6 +1954,7 @@ fn cell_style_xml(
     xf_index: u32,
     theme: &crate::theme::Theme,
     data_style: Option<&str>,
+    compat: bool,
 ) -> String {
     let styles = &wb.styles;
     let xf = styles.xf(xf_index).cloned().unwrap_or_default();
@@ -1910,7 +1963,8 @@ fn cell_style_xml(
     let mut cell = String::new();
     cell.push_str(match al.vertical.as_deref() {
         Some("top") => r#" style:vertical-align="top""#,
-        Some("bottom") | None => r#" style:vertical-align="bottom""#,
+        // 한셀은 아래 맞춤도 가운데로 쓴다
+        Some("bottom") | None if !compat => r#" style:vertical-align="bottom""#,
         _ => r#" style:vertical-align="middle""#,
     });
     if let Some(f) = styles.fills.get(xf.fill_id as usize) {
@@ -1933,10 +1987,10 @@ fn cell_style_xml(
             ("left", &b.left),
             ("right", &b.right),
         ] {
-            let v = odf_edge(e.as_ref(), theme).unwrap_or_else(|| "none".into());
+            let v = odf_edge(e.as_ref(), theme, compat).unwrap_or_else(|| "none".into());
             cell.push_str(&format!(r#" fo:border-{k}="{v}""#));
         }
-        if let Some(d) = odf_edge(b.diagonal.as_ref(), theme) {
+        if let Some(d) = odf_edge(b.diagonal.as_ref(), theme, compat).filter(|_| !compat) {
             if b.diagonal_down {
                 cell.push_str(&format!(r#" style:diagonal-tl-br="{d}""#));
             }
@@ -2122,7 +2176,14 @@ fn hf_odf(code: &str, text_styles: &mut Vec<String>, theme_font: &str) -> String
 }
 
 /// 머리글·바닥글 코드 → `style:header`/`style:footer` 의 영역들
-fn hf_regions(code: &str, text_styles: &mut Vec<String>, theme_font: &str) -> String {
+fn hf_regions(
+    code: &str,
+    text_styles: &mut Vec<String>,
+    theme_font: &str,
+    // (시트 번호, "Header"/"Footer", 한셀 호환) — 한셀은 영역마다 `Sheet{N}{Header|Footer}Style{Left|Center|Right}` 이름의
+    // 글자 스타일만 읽는다 (다른 이름의 스타일은 머리글 글꼴로 읽지 않는다)
+    named: (usize, &str, bool),
+) -> String {
     let mut sections: [String; 3] = Default::default();
     let mut cur = 1usize;
     let mut rest = code;
@@ -2154,19 +2215,105 @@ fn hf_regions(code: &str, text_styles: &mut Vec<String>, theme_font: &str) -> St
     }
     sections[cur].push_str(&buf);
     let mut out = String::new();
-    for (k, s) in ["region-left", "region-center", "region-right"]
+    for ((k, region), s) in ["region-left", "region-center", "region-right"]
         .iter()
+        .zip(["Left", "Center", "Right"])
         .zip(sections.iter())
     {
         if !s.is_empty() {
-            let paras: String = s
+            let mut paras: String = s
                 .split('\n')
                 .map(|line| format!("<text:p>{}</text:p>", hf_odf(line, text_styles, theme_font)))
                 .collect();
+            if named.2
+                && let Some(at) = paras.find(r#"text:style-name="T"#)
+            {
+                let digits: String = paras[at + 18..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                if let Some(props) = digits
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| text_styles.get(n - 1))
+                    .cloned()
+                {
+                    let name = format!("Sheet{}{}Style{region}", named.0, named.1);
+                    let entry =
+                        format!("{name}\u{0}{}", props.rsplit('\u{0}').next().unwrap_or(""));
+                    if !text_styles.contains(&entry) {
+                        text_styles.push(entry);
+                    }
+                    // 영역의 모든 글 조각이 이 스타일
+                    let mut rewritten = String::new();
+                    let mut rest = paras.as_str();
+                    while let Some(p) = rest.find(r#"text:style-name="T"#) {
+                        rewritten.push_str(&rest[..p]);
+                        rewritten.push_str(&format!(r#"text:style-name="{name}""#));
+                        let after = &rest[p + 18..];
+                        let skip = after.chars().take_while(char::is_ascii_digit).count();
+                        rest = &after[skip + 1..];
+                    }
+                    rewritten.push_str(rest);
+                    paras = rewritten;
+                }
+            }
             out.push_str(&format!("<style:{k}>{paras}</style:{k}>"));
         }
     }
     out
+}
+
+/// `'[N]시트'!$C$15:$F$15` → 한셀의 외부 참조 주소 `$'[C:./경로/파일]시트'.$C$15:$F$15`.
+/// 연결 파일 이름이 시트 이름과 같으면 (자기 자신) None
+fn external_name(wb: &Workbook, formula: &str) -> Option<String> {
+    let rest = formula.strip_prefix("'[")?;
+    let (n, rest) = rest.split_once(']')?;
+    let (sheet, cells) = rest.split_once("'!")?;
+    let link = wb
+        .external_links
+        .get(n.parse::<usize>().ok()?.checked_sub(1)?)?;
+    let path = link.target.strip_prefix("file:///")?;
+    let mut decoded = String::new();
+    let b = path.as_bytes();
+    let mut bytes = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(v) = path
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            bytes.push(v);
+            i += 3;
+        } else {
+            bytes.push(b[i]);
+            i += 1;
+        }
+    }
+    decoded.push_str(&String::from_utf8_lossy(&bytes));
+    let stem = decoded
+        .rsplit('/')
+        .next()?
+        .rsplit_once('.')
+        .map_or("", |x| x.0);
+    if stem == sheet {
+        return None;
+    }
+    // `C:/dir/file` → `C:./dir/file`
+    let (drive, tail) = decoded.split_once('/')?;
+    Some(format!("$'[{drive}./{tail}]{sheet}'.{cells}"))
+}
+
+/// 한셀 호환 쓰기에서 쓰지 않는 수식 칸 (한셀 `.ods` 저장 대조): 값이 빈 글로 보이는 칸(값 `""` 이나 값이 없는 칸, 0 을 감추는
+/// 표시 형식)과 공유 수식의 종속 칸 — 한셀은 공유 수식의 기준 칸(`range` 가 있는)만 쓰고 종속 칸은 값도 잃는다
+fn hidden_formula(wb: &Workbook, c: &Cell, compat: bool) -> bool {
+    use crate::model::FormulaKind;
+    compat
+        && c.formula.as_ref().is_some_and(|f| {
+            (f.kind == FormulaKind::Shared && f.range.is_none())
+                || crate::csv::shown(wb, c).is_empty()
+        })
 }
 
 /// 시트 인쇄 설정 → 쪽 모양과 마스터 쪽. 한셀이 읽을 때 위(아래) 여백 = 쪽 여백 + 머리글(바닥글) 높이 + 간격 이므로
@@ -2176,6 +2323,7 @@ fn page_xml(
     sheet: &crate::model::Sheet,
     text_styles: &mut Vec<String>,
     theme_font: &str,
+    compat: bool,
 ) -> (String, String) {
     let p = &sheet.page;
     let m = p.margins.clone().unwrap_or(crate::model::PageMargins {
@@ -2186,7 +2334,26 @@ fn page_xml(
         header: 0.3,
         footer: 0.3,
     });
-    let cm = |inch: f64| inch * 2.54;
+    // 한셀 호환이면 한셀처럼 인치를 pt/28.35 로 센티미터에 옮기고, 위·아래 여백 모두 머리글 여백으로 쓴다
+    let cm = |inch: f64| {
+        if compat {
+            // 한셀은 여백을 HWPUNIT(1/7200 인치)로 두는데 0.5117 인치 언저리(3683–3685)는 한두 단위 낮게 쓴다 (한셀 .ods 대조)
+            let n = (inch * 7200.0).round();
+            let n = match n as i64 {
+                3683 => 3682.0,
+                3684 | 3685 => 3683.0,
+                _ => n,
+            };
+            let inch = if n != (inch * 7200.0).round() {
+                n / 7200.0
+            } else {
+                inch
+            };
+            inch * 72.0 / 28.35
+        } else {
+            inch * 2.54
+        }
+    };
     let su = p.setup.clone().unwrap_or_default();
     let landscape = su.orientation.as_deref() == Some("landscape");
     let (pw, ph) = PAPERS
@@ -2194,13 +2361,16 @@ fn page_xml(
         .find(|x| Some(x.0) == su.paper_size)
         .map_or((21.0, 29.7), |x| (x.1, x.2));
     let (pw, ph) = if landscape { (ph, pw) } else { (pw, ph) };
+    // 한셀의 A4 짧은 변은 21.001cm
+    let fix = |v: f64| if compat && v == 21.0 { 21.001 } else { v };
+    let (pw, ph) = (fix(pw), fix(ph));
     let mut props = format!(
         r#"fo:page-width="{pw}cm" fo:page-height="{ph}cm" style:print-orientation="{}" fo:margin-left="{:.6}cm" fo:margin-right="{:.6}cm" fo:margin-top="{:.6}cm" fo:margin-bottom="{:.6}cm" style:scale-to="{}""#,
         if landscape { "landscape" } else { "portrait" },
         cm(m.left),
         cm(m.right),
         cm(m.header),
-        cm(m.footer),
+        cm(if compat { m.header } else { m.footer }),
         su.scale.unwrap_or(100)
     );
     // 한셀처럼 배율과 쪽 맞춤 수를 함께 쓴다 (한셀은 읽을 때 늘 쪽 맞춤을 켠다)
@@ -2242,8 +2412,12 @@ fn page_xml(
         let gap = if room >= 0.25 { 0.25 } else { 0.0 };
         (room - gap, gap)
     };
-    let (hh, hg) = block(m.top, m.header);
-    let (fh, fg) = block(m.bottom, m.footer);
+    let (mut hh, mut hg) = block(m.top, m.header);
+    let (mut fh, mut fg) = block(m.bottom, m.footer);
+    if compat {
+        // 한셀은 머리글·바닥글 높이 0.751cm·간격 0.25cm 로 고정해 쓴다 (그래서 다시 열면 위·아래 여백이 늘어난다)
+        (hh, hg, fh, fg) = (0.751, 0.25, 0.751, 0.25);
+    }
     let layout = format!(
         r#"<style:page-layout style:name="pm{i}"><style:page-layout-properties {props}/><style:header-style><style:header-footer-properties fo:min-height="{hh:.6}cm" fo:margin-left="0cm" fo:margin-right="0cm" fo:margin-bottom="{hg}cm"/></style:header-style><style:footer-style><style:header-footer-properties fo:min-height="{fh:.6}cm" fo:margin-left="0cm" fo:margin-right="0cm" fo:margin-top="{fg}cm"/></style:footer-style></style:page-layout>"#
     );
@@ -2254,7 +2428,12 @@ fn page_xml(
         if let Some(c) = code.as_deref().filter(|c| !c.is_empty()) {
             master.push_str(&format!(
                 "<style:{tag}>{}</style:{tag}>",
-                hf_regions(c, text_styles, theme_font)
+                hf_regions(
+                    c,
+                    text_styles,
+                    theme_font,
+                    (i, if tag == "header" { "Header" } else { "Footer" }, compat)
+                )
             ));
         }
     }
@@ -2295,7 +2474,74 @@ fn odf_range(formula: &str) -> Option<String> {
 }
 
 /// 통합 문서 → `.ods` 바이트 (한셀처럼 `mimetype` 없이 내용·스타일·메타·설정·매니페스트)
+/// 쓰기 선택
+#[derive(Debug, Clone, Copy)]
+pub struct WriteOptions {
+    /// 한셀이 `.ods` 에 쓰는 대로만 쓴다 (기본). 한셀이 버리는 것 — 표시 형식(`number:*`)·아래 세로 맞춤·점선·파선·
+    /// 정확한 행 높이와 열 너비·위·아래 여백·눈금선·확대율, 빈 글로 보이는 수식 칸의 수식 — 은 쓰지 않고 한셀이 연 문서 속성 꼴로 쓴다.
+    /// 거짓이면 rcell 이 아는 것을 모두 쓴다 (한셀이 다시 열어도 같은 결과를 보장하지 않는다)
+    pub hcell_compatible: bool,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        WriteOptions {
+            hcell_compatible: true,
+        }
+    }
+}
+
+/// 문서 속성 → `meta.xml` 의 `office:meta` 안 (한셀 꼴: 만든 이 `meta:initial-creator`, 마지막으로 저장한 이 `dc:creator`,
+/// 고친 횟수 `meta:editing-cycles`, 인쇄한 때는 `meta:printed-by` 에 날짜로 쓴다)
+fn meta_xml(wb: &Workbook, compat: bool) -> String {
+    let p = &wb.properties;
+    let mut m = String::from("<meta:generator>rcell</meta:generator>");
+    let mut tag = |name: &str, v: &Option<String>| {
+        if let Some(v) = v.as_deref().filter(|v| !v.is_empty()) {
+            m.push_str(&format!("<{name}>{}</{name}>", esc(v)));
+        }
+    };
+    tag("dc:title", &p.title);
+    tag("dc:subject", &p.subject);
+    tag("meta:initial-creator", &p.creator);
+    tag("dc:description", &p.description);
+    tag("meta:keyword", &p.keywords);
+    tag("dc:creator", &p.last_modified_by);
+    tag("meta:editing-cycles", &p.revision);
+    let date = |d: &Option<String>| {
+        d.as_deref().map(|d| {
+            let d = d.trim_end_matches('Z');
+            if d.contains('.') {
+                d.to_string()
+            } else {
+                format!("{d}.000")
+            }
+        })
+    };
+    tag(
+        if compat {
+            "meta:printed-by"
+        } else {
+            "meta:print-date"
+        },
+        &date(&p.last_printed),
+    );
+    tag("meta:creation-date", &date(&p.created));
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-meta {NS} office:version="1.2"><office:meta>{m}</office:meta></office:document-meta>"#,
+        NS = META_NS
+    )
+}
+
+const META_NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0" xmlns:dc="http://purl.org/dc/elements/1.1/""#;
+
 pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
+    write_with(wb, &WriteOptions::default())
+}
+
+/// [`write`] 에 쓰기 선택을 더한 것
+pub fn write_with(wb: &Workbook, opts: &WriteOptions) -> Result<Vec<u8>> {
+    let compat = opts.hcell_compatible;
     // 값이 없는 수식이 있으면 다시 계산한 사본으로 쓴다 (ODS 는 수식의 값을 담는다 — 한셀은 열 때 다시 계산하지 않는다)
     let computed;
     let wb = if wb.sheets.iter().any(|s| {
@@ -2350,7 +2596,7 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
         .unwrap_or_else(|| "맑은 고딕".into());
     for (si, sheet) in wb.sheets.iter().enumerate() {
         let i = si + 1;
-        let (layout, master) = page_xml(i, sheet, &mut hf_styles, &theme_font);
+        let (layout, master) = page_xml(i, sheet, &mut hf_styles, &theme_font, compat);
         layouts.push_str(&layout);
         masters.push_str(&master);
         // 표 스타일: 마스터 쪽, 숨김, 탭 색
@@ -2361,8 +2607,27 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
             r#"<style:style style:name="ta{i}" style:family="table" style:master-page-name="mp{i}"><style:table-properties table:display="{}"{tab}/></style:style>"#,
             sheet.state == crate::model::SheetState::Visible
         ));
+        // 인쇄 범위: 시트의 `_xlnm.Print_Area` 이름 → `table:print-ranges` (한셀 꼴 `시트.B3:G14`)
+        let print_ranges = wb
+            .defined_names
+            .iter()
+            .find(|n| n.name == "_xlnm.Print_Area" && n.local_sheet_id == Some(si as u32))
+            .map(|n| {
+                n.formula
+                    .split(',')
+                    .filter_map(|r| {
+                        let (sh, cells) = r.rsplit_once('!')?;
+                        let sh = crate::ods_draw::sheet_ref(sh.trim_matches('\''));
+                        Some(format!("{sh}.{}", cells.replace('$', "")))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|r| !r.is_empty())
+            .map(|r| format!(r#" table:print-ranges="{r}""#))
+            .unwrap_or_default();
         body.push_str(&format!(
-            r#"<table:table table:name="{}" table:style-name="ta{i}">"#,
+            r#"<table:table table:name="{}" table:style-name="ta{i}"{print_ranges}>"#,
             esc(&sheet.name)
         ));
         let last_col = sheet.cells.iter().map(|c| c.r.col).max().unwrap_or(0).max(
@@ -2382,10 +2647,16 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
                 .and_then(|i| i.width)
                 .unwrap_or(sheet.default_col_width.unwrap_or(9.003_906_25));
             // 한셀은 읽을 때 글자 수를 1/256 로 버린다 — 식의 오차(1e-6cm)로 한 칸 아래가 되지 않게 조금 올린다
-            let w = format!(
-                "{:.6}cm",
-                (width_cm(width, font_pt) * 1e6).ceil() / 1e6 + 1e-5
-            );
+            let w = if compat {
+                // 한셀은 단정밀도로 셈해 소수 여섯째 자리까지 쓴다 (한셀 .ods 열 너비 95쌍이 모두 이 식과 같다)
+                let cm = ((width + 0.772_343_7) * digit_px(font_pt) + 5.0) / 96.0 * 2.54;
+                format!("{:.6}cm", f64::from(cm as f32))
+            } else {
+                format!(
+                    "{:.6}cm",
+                    (width_cm(width, font_pt) * 1e6).ceil() / 1e6 + 1e-5
+                )
+            };
             let name = style_of(&mut col_styles, w.clone(), "co", &mut auto, &|n| {
                 format!(
                     r#"<style:style style:name="{n}" style:family="table-column"><style:table-column-properties style:column-width="{w}"/></style:style>"#
@@ -2436,8 +2707,12 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
             let name = style_of(&mut row_styles, key, "ro", &mut auto, &|n| {
                 format!(
                     r#"<style:style style:name="{n}" style:family="table-row"><style:table-row-properties style:row-height="{:.6}cm" style:use-optimal-row-height="{}"/></style:style>"#,
-                    // 한셀은 읽을 때 pt 를 정수로 버린다 — 정수 pt 가 아래로 반올림되지 않게 올린다
-                    (h / 72.0 * 2.54 * 1e6).ceil() / 1e6,
+                    // 한셀은 읽을 때 pt 를 정수로 버린다 — 정수 pt 가 아래로 반올림되지 않게 올린다 (한셀 호환이면 한셀처럼 그대로)
+                    if compat {
+                        (h / 72.0 * 2.54 * 1e6).round() / 1e6
+                    } else {
+                        (h / 72.0 * 2.54 * 1e6).ceil() / 1e6
+                    },
                     !custom
                 )
             });
@@ -2454,7 +2729,10 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
             while i < sheet.cells.len() && sheet.cells[i].r.row == r {
                 let cell = &sheet.cells[i];
                 i += 1;
-                if !cell.value.is_empty() || cell.formula.is_some() || cell.style != 0 {
+                if !hidden_formula(wb, cell, compat)
+                    && (!cell.value.is_empty() || cell.formula.is_some())
+                    || cell.style != 0
+                {
                     entries.push((cell.r.col, Some(cell)));
                 }
             }
@@ -2496,14 +2774,14 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
                             let id = wb.styles.xf(x).map_or(0, |xf| xf.num_fmt_id);
                             // 기본 서식에 표시 형식이 있으면 일반 서식도 밝힌다 (부모 "Default" 를 물려받지 않게)
                             let base_fmt = wb.styles.xf(0).map_or(0, |xf| xf.num_fmt_id);
-                            let general = (id == 0 && base_fmt != 0).then(|| {
+                            let general = (id == 0 && base_fmt != 0 && !compat).then(|| {
                                 if !data_styles.contains(&u32::MAX) {
                                     auto.push_str(r#"<number:number-style style:name="NG"><number:number number:min-integer-digits="1"/></number:number-style>"#);
                                     data_styles.push(u32::MAX);
                                 }
                                 "NG".to_string()
                             });
-                            let data = (id != 0)
+                            let data = (id != 0 && !compat)
                                 .then(|| {
                                     let dn = format!("N{id}");
                                     if !data_styles.contains(&id) {
@@ -2516,7 +2794,14 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
                                 })
                                 .flatten()
                                 .or(general);
-                            auto.push_str(&cell_style_xml(&n, wb, x, &theme, data.as_deref()));
+                            auto.push_str(&cell_style_xml(
+                                &n,
+                                wb,
+                                x,
+                                &theme,
+                                data.as_deref(),
+                                compat,
+                            ));
                             cell_style_names.insert(x, n.clone());
                             n
                         }
@@ -2530,10 +2815,11 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
                         m.end.row - m.start.row + 1
                     ));
                 }
+                let cell = cell.filter(|c| !hidden_formula(wb, c, compat));
                 if let Some(f) = cell.and_then(|c| c.formula.as_ref()) {
                     a.push_str(&format!(
                         r#" table:formula="{}""#,
-                        esc(&formula_to_odf(&f.text))
+                        esc(&formula_to_odf_with(&f.text, compat))
                     ));
                 }
                 let empty = CellValue::Empty;
@@ -2584,10 +2870,26 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
     // 이름 정의: 시트 범위 하나는 named-range, 나머지는 named-expression (예약 이름 _xlnm. 은 뺀다)
     let mut names = String::new();
     for n in wb.defined_names.iter().filter(|n| {
-        // 한셀처럼 잃은 참조(#REF!)의 이름은 뺀다
-        !n.name.starts_with("_xlnm.") && n.local_sheet_id.is_none() && !n.formula.contains("#REF!")
+        // 한셀처럼 잃은 참조(#REF!)의 이름은 뺀다 (한셀은 시트 범위 이름도 문서 이름으로 쓴다)
+        !n.name.starts_with("_xlnm.")
+            && (compat || n.local_sheet_id.is_none())
+            && !n.formula.contains("#REF!")
     }) {
         let name = esc(&n.name);
+        // 한셀은 외부 통합 문서 참조 이름의 주소를 `$'[C:./경로/파일.hcdt]시트'.$C$15` 로 쓴다 (자기 자신을 가리키는 연결은 비운다)
+        if compat && let Some(a) = external_name(wb, &n.formula) {
+            names.push_str(&format!(
+                r#"<table:named-range table:name="{name}" table:cell-range-address="{0}" table:base-cell-address="{0}"/>"#,
+                esc(&a)
+            ));
+            continue;
+        }
+        if compat && n.formula.starts_with("'[") {
+            names.push_str(&format!(
+                r#"<table:named-range table:name="{name}" table:cell-range-address=""/>"#
+            ));
+            continue;
+        }
         match odf_range(&n.formula) {
             Some(a) => {
                 let base = a.split(':').next().unwrap_or(&a).to_string();
@@ -2599,13 +2901,51 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
             }
             None => names.push_str(&format!(
                 r#"<table:named-expression table:name="{name}" table:expression="{}"/>"#,
-                esc(&formula_to_odf(&n.formula))
+                esc(&formula_to_odf_with(&n.formula, compat))
             )),
         }
     }
     if !names.is_empty() {
         body.push_str(&format!(
             "<table:named-expressions>{names}</table:named-expressions>"
+        ));
+    }
+    // 자동 필터: `table:database-range`. 한셀은 첫 값 목록 열만 쓰고 (사용자 지정·상위 하위 조건은 버린다)
+    // 첫 조건에 `-0.000000`, 값 묶음 `filter-or`, 값 조건을 한 번 더 되풀이하는 꼴로 쓴다
+    let mut ranges = String::new();
+    for sheet in &wb.sheets {
+        let Some(af) = &sheet.auto_filter else {
+            continue;
+        };
+        let name = crate::ods_draw::sheet_ref(&sheet.name);
+        let (a, b) = af.range.split_once(':').unwrap_or((&af.range, &af.range));
+        let (a, b) = (a.replace('$', ""), b.replace('$', ""));
+        let mut filter = String::new();
+        if let Some(col) = af.columns.iter().find(|c| !c.values.is_empty()) {
+            let cond = |v: &str| {
+                format!(
+                    r#"<table:filter-condition table:field-number="{}" table:value="{}" table:operator="="/>"#,
+                    col.col_id,
+                    esc(v)
+                )
+            };
+            let values: String = col.values.iter().map(|v| cond(v)).collect();
+            filter = if compat {
+                format!(
+                    r#"<table:filter>{}<table:filter-or>{values}</table:filter-or>{values}</table:filter>"#,
+                    cond("-0.000000")
+                )
+            } else {
+                format!("<table:filter><table:filter-or>{values}</table:filter-or></table:filter>")
+            };
+        }
+        ranges.push_str(&format!(
+            r#"<table:database-range table:display-filter-buttons="true" table:target-range-address="{name}.{a}:{name}.{b}">{filter}</table:database-range>"#
+        ));
+    }
+    if !ranges.is_empty() {
+        body.push_str(&format!(
+            "<table:database-ranges>{ranges}</table:database-ranges>"
         ));
     }
     // 글꼴 선언: 쓰인 글꼴 이름 모두
@@ -2617,28 +2957,41 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
             faces.push(n);
         }
     }
-    let faces: String = faces
+    // 머리글·바닥글 글자 스타일의 글꼴도 (한셀은 선언이 없는 글꼴을 읽지 못한다)
+    let hf_faces: Vec<String> = hf_styles
         .iter()
-        .map(|n| {
-            let n = esc(n);
-            format!(r#"<style:font-face style:name="{n}" svg:font-family="{n}"/>"#)
+        .filter_map(|p| {
+            let at = p.find(r#"style:font-name=""#)? + r#"style:font-name=""#.len();
+            Some(p[at..at + p[at..].find('"')?].to_string())
         })
+        .collect();
+    let mut all: Vec<String> = faces.iter().map(|n| esc(n)).collect();
+    for n in hf_faces {
+        if !all.contains(&n) {
+            all.push(n);
+        }
+    }
+    let faces: String = all
+        .iter()
+        .map(|n| format!(r#"<style:font-face style:name="{n}" svg:font-family="{n}"/>"#))
         .collect();
     let content = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content {NS} office:version="1.2"><office:font-face-decls>{faces}</office:font-face-decls><office:automatic-styles>{auto}{}</office:automatic-styles><office:body><office:spreadsheet>{body}</office:spreadsheet></office:body></office:document-content>"#,
         draw.auto
     );
     // 기본 칸 스타일 "Default" = 기본 셀 서식 0 (표시 형식·맞춤·테두리까지 — 한셀은 글자 속성만 쓴다)
-    let default_data =
-        wb.styles.xf(0).filter(|x| x.num_fmt_id != 0).and_then(|x| {
-            number_styles_xml("N0", &crate::numfmt::code_for(&wb.styles, x.num_fmt_id))
-        });
+    let default_data = wb
+        .styles
+        .xf(0)
+        .filter(|x| x.num_fmt_id != 0 && !compat)
+        .and_then(|x| number_styles_xml("N0", &crate::numfmt::code_for(&wb.styles, x.num_fmt_id)));
     let default_style = cell_style_xml(
         "Default",
         wb,
         0,
         &theme,
         default_data.as_ref().map(|_| "N0"),
+        compat,
     )
     .replace(r#" style:parent-style-name="Default""#, "");
     let styles = format!(
@@ -2648,12 +3001,14 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
         hf_styles
             .iter()
             .enumerate()
-            .map(|(k, p)| format!(r#"<style:style style:name="T{}" style:family="text"><style:text-properties{p}/></style:style>"#, k + 1))
+            .filter(|(k, p)| p.contains('\u{0}') || masters.contains(&format!("\"T{}\"", k + 1)))
+            .map(|(k, p)| match p.split_once('\u{0}') {
+                Some((n, p)) => format!(r#"<style:style style:name="{n}" style:family="text"><style:text-properties{p}/></style:style>"#),
+                None => format!(r#"<style:style style:name="T{}" style:family="text"><style:text-properties{p}/></style:style>"#, k + 1),
+            })
             .collect::<String>()
     );
-    let meta = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-meta {NS} office:version="1.2"><office:meta><meta:generator>rcell</meta:generator></office:meta></office:document-meta>"#
-    );
+    let meta = meta_xml(wb, compat);
     // 설정: 한셀 꼴 (시트마다 커서 위치, 활성 시트, 확대율, 행·열 머리글). 이 파트가 없으면 한셀은 눈금선을 끈다
     let mut tables = String::new();
     for sheet in &wb.sheets {
@@ -2664,11 +3019,19 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
             .and_then(CellRef::parse)
             .unwrap_or(CellRef { row: 0, col: 0 });
         tables.push_str(&format!(
-            r#"<config:config-item-map-entry config:name="{}"><config:config-item config:name="CursorPositionX" config:type="int">{}</config:config-item><config:config-item config:name="CursorPositionY" config:type="int">{}</config:config-item><config:config-item config:name="ShowGrid" config:type="boolean">{}</config:config-item></config:config-item-map-entry>"#,
+            r#"<config:config-item-map-entry config:name="{}"><config:config-item config:name="CursorPositionX" config:type="int">{}</config:config-item><config:config-item config:name="CursorPositionY" config:type="int">{}</config:config-item>{}</config:config-item-map-entry>"#,
             esc(&sheet.name),
             at.col,
             at.row,
-            sheet.show_grid_lines
+            // 한셀은 눈금선을 쓰지 않는다 (파트가 있고 항목이 없으면 눈금선이 켜진다)
+            if compat {
+                String::new()
+            } else {
+                format!(
+                    r#"<config:config-item config:name="ShowGrid" config:type="boolean">{}</config:config-item>"#,
+                    sheet.show_grid_lines
+                )
+            }
         ));
     }
     let active = wb
@@ -2679,7 +3042,12 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
     let settings = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?><office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" office:version="1.2"><office:settings><config:config-item-set config:name="ooo:view-settings"><config:config-item-map-indexed config:name="Views"><config:config-item-map-entry><config:config-item-map-named config:name="Tables">{tables}</config:config-item-map-named><config:config-item config:name="ActiveTable" config:type="string">{}</config:config-item><config:config-item config:name="ZoomValue" config:type="int">{}</config:config-item><config:config-item config:name="PageViewZoomValue" config:type="int">100</config:config-item><config:config-item config:name="ShowPageBreakPreview" config:type="boolean">false</config:config-item><config:config-item config:name="HasColumnRowHeaders" config:type="boolean">{}</config:config-item></config:config-item-map-entry></config:config-item-map-indexed></config:config-item-set></office:settings></office:document-settings>"#,
         esc(active.map_or("", |s| s.name.as_str())),
-        active.and_then(|s| s.view.zoom_scale).unwrap_or(100),
+        // 한셀은 확대율을 늘 100 으로 쓴다
+        if compat {
+            100
+        } else {
+            active.and_then(|s| s.view.zoom_scale).unwrap_or(100)
+        },
         active.is_none_or(|s| s.view.show_row_col_headers)
     );
     let mut manifest = String::from(
@@ -2881,7 +3249,16 @@ mod tests {
                 },
             )
             .unwrap();
-            let back = read(&write(&wb).unwrap()).unwrap();
+            let back = read(
+                &write_with(
+                    &wb,
+                    &WriteOptions {
+                        hcell_compatible: false,
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
             let shown = |w: &Workbook, v: f64| {
                 let c = w.sheets[0].cell(CellRef::parse("A1").unwrap()).unwrap();
                 let id = w.styles.xf(c.style).map_or(0, |x| x.num_fmt_id);

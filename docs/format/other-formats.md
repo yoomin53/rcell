@@ -340,19 +340,38 @@ A4 — 그래서 세로 레터는 A4 가 된다, 쪽 맞춤 켬, 쪽 순서 over
 rcell 이 `.ods` 에서 읽지 않는 도형·차트(그리기 42, 차트), 이름 11, 열 너비 36시트(1/256 글자 — 한셀이 cm 를 글자로 바꾸는 식의
 오차 경계), 외부 연결.
 
-### 8.3 쓰기
+### 8.3 쓰기 (한셀 호환이 기본)
 
-칸 스타일(위 8.1 꼴 — 글꼴·채우기·테두리·맞춤·줄 바꿈·보호·표시 형식 스타일), 쪽 모양·마스터 쪽·머리글/바닥글 (위·아래 여백은 쪽 여백 = 머리글
-여백 + 머리글 높이로 되돌려 한셀이 읽을 때 위 여백을 잃지 않게 한다), 표 스타일(숨김·탭 색), 이름 정의, `settings.xml`(눈금선 —
-이 파트가 없으면 한셀이 눈금선을 끈다), 병합에 덮인 칸도 `table:table-cell` (한셀은 `covered-table-cell` 의 스타일을 버린다), 열
-너비는 식의 오차로 한 칸 아래가 되지 않게 +1e-5cm, 행 높이는 올림. 표시 형식은 `number:*-style` 으로 쓴다 (`style:map` 으로
-양수·음수 구역, 통화 기호의 언어·나라, 날짜·시간·백분율·지수·글).
+`.ods` 쓰기는 **한셀이 쓰는 대로** 쓴다 (`ods::write`, `rcell convert x.cell y.ods` — 기본). 한셀이 버리는 것은 쓰지 않아, 같은 문서를
+한셀이 연 것과 rcell 이 쓴 `.ods` 를 한셀이 연 것이 같다. rcell 이 아는 것을 모두 쓰려면 `ods::write_with(.., hcell_compatible: false)`
+(`convert --ods-lossless`). 한셀과 달리 쓰는 것 (모두 쓰기에서만):
 
-한셀과 다르게 쓰는 것 (의도): **표시 형식**(한셀은 쓰지 않아 한셀이 다시 열면 일반 서식 — rcell 은 쓰고 한셀도 읽는다),
-**아래 세로 맞춤**(한셀은 가운데로 쓴다), **점선·파선**(한셀은 실선으로 쓴다), **행 높이**(한셀은 12pt 를 0.423333cm 로 써 다시
-열면 11 이 된다 — rcell 은 올려 12), **위·아래 여백**, **눈금선·확대율**. 쓰기 대조 (HCell(rcell `.ods`) 대 HCell(한셀 `.ods`)):
-칸 서식에서 위 의도한 차이 말고는 같다 (글꼴·채우기·테두리 굵기·가로 맞춤·문단 모양·병합·쪽 모양·열 너비) — 문서별로는 값·수식·
-도형·차트가 달라 56개 모두 어긋난다 (값·수식은 한셀의 `.ods` 읽기 결함 때문에 한셀 쪽이 틀린 것).
+| 항목 | 한셀 호환 (기본) | 모두 쓰기 |
+|---|---|---|
+| 표시 형식 | 쓰지 않는다 (한셀이 안 쓴다 → 다시 열면 일반) | `number:*-style` 로 쓴다 |
+| 세로 맞춤 | 아래·지정 없음도 가운데 (위만 위) | 아래는 아래 |
+| 테두리 | 점선·파선·헤어는 실선 | 점선·파선 그대로 |
+| 대각선 테두리 | 쓰지 않는다 | `style:diagonal-*` |
+| 열 너비 | 단정밀도 식 `((글자 + 0.7723437)·숫자폭 + 5)/96·2.54` 을 소수 여섯째 자리까지 (한셀 .ods 열 너비 95쌍 모두 같다) | 한셀이 읽어도 줄지 않게 올림 + 1e-5 |
+| 행 높이 | 그대로 (12pt 는 다시 열면 11) | 올림 |
+| 쪽 여백 | 위·아래 모두 머리글 여백, 머리글·바닥글 높이 0.751cm·간격 0.25cm 고정, pt/28.35 환산, 0.5117인치 언저리 양자화 (다시 열면 위 여백이 늘어난다) | 위 여백을 보존하게 높이를 조정 |
+| 눈금선·확대율 | `ShowGrid` 를 쓰지 않고(설정 파트는 있으니 눈금선 켜짐) 확대율 100 | 시트마다 `ShowGrid`, 확대율 |
+| 수식 칸 | 값이 빈 글로 보이는 칸·값 없는 칸과 **공유 수식의 종속 칸은 값까지** 쓰지 않는다 (한셀의 .ods 저장 손실) | 모두 쓴다 |
+| 다른 시트 참조 | `시트.A1` (대괄호 없이), `#REF!` → `#REF.` | ODF 표준 `[시트.A1]` |
+| 문서 속성 | `meta.xml`: 제목·주제·만든 이(`meta:initial-creator`)·설명·마지막 저장한 이(`dc:creator`)·고친 횟수·만든 때, **인쇄한 때는 `meta:printed-by`** | 인쇄한 때는 `meta:print-date` |
+| 이름 정의 | 시트 범위 이름도 문서 이름으로, `#REF!`·`_xlnm.` 이름은 뺀다, 외부 통합 문서 참조는 `$'[C:./경로/파일.hcdt]시트'.$C$15` (자기 자신을 가리키는 연결은 주소를 비운다) | 문서 이름만 |
+| 인쇄 범위 | 시트의 `_xlnm.Print_Area` → `table:print-ranges="시트.B3:G14"` | 같다 |
+| 자동 필터 | `table:database-range` — **값 목록 열 하나만** 쓰고 (사용자 지정·상위/하위는 버린다) 첫 조건 `-0.000000` + `filter-or` + 값 되풀이 꼴 | 값 목록만, 표준 꼴 |
+| 머리글·바닥글 글자 | 영역마다 `Sheet{N}{Header|Footer}Style{Left|Center|Right}` 이름의 글자 스타일 (한셀은 이 이름의 스타일만 글꼴로 읽는다), 글꼴 선언 포함 | 같다 |
+
+그 밖에 한셀과 같게 쓰는 것: 칸 스타일·글꼴·채우기·테두리 굵기·가로 맞춤·문단 모양·병합(덮인 칸도 `table:table-cell`)·쪽 모양·표 스타일(숨김·탭 색)·
+이름 범위·`settings.xml`·도형·그림·차트 (17절).
+
+**쓰기 대조** (HCell(rcell `.ods`) 대 HCell(한셀 `.ods`), 한셀이 저장한 56개 — `rcell diff` 가 **문서 속성·서식·값·수식·인쇄·열·행·이름·
+연결·그리기·차트를 모두** 맞댄다): 전에는 0/56, 쓰기 선택으로 고친 뒤 **55/56** 이 같다. 남은 하나(`fills_borders`)는 행 높이가 없는 행의
+높이를 한셀이 내용 글꼴로 따로 셈하는 것 (11pt 글꼴 행 0.5909cm, 빈 행 0.453cm) — rcell 은 셈하지 않는다.
+고치기 전 29개의 차이 원인은 의도한 차이 (표시 형식 35 · 아래 맞춤 · 점선 · 위·아래 여백 · 눈금선·확대율)와 rcell 의 빠뜨림
+(문서 속성 56 · 머리글 글꼴 이름 · 열 너비 식 · 쪽 여백 환산 · 인쇄 범위 · 시트 범위 이름 · 자동 필터 · 외부 이름 · 대각선)이었다.
 
 ## 9. 웹 페이지 `.htm`·`.mht` (`src/webpage.rs`)
 
@@ -511,13 +530,17 @@ padding:0;}`), 속성 차례는 `color`·`font-size`(`11.00pt`)·`font-weight`(4
 rcell 이 전에는 묶음을 평평하게 써서 (자식이 묶음 밖 도형이 됨) 묶음 안 차트를 잃었고, 읽기는 최상위 차트에만 차트 내용을 붙였다 — 둘 다 고쳤다 (읽기는 묶음 안 도형의 자식 앵커와 묶음의 자식 좌표 범위를 `xfrm` 으로 둔다).
 그림 영역 모양에 선 속성(두께·끝·꺾임 …)이 있는 차트는 `1032 FRAME(플래그 3)` + 자동 `1007` 틀을 `1035 PLOTAREA` 뒤에 쓴다. 남은 차이: 한셀은 차트 글자 글꼴을 통합 문서 글꼴 표(FONT 레코드)에 더한다 (서식 문서 차트에서 FONT 1–13개).
 
-## 17. ODS 의 도형·차트 (한셀이 쓰는 꼴 — rcell 은 아직 읽지도 쓰지도 않는다)
+## 17. ODS 의 도형·그림·차트 (`src/ods_draw.rs`, `src/ods_geom.rs`)
 
-한셀 `.ods`(60) 저장 관찰 (기록만 — 구현하지 않았다):
-- 도형은 시작 칸 안의 `<draw:frame draw:name draw:style-name="grN" svg:width svg:height svg:x svg:y draw:id="drawingN.xml-ID" table:end-cell-address table:end-x table:end-y>` + `<draw:text-box>` (사각형도 텍스트 상자로). `svg:x`·`svg:y` 는 시작 칸 안의 오프셋, `table:end-*` 는 끝 칸과 칸 안 오프셋. 서식은 `style:family="graphic"` 자동 스타일 (`draw:fill`·`draw:fill-color`·`draw:stroke`·`draw:shadow` …).
-- 묶음은 `<draw:g svg:y table:end-cell-address …>` 안에 `draw:frame` 들. 묶음 안 차트도 그대로 든다.
-- 차트는 별도 하위 문서 `Object N/content.xml`·`styles.xml` (`<office:chart><chart:chart chart:class="chart:bar" …><chart:plot-area><chart:axis …><chart:series chart:label-cell-address="local-table.$C$1" …>`, `local-table` 표에 값이 복사됨)이고 `content.xml` 에는 `<draw:frame><draw:object xlink:href="Object N/"/></draw:frame>`.
-- 그림은 `Pictures/imageN.png|jpeg` + `draw:frame` 의 `draw:image`.
+한셀 `.ods`(60) 저장 관찰을 그대로 읽고 쓴다. 한셀 저장 40개 문서(서식 문서·차트 17·그림·묶음)의 개체 부분(`draw:frame`·`draw:g`·스타일·차트 하위
+문서)이 **글자까지 같은 것 38개**다 (남은 둘은 서식 문서 차트의 차트 틀 스타일 — `Chart7`·`Chart8`).
+- 도형은 시작 칸 안의 `<draw:frame draw:name draw:style-name="grN" svg:width svg:height svg:x svg:y draw:id="drawingN.xml-ID" table:end-cell-address table:end-x table:end-y>` + `<draw:text-box>` (사각형도 텍스트 상자로). `svg:x`·`svg:y` 는 시작 칸 안의 오프셋, `table:end-*` 는 끝 칸과 칸 안 오프셋. 타원·둥근 사각형·삼각형·마름모·화살표·별·육각형·평행사변형·사다리꼴·순서도 처리는 `draw:custom-shape` + `draw:enhanced-geometry` (한셀이 쓴 요소 글을 표로, `ods_geom.rs`), 연결선은 `draw:connector` (시트 안 절대 좌표 `svg:x1…y2`, 화살표는 `draw:marker-end`).
+- 도형 서식은 `style:family="graphic"` 자동 스타일 `grN` (그리기 차례 번호). **한셀은 원본 개체가 가진 속성만 쓴다**: 스타일 참조(`xdr:style`)가 있는 도형은 전부(선 없음이면 기본 선 0.5pt `#263E5B`·`fo:min-width="3.5cm" fo:min-height="3.95cm"`·`draw:auto-grow-height`·`fo:wrap-option`·안쪽 여백·채우기 색 `#4F81BD` 기본), 글 상자(`txBox`)는 `auto-grow-height`·`style:shrink-to-fit="false"`, 그 밖은 선·채우기·줄 바꿈만, 경로가 없는 사용자 정의 도형(`a:custGeom` 빈 경로)은 스타일(`draw:stroke="solid" … draw:fill="solid"`)만 쓰고 개체는 쓰지 않는다. 그림자 거리 2만 EMU 이하는 간격 0cm, 점선 이름은 `Dashed`·`LongDash`·`DashDot`·`LongDashDot`·`LongDashDotDot`·`SysDash`·`SysDot` (`draw:stroke-dash` 정의는 `styles.xml`). 회전·뒤집기는 쓰지 않는다.
+- 글은 문단 `P{n}`(`fo:text-align`: 지정 없으면 글 상자는 가운데, 그 밖은 시작)과 글 조각 `T{n}`(`fo:color` 또는 `style:use-window-font-color`, 글꼴 이름·크기·기울임·밑줄·굵게; 테마 글꼴 `+mn-ea` 는 테마 제목 글꼴의 영문 이름).
+- 묶음은 `<draw:g svg:y table:end-cell-address …>` 안에 `draw:frame` 들 (자식의 `svg:x`·`svg:y` 는 시트 안 좌표). 묶음 안 차트도 그대로 든다.
+- 차트는 별도 하위 문서 `Object N/content.xml`·`styles.xml` (`chart:class`: bar·line·area·circle·ring·scatter·radar·bubble·stock, 3차원은 `dr3d:*`, 범례 `end`/`bottom`/`start`/`top`, 항목 축 `chart:categories`, 계열 `chart:label-cell-address`, 막대·꺾은선·원형은 값을 쓰지 않고 영역·분산형만 `values-cell-range-address` 와 지역 표에 값을 쓴다)이고 `content.xml` 에는 `<draw:frame><draw:object xlink:href="Object N/"/></draw:frame>`. 영문 시트 이름은 `local-table.$C$1`, 그 밖은 `시트!$B$33` 꼴. **한셀은 제목이 있는 차트(24개)와 글자 이름의 계열을 쓰지 못한다** — 같은 문서의 `.ods` 에서 사라진다.
+- 그림은 `Pictures/imageN.png|jpeg` + `draw:frame` 의 `draw:image` (크기는 두 칸 앵커의 칸 사이 크기 — `xfrm` 이 아니라 앵커가 정한다).
+- 읽기는 같은 꼴을 도형 모델(앵커·`xfrm`·채우기·선·그림자·글 상자 속성·글)과 차트 모델(종류·범례·항목 범위·계열·색)로 읽고, 그림은 `xl/media/odsN.*` 로 옮긴다.
 
 ## 18. 알려진 한계 (한셀과 같지 않은 것)
 

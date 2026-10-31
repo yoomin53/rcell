@@ -81,7 +81,7 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 - **Legacy `.cell`** — Hancom Cell 2010 and earlier (OLE2 compound file + a BIFF8 variant: 32-bit row numbers, UTF-16 strings, Hancom-specific records)
 - **Encrypted documents** — ECMA-376 standard encryption (AES-128); the default password Hancom Cell uses for protected documents is handled automatically, user passwords via `--password` (saving: `convert … --out-password` for XML/binary `.cell`, `.xlsx`, legacy `.cell`, `.nxl`)
 - `.xlsx` / `.xlsb` are read too
-- Excel 97-2003 `.xls`, Nexcel `.nxl`, ODF `.ods` (values, formulas, structure, cell formats), CSV and text (`.csv` `.txt` `.prn` — opened with Hancom Cell's rules) — [other formats](docs/format/other-formats.md)
+- Excel 97-2003 `.xls`, Nexcel `.nxl`, ODF `.ods` (values, formulas, structure, cell formats, shapes, pictures, charts), CSV and text (`.csv` `.txt` `.prn` — opened with Hancom Cell's rules) — [other formats](docs/format/other-formats.md)
 
 ### Document model
 
@@ -106,7 +106,7 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 - Binary `.cell` (`xlCellb`) — written the way Hancom Cell saves it (98.9% of records byte-identical)
 - Legacy `.cell` (`xlCell8`) — written the way Hancom Cell saves it with -2005 (97.7% of records identical to Hancom Cell opening the XML and saving legacy, ignoring per-save values such as the SST order; charts and tables not yet)
 - Excel 97-2003 `.xls` — legacy records transcoded to BIFF8, charts as BIFF8 chart substreams (Hancom Cell opens all 61 test files, 59 identical to its own `.xls`)
-- ODF `.ods` — values, formulas, structure and cell formats
+- ODF `.ods` — values, formulas, structure, cell formats, shapes, pictures and charts; HCell-compatible by default (HCell opens the result as it opens its own file: 55 of 56 corpus documents), `--ods-lossless` writes everything rcell knows
 - Web page `.htm` / `.mht` — Hancom Cell's web-save layout (frameset, sheet pages, MIME archive; shapes, charts and pictures as RGBA PNG)
 - Nexcel `.nxl` — Hancom Cell's -2003 layout (BIFF8 frame + Hancom extensions; 61 of 61 identical to its own `.nxl`)
 - CSV, text and PRN — byte-identical to Hancom Cell's save (code page 949, 216/216), document-model JSON
@@ -281,7 +281,7 @@ src/
 │   └── props.rs               # document properties (SummaryInformation)
 ├── writer.rs                  # XML .cell / .xlsx writer
 ├── csv.rs                     # CSV/text/PRN reader and writer (Hancom Cell rules)
-├── ods.rs                     # ODF .ods reader and writer (cell formats and page setup included)
+├── ods.rs, ods_draw.rs        # ODF .ods reader and writer (cell formats, page setup, shapes, pictures, charts; HCell-compatible writing)
 ├── webpage.rs                 # web page .htm/.mht writer (Hancom Cell's web-save layout)
 ├── edit/                      # editing (input rules, reference adjustment, formats/borders/merges, clipboard, sheets)
 ├── numfmt.rs                  # number-format engine

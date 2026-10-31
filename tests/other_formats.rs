@@ -636,3 +636,40 @@ fn xls_open_loses_shape_text_like_hcell_unless_keep_original() {
     let kept = rcell::from_bytes_with_options(bytes, None, &opts).unwrap();
     assert_eq!(kept.sheets[0].shapes[0].plain_text(), "안녕");
 }
+
+/// `.ods` 쓰기: 기본은 한셀 호환 (표시 형식을 쓰지 않고, 공유 수식의 종속 칸과 빈 글로 보이는 수식 칸을 쓰지 않고, 문서 속성을
+/// 한셀 꼴로), `hcell_compatible: false` 면 rcell 이 아는 것을 모두 쓴다 (docs/format/other-formats.md 8.3절)
+#[test]
+fn ods_default_is_hcell_compatible_and_lossless_keeps_formats() {
+    let mut wb = sample();
+    wb.properties.title = Some("제목".into());
+    wb.properties.creator = Some("만든 이".into());
+    let compat = rcell::ods::write(&wb).unwrap();
+    let content =
+        String::from_utf8(rcell::container::read_entry(&compat, "content.xml").unwrap()).unwrap();
+    assert!(
+        !content.contains("number:percentage-style"),
+        "한셀은 표시 형식을 쓰지 않는다"
+    );
+    let meta =
+        String::from_utf8(rcell::container::read_entry(&compat, "meta.xml").unwrap()).unwrap();
+    assert!(
+        meta.contains("<dc:title>제목</dc:title>")
+            && meta.contains("<meta:initial-creator>만든 이</meta:initial-creator>")
+    );
+    // 다시 읽으면 문서 속성이 돌아온다
+    let back = rcell::ods::read(&compat).unwrap();
+    assert_eq!(back.properties.title.as_deref(), Some("제목"));
+    assert_eq!(back.properties.creator.as_deref(), Some("만든 이"));
+    // 모두 쓰기: 백분율 서식이 남는다
+    let full = rcell::ods::write_with(
+        &wb,
+        &rcell::ods::WriteOptions {
+            hcell_compatible: false,
+        },
+    )
+    .unwrap();
+    let content =
+        String::from_utf8(rcell::container::read_entry(&full, "content.xml").unwrap()).unwrap();
+    assert!(content.contains("number:percentage-style"));
+}

@@ -537,7 +537,7 @@ fn end_attrs(wb: &Workbook, si: usize, a: &Anchor) -> String {
 }
 
 /// 시트 이름 (공백·기호가 있으면 따옴표)
-fn sheet_ref(name: &str) -> String {
+pub(crate) fn sheet_ref(name: &str) -> String {
     if name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         esc(name)
     } else {
