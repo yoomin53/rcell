@@ -170,6 +170,7 @@ fn pixels(data: &[u8]) -> Option<PdfImage> {
         height: j.height,
         components: j.components,
         dct: false,
+        stencil: false,
         data: j.data,
         alpha: None,
     })
