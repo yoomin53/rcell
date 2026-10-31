@@ -233,6 +233,9 @@ enum Tok {
     LParen,
     RParen,
     Comma,
+    LBrace,
+    RBrace,
+    Semi,
 }
 
 /// 시트 앞머리 `시트!`, `시트1:시트3!`, `[n]시트!`, `[n]!`
@@ -328,6 +331,8 @@ fn error_code(s: &str) -> Option<u8> {
 struct Lexer {
     c: Vec<char>,
     i: usize,
+    /// 방금 읽은 낱말 앞에 공백이 있었다 (교집합 연산자)
+    sp: bool,
 }
 
 impl Lexer {
@@ -435,11 +440,13 @@ impl Lexer {
     }
 
     fn next(&mut self) -> Result<Option<Tok>, EncodeError> {
+        self.sp = false;
         while self
             .peek()
             .is_some_and(|c| c == ' ' || c == '\n' || c == '\r' || c == '\t')
         {
             self.i += 1;
+            self.sp = true;
         }
         let Some(c) = self.peek() else {
             return Ok(None);
@@ -452,6 +459,9 @@ impl Lexer {
             '(' => one(self, Tok::LParen),
             ')' => one(self, Tok::RParen),
             ',' => one(self, Tok::Comma),
+            '{' => one(self, Tok::LBrace),
+            '}' => one(self, Tok::RBrace),
+            ';' => one(self, Tok::Semi),
             '+' => one(self, Tok::Op("+")),
             '-' => one(self, Tok::Op("-")),
             '*' => one(self, Tok::Op("*")),
@@ -607,7 +617,6 @@ impl Lexer {
                     .map(|v| Some(Tok::Num(v)))
                     .map_err(|_| EncodeError(format!("숫자 {t}")))
             }
-            '{' => err("배열 상수는 아직 쓸 수 없습니다"),
             c if is_word_char(c) => {
                 let s = self.i;
                 let e = self.word_from(s);
@@ -735,10 +744,14 @@ enum Node {
     Percent(Box<Node>),
     Binary(&'static str, Box<Node>, Box<Node>),
     Paren(Box<Node>),
+    /// 배열 상수 (행마다 값들)
+    Array(Vec<Vec<Node>>),
 }
 
 struct Parser {
     toks: Vec<Tok>,
+    /// 낱말 앞에 공백이 있었나
+    sps: Vec<bool>,
     i: usize,
 }
 
@@ -803,15 +816,26 @@ impl Parser {
         if let Some(op) = self.is_op(&["-", "+"]) {
             self.i += 1;
             let x = self.unary()?;
-            // 숫자 상수에 바로 붙은 - 는 음수 상수로 (한셀: ABS(-5) → PtgNum -5)
-            if op == "-"
-                && let Node::Num(v) = x
-            {
-                return Ok(Node::Num(-v));
-            }
             return Ok(Node::Unary(op, Box::new(x)));
         }
-        self.range()
+        self.isect()
+    }
+
+    /// 교집합: 참조 사이의 공백
+    fn isect(&mut self) -> Result<Node, EncodeError> {
+        let mut a = self.range()?;
+        while self.i < self.toks.len()
+            && self.sps[self.i]
+            && is_ref_like(&a)
+            && matches!(
+                self.toks[self.i],
+                Tok::Ref(_) | Tok::Name(..) | Tok::LParen | Tok::Func(_) | Tok::List(..)
+            )
+        {
+            let b = self.range()?;
+            a = Node::Binary(" ", Box::new(a), Box::new(b));
+        }
+        Ok(a)
     }
     fn range(&mut self) -> Result<Node, EncodeError> {
         let mut a = self.primary()?;
@@ -832,6 +856,7 @@ impl Parser {
             Some(Tok::Ref(r)) => Ok(Node::Ref(r)),
             Some(Tok::Name(p, n)) => Ok(Node::Name(p, n)),
             Some(Tok::List(t, spec)) => Ok(Node::List(t, spec)),
+            Some(Tok::LBrace) => self.array(),
             Some(Tok::Func(name)) => {
                 if self.bump() != Some(Tok::LParen) {
                     return err("함수 이름 뒤에 ( 가 없습니다");
@@ -870,6 +895,49 @@ impl Parser {
             }
             t => err(format!("뜻밖의 낱말 {t:?}")),
         }
+    }
+}
+
+/// 참조를 돌려주는 식인가 (교집합의 앞쪽)
+fn is_ref_like(n: &Node) -> bool {
+    match n {
+        Node::Ref(_) | Node::Name(..) | Node::List(..) => true,
+        Node::Paren(x) => is_ref_like(x),
+        Node::Binary(op, ..) => matches!(*op, ":" | " " | ","),
+        Node::Func(name, _) => lookup_function(name).is_some_and(|f| f.ret == b'R'),
+        _ => false,
+    }
+}
+
+impl Parser {
+    /// 배열 상수 `{1,2;3,4}` (`{` 는 이미 읽었다): 값은 수·글·논리·오류 (앞의 - 하나 허용)
+    fn array(&mut self) -> Result<Node, EncodeError> {
+        let mut rows = vec![Vec::new()];
+        loop {
+            let neg = matches!(self.peek(), Some(Tok::Op("-")));
+            if neg || matches!(self.peek(), Some(Tok::Op("+"))) {
+                self.i += 1;
+            }
+            let v = match self.bump() {
+                Some(Tok::Num(v)) => Node::Num(if neg { -v } else { v }),
+                Some(Tok::Str(t)) if !neg => Node::Str(t),
+                Some(Tok::Bool(b)) if !neg => Node::Bool(b),
+                Some(Tok::Err(e)) if !neg => Node::Err(e),
+                t => return err(format!("배열 상수의 값이 아닙니다: {t:?}")),
+            };
+            rows.last_mut().unwrap().push(v);
+            match self.bump() {
+                Some(Tok::Comma) => {}
+                Some(Tok::Semi) => rows.push(Vec::new()),
+                Some(Tok::RBrace) => break,
+                t => return err(format!("배열 상수가 닫히지 않았습니다: {t:?}")),
+            }
+        }
+        let cols = rows[0].len();
+        if rows.iter().any(|r| r.len() != cols) {
+            return err("배열 상수의 행 길이가 다릅니다");
+        }
+        Ok(Node::Array(rows))
     }
 }
 
@@ -949,15 +1017,18 @@ fn parse(text: &str) -> Result<Node, EncodeError> {
     let mut lx = Lexer {
         c: text.chars().collect(),
         i: 0,
+        sp: false,
     };
     let mut toks = Vec::new();
+    let mut sps = Vec::new();
     while let Some(t) = lx.next()? {
         toks.push(t);
+        sps.push(lx.sp);
     }
     if toks.is_empty() {
         return err("빈 수식");
     }
-    let mut p = Parser { toks, i: 0 };
+    let mut p = Parser { toks, sps, i: 0 };
     let mut n = p.expr()?;
     // 맨 바깥의 쉼표는 합집합 (정의된 이름 `=시트!$A$1:$B$2,시트!$D$1`)
     while p.peek() == Some(&Tok::Comma) {
@@ -980,8 +1051,80 @@ struct Emitter<'r> {
     res: &'r mut dyn Resolve,
     opts: Options,
     volatile: bool,
-    /// 합집합 안 (PtgMemFunc 는 맨 바깥 합집합에만)
-    in_union: bool,
+    /// 참조 연산 식(`:`·공백·`,` 와 그 사이의 괄호) 안이다 — 맨 바깥 연산에만 PtgMem* 을 붙인다
+    in_chain: bool,
+    /// 토큰열 뒤에 붙는 자료 (PtgExtraMem 영역 목록, PtgExtraArray 배열 상수) — 토큰 차례대로
+    extra: Vec<u8>,
+}
+
+/// 참조 연산 식의 컴파일 시점 값 ([`crate::binary::formula`] 와 같은 규칙)
+enum Static {
+    Areas(Vec<[u32; 4]>),
+    Err,
+    Dynamic,
+}
+
+fn static_eval(n: &Node) -> Static {
+    let rect = |k: &RefKind| -> Static {
+        match k {
+            RefKind::Cell(c, r) => Static::Areas(vec![[r.n, r.n, c.n, c.n]]),
+            RefKind::Area(c1, r1, c2, r2) => Static::Areas(vec![[
+                r1.n.min(r2.n),
+                r1.n.max(r2.n),
+                c1.n.min(c2.n),
+                c1.n.max(c2.n),
+            ]]),
+            RefKind::Cols(c1, c2) => {
+                Static::Areas(vec![[0, MAX_ROW, c1.n.min(c2.n), c1.n.max(c2.n)]])
+            }
+            RefKind::Rows(r1, r2) => {
+                Static::Areas(vec![[r1.n.min(r2.n), r1.n.max(r2.n), 0, MAX_COL]])
+            }
+            RefKind::Err => Static::Err,
+        }
+    };
+    match n {
+        Node::Paren(x) => static_eval(x),
+        Node::Err(_) => Static::Err,
+        Node::Ref(r) if r.prefix.book.is_none() && r.prefix.first.is_none() => rect(&r.kind),
+        Node::Binary(op @ (":" | " " | ","), a, b) => {
+            let (x, y) = match (static_eval(a), static_eval(b)) {
+                (Static::Err, _) | (_, Static::Err) => return Static::Err,
+                (Static::Dynamic, _) | (_, Static::Dynamic) => return Static::Dynamic,
+                (Static::Areas(x), Static::Areas(y)) => (x, y),
+            };
+            match *op {
+                "," => Static::Areas(x.into_iter().chain(y).collect()),
+                ":" => {
+                    let all: Vec<&[u32; 4]> = x.iter().chain(&y).collect();
+                    Static::Areas(vec![[
+                        all.iter().map(|a| a[0]).min().unwrap_or(0),
+                        all.iter().map(|a| a[1]).max().unwrap_or(0),
+                        all.iter().map(|a| a[2]).min().unwrap_or(0),
+                        all.iter().map(|a| a[3]).max().unwrap_or(0),
+                    ]])
+                }
+                _ => {
+                    let mut out = Vec::new();
+                    for a in &x {
+                        for b in &y {
+                            let (r1, r2) = (a[0].max(b[0]), a[1].min(b[1]));
+                            let (c1, c2) = (a[2].max(b[2]), a[3].min(b[3]));
+                            if r1 <= r2 && c1 <= c2 {
+                                out.push([r1, r2, c1, c2]);
+                            }
+                        }
+                    }
+                    if out.is_empty() {
+                        Static::Err
+                    } else {
+                        Static::Areas(out)
+                    }
+                }
+            }
+        }
+        _ => Static::Dynamic,
+    }
 }
 
 /// 클래스 정하기: 기대 클래스 + 배열 강제 여부 → 피연산자 클래스
@@ -1182,7 +1325,7 @@ impl Emitter<'_> {
     }
 
     fn number(&mut self, v: f64) {
-        if (0.0..=65535.0).contains(&v) && v.fract() == 0.0 && !(v == 0.0 && v.is_sign_negative()) {
+        if (0.0..=65535.0).contains(&v) && v.fract() == 0.0 {
             self.u8(0x1E);
             self.u16(v as u16);
         } else {
@@ -1207,7 +1350,73 @@ impl Emitter<'_> {
     }
 
     fn emit(&mut self, n: &Node, expected: Class, forced: bool) -> Result<(), EncodeError> {
+        let was = self.in_chain;
+        if !matches!(n, Node::Paren(_) | Node::Binary(":" | " " | ",", ..)) {
+            self.in_chain = false;
+        }
+        let r = self.emit_node(n, expected, forced);
+        self.in_chain = was;
+        r
+    }
+
+    /// 배열 상수: PtgArray (클래스 + 빈 7바이트) 와 뒤따르는 자료 — 열 수−1 u16, 행 수−1 u32, 값마다 형식 u8
+    /// (1 수 f64, 2 글 u16 길이·플래그·글자, 4 논리 값 1바이트, 0x10 오류 코드 1바이트) 와 8바이트 (한셀은 남는 바이트에
+    /// 앞서 쓴 수식의 찌꺼기를 남긴다 — 0 으로)
+    fn array(&mut self, rows: &[Vec<Node>], class: Class) -> Result<(), EncodeError> {
+        self.out.push(class.bits());
+        self.out.extend_from_slice(&[0; 7]);
+        let cols = rows[0].len();
+        self.extra
+            .extend_from_slice(&((cols - 1) as u16).to_le_bytes());
+        self.extra
+            .extend_from_slice(&((rows.len() - 1) as u32).to_le_bytes());
+        for r in rows {
+            for v in r {
+                match v {
+                    Node::Num(n) => {
+                        self.extra.push(0x01);
+                        self.extra.extend_from_slice(&n.to_le_bytes());
+                    }
+                    Node::Str(t) => {
+                        let units: Vec<u16> = t.encode_utf16().collect();
+                        self.extra.push(0x02);
+                        self.extra
+                            .extend_from_slice(&(units.len() as u16).to_le_bytes());
+                        if units.iter().all(|&u| u <= 0xFF) {
+                            self.extra.push(0);
+                            self.extra.extend(units.iter().map(|&u| u as u8));
+                        } else {
+                            self.extra.push(1);
+                            for u in units {
+                                self.extra.extend_from_slice(&u.to_le_bytes());
+                            }
+                        }
+                    }
+                    Node::Bool(b) => {
+                        self.extra
+                            .extend_from_slice(&[0x04, *b as u8, 0, 0, 0, 0, 0, 0, 0]);
+                    }
+                    Node::Err(e) => {
+                        self.extra
+                            .extend_from_slice(&[0x10, *e, 0, 0, 0, 0, 0, 0, 0]);
+                    }
+                    _ => return err("배열 상수 값"),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_node(&mut self, n: &Node, expected: Class, forced: bool) -> Result<(), EncodeError> {
         match n {
+            Node::Array(rows) => {
+                let class = if expected == Class::Val && !forced {
+                    Class::Val
+                } else {
+                    Class::Arr
+                };
+                self.array(rows, class)?;
+            }
             Node::Num(v) => self.number(*v),
             Node::Str(s) => self.string(s),
             Node::Bool(b) => {
@@ -1237,8 +1446,16 @@ impl Emitter<'_> {
                 self.u8(0x15);
             }
             Node::Unary(op, x) => {
-                self.emit(x, Class::Val, forced)?;
-                self.u8(if *op == "-" { 0x13 } else { 0x12 });
+                // 숫자 상수 바로 앞의 - 는 음수 상수로 접는다 (한셀: ABS(-5) → PtgNum -5). 숫자 상수 앞의 + 는
+                // 토큰이 없다 (`+1000` → 1000). 접은 상수 앞의 또 다른 단항은 그대로 토큰 (`--1` → -1, 단항 -)
+                match (&**x, *op) {
+                    (Node::Num(v), "-") => self.number(-v),
+                    (Node::Num(v), _) => self.number(*v),
+                    _ => {
+                        self.emit(x, Class::Val, forced)?;
+                        self.u8(if *op == "-" { 0x13 } else { 0x12 });
+                    }
+                }
             }
             Node::Percent(x) => {
                 self.emit(x, Class::Val, forced)?;
@@ -1258,29 +1475,55 @@ impl Emitter<'_> {
                     ">=" => 0x0C,
                     ">" => 0x0D,
                     "<>" => 0x0E,
+                    " " => 0x0F,
                     "," => 0x10,
                     _ => 0x11,
                 };
-                // 참조 연산자(범위·합집합)의 피연산자는 참조, 나머지는 값
-                let cls = if matches!(ptg, 0x10 | 0x11) {
+                // 참조 연산자(범위·교집합·합집합)의 피연산자는 참조, 나머지는 값
+                let cls = if matches!(ptg, 0x0F..=0x11) {
                     Class::Ref
                 } else {
                     Class::Val
                 };
-                // 합집합은 PtgMemFunc(뒤따르는 식의 길이 u16)로 감싼다 (관측: 이름 Print_Area 의 두 영역)
-                let wrap = ptg == 0x10 && !self.in_union;
+                // 참조 연산 식은 맨 바깥에서 PtgMemArea (컴파일 때 영역을 아는 것: 영역 목록 PtgExtraMem 이 뒤따른다),
+                // PtgMemErr (빈 교집합·오류), PtgMemFunc (이름·함수·3차원 참조) 로 감싼다 (관측: 이름 Print_Area 의 두
+                // 영역은 PtgMemFunc, 한셀 토큰 대조)
+                let root = matches!(ptg, 0x0F..=0x11) && !self.in_chain;
                 let at = self.out.len();
-                if wrap {
-                    self.in_union = true;
-                    self.out.extend_from_slice(&[0x09 | expected.bits(), 0, 0]);
+                let mut head = 0;
+                if root {
+                    let bits = expected.bits();
+                    match static_eval(n) {
+                        Static::Areas(areas) => {
+                            self.out.extend_from_slice(&[0x06 | bits, 0, 0, 0, 0, 0, 0]);
+                            self.extra
+                                .extend_from_slice(&(areas.len() as u32).to_le_bytes());
+                            for a in areas {
+                                for v in a {
+                                    self.extra.extend_from_slice(&v.to_le_bytes());
+                                }
+                            }
+                            head = 7;
+                        }
+                        Static::Err => {
+                            self.out.extend_from_slice(&[0x07 | bits, 0, 0, 0, 0, 0, 0]);
+                            head = 7;
+                        }
+                        Static::Dynamic => {
+                            self.out.extend_from_slice(&[0x09 | bits, 0, 0]);
+                            head = 3;
+                        }
+                    }
+                }
+                if matches!(ptg, 0x0F..=0x11) {
+                    self.in_chain = true;
                 }
                 self.emit(a, cls, forced)?;
                 self.emit(b, cls, forced)?;
                 self.u8(ptg);
-                if wrap {
-                    self.in_union = false;
-                    let len = (self.out.len() - at - 3) as u16;
-                    self.out[at + 1..at + 3].copy_from_slice(&len.to_le_bytes());
+                if root {
+                    let len = (self.out.len() - at - head) as u16;
+                    self.out[at + head - 2..at + head].copy_from_slice(&len.to_le_bytes());
                 }
             }
             Node::Func(name, args) => self.func(name, args, expected, forced)?,
@@ -1533,8 +1776,21 @@ impl Emitter<'_> {
     }
 }
 
-/// 수식 원문 → 토큰
+/// 수식 원문 → 토큰. 배열 상수·참조 연산 영역 목록처럼 토큰 뒤에 자료가 붙는 수식은 [`encode_with_extra`] 만 쓴다
 pub fn encode(text: &str, opts: Options, res: &mut dyn Resolve) -> Result<Vec<u8>, EncodeError> {
+    let (rgce, extra) = encode_with_extra(text, opts, res)?;
+    if !extra.is_empty() {
+        return err("토큰 뒤에 자료가 붙는 수식(배열 상수·영역 목록)은 여기서 쓸 수 없습니다");
+    }
+    Ok(rgce)
+}
+
+/// 수식 원문 → (토큰, 토큰 뒤에 붙는 자료)
+pub fn encode_with_extra(
+    text: &str,
+    opts: Options,
+    res: &mut dyn Resolve,
+) -> Result<(Vec<u8>, Vec<u8>), EncodeError> {
     let text = text.strip_prefix('=').unwrap_or(text);
     let node = parse(text)?;
     let mut e = Emitter {
@@ -1542,7 +1798,8 @@ pub fn encode(text: &str, opts: Options, res: &mut dyn Resolve) -> Result<Vec<u8
         res,
         opts,
         volatile: false,
-        in_union: false,
+        in_chain: false,
+        extra: Vec::new(),
     };
     e.emit(&node, opts.root, opts.root == Class::Arr)?;
     let mut out = e.out;
@@ -1551,7 +1808,7 @@ pub fn encode(text: &str, opts: Options, res: &mut dyn Resolve) -> Result<Vec<u8
         v.extend_from_slice(&out);
         out = v;
     }
-    Ok(out)
+    Ok((out, e.extra))
 }
 
 #[cfg(test)]

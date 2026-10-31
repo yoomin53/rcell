@@ -122,6 +122,61 @@ fn mask_pads12(t: &mut [u8]) {
     }
 }
 
+/// 레거시 토큰 하나의 바이트 수 (BIFF12 와 같되 PtgArray 는 8, PtgStr 은 길이 u16·플래그·글자)
+fn ptg_size8(rgce: &[u8], i: usize) -> usize {
+    match rgce[i] {
+        0x20 | 0x40 | 0x60 => 8,
+        0x17 => {
+            4 + u16_at(rgce, i + 1).unwrap_or(0)
+                * if rgce.get(i + 3).is_some_and(|f| f & 1 != 0) {
+                    2
+                } else {
+                    1
+                }
+        }
+        _ => ptg_size12(rgce, i),
+    }
+}
+
+/// 레거시 FORMULA 의 토큰 뒤 자료에서 한셀이 초기화하지 않은 바이트를 0 으로 (배열 상수의 논리·오류 칸의 남는 7바이트).
+/// `t` = grbit u16 + chn u32 + cce u16 + rgce + 자료
+fn mask_pads8(t: &mut [u8]) {
+    let Some(cce) = u16_at(t, 6) else { return };
+    let rgce: Vec<u8> = t.get(8..8 + cce).unwrap_or_default().to_vec();
+    let mut at = 8 + cce;
+    let mut i = 0;
+    while i < rgce.len() {
+        let p = rgce[i];
+        let base = 0x20 | (p & 0x1F);
+        if p >= 0x20 && base == 0x26 {
+            at += 4 + 16 * u32_at(t, at).unwrap_or(0);
+        } else if p >= 0x20 && base == 0x20 {
+            let (Some(c), Some(r)) = (u16_at(t, at), u32_at(t, at + 2)) else {
+                return;
+            };
+            at += 6;
+            for _ in 0..(c + 1) * (r + 1) {
+                match t.get(at).copied() {
+                    Some(1) => at += 9,
+                    Some(2) => {
+                        let cch = u16_at(t, at + 1).unwrap_or(0);
+                        let wide = t.get(at + 3).is_some_and(|f| f & 1 != 0);
+                        at += 4 + cch * if wide { 2 } else { 1 };
+                    }
+                    Some(4) | Some(0x10) => {
+                        if let Some(pad) = t.get_mut(at + 2..at + 9) {
+                            pad.fill(0);
+                        }
+                        at += 9;
+                    }
+                    _ => return,
+                }
+            }
+        }
+        i += ptg_size8(&rgce, i);
+    }
+}
+
 /// BIFF12 수식 (cce u32, rgce, cb u32, rgcb) 의 전체 바이트 길이
 fn bin_formula_len(d: &[u8], at: usize) -> Option<usize> {
     let cce = u32_at(d, at)?;
@@ -201,7 +256,9 @@ fn legacy_tokens(bytes: &[u8]) -> Tokens {
                     continue;
                 };
                 if d.len() > 16 {
-                    out.insert((sheet - 1, row as u32, col as u32), d[16..].to_vec());
+                    let mut t = d[16..].to_vec();
+                    mask_pads8(&mut t);
+                    out.insert((sheet - 1, row as u32, col as u32), t);
                 }
             }
             // SHRFMLA·ARRAY: 첫 칸 (RefU) 으로 열쇠. TABLE 도 같다

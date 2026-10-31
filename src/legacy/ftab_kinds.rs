@@ -67,10 +67,10 @@ pub const KINDS: &[(u16, u8, &str)] = &[
     (46, b'V', "RRRRR"),   // VAR
     (47, b'V', "RRR"),     // DVAR
     (48, b'V', "VV"),      // TEXT
-    (49, b'V', "BBVV"),    // LINEST
-    (50, b'V', "BBBV"),    // TREND
-    (51, b'V', "BBVV"),    // LOGEST
-    (52, b'V', "BBBV"),    // GROWTH
+    (49, b'A', "BBVV"),    // LINEST
+    (50, b'A', "BBBV"),    // TREND
+    (51, b'A', "BBVV"),    // LOGEST
+    (52, b'A', "BBBV"),    // GROWTH
     (56, b'V', "VVVVV"),   // PV
     (57, b'V', "VVVVV"),   // FV
     (58, b'V', "VVVVV"),   // NPER

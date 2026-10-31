@@ -1624,6 +1624,8 @@ struct EncFormula {
     rel: Vec<u8>,
     /// FORMULA 바로 뒤에 쓸 레코드 (배열 수식의 ARRAY, 데이터 표의 TABLE): (종류, 내용)
     extra: Option<(u16, Vec<u8>)>,
+    /// FORMULA 레코드 안 토큰 뒤에 붙는 자료 (배열 상수, 참조 연산 영역 목록)
+    tail: Vec<u8>,
 }
 
 /// XLWideString 꼴 (글자 수 u32 + UTF-16) — 표 레코드의 이름들. 없으면 0 (레거시는 빈 글로 쓴다)
@@ -2920,6 +2922,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                 exp: None,
                 rel: Vec::new(),
                 extra: None,
+                tail: Vec::new(),
             },
         );
     }
@@ -2939,6 +2942,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                     exp: None,
                     rel: Vec::new(),
                     extra: Some((0x0236, table_record(&range, d))),
+                    tail: Vec::new(),
                 },
             );
             continue;
@@ -2955,7 +2959,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
             (f.kind, f.range.as_deref().and_then(CellRange::parse))
         {
             // ARRAY: 범위, grbit 0, chn 0, cce + 토큰
-            match encode::encode(
+            match encode::encode_with_extra(
                 &f.text,
                 encode::Options {
                     array: true,
@@ -2963,10 +2967,10 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                 },
                 tables,
             ) {
-                Ok(t) => {
+                Ok((t, tail)) => {
                     let mut b = Buf::new();
                     range_u32(&mut b, &range);
-                    b.u16(0).u32(0).u16(t.len() as u16).bytes(&t);
+                    b.u16(0).u32(0).u16(t.len() as u16).bytes(&t).bytes(&tail);
                     e.formulas.insert(
                         (c.r.row, c.r.col),
                         EncFormula {
@@ -2975,6 +2979,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                             exp: None,
                             rel: Vec::new(),
                             extra: Some((0x0221, b.take())),
+                            tail: Vec::new(),
                         },
                     );
                 }
@@ -3000,6 +3005,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                             shared: Some((range, t)),
                             exp: Some(m),
                             extra: None,
+                            tail: Vec::new(),
                         },
                     );
                 }
@@ -3015,11 +3021,12 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                         exp: Some(m),
                         rel,
                         extra: None,
+                        tail: Vec::new(),
                     },
                 );
             }
-            None => match encode::encode(&f.text, opts, tables) {
-                Ok(t) => {
+            None => match encode::encode_with_extra(&f.text, opts, tables) {
+                Ok((t, tail)) => {
                     let rel = encode::encode(&f.text, rel_opts, tables).unwrap_or_default();
                     e.formulas.insert(
                         (c.r.row, c.r.col),
@@ -3029,6 +3036,7 @@ fn encode_sheet(sheet: &Sheet, si: usize, tables: &mut Tables, report: &mut Repo
                             exp: None,
                             rel,
                             extra: None,
+                            tail,
                         },
                     );
                 }
@@ -3726,7 +3734,8 @@ fn write_formula(out: &mut Out, ctx: &SheetCtx, c: &Cell, xf: u16, sst: &mut Sst
     b.u16(grbit)
         .u32(0)
         .u16(enc.rgce.len() as u16)
-        .bytes(&enc.rgce);
+        .bytes(&enc.rgce)
+        .bytes(&enc.tail);
     out.rec_buf(0x0006, &mut b);
     if let Some((range, tokens)) = &enc.shared {
         let mut s = Buf::new();

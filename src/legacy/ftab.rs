@@ -501,8 +501,8 @@ pub fn signature(index: u16) -> Signature {
 
 /// 다시 계산할 때마다 값이 바뀔 수 있는 함수 (수식 앞에 tAttrVolatile, 셀은 fAlwaysCalc)
 pub fn is_volatile(index: u16) -> bool {
-    // RAND, NOW, OFFSET, CELL, INDIRECT, TODAY, INFO, RANDBETWEEN
-    matches!(index, 63 | 74 | 78 | 125 | 148 | 221 | 244 | 464)
+    // RAND, NOW, OFFSET, CELL, INDIRECT, CALL, TODAY, INFO, RANDBETWEEN
+    matches!(index, 63 | 74 | 78 | 125 | 148 | 150 | 221 | 244 | 464)
 }
 
 /// 함수의 반환 종류 ([`super::ftab_kinds`] 의 표, 없으면 [`signature`] 에서)

@@ -1422,7 +1422,9 @@ impl Gen<'_> {
     fn func(&mut self, name: &str, args: &[Node], ctx: Ctx) -> Result<(), String> {
         let up = name.to_ascii_uppercase();
         let plain = up.strip_prefix("_XLFN.").unwrap_or(&up);
-        let Some((idx, fixed)) = ftab::by_name(plain) else {
+        // 한셀이 모르는 함수(타이·큐브 …)는 번호가 아니라 이름으로 부른다
+        let known = ftab::by_name(plain).filter(|_| !crate::calc::functions::hcell_unknown(plain));
+        let Some((idx, fixed)) = known else {
             return self.udf(name, args, ctx);
         };
         let arg = |k: usize| ctx.arg(ftab::slot_kind(idx, k), false);
