@@ -124,57 +124,6 @@ pub struct Run {
     pub text: String,
 }
 
-/// 글리프 외곽선 → 경로 조각 (글꼴 단위 → 장치 단위, y 뒤집기)
-struct Outline {
-    segs: Vec<Seg>,
-    at: (f64, f64),
-    k: f64,
-    stretch: f64,
-    shear: f64,
-    pen: f64,
-}
-
-impl Outline {
-    fn pt(&self, x: f32, y: f32) -> (f64, f64) {
-        let (x, y) = (x as f64 * self.k, y as f64 * self.k);
-        (self.pen + (x + y * self.shear) * self.stretch, -y)
-    }
-}
-
-impl ttf_parser::OutlineBuilder for Outline {
-    fn move_to(&mut self, x: f32, y: f32) {
-        let p = self.pt(x, y);
-        self.at = p;
-        self.segs.push(Seg::Move(p.0, p.1));
-    }
-    fn line_to(&mut self, x: f32, y: f32) {
-        let p = self.pt(x, y);
-        self.at = p;
-        self.segs.push(Seg::Line(p.0, p.1));
-    }
-    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        let (c, p, a) = (self.pt(x1, y1), self.pt(x, y), self.at);
-        // 2차 → 3차 베지어
-        self.segs.push(Seg::Cubic(
-            a.0 + 2.0 / 3.0 * (c.0 - a.0),
-            a.1 + 2.0 / 3.0 * (c.1 - a.1),
-            p.0 + 2.0 / 3.0 * (c.0 - p.0),
-            p.1 + 2.0 / 3.0 * (c.1 - p.1),
-            p.0,
-            p.1,
-        ));
-        self.at = p;
-    }
-    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        let (a, b, p) = (self.pt(x1, y1), self.pt(x2, y2), self.pt(x, y));
-        self.segs.push(Seg::Cubic(a.0, a.1, b.0, b.1, p.0, p.1));
-        self.at = p;
-    }
-    fn close(&mut self) {
-        self.segs.push(Seg::Close);
-    }
-}
-
 /// 글꼴 파일이 없을 때 글자 폭 (1/1000 em): 전각 1000, 그 밖 500
 fn plain_width(ch: char) -> f64 {
     if crate::render::is_wide(ch) {
@@ -209,45 +158,6 @@ impl<'a> FontSet<'a> {
             });
         st.by_face.insert(face, e);
         e
-    }
-
-    /// 글자 모양: 글자마다 글리프 외곽선 (기준선 왼쪽 끝이 (0, 0), 장치 단위, 아래가 +). 글꼴 파일이 없는 글자가 있거나
-    /// 외곽선을 못 읽으면 None. 비트맵으로 그릴 때 쓴다
-    pub fn glyph_paths(
-        &self,
-        key: &FontKey,
-        text: &str,
-        size: f64,
-        stretch: f64,
-    ) -> Option<Vec<Vec<Seg>>> {
-        let runs = self.runs(key, text, false);
-        let st = self.state.borrow();
-        let mut pen = 0.0;
-        let mut out = Vec::new();
-        for run in &runs {
-            let emb = &st.fonts[run.font?];
-            let face = ttf_parser::Face::parse(&emb.face.data, emb.face.index).ok()?;
-            let k = size / face.units_per_em() as f64;
-            let shear = if run.synth_italic { 0.21 } else { 0.0 };
-            for (ch, gid) in run.text.chars().zip(&run.glyphs) {
-                let gid = ttf_parser::GlyphId(*gid);
-                let mut b = Outline {
-                    segs: Vec::new(),
-                    at: (0.0, 0.0),
-                    k,
-                    stretch,
-                    shear,
-                    pen,
-                };
-                if face.outline_glyph(gid, &mut b).is_some() {
-                    out.push(b.segs);
-                } else if ch != ' ' {
-                    out.push(Vec::new());
-                }
-                pen += face.glyph_hor_advance(gid).unwrap_or(0) as f64 * k * stretch;
-            }
-        }
-        Some(out)
     }
 
     /// 글자들을 글꼴 토막으로 (없는 글자는 대체 글꼴). `keep` 이면 글리프를 부분 집합에 넣는다
@@ -321,6 +231,14 @@ impl<'a> FontSet<'a> {
 }
 
 impl FontSet<'_> {
+    /// 넣은 글꼴 번호 → 글꼴 파일 바이트와 얼굴 번호 (글리프 윤곽을 그릴 때)
+    pub fn face_data(&self, font: usize) -> Option<(std::sync::Arc<Vec<u8>>, u32)> {
+        let st = self.state.borrow();
+        st.fonts
+            .get(font)
+            .map(|e| (e.face.data.clone(), e.face.index))
+    }
+
     /// 글꼴의 오름·내림 (1/1000 em, 내림은 양수) — 고른 얼굴, 없으면 대체 글꼴
     pub fn ascent_descent(&self, key: &FontKey) -> (f64, f64) {
         let mut st = self.state.borrow_mut();
@@ -407,6 +325,194 @@ fn color(c: [u8; 3]) -> String {
         num(c[1] as f64 / 255.0),
         num(c[2] as f64 / 255.0)
     )
+}
+
+/// 비트맵 한 장의 최대 픽셀 수 (넘으면 벡터로)
+const MAX_BITMAP_PIXELS: i64 = 40_000_000;
+
+/// [`Op`] 의 좌표를 `(x − ox) · k` 꼴로 옮기고 늘인다 (선 굵기·점선·글자 크기도 `k` 배)
+fn rebase(op: &Op, (ox, oy): (f64, f64), k: f64) -> Op {
+    let pt = |x: f64, y: f64| ((x - ox) * k, (y - oy) * k);
+    match op {
+        Op::Path {
+            segs,
+            fill,
+            stroke,
+            even_odd,
+            caps,
+            hatch,
+        } => Op::Path {
+            segs: segs
+                .iter()
+                .map(|s| match *s {
+                    Seg::Move(x, y) => {
+                        let p = pt(x, y);
+                        Seg::Move(p.0, p.1)
+                    }
+                    Seg::Line(x, y) => {
+                        let p = pt(x, y);
+                        Seg::Line(p.0, p.1)
+                    }
+                    Seg::Cubic(a, b, c, d, e, f) => {
+                        let (p, q, r) = (pt(a, b), pt(c, d), pt(e, f));
+                        Seg::Cubic(p.0, p.1, q.0, q.1, r.0, r.1)
+                    }
+                    Seg::Close => Seg::Close,
+                })
+                .collect(),
+            fill: *fill,
+            stroke: stroke
+                .as_ref()
+                .map(|(w, c, d)| (w * k, *c, d.iter().map(|v| v * k).collect())),
+            even_odd: *even_odd,
+            caps: *caps,
+            hatch: *hatch,
+        },
+        Op::Rect {
+            x0,
+            y0,
+            x1,
+            y1,
+            color,
+        } => {
+            let (a, b) = (pt(*x0, *y0), pt(*x1, *y1));
+            Op::Rect {
+                x0: a.0,
+                y0: a.1,
+                x1: b.0,
+                y1: b.1,
+                color: *color,
+            }
+        }
+        Op::Line {
+            x0,
+            y0,
+            x1,
+            y1,
+            width,
+            color,
+            dash,
+        } => {
+            let (a, b) = (pt(*x0, *y0), pt(*x1, *y1));
+            Op::Line {
+                x0: a.0,
+                y0: a.1,
+                x1: b.0,
+                y1: b.1,
+                width: width * k,
+                color: *color,
+                dash: dash.iter().map(|v| v * k).collect(),
+            }
+        }
+        Op::Text {
+            x,
+            y,
+            size,
+            font,
+            color,
+            text,
+            underline,
+            strike,
+            stretch,
+            angle,
+        } => {
+            let p = pt(*x, *y);
+            Op::Text {
+                x: p.0,
+                y: p.1,
+                size: size * k,
+                font: font.clone(),
+                color: *color,
+                text: text.clone(),
+                underline: *underline,
+                strike: *strike,
+                stretch: *stretch,
+                angle: *angle,
+            }
+        }
+        Op::Image {
+            x0,
+            y0,
+            x1,
+            y1,
+            data,
+        } => {
+            let (a, b) = (pt(*x0, *y0), pt(*x1, *y1));
+            Op::Image {
+                x0: a.0,
+                y0: a.1,
+                x1: b.0,
+                y1: b.1,
+                data: data.clone(),
+            }
+        }
+        Op::Clip { x0, y0, x1, y1 } => {
+            let (a, b) = (pt(*x0, *y0), pt(*x1, *y1));
+            Op::Clip {
+                x0: a.0,
+                y0: a.1,
+                x1: b.0,
+                y1: b.1,
+            }
+        }
+        Op::Unclip => Op::Unclip,
+        Op::Raster { .. } => op.clone(),
+    }
+}
+
+/// 차트 비트맵: 상자 `(x0, y0, x1, y1)` (장치 단위, 정수 픽셀로 맞춘다) 안의 그리기 목록을 장치 해상도(한 장치 단위 = 한
+/// 픽셀)의 RGB + 알파 그림으로. 웹 페이지 그림이 쓰는 래스터라이저 ([`super::raster`]) 를 같이 쓴다 — 그 래스터라이저는 1px =
+/// 6.25 장치 단위로 그리므로 좌표를 6.25 배 늘려 넘긴다. 글꼴 파일이 없는 글자가 있거나 너무 크면 None (벡터로 그린다)
+fn chart_bitmap(
+    ops: &[Op],
+    (bx0, by0, bx1, by1): (f64, f64, f64, f64),
+    fonts: &FontSet,
+) -> Option<PdfImage> {
+    let (ox, oy) = (bx0.round(), by0.round());
+    let (w, h) = ((bx1 - bx0).round() as i64, (by1 - by0).round() as i64);
+    if w <= 0 || h <= 0 || w * h > MAX_BITMAP_PIXELS {
+        return None;
+    }
+    let flat = super::raster::flatten_raster(ops);
+    for op in &flat {
+        match op {
+            Op::Text { font, text, .. } => {
+                if fonts
+                    .runs(font, text, false)
+                    .iter()
+                    .any(|r| r.font.is_none())
+                {
+                    return None;
+                }
+            }
+            Op::Path { hatch: Some(_), .. } => return None,
+            _ => {}
+        }
+    }
+    let scaled: Vec<Op> = flat.iter().map(|o| rebase(o, (ox, oy), 6.25)).collect();
+    let bm = super::raster::draw(&scaled, w as u32, h as u32, fonts);
+    let rgba = bm.rgba();
+    let n = (w * h) as usize;
+    let mut rgb = Vec::with_capacity(n * 3);
+    let mut alpha = Vec::with_capacity(n);
+    let mut opaque = true;
+    for p in rgba.as_chunks::<4>().0 {
+        if p[3] == 0 {
+            rgb.extend_from_slice(&[255, 255, 255]);
+        } else {
+            rgb.extend_from_slice(&p[..3]);
+        }
+        opaque &= p[3] == 255;
+        alpha.push(p[3]);
+    }
+    Some(PdfImage {
+        width: w as u32,
+        height: h as u32,
+        components: 3,
+        dct: false,
+        data: rgb,
+        alpha: (!opaque).then_some(alpha),
+    })
 }
 
 /// 그리기 목록 → 내용 스트림 (장치 단위). 글꼴은 `/F{n}` (넣은 글꼴 번호), 표준 CID 글꼴은 `/FK`
@@ -554,7 +660,7 @@ fn content(
                 x1,
                 y1,
                 ops: sub,
-            } => match super::raster::render(sub, (*x0, *y0, *x1, *y1), fonts) {
+            } => match chart_bitmap(sub, (*x0, *y0, *x1, *y1), fonts) {
                 Some(img) => {
                     let (ox, oy) = (x0.round(), y0.round());
                     let (w, h) = (img.width as f64, img.height as f64);
@@ -968,4 +1074,41 @@ S"
         assert_eq!(num(-0.0001), "0");
         assert_eq!(num(2.5), "2.5");
     }
+}
+/// 차트 비트맵: 장치 해상도 RGB + 알파 (칠한 곳 불투명, 빈 곳 투명). 글꼴 파일이 없는 글자가 있으면 벡터로 (None)
+#[test]
+fn chart_bitmap_is_device_resolution_with_alpha() {
+    let db = FontDb::new();
+    let fonts = FontSet::new(&db);
+    let rect = Op::Rect {
+        x0: 102.0,
+        y0: 102.0,
+        x1: 106.0,
+        y1: 106.0,
+        color: [255, 0, 0],
+    };
+    let img = chart_bitmap(&[rect], (100.0, 100.0, 110.0, 110.0), &fonts).unwrap();
+    assert_eq!((img.width, img.height), (10, 10));
+    let alpha = img.alpha.as_ref().unwrap();
+    let at = |x: usize, y: usize| y * 10 + x;
+    assert_eq!(alpha[at(3, 3)], 255);
+    assert_eq!(&img.data[at(3, 3) * 3..at(3, 3) * 3 + 3], &[255, 0, 0]);
+    assert_eq!(alpha[at(8, 3)], 0);
+    let text = Op::Text {
+        x: 100.0,
+        y: 105.0,
+        size: 10.0,
+        font: FontKey {
+            name: "Arial".into(),
+            bold: false,
+            italic: false,
+        },
+        color: [0, 0, 0],
+        text: "A".into(),
+        underline: false,
+        strike: false,
+        stretch: 1.0,
+        angle: 0.0,
+    };
+    assert!(chart_bitmap(&[text], (100.0, 100.0, 110.0, 110.0), &fonts).is_none());
 }

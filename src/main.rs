@@ -105,6 +105,9 @@ enum Cmd {
         /// 바이너리 저장에서 한셀이 잃는 값도 똑같이 잃는다 (한셀과 같은 결과를 볼 때)
         #[arg(long)]
         exact: bool,
+        /// 저장할 문서의 암호 (XML·바이너리 .cell, .xlsx, .xlsm, .xlsb — 한셀과 같은 표준 암호화)
+        #[arg(long)]
+        out_password: Option<String>,
     },
     /// 편집 대본(JSON — docs/editing.md)을 실행해 저장한다. 편집 뒤 수식을 다시 계산한다
     Edit {
@@ -313,7 +316,15 @@ fn main() -> ExitCode {
             format,
             abs_path,
             exact,
-        } => convert(&input, &output, format.as_deref(), abs_path, exact),
+            out_password,
+        } => convert(
+            &input,
+            &output,
+            format.as_deref(),
+            abs_path,
+            exact,
+            out_password.as_deref(),
+        ),
         Cmd::Edit {
             input,
             script,
@@ -815,6 +826,7 @@ fn convert(
     format: Option<&str>,
     abs_path: Option<String>,
     exact: bool,
+    out_password: Option<&str>,
 ) -> rcell::Result<()> {
     let format = match format.map(str::to_ascii_lowercase).as_deref() {
         None => rcell::SaveFormat::from_path(output),
@@ -840,6 +852,9 @@ fn convert(
         }
     };
     let wb = open_doc(input)?;
+    if let Some(pw) = out_password {
+        return rcell::save_as_encrypted(&wb, output, format, pw);
+    }
     match format {
         rcell::SaveFormat::Binary => {
             let out = rcell::binary::writer::write_report(

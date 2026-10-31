@@ -703,6 +703,58 @@ pub fn encrypt_package(
 }
 
 // ---------------------------------------------------------------------------
+// 레거시 `.cell`·넥셀 `.nxl` 암호 (`/HCellCrypto` + 암호화한 `/Workbook`)
+// ---------------------------------------------------------------------------
+
+/// 한셀이 암호를 걸어 저장한 레거시 `.cell`·`.nxl` 의 `/HCellCrypto` 80바이트: 0x5001 (u16), 플래그 (u16, 레거시 0 · 넥셀 8),
+/// 덧댄 바이트 수 (u32), 종류 (u16, 레거시 1 · 넥셀 2), 1 (u16), 0x40 (u32) 다음 salt 16 + 암호화한 검증자 16 + 암호화한
+/// 검증자 해시 32. 키 유도는 표준 암호화와 같다 (SHA-1, UTF-16 암호, 50,000회 — 한셀 -2005·-2003 저장에서 첫 블록을 맞대 찾았다).
+/// `/Workbook` 은 통째로 AES-128 ECB, 끝을 0 으로 16바이트 단위로 덧댄다.
+pub fn decrypt_hcell_workbook(crypto: &[u8], workbook: &[u8], password: &str) -> Result<Vec<u8>> {
+    let bad = |m: &str| Error::Decrypt(m.to_string());
+    if crypto.len() < 80 || crypto[..2] != [0x01, 0x50] {
+        return Err(bad("HCellCrypto 꼴이 아닙니다"));
+    }
+    let pad = u32::from_le_bytes([crypto[4], crypto[5], crypto[6], crypto[7]]) as usize;
+    let salt = &crypto[16..32];
+    let key: [u8; 16] = derive_key(password, salt, 128)
+        .try_into()
+        .map_err(|_| bad("키"))?;
+    let verifier = aes128_ecb_decrypt(&key, &crypto[32..48]);
+    let vh = aes128_ecb_decrypt(&key, &crypto[48..80]);
+    if sha1(&verifier)[..] != vh[..20] {
+        return Err(Error::WrongPassword);
+    }
+    let mut plain = aes128_ecb_decrypt(&key, workbook);
+    plain.truncate(plain.len().saturating_sub(pad));
+    Ok(plain)
+}
+
+/// [`decrypt_hcell_workbook`] 의 반대 → (`/HCellCrypto`, 암호화한 `/Workbook`). `nxl` 이 참이면 넥셀 꼴
+pub fn encrypt_hcell_workbook(
+    workbook: &[u8],
+    password: &str,
+    nxl: bool,
+    salt: &[u8; 16],
+    verifier: &[u8; 16],
+) -> (Vec<u8>, Vec<u8>) {
+    let key: [u8; 16] = derive_key(password, salt, 128)
+        .try_into()
+        .unwrap_or([0; 16]);
+    let pad = (16 - workbook.len() % 16) % 16;
+    let mut c = vec![0x01, 0x50];
+    c.extend_from_slice(&(if nxl { 8u16 } else { 0 }).to_le_bytes());
+    c.extend_from_slice(&(pad as u32).to_le_bytes());
+    c.extend_from_slice(&(if nxl { 2u16 } else { 1 }).to_le_bytes());
+    c.extend_from_slice(&1u16.to_le_bytes());
+    c.extend_from_slice(&0x40u32.to_le_bytes());
+    c.extend_from_slice(salt);
+    c.extend_from_slice(&aes128_ecb_encrypt(&key, verifier));
+    c.extend_from_slice(&aes128_ecb_encrypt(&key, &sha1(verifier)));
+    (c, aes128_ecb_encrypt(&key, workbook))
+}
+
+// ---------------------------------------------------------------------------
 // Agile 암호화 ([MS-OFFCRYPTO] 2.3.4.10–2.3.4.15)
 // ---------------------------------------------------------------------------
 

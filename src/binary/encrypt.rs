@@ -44,10 +44,16 @@ const CHUNK: usize = 4096;
 
 /// ZIP 패키지를 한셀처럼 감싼다 (기본 암호)
 pub fn wrap(package: &[u8]) -> Vec<u8> {
+    wrap_with_password(package, crypto::DEFAULT_PASSWORD)
+}
+
+/// ZIP 패키지를 사용자 암호로 감싼다 — 한셀이 암호를 걸어 저장할 때와 같은 표준 암호화 (한셀 .cell·.xlsx·.xlsm·바이너리
+/// .cell·.xlsb 저장 대조)
+pub fn wrap_with_password(package: &[u8], password: &str) -> Vec<u8> {
     let h = crypto::sha1(package);
     let mut salt = [0u8; 16];
     salt.copy_from_slice(&h[..16]);
-    let (info, enc) = crypto::encrypt_package(package, crypto::DEFAULT_PASSWORD, &salt, &salt);
+    let (info, enc) = crypto::encrypt_package(package, password, &salt, &salt);
     container(&info, &enc)
 }
 

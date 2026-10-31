@@ -108,7 +108,7 @@ format). Goals per version and the remaining work are tracked in the [roadmap](d
 - Excel 97-2003 `.xls` — legacy records transcoded to BIFF8, charts as BIFF8 chart substreams (Hancom Cell opens all 61 test files, 59 identical to its own `.xls`)
 - ODF `.ods` — values, formulas, structure and cell formats
 - Web page `.htm` / `.mht` — Hancom Cell's web-save layout (frameset, sheet pages, MIME archive; shapes and charts are not rendered to pictures)
-- Nexcel `.nxl` — Hancom Cell's -2003 layout (BIFF8 frame + Hancom extensions; 58 of 61 identical to its own `.nxl`)
+- Nexcel `.nxl` — Hancom Cell's -2003 layout (BIFF8 frame + Hancom extensions; 61 of 61 identical to its own `.nxl`)
 - CSV, text and PRN — byte-identical to Hancom Cell's save (code page 949, 216/216), document-model JSON
 
 ### Editing

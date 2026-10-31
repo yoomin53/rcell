@@ -38,8 +38,6 @@ libm = "0.2.16"
 pdf-writer = "0.15.0"
 ttf-parser = { version = "0.25.1", default-features = false, features = ["std"] }
 subsetter = { version = "0.2.6", default-features = false }
-# 차트를 장치 해상도 비트맵으로 인쇄 (한셀 PDF 와 같게): 윤곽 래스터라이저, Apache-2.0 OR MIT, 의존 없음, 순수 Rust (wasm 가능)
-zeno = { version = "0.3.3", default-features = false, features = ["std", "eval"] }
 
 [workspace]
 members = [".", "crates/rcell-wasm"]
