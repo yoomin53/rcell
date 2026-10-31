@@ -34,6 +34,72 @@ function box(t) {
   const w = Math.round(Math.max(...xs) - Math.min(...xs)) - adj, h = Math.round(Math.max(...ys) - Math.min(...ys)) - adj;
   return [(Math.max(...xs) + Math.min(...xs)) / 2 - w / 2, (Math.max(...ys) + Math.min(...ys)) / 2 - h / 2, w, h];
 }
+// ---- 호가 있는 윤곽: 꼭짓점 맞추기 ----
+const CORNER_DEG = 40;
+function turnDeg(p, q, r) {
+  const a1 = Math.atan2(q[1] - p[1], q[0] - p[0]), a2 = Math.atan2(r[1] - q[1], r[0] - q[0]);
+  let d = ((a2 - a1) * 180) / Math.PI;
+  while (d > 180) d -= 360;
+  while (d < -180) d += 360;
+  return Math.abs(d);
+}
+function cornerIdx(r) {
+  const n = r.length, out = [];
+  for (let i = 0; i < n; i++) if (turnDeg(r[(i + n - 1) % n], r[i], r[(i + 1) % n]) > CORNER_DEG) out.push(i);
+  return out;
+}
+// 폴리선을 호 길이 기준 같은 간격 n 개 (양 끝 뺀 안쪽 점)로
+function resample(pts, n) {
+  if (n === 0) return [];
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  const total = cum[cum.length - 1] || 1;
+  const out = [];
+  for (let k = 1; k <= n; k++) {
+    const t = (total * k) / (n + 1);
+    let j = 1;
+    while (j < cum.length - 1 && cum[j] < t) j++;
+    const f = (t - cum[j - 1]) / ((cum[j] - cum[j - 1]) || 1);
+    out.push([pts[j - 1][0] + (pts[j][0] - pts[j - 1][0]) * f, pts[j - 1][1] + (pts[j][1] - pts[j - 1][1]) * f]);
+  }
+  return out;
+}
+function align3(a, b, d) {
+  const rings = [a, b, d];
+  const cs = rings.map(cornerIdx);
+  if (!(cs[0].length === cs[1].length && cs[1].length === cs[2].length)) return null;
+  if (cs[0].length === 0) {
+    // 매끈한 닫힌 곡선: 가장 왼쪽(같으면 위) 점에서 시작하는 하나의 마디
+    const rot = rings.map((r) => {
+      let s = 0;
+      r.forEach((p, i) => { if (p[0] < r[s][0] - 1e-9 || (Math.abs(p[0] - r[s][0]) < 1e-9 && p[1] < r[s][1])) s = i; });
+      return r.slice(s).concat(r.slice(0, s)).concat([r[s]]);
+    });
+    const n = Math.max(...rot.map((r) => r.length - 2));
+    return rot.map((r) => [r[0]].concat(resample(r, n)));
+  }
+  // 가장 위(같으면 왼쪽) 꼭짓점에서 시작
+  const rot = rings.map((r, j) => {
+    let s = cs[j][0];
+    for (const i of cs[j]) if (r[i][1] < r[s][1] - 1e-9 || (Math.abs(r[i][1] - r[s][1]) < 1e-9 && r[i][0] < r[s][0])) s = i;
+    return r.slice(s).concat(r.slice(0, s));
+  });
+  const rc = rot.map(cornerIdx);
+  const out = [[], [], []];
+  const m = rc[0].length;
+  for (let k = 0; k < m; k++) {
+    const segs = rot.map((r, j) => {
+      const i0 = rc[j][k], i1 = rc[j][(k + 1) % m];
+      const seg = [];
+      for (let i = i0; ; i = (i + 1) % r.length) { seg.push(r[i]); if (i === i1) break; }
+      return seg;
+    });
+    const n = Math.max(...segs.map((s) => s.length - 2));
+    segs.forEach((s, j) => { out[j].push(s[0]); for (const p of resample(s, Math.max(0, n))) out[j].push(p); });
+  }
+  return out;
+}
+
 const result = {};
 const bad = [];
 for (const n of names) {
@@ -51,8 +117,13 @@ for (const n of names) {
     if (!(rs[0].length === rs[1].length && rs[1].length === rs[2].length)) { ok = false; break; }
     const rings = [];
     for (let i = 0; i < rs[0].length; i++) {
-      const [a, b, d] = [rs[0][i], rs[1][i], rs[2][i]];
-      if (!(a.length === b.length && b.length === d.length)) { ok = false; break; }
+      let [a, b, d] = [rs[0][i], rs[1][i], rs[2][i]];
+      if (!(a.length === b.length && b.length === d.length)) {
+        // 꼭짓점 수가 다르면 (호) 꼭짓점(꺾임 40도 넘는 점)끼리 맞추고 그 사이를 같은 수로 다시 뽑는다
+        const al = align3(a, b, d);
+        if (!al) { ok = false; break; }
+        [a, b, d] = al;
+      }
       const ring = [];
       for (let k = 0; k < a.length; k++) {
         // 상자 안 좌표 (px)
