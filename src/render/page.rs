@@ -272,6 +272,9 @@ pub(crate) fn aligned_px(right: bool, cell_w: f64, text_w: f64, indent: f64, zoo
 /// 칸 무늬 채우기의 `Hatch` 번호 바닥: 0–5 는 GDI 빗금, 이 번호부터는 [`paint::PATTERNS`] 의 무늬
 pub const PATTERN_BASE: u8 = 16;
 
+/// 한셀 PDF 가 도형 선(굵기만큼 넓힌 다각형)의 가장자리에 한 번 더 긋는 가는 선의 굵기 (0.75pt = 장치 6.25)
+pub const HC_LINE_EXTRA: f64 = 6.25;
+
 /// 반투명 채우기(점 찍기)의 `Hatch` 번호: `STIPPLE_BASE` + 점 수 (1–63, 8×8 칸 64 점 가운데). 한셀 PDF 는 알파를 쓰지 않고
 /// 8×8 베이어 디더 마스크(`/ImageMask`)를 되풀이해 반투명을 점 찍기로 그린다 (어둡게 25% = 16 점, 50% = 32 점, 밝게 30% = 19 점, 15% = 10 점)
 pub const STIPPLE_BASE: u8 = 128;
@@ -1998,6 +2001,10 @@ fn shadow_raster(
                 ..
             } if fill.is_some() || stroke.is_some() => {
                 let segs = mv(segs);
+                // 도형 선은 한셀 PDF 가 0.75pt 가는 선을 한 번 더 긋는 만큼 (svgops 의 data-hc) 굵게 잡혀 있다 — 그림자 모양은 선 굵기 그대로
+                let stroke = stroke
+                    .as_ref()
+                    .map(|(w, c, d)| ((*w - HC_LINE_EXTRA).max(0.0), *c, d.clone()));
                 let pad = stroke.as_ref().map_or(0.0, |s| s.0 / 2.0);
                 for sg in &segs {
                     match *sg {
