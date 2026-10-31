@@ -87,6 +87,41 @@ pub struct FillPaint {
     pub color: Option<String>,
     /// 무늬·그라데이션: 칸 자신의 오른쪽·아래 격자선 자리도 같은 무늬로 (한셀 화면 — 무늬가 격자선 자리를 지나간다)
     pub tiled: bool,
+    /// 무늬 채우기: (무늬 이름, 전경 색, 배경 색 — #RRGGBB). 인쇄가 8×8 무늬 칸으로 찍는다
+    pub pat: Option<(String, String, String)>,
+}
+
+/// 인쇄 무늬 목록 (번호 = 목록 위치): 무늬 이름 → [`pattern_rows`] 의 8×8 칸
+pub const PATTERNS: [&str; 17] = [
+    "mediumGray",
+    "darkGray",
+    "lightGray",
+    "darkHorizontal",
+    "darkVertical",
+    "darkDown",
+    "darkUp",
+    "darkGrid",
+    "darkTrellis",
+    "lightHorizontal",
+    "lightVertical",
+    "lightDown",
+    "lightUp",
+    "lightGrid",
+    "lightTrellis",
+    "gray125",
+    "gray0625",
+];
+
+/// 무늬의 8×8 칸 (전경이 true, 위가 첫 줄) — 한셀 PDF 의 무늬 칸 그림(8×8, 가로 4pt)과 같다 (화면의 4×4 무늬 둘씩)
+pub fn pattern_rows(index: usize) -> Option<[[bool; 8]; 8]> {
+    let (w, h, on) = pattern_tile(PATTERNS.get(index)?)?;
+    let mut out = [[false; 8]; 8];
+    for (y, row) in out.iter_mut().enumerate() {
+        for (x, v) in row.iter_mut().enumerate() {
+            *v = on(x as u32 % w, y as u32 % h);
+        }
+    }
+    Some(out)
 }
 
 fn col(c: Option<&Color>, theme: &Theme) -> Option<String> {
@@ -110,15 +145,18 @@ pub fn fill_css(fill: &Fill, theme: &Theme, z: f64) -> Option<FillPaint> {
             css: format!("background:{c};"),
             color: Some(c),
             tiled: false,
+            pat: None,
         });
     }
     let fg = fg.unwrap_or_else(|| "#000000".into());
     let bg = bg.unwrap_or_else(|| "#FFFFFF".into());
+    let (fg_hex, bg_hex) = (fg.clone(), bg.clone());
     let Some((w, h, on)) = pattern_tile(pt) else {
         return Some(FillPaint {
             css: format!("background:{fg};"),
             color: Some(fg),
             tiled: false,
+            pat: None,
         });
     };
     let mut svg = format!(
@@ -148,6 +186,7 @@ pub fn fill_css(fill: &Fill, theme: &Theme, z: f64) -> Option<FillPaint> {
         ),
         color: Some(rep),
         tiled: true,
+        pat: Some((pt.to_string(), fg_hex, bg_hex)),
     })
 }
 
@@ -227,6 +266,7 @@ fn gradient_css(g: &GradientFill, theme: &Theme) -> Option<FillPaint> {
         ),
         color: rep,
         tiled: true,
+        pat: None,
     })
 }
 

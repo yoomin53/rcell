@@ -20,6 +20,8 @@ pub struct PdfImage {
     pub data: Vec<u8>,
     /// 알파 (8비트, 1 성분)
     pub alpha: Option<Vec<u8>>,
+    /// 알파를 1비트 스텐실 마스크(`/Mask` + `/ImageMask`)로 쓴다 (한셀 PDF 의 차트·도형 그림이 이 꼴 — 알파 128 이상이 칠해진다)
+    pub stencil: bool,
 }
 
 /// 그림 바이트를 PDF 이미지로. 모르는 형식이면 None
@@ -60,6 +62,7 @@ fn jpeg(d: &[u8]) -> Option<PdfImage> {
                 dct: true,
                 data: d.to_vec(),
                 alpha: None,
+                stencil: false,
             });
         }
         i += 2 + len;
@@ -221,6 +224,7 @@ fn png(d: &[u8]) -> Option<PdfImage> {
         dct: false,
         data: out,
         alpha: has_alpha.then_some(alpha),
+        stencil: false,
     })
 }
 
@@ -324,6 +328,7 @@ fn bmp(d: &[u8]) -> Option<PdfImage> {
         dct: false,
         data: out,
         alpha: None,
+        stencil: false,
     })
 }
 

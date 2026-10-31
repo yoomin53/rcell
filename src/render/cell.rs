@@ -370,7 +370,32 @@ fn rich_html(v: &CellView, text: &str, theme: &Theme, cf_bold: bool) -> String {
 
 /// 칸 안 글자 (`.rc-t` 상자). `w`×`h` 는 칸(병합이면 병합 영역)의 크기(px, 오른쪽·아래 격자선 포함),
 /// `overflow` 는 글자가 넘쳐 쓰는 왼쪽·오른쪽 이웃 폭(px)
+///
+/// `rtl` (오른쪽에서 왼쪽 시트): 표를 통째로 뒤집었으니 데이터 막대는 뒤집힌 채 두고 (한셀 화면: 막대가 오른쪽에서 왼쪽으로
+/// 자라고 세로 변이 오른쪽) 글·아이콘은 `.rc-flip` 으로 한 번 더 뒤집어 바로 세운다 (아이콘은 칸 왼쪽 그대로)
 pub(super) fn cell_content(
+    v: &CellView,
+    cf: Option<&crate::cf_eval::CfStyle>,
+    theme: &Theme,
+    w: u32,
+    h: u32,
+    overflow: (u32, u32),
+    rtl: bool,
+) -> String {
+    // 데이터 막대 (조건부 서식): 글자 뒤 칸 안쪽
+    let bar = cf
+        .and_then(|c| c.bar.as_ref())
+        .map(|b| data_bar_svg(b, w, h))
+        .unwrap_or_default();
+    let rest = cell_content_inner(v, cf, theme, w, h, overflow);
+    if rtl && !rest.is_empty() {
+        format!("{bar}<div class=\"rc-flip\">{rest}</div>")
+    } else {
+        format!("{bar}{rest}")
+    }
+}
+
+fn cell_content_inner(
     v: &CellView,
     cf: Option<&crate::cf_eval::CfStyle>,
     theme: &Theme,
@@ -379,10 +404,6 @@ pub(super) fn cell_content(
     overflow: (u32, u32),
 ) -> String {
     let mut out = String::new();
-    // 데이터 막대 (조건부 서식): 글자 뒤 칸 안쪽
-    if let Some(b) = cf.and_then(|c| c.bar.as_ref()) {
-        out.push_str(&data_bar_svg(b, w, h));
-    }
     let mut text = v.text.clone();
     if cf.is_some_and(|c| c.hide_value) {
         text.clear();
@@ -547,6 +568,23 @@ pub(super) fn cell_content(
         );
         if v.h == HAlign::Distributed {
             css.push_str("text-align-last:justify;");
+        }
+        // 맑은 고딕 위 맞춤 줄 바꿈 글은 11pt 가 아니면 한셀이 1px 위 (줄 바꿈 실험 2: 10·12–20pt 첫·끝 줄 −1px, 11pt 0)
+        if v.v == VAlign::Top {
+            let (name, size) = v
+                .font
+                .map_or((metrics::DEFAULT_FONT, metrics::DEFAULT_SIZE), |f| {
+                    (
+                        f.name.as_deref().unwrap_or(metrics::DEFAULT_FONT),
+                        f.size.unwrap_or(metrics::DEFAULT_SIZE),
+                    )
+                });
+            if matches!(name, "맑은 고딕" | "Malgun Gothic")
+                && size >= 10.0
+                && (size - 11.0).abs() > 0.01
+            {
+                css.push_str("top:-1px;");
+            }
         }
         match v.h {
             HAlign::Right if indent > 0.0 => {

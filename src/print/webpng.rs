@@ -158,17 +158,35 @@ fn rgba(img: &PdfImage) -> Vec<u8> {
     out
 }
 
-/// 그림(PNG·BMP)을 상자에 이중선형으로 얹는다 (`rgba` 는 `w × h`, 직선 알파). 풀 수 없으면 그대로 둔다
+/// 그림 바이트를 픽셀로: PNG·BMP 는 인쇄의 풀개로, JPEG 은 [`crate::jpeg`] 로. 모르는 꼴이면 None
+fn pixels(data: &[u8]) -> Option<PdfImage> {
+    let img = decode(data)?;
+    if !img.dct {
+        return Some(img);
+    }
+    let j = crate::jpeg::decode(data)?;
+    Some(PdfImage {
+        width: j.width,
+        height: j.height,
+        components: j.components,
+        dct: false,
+        stencil: false,
+        data: j.data,
+        alpha: None,
+    })
+}
+
+/// 그림(PNG·BMP·JPEG)을 상자에 이중선형으로 얹는다 (`rgba` 는 `w × h`, 직선 알파). 풀 수 없으면 그대로 둔다
 fn draw_image(
     buf: &mut [u8],
     (w, h): (u32, u32),
     (x0, y0, x1, y1): (f64, f64, f64, f64),
     data: &[u8],
 ) {
-    let Some(img) = decode(data) else {
+    let Some(img) = pixels(data) else {
         return;
     };
-    if img.dct || img.width == 0 || img.height == 0 {
+    if img.width == 0 || img.height == 0 {
         return;
     }
     let (iw, ih, comps) = (
@@ -213,7 +231,37 @@ fn draw_image(
         let al = (a.1 * (1.0 - tx) + b.1 * tx) * (1.0 - ty) + (c.1 * (1.0 - tx) + d.1 * tx) * ty;
         (col, al)
     };
+    // 줄일 때는 원본 칸들의 넓이 평균(상자 필터), 늘릴 때는 이중선형 — 많이 줄이는 사진에서 계단이 지지 않게
+    let area = |sx0: f64, sx1: f64, sy0: f64, sy1: f64| -> ([f32; 3], f32) {
+        let (mut acc, mut acc_a, mut wsum) = ([0f64; 3], 0f64, 0f64);
+        let (ix0, ix1) = (sx0.floor() as usize, (sx1.ceil() as usize).min(iw));
+        let (iy0, iy1) = (sy0.floor() as usize, (sy1.ceil() as usize).min(ih));
+        for yy in iy0..iy1 {
+            let wy = (sy1.min(yy as f64 + 1.0) - sy0.max(yy as f64)).max(0.0);
+            for xx in ix0..ix1 {
+                let wt = wy * (sx1.min(xx as f64 + 1.0) - sx0.max(xx as f64)).max(0.0);
+                let (c, a) = get(xx, yy);
+                acc_a += a as f64 * wt;
+                for k in 0..3 {
+                    acc[k] += c[k] as f64 * a as f64 * wt;
+                }
+                wsum += wt;
+            }
+        }
+        if wsum <= 0.0 || acc_a <= 0.0 {
+            return ([0.0; 3], 0.0);
+        }
+        (
+            [
+                (acc[0] / acc_a) as f32,
+                (acc[1] / acc_a) as f32,
+                (acc[2] / acc_a) as f32,
+            ],
+            (acc_a / wsum) as f32,
+        )
+    };
     let (bw, bh) = (x1 - x0, y1 - y0);
+    let shrink = iw as f64 > bw * 1.01 || ih as f64 > bh * 1.01;
     for py in (y0.max(0.0).floor() as i64)..(y1.min(h as f64).ceil() as i64) {
         for px in (x0.max(0.0).floor() as i64)..(x1.min(w as f64).ceil() as i64) {
             let (sx, sy) = (
@@ -223,7 +271,17 @@ fn draw_image(
             if sx < 0.0 || sy < 0.0 || sx > iw as f64 || sy > ih as f64 {
                 continue;
             }
-            let (c, sa) = sample(sx, sy);
+            let (c, sa) = if shrink {
+                let (kx, ky) = (iw as f64 / bw, ih as f64 / bh);
+                area(
+                    (sx - kx / 2.0).max(0.0),
+                    (sx + kx / 2.0).min(iw as f64),
+                    (sy - ky / 2.0).max(0.0),
+                    (sy + ky / 2.0).min(ih as f64),
+                )
+            } else {
+                sample(sx, sy)
+            };
             let o = ((py as u32 * w + px as u32) * 4) as usize;
             let da = buf[o + 3] as f32 / 255.0;
             let oa = sa + da * (1.0 - sa);
@@ -240,14 +298,42 @@ fn draw_image(
 }
 
 /// 그리기 목록(장치 단위)을 `w × h`(px) 투명 바탕 RGBA 바이트로
-pub fn draw(ops: &[Op], w: u32, h: u32, fonts: &FontSet) -> Vec<u8> {
+/// `bilevel` 이면 작은 글자(16px 이하)를 안티앨리어싱 없이 두 색으로 그린다 — 한셀 도형 그림의 글 상자 본문이 그렇다
+/// (차트의 글자는 안티앨리어싱). 한셀의 글꼴 힌팅까지는 따라가지 못해 모양은 같지 않다
+pub fn draw(ops: &[Op], w: u32, h: u32, fonts: &FontSet, bilevel: bool) -> Vec<u8> {
     let mut px = Vec::new();
     let mut images = Vec::new();
     scaled(ops, K, fonts, &mut px, &mut images);
-    let mut buf = match raster::render(&px, (0.0, 0.0, w as f64, h as f64), fonts) {
+    let limit = if bilevel { 16.0 } else { 0.0 };
+    let thr = 128u8;
+    let (small, rest): (Vec<Op>, Vec<Op>) = if limit > 0.0 {
+        px.into_iter()
+            .partition(|o| matches!(o, Op::Text { size, .. } if *size <= limit))
+    } else {
+        (Vec::new(), px)
+    };
+    let px = rest;
+    let mut buf = match raster::render(&px, (0.0, 0.0, w as f64, h as f64), None, fonts) {
         Some(img) if img.width == w && img.height == h => rgba(&img),
         _ => vec![0; (w as usize) * (h as usize) * 4],
     };
+    if !small.is_empty()
+        && let Some(img) = raster::render(&small, (0.0, 0.0, w as f64, h as f64), None, fonts)
+        && img.width == w
+        && img.height == h
+    {
+        let t = rgba(&img);
+        for (d, sp) in buf
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(t.as_chunks::<4>().0)
+        {
+            if sp[3] >= thr {
+                d.copy_from_slice(&[sp[0], sp[1], sp[2], 255]);
+            }
+        }
+    }
     for (x0, y0, x1, y1, data) in &images {
         draw_image(&mut buf, (w, h), (*x0, *y0, *x1, *y1), data);
     }
@@ -256,10 +342,7 @@ pub fn draw(ops: &[Op], w: u32, h: u32, fonts: &FontSet) -> Vec<u8> {
 
 /// 그림(PNG·BMP)을 `w × h` 로 다시 그린 RGBA 바이트. 풀 수 없는 형식이면 None
 pub fn picture(data: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
-    let img = decode(data)?;
-    if img.dct {
-        return None;
-    }
+    pixels(data)?;
     let mut buf = vec![0; (w as usize) * (h as usize) * 4];
     draw_image(&mut buf, (w, h), (0.0, 0.0, w as f64, h as f64), data);
     Some(buf)
@@ -346,7 +429,7 @@ mod tests {
             y1: 37.5,
             color: [255, 0, 0],
         }];
-        let buf = draw(&ops, 10, 10, &fonts);
+        let buf = draw(&ops, 10, 10, &fonts, false);
         let at = |x: usize, y: usize| &buf[(y * 10 + x) * 4..(y * 10 + x) * 4 + 4];
         assert_eq!(at(3, 3), &[255, 0, 0, 255]);
         assert_eq!(at(0, 0), &[0, 0, 0, 0]);

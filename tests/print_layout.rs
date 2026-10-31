@@ -300,6 +300,27 @@ fn cases() -> Vec<Case> {
     setup(&mut wb).fit_to_width = Some(1);
     setup(&mut wb).fit_to_height = Some(0);
     add("fit_manual_wide", wb, 6, "20m,64,108,152,196", "", 0);
+    // 한 칸 앵커 도형이 쓰는 범위 밖(열 E, 너비 1000px)까지 닿으면 쪽에 맞춤 배율이 줄어든다 — 인쇄 범위는 도형 끝이 닿는 칸까지
+    let mut wb = base();
+    fill(&mut wb, "A1:C10");
+    wb.sheets[0].page.fit_to_page = Some(true);
+    setup(&mut wb).fit_to_width = Some(1);
+    setup(&mut wb).fit_to_height = Some(1);
+    wb.sheets[0].shapes.push(rcell::model::Shape {
+        anchor: rcell::model::Anchor {
+            kind: rcell::model::AnchorKind::OneCell,
+            from: rcell::model::Marker {
+                col: 4,
+                col_off: 0,
+                row: 2,
+                row_off: 0,
+            },
+            ext: Some((1000 * 9525, 100 * 9525)),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    add("shape_onecell_extent", wb, 1, "", "", 50);
     // 행·열 머리글은 나누기를 바꾸지 않는다
     let mut wb = base();
     fill(&mut wb, "A1:Z200");
@@ -713,4 +734,55 @@ fn open_recalc_rules() {
     let mut f = wb.clone();
     apply_open_recalc(&mut f, OpenRecalc::Full);
     assert_eq!(value(&f, "B1"), CellValue::Number(10.0));
+}
+
+/// 한셀 PDF 의 껍데기: PDF 1.4, 쪽마다 MediaBox·TrimBox·BleedBox 가 같다 (한셀 COM ExportAsFixedFormat 의 PDF 구조 대조)
+#[test]
+fn pdf_has_hcell_shell() {
+    let mut wb = base();
+    fill(&mut wb, "A1:B3");
+    let bytes = rcell::print::workbook_pdf(
+        &wb,
+        &rcell::print::FontDb::new(),
+        &rcell::print::PdfOptions::default(),
+    );
+    assert!(bytes.starts_with(b"%PDF-1.4"));
+    let s = String::from_utf8_lossy(&bytes);
+    for key in ["/MediaBox", "/TrimBox", "/BleedBox"] {
+        assert!(s.contains(key), "{key}");
+    }
+}
+
+/// 칸 무늬 채우기(darkGrid, 빨강/흰색)는 8×8 무늬 칸 그림을 되풀이하는 Tiling 무늬로 찍힌다 (한셀 PDF: 무늬 칸 그림 8×8,
+/// BBox 가로세로 4pt)
+#[test]
+fn pattern_fill_is_a_tiling_pattern() {
+    let mut wb = base();
+    fill(&mut wb, "A1:A2");
+    wb.styles.fills.push(Fill {
+        pattern_type: Some("darkGrid".into()),
+        fg_color: Some(rcell::model::Color {
+            rgb: Some("ffff0000".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    wb.styles.cell_xfs.push(Xf {
+        fill_id: 1,
+        apply_fill: Some(true),
+        ..Default::default()
+    });
+    wb.sheets[0].cells[0].style = 1;
+    let bytes = rcell::print::workbook_pdf(
+        &wb,
+        &rcell::print::FontDb::new(),
+        &rcell::print::PdfOptions::default(),
+    );
+    let s = String::from_utf8_lossy(&bytes);
+    assert!(s.contains("/PatternType 1"), "tiling pattern");
+    assert!(s.contains("/BBox [0 0 4 4]"), "4pt tile");
+    assert!(
+        s.contains("/Width 8") && s.contains("/Height 8"),
+        "8x8 tile image"
+    );
 }

@@ -476,6 +476,14 @@ pub(crate) fn write(
         }
     }
     w.r(0x1035, Vec::new());
+    // 그림 영역에 선 속성(a:ln 의 두께·끝·꺾임 등)이 있는 차트: 한셀은 자동 선의 영역 틀(FRAME 플래그 3)을 쓴다
+    // (선이 없고 채우기만 있는 차트는 쓰지 않는다 — 한셀 .xls 대조)
+    if ch.plot_sp_pr.as_ref().is_some_and(|p| p.line.is_some()) {
+        w.h(0x1032, "00 00 03 00");
+        w.begin();
+        w.h(0x1007, "00 00 00 00 00 00 00 00 09 00 08 00");
+        w.end();
+    }
     let mut cf = vec![0u8; 20];
     if ch.vary_colors {
         cf[16] = 1;

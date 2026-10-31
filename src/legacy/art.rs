@@ -172,6 +172,48 @@ fn client_anchor(flag: u16, a: [u32; 8]) -> Vec<u8> {
     rec(0, 0, 0xF010, &b.0)
 }
 
+/// 도형 부분을 받는 쪽: (SpContainer 앞부분, OBJ, TXO, 묶음 안 깊이)
+type Emit<'a> = dyn FnMut(Vec<u8>, Vec<u8>, Option<Vec<u8>>, u8) + 'a;
+
+/// OfficeArtChildAnchor (0xF00F): 묶음 안 좌표(EMU)의 왼쪽·위·오른쪽·아래
+fn child_anchor(s: &Shape) -> Vec<u8> {
+    let (x, y, cx, cy) = s
+        .xfrm
+        .as_ref()
+        .map_or((0, 0, 0, 0), |x| (x.x, x.y, x.cx, x.cy));
+    let mut b = Buf::new();
+    b.i32(x as i32)
+        .i32(y as i32)
+        .i32((x + cx) as i32)
+        .i32((y + cy) as i32);
+    rec(0, 0, 0xF00F, &b.0)
+}
+
+/// 묶음 자식 좌표 범위: `a:chOff`·`a:chExt` (원본 XML), 없으면 묶음 자신의 xfrm
+fn group_rect(s: &Shape) -> (i32, i32, i32, i32) {
+    let raw = s.raw.as_deref().unwrap_or("");
+    let attr = |tag: &str, a: &str| -> Option<i64> {
+        let i = raw.find(&format!("<a:{tag} "))?;
+        let seg = &raw[i..raw[i..].find('>')? + i];
+        let k = format!(" {a}=\"");
+        let j = seg.find(&k)? + k.len();
+        seg[j..].split('"').next()?.parse().ok()
+    };
+    let own = s
+        .xfrm
+        .as_ref()
+        .map_or((0, 0, 0, 0), |x| (x.x, x.y, x.cx, x.cy));
+    let (x, y) = (
+        attr("chOff", "x").unwrap_or(own.0),
+        attr("chOff", "y").unwrap_or(own.1),
+    );
+    let (cx, cy) = (
+        attr("chExt", "cx").unwrap_or(own.2),
+        attr("chExt", "cy").unwrap_or(own.3),
+    );
+    (x as i32, y as i32, (x + cx) as i32, (y + cy) as i32)
+}
+
 fn draw_rgb(c: &DrawColor) -> Option<u32> {
     let v = c.value.strip_prefix("srgb:")?;
     u32::from_str_radix(v, 16).ok()
@@ -540,6 +582,8 @@ impl Art {
             sp: Vec<u8>,
             obj: Vec<u8>,
             txo: Option<Vec<u8>>,
+            /// 묶음 안 깊이 (0 = 시트 바로 아래)
+            depth: u8,
         }
         let mut parts: Vec<Part> = Vec::new();
         let mut spid = dgid * 0x400;
@@ -587,6 +631,7 @@ impl Art {
                         sp,
                         obj: obj.take(),
                         txo: None,
+                        depth: 0,
                     });
                 }
                 Obj::Chart(s) => {
@@ -624,6 +669,7 @@ impl Art {
                         sp,
                         obj: obj.take(),
                         txo: None,
+                        depth: 0,
                     });
                 }
                 Obj::Shape(s) => {
@@ -633,7 +679,15 @@ impl Art {
                         &mut spid,
                         &mut obj_id,
                         false,
-                        &mut |sp, obj, txo| parts.push(Part { sp, obj, txo }),
+                        0,
+                        &mut |sp, obj, txo, depth| {
+                            parts.push(Part {
+                                sp,
+                                obj,
+                                txo,
+                                depth,
+                            })
+                        },
                     );
                 }
                 Obj::Note(c) => {
@@ -741,6 +795,7 @@ impl Art {
                         sp,
                         obj: obj.take(),
                         txo: Some(txo),
+                        depth: 0,
                     });
                 }
             }
@@ -757,6 +812,61 @@ impl Art {
             .iter()
             .map(|p| 8 + p.sp.len() + if p.txo.is_some() { textbox.len() } else { 0 })
             .sum();
+        // 묶음 구조: 다음 도형이 더 깊으면 묶음. 묶음 하나의 컨테이너 길이 = 자기 SpContainer + 자손들 (묶음이면 머리 8 바이트 더)
+        let unit = |p: &Part| 8 + p.sp.len() + if p.txo.is_some() { textbox.len() } else { 0 };
+        let is_group: Vec<bool> = (0..parts.len())
+            .map(|i| parts.get(i + 1).is_some_and(|n| n.depth > parts[i].depth))
+            .collect();
+        fn group_len(
+            parts: &[Part],
+            is_group: &[bool],
+            i: usize,
+            unit: &dyn Fn(&Part) -> usize,
+        ) -> (usize, usize) {
+            // (길이, 자손 다음 자리)
+            let d = parts[i].depth;
+            let mut len = unit(&parts[i]);
+            let mut k = i + 1;
+            while k < parts.len() && parts[k].depth > d {
+                if parts[k].depth == d + 1 {
+                    if is_group[k] {
+                        let (l, next) = group_len(parts, is_group, k, unit);
+                        len += 8 + l;
+                        k = next;
+                    } else {
+                        len += unit(&parts[k]);
+                        k += 1;
+                    }
+                } else {
+                    k += 1;
+                }
+            }
+            (len, k)
+        }
+        let mut group_lens: Vec<usize> = vec![0; parts.len()];
+        let mut sp_total2 = 0usize;
+        {
+            let mut i = 0;
+            while i < parts.len() {
+                if is_group[i] {
+                    let (l, next) = group_len(&parts, &is_group, i, &unit);
+                    group_lens[i] = l;
+                    sp_total2 += 8 + l;
+                    i = next;
+                } else {
+                    sp_total2 += unit(&parts[i]);
+                    i += 1;
+                }
+            }
+            // 안쪽 묶음의 길이도
+            for i in 0..parts.len() {
+                if is_group[i] && group_lens[i] == 0 {
+                    group_lens[i] = group_len(&parts, &is_group, i, &unit).0;
+                }
+            }
+        }
+        let _ = sp_total;
+        let sp_total = sp_total2;
         let spgr_len = patriarch.len() + sp_total;
         let mut fdg = Buf::new();
         fdg.u32(self.csp[ctx.si]).u32(spid);
@@ -773,6 +883,12 @@ impl Art {
                 first.extend_from_slice(&0xF003u16.to_le_bytes());
                 first.extend_from_slice(&(spgr_len as u32).to_le_bytes());
                 first.extend(&patriarch);
+            }
+            // 묶음이 시작하면 SpgrContainer 머리
+            if is_group[k] {
+                first.extend_from_slice(&0x000Fu16.to_le_bytes());
+                first.extend_from_slice(&0xF003u16.to_le_bytes());
+                first.extend_from_slice(&(group_lens[k] as u32).to_le_bytes());
             }
             // SpContainer 머리 (글 상자 포함 길이) + 앞부분
             let len = p.sp.len() + if p.txo.is_some() { textbox.len() } else { 0 };
@@ -799,10 +915,37 @@ impl Art {
         spid: &mut u32,
         obj_id: &mut u16,
         child: bool,
-        emit: &mut dyn FnMut(Vec<u8>, Vec<u8>, Option<Vec<u8>>),
+        depth: u8,
+        emit: &mut Emit,
     ) {
         *spid += 1;
         *obj_id += 1;
+        // 묶음 안의 차트 (xls): 한셀은 종류 0, 잠금 0x007F 031E031E, 0x0304 0, 0x033F 00080008, 이름, 자식 앵커, OBJ ot 5
+        if s.kind == ShapeKind::Chart && child {
+            let mut fsp = Buf::new();
+            fsp.u32(*spid).u32(0x0A02);
+            let mut sp = rec(2, 0, 0xF00A, &fsp.0);
+            let mut p = Props(Vec::new());
+            p.set(0x007F, 0x031E_031E);
+            p.set(0x0304, 0);
+            p.set(0x033F, 0x0008_0008);
+            if !s.name.is_empty() {
+                p.string(0x0380, &s.name);
+            }
+            sp.extend(p.record());
+            sp.extend(child_anchor(s));
+            sp.extend(rec(0, 0, 0xF011, &[]));
+            let mut obj = Buf::new();
+            obj.u16(0x15)
+                .u16(0x12)
+                .u16(0x05)
+                .u16(*obj_id)
+                .u16(0x0011)
+                .bytes(&[0; 12]);
+            obj.u32(0);
+            emit(sp, obj.take(), None, depth);
+            return;
+        }
         let (shape_type, ot) = match s.kind {
             ShapeKind::Picture => (75u16, 0x08u16),
             ShapeKind::Group => (0, 0x00),
@@ -847,7 +990,12 @@ impl Art {
         };
         // FSP 플래그: 0x0A00 (앵커·모양 종류 있음), 자식 0x0002, 그룹 0x0001, 연결선 0x0100 (도형 대조 실험 0xB00),
         // 뒤집기 0x0040·0x0080
-        let mut flags = 0x0A00u32;
+        // 묶음은 앵커 있음(0x0200)만, 한셀 .xls·레거시 관측: 묶음 0x0201, 자식 도형 0x0A02
+        let mut flags = if s.kind == ShapeKind::Group {
+            0x0200u32
+        } else {
+            0x0A00u32
+        };
         if child {
             flags |= 0x0002;
         }
@@ -869,7 +1017,11 @@ impl Art {
         fsp.u32(*spid).u32(flags);
         let mut sp = Vec::new();
         if s.kind == ShapeKind::Group {
-            sp.extend(rec(1, 0, 0xF009, &[0; 16]));
+            // 묶음의 자식 좌표 범위 (chOff·chExt, 없으면 묶음 자신의 xfrm)
+            let (l, t, r, b) = group_rect(s);
+            let mut g = Buf::new();
+            g.i32(l).i32(t).i32(r).i32(b);
+            sp.extend(rec(1, 0, 0xF009, &g.0));
         }
         sp.extend(rec(2, shape_type, 0xF00A, &fsp.0));
         let mut p = Props(Vec::new());
@@ -877,7 +1029,12 @@ impl Art {
         let raw = s.raw.as_deref().unwrap_or("");
         // 보호 속성 ([`lock_bits`]). 글 상자 여백·줄 바꿈·세로 맞춤(0x0081–0x0087)은 한셀이 쓰지 않는다
         // (관측: 말뭉치 한셀 레거시·XML→레거시의 도형 207개 모두, 도형 대조 실험의 글 넘침·줄임표 도형)
-        p.set(0x007F, lock_bits(s));
+        if s.kind == ShapeKind::Group {
+            // 묶음: 기본 잠금 0x011E (한셀이 잠금 없는 묶음을 .xls 로 저장한 값) 에 모양 잠금 0x033F 0x00080008
+            p.set(0x007F, (lock_bits(s) & !0x0200_0200) | 0x011E_011E);
+        } else {
+            p.set(0x007F, lock_bits(s));
+        }
         if s.kind == ShapeKind::Picture
             && let Some(pib) = s.target.as_ref().and_then(|t| self.pib.get(t))
         {
@@ -929,6 +1086,9 @@ impl Art {
         if s.locks.iter().any(|l| l == "noChangeShapeType") {
             sbool |= 0x08;
         }
+        if s.kind == ShapeKind::Group {
+            sbool |= 0x08;
+        }
         if sbool != 0 {
             p.set(0x033F, sbool | (sbool << 16));
         }
@@ -966,8 +1126,12 @@ impl Art {
             Some("absolute") => 3,
             _ => 0,
         };
-        let anchor = legacy_anchor(&s.anchor, ctx);
-        sp.extend(client_anchor(flag, anchor));
+        if child {
+            sp.extend(child_anchor(s));
+        } else {
+            let anchor = legacy_anchor(&s.anchor, ctx);
+            sp.extend(client_anchor(flag, anchor));
+        }
         sp.extend(rec(0, 0, 0xF011, &[]));
         // ftCmo 플래그: 0x0001 잠금, 0x0010 인쇄 — `xdr:clientData fPrintsWithSheet="0"` 이면 인쇄 끔 (관측: 서식
         // 파일의 배경 도형). 잠금은 늘 켠다: 한셀은 `fLocksWithSheet="0"` 을 저장하지 않는다 (도형 대조 실험)
@@ -1001,10 +1165,10 @@ impl Art {
                 self.text_para.unwrap_or(0),
             )
         });
-        emit(sp, obj.take(), txo);
+        emit(sp, obj.take(), txo, depth);
         if s.kind == ShapeKind::Group {
             for c in &s.children {
-                self.shape_parts(c, ctx, spid, obj_id, true, emit);
+                self.shape_parts(c, ctx, spid, obj_id, true, depth + 1, emit);
             }
         }
     }

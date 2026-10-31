@@ -1757,20 +1757,27 @@ fn draw_axis_chart(
     } else {
         TickRule::Horizontal { room }
     };
-    let legacy_wide_cats =
-        legacy && !horizontal && cats.iter().any(|c| c.chars().any(crate::render::is_wide));
+    // 한글에 공백이 낀 항목 이름("항목 2")은 레이블 자리가 16px 더 높다 (두 줄로 갈 수 있다) — 공백 없는 이름("1월")은
+    // 높지 않다 (차트 종류 실험의 레거시 7개: 틀 아래 − 36 에 축. c2_e10_str_cat 은 − 52)
+    let legacy_wide_cats = legacy
+        && !horizontal
+        && cats
+            .iter()
+            .any(|c| c.contains(' ') && c.chars().any(crate::render::is_wide));
     let probe = make_scale(vlo, vhi, val_ax, inner.h.max(inner.w) * 0.8, !xy, vrule);
     let val_labels: Vec<String> = probe
         .ticks()
         .iter()
         .map(|v| tick_label(*v, val_ax, val_fmt.as_deref(), percent))
         .collect();
+    // 레거시: 값 레이블 끝 → 축이 12px (XML 14px) — 한셀 화면에서 글자 잉크 끝 → 축 14.5px, 글자 자리는 잉크보다 2.5px 더
+    let val_gap = if legacy { VAL_GAP - 2.0 } else { VAL_GAP };
     let val_label_w = if labels_on(val_ax) {
         val_labels
             .iter()
             .map(|l| val_font.width(l))
             .fold(0.0, f64::max)
-            + VAL_GAP
+            + val_gap
     } else {
         0.0
     };
@@ -2312,10 +2319,20 @@ fn draw_axis_chart(
     };
     // 레이블 기준선: 값 레이블은 눈금 + 글꼴 0.35 (레거시 0.3), 항목 레이블은 축 아래 22.5px (레거시는 글자 윗변이
     // 축 + 9 — 기준선 1.39 글꼴)
-    let val_dy = |f: &Font| f.px() * if legacy { 0.3 } else { 0.35 };
+    // (레거시 글자는 1px 위 — 한셀이 COM 으로 만든 레거시 차트의 값·항목 레이블 잉크가 rcell 보다 1px 위)
+    let val_dy = |f: &Font| {
+        if legacy {
+            f.px() * 0.3 - 1.0
+        } else {
+            f.px() * 0.35
+        }
+    };
     let cat_dy = |f: &Font| {
         if legacy {
-            f.px() * 1.39 + if legacy_wide_cats { 8.0 } else { 0.0 }
+            // 한글 항목 이름은 한 줄 더 위 (한셀 화면: "1월" 이름 잉크가 숫자 이름보다 1px 위)
+            let hangul = cats.iter().any(|c| c.chars().any(crate::render::is_wide));
+            f.px() * 1.39 - if hangul { 2.0 } else { 1.0 }
+                + if legacy_wide_cats { 8.0 } else { 0.0 }
         } else {
             22.5 * f.size / BASE_PT + f.px() * 0.35
         }
@@ -2377,10 +2394,11 @@ fn draw_axis_chart(
                 }
                 if labels_on(val_ax) {
                     let t = tick_label(v, val_ax, val_fmt.as_deref(), percent);
+                    let gap = if legacy { VAL_GAP - 2.0 } else { VAL_GAP };
                     if right {
-                        out.text(x + VAL_GAP, p + val_dy(&val_font), &t, &val_font, "start");
+                        out.text(x + gap, p + val_dy(&val_font), &t, &val_font, "start");
                     } else {
-                        out.text(x - VAL_GAP, p + val_dy(&val_font), &t, &val_font, "end");
+                        out.text(x - gap, p + val_dy(&val_font), &t, &val_font, "end");
                     }
                 }
             }

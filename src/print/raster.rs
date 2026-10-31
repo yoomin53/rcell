@@ -138,10 +138,25 @@ fn commands(segs: &[Seg], map: impl Fn(f64, f64) -> (f64, f64)) -> Vec<Command> 
 pub fn render(
     ops: &[Op],
     (bx0, by0, bx1, by1): (f64, f64, f64, f64),
+    px: Option<(u32, u32)>,
     fonts: &FontSet,
 ) -> Option<PdfImage> {
-    let (ox, oy) = (bx0.round(), by0.round());
-    let (w, h) = ((bx1 - bx0).round() as i32, (by1 - by0).round() as i32);
+    // 그림 크기가 정해져 있으면 상자를 그 픽셀 수로 줄이거나 늘려 그린다 (선 굵기·글자 크기도 같은 비율)
+    let (ox, oy) = if px.is_some() {
+        (bx0, by0)
+    } else {
+        (bx0.round(), by0.round())
+    };
+    let (w, h) = px.map_or(
+        ((bx1 - bx0).round() as i32, (by1 - by0).round() as i32),
+        |(a, b)| (a as i32, b as i32),
+    );
+    let (sx, sy) = px.map_or((1.0, 1.0), |(a, b)| {
+        (
+            a as f64 / (bx1 - bx0).max(1e-9),
+            b as f64 / (by1 - by0).max(1e-9),
+        )
+    });
     if w <= 0 || h <= 0 || w as i64 * h as i64 > MAX_PIXELS {
         return None;
     }
@@ -151,7 +166,7 @@ pub fn render(
         px: vec![0; (w * h * 4) as usize],
         clips: Vec::new(),
     };
-    let to = |x: f64, y: f64| (x - ox, y - oy);
+    let to = |x: f64, y: f64| ((x - ox) * sx, (y - oy) * sy);
     for op in ops {
         match op {
             Op::Path {
@@ -170,7 +185,8 @@ pub fn render(
                     cv.fill(&cmds, *c, *even_odd);
                 }
                 if let Some((sw, c, dash)) = stroke {
-                    cv.stroke(&cmds, *sw, *c, dash, caps.unwrap_or((0, 0)));
+                    let d: Vec<f64> = dash.iter().map(|v| v * sx).collect();
+                    cv.stroke(&cmds, *sw * sx, *c, &d, caps.unwrap_or((0, 0)));
                 }
             }
             Op::Rect {
@@ -199,7 +215,8 @@ pub fn render(
                 dash,
             } => {
                 let segs = [Seg::Move(*x0, *y0), Seg::Line(*x1, *y1)];
-                cv.stroke(&commands(&segs, to), *width, *color, dash, (0, 0));
+                let d: Vec<f64> = dash.iter().map(|v| v * sx).collect();
+                cv.stroke(&commands(&segs, to), *width * sx, *color, &d, (0, 0));
             }
             Op::Text {
                 x,
@@ -271,6 +288,7 @@ pub fn render(
         dct: false,
         data: rgb,
         alpha: (!opaque).then_some(alpha),
+        stencil: false,
     })
 }
 
@@ -301,7 +319,7 @@ mod tests {
                 dash: Vec::new(),
             },
         ];
-        let img = render(&ops, (100.0, 100.0, 110.0, 110.0), &fonts).unwrap();
+        let img = render(&ops, (100.0, 100.0, 110.0, 110.0), None, &fonts).unwrap();
         assert_eq!((img.width, img.height), (10, 10));
         let alpha = img.alpha.as_ref().unwrap();
         // 칠한 곳은 불투명 빨강, 빈 곳은 투명
@@ -324,6 +342,7 @@ mod tests {
                 data: std::sync::Arc::new(Vec::new()),
             }],
             (0.0, 0.0, 4.0, 4.0),
+            None,
             &fonts,
         );
         assert!(none.is_none());
