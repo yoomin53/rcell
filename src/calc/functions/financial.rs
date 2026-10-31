@@ -191,6 +191,7 @@ pub const FNS: &[FnSpec] = &[
         num(365.0 * d / (360.0 - d * dsm))
     }),
     f("DISC", 4, 5, V, |c, a| {
+        try_v!(numbers_only(a));
         let (s, m) = try_v!(sm(c, a));
         let pr = try_v!(num_arg(c, a, 2));
         let red = try_v!(num_arg(c, a, 3));
@@ -934,8 +935,27 @@ fn coupon_dates(s: f64, m: f64, fr: f64, date1904: bool) -> (f64, f64, f64) {
     }
 }
 
+/// 숫자만 받는 인수 확인: 글·논리·오류 값은 (오류 값도) #VALUE! — COUP* 와 DISC 는 날짜 글도 읽지 않는다
+/// (COUPNCD("2024-03-15",…) = #VALUE!, COUPNCD(NA(),…) = #VALUE!, 대조 실험 conv8·conv9)
+fn numbers_only(a: &[Value]) -> Result<(), ErrorKind> {
+    if a.iter()
+        .any(|v| matches!(v, Value::Text(_) | Value::Bool(_) | Value::Error(_)))
+    {
+        return Err(ErrorKind::Value);
+    }
+    Ok(())
+}
+
 fn coup(ctx: &mut Ctx, a: &[Value], what: u8) -> Value {
+    try_v!(numbers_only(a));
+    // 날짜는 1 이상 2958465 이하: 0 이하·결제일 ≥ 만기일은 #NUM!, 그다음 넘으면 #VALUE!
     let (s, m) = try_v!(sm(ctx, a));
+    if s < 1.0 || m < 1.0 {
+        return Value::Error(ErrorKind::Num);
+    }
+    if s >= 2_958_466.0 || m >= 2_958_466.0 {
+        return Value::Error(ErrorKind::Value);
+    }
     let fr = try_v!(freq(ctx, a, 2));
     let b = try_v!(basis(ctx, a, 3));
     let d1904 = ctx.date1904();

@@ -49,27 +49,15 @@ pub const FNS: &[FnSpec] = &[
     f("VARA", 1, MANY, R, |c, a| agg(c, a, Agg::NumbersA, 10)),
     f("VARPA", 1, MANY, R, |c, a| agg(c, a, Agg::NumbersA, 11)),
     f("MEDIAN", 1, MANY, R, |c, a| {
-        // 배열 상수가 첫 자리가 아니면 값을 읽기 전에 #VALUE! (MODE(범위,{"a","b"},오류) = #VALUE!)
-        if late_array(a) {
-            return Value::Error(ErrorKind::Value);
-        }
-        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
+        let v = try_v!(ordered_numbers(c, a));
         median(&v)
     }),
     f("MODE", 1, MANY, RAR, |c, a| {
-        // 배열 상수가 첫 자리가 아니면 값을 읽기 전에 #VALUE! (MODE(범위,{"a","b"},오류) = #VALUE!)
-        if late_array(a) {
-            return Value::Error(ErrorKind::Value);
-        }
-        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
+        let v = try_v!(ordered_numbers(c, a));
         mode_sngl(&v)
     }),
     f("MODE.SNGL", 1, MANY, RAR, |c, a| {
-        // 배열 상수가 첫 자리가 아니면 값을 읽기 전에 #VALUE! (MODE(범위,{"a","b"},오류) = #VALUE!)
-        if late_array(a) {
-            return Value::Error(ErrorKind::Value);
-        }
-        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
+        let v = try_v!(ordered_numbers(c, a));
         mode_sngl(&v)
     }),
     f("MODE.MULT", 1, MANY, RAR, mode_mult),
@@ -908,9 +896,17 @@ fn percentrank(ctx: &mut Ctx, a: &[Value], inclusive: bool) -> Value {
 }
 
 /// MEDIAN·MODE·MODE.SNGL 은 첫 인수가 아닌 자리의 배열 상수를 #VALUE! 로 본다 (MEDIAN(범위,{1,2}), MODE({1,2},{1,2}); 첫
-/// 자리의 배열은 된다, 대조 실험 misc6)
-fn late_array(a: &[Value]) -> bool {
-    a.iter().skip(1).any(|v| matches!(v, Value::Array(_)))
+/// 자리의 배열은 된다, 대조 실험 misc6). 인수를 차례로 읽어 앞 인수의 오류가 뒤 인수의 #VALUE! 보다 먼저
+/// (MEDIAN(오류,{1,2}) = 그 오류, MODE(범위,{"a","b"},오류) = #VALUE!, 대조 실험 conv8)
+fn ordered_numbers(ctx: &mut Ctx, a: &[Value]) -> Result<Vec<f64>, ErrorKind> {
+    let mut out = Vec::new();
+    for (i, v) in a.iter().enumerate() {
+        if i > 0 && matches!(v, Value::Array(_)) {
+            return Err(ErrorKind::Value);
+        }
+        out.extend(collect_numbers(ctx, std::slice::from_ref(v), Agg::Numbers)?);
+    }
+    Ok(out)
 }
 
 fn rank(ctx: &mut Ctx, a: &[Value], average: bool) -> Value {
@@ -1838,8 +1834,18 @@ fn binom_inv(ctx: &mut Ctx, a: &[Value], strict: bool) -> Value {
     }
     let mut s = 0.0;
     let mut k = 0.0;
+    // 누적에 쓰는 확률은 점화식 (정확한 값 — CRITBINOM(4,0.5,0.3125) = 2: 1 까지 누적이 정확히 0.3125 라 초과가
+    // 아니다). (1−p)^n 이 0 으로 사라지면 e^{GAMMALN} 꼴
+    let q0 = (1.0 - p).mpow(n);
+    let mut pm = q0;
     while k <= n {
-        s += sp::binom_pmf(k, n, p);
+        let pk = if q0 > 1e-300 {
+            pm
+        } else {
+            sp::binom_pmf(k, n, p)
+        };
+        s += pk;
+        pm *= (n - k) / (k + 1.0) * (p / (1.0 - p));
         // CRITBINOM 은 1 부터 찾는다 (CRITBINOM(2,0.3,0.3) = 1, BINOM.INV 는 0, 대조 실험 conv8)
         if if strict {
             k >= 1.0 && s > alpha
@@ -1941,7 +1947,8 @@ fn poisson(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(num_arg(ctx, a, 0)).trunc();
     let m = try_v!(num_arg(ctx, a, 1));
     let cum = try_v!(bool_or(ctx, a, 2, true));
-    if x < 0.0 || m < 0.0 {
+    // x 는 32비트 정수 안 (POISSON.DIST(1E12,100,TRUE) = #NUM!, 한셀은 그 앞에서 멈춘다 — 대조 실험 conv9)
+    if x < 0.0 || m < 0.0 || x >= 2_147_483_648.0 {
         return Value::Error(ErrorKind::Num);
     }
     // 확률 질량은 e^{k·ln m − m − Σ_{j=2}^{k} ln j}, 누적은 그것을 0 부터 차례로 더한 값 (ln Γ 를 쓰지 않는다 —
@@ -1976,12 +1983,11 @@ fn poisson(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn chi_rt(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
     let df = try_v!(num_arg(ctx, a, 1));
-    if x < 0.0 || !(1.0..=1e10).contains(&df) {
+    // x 는 1E10 까지 (CHIDIST(1E10,3) = 0, CHIDIST(2E10,3) = #NUM!, 대조 실험 conv9)
+    if !(0.0..=1e10).contains(&x) || !(1.0..=1e10).contains(&df) {
         return Value::Error(ErrorKind::Num);
     }
-    let q = sp::gamma_q(df / 2.0, x / 2.0);
-    // 아주 큰 x 에서 지수가 0 으로 사라져 수가 아니게 되면 0 (CHIDIST(1E15,3) = 0)
-    num(if q.is_nan() { 0.0 } else { q })
+    num(sp::gamma_q_hc(df / 2.0, x / 2.0))
 }
 
 fn chi_inv_rt(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -2031,7 +2037,8 @@ fn f_rt(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x < 0.0 || d1 < 1.0 || d2 < 1.0 {
         return Value::Error(ErrorKind::Num);
     }
-    num(1.0 - sp::f_cdf(x, d1, d2))
+    // 오른쪽 꼬리의 불완전 베타를 그대로 (1 에서 빼지 않는다 — FDIST(1E10,3,4) = 3.333333332296296E-20)
+    num(sp::beta_i(d2 / (d2 + d1 * x), d2 / 2.0, d1 / 2.0))
 }
 
 fn f_inv_rt(ctx: &mut Ctx, a: &[Value]) -> Value {

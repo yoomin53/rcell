@@ -339,6 +339,64 @@ pub fn gamma_p_hc(a: f64, x: f64) -> f64 {
     }
 }
 
+/// CHIDIST·CHISQ.DIST.RT 의 오른쪽 꼬리 Q(a, x): GAMMA.DIST 와 같은 한셀 GAMMALN 지수, 자유도가 아주 커도
+/// (CHIDIST(1E8,1E8) = 0.4999811936804336) 끝까지 수렴시킨다
+pub fn gamma_q_hc(a: f64, x: f64) -> f64 {
+    use crate::calc::hcmath::lgamma;
+    if x <= 0.0 {
+        return 1.0;
+    }
+    let max_iter = 1_000_000usize.max((50.0 * a.sqrt()) as usize);
+    // a 가 크면 −x + a·ln x − lnΓ(a) 의 항들이 서로 지워져 자리를 잃는다 — 스털링 꼴로 차이를 바로 계산한다
+    // (CHIDIST(1E8,1E8) = 0.4999811936804336, 대조 실험 conv9)
+    let e = if a >= 50.0 {
+        let t = (x - a) / a;
+        let corr = 1.0 / (12.0 * a) - 1.0 / (360.0 * a * a * a) + 1.0 / (1260.0 * a.powi(5));
+        (a * (t.ln_1p() - t) + 0.5 * a.mln() - 0.5 * (2.0 * std::f64::consts::PI).mln() - corr)
+            .mexp()
+    } else {
+        (-x + a * x.mln() - lgamma(a)).mexp()
+    };
+    if x < a + 1.0 {
+        let mut ap = a;
+        let mut sum = 1.0 / a;
+        let mut del = sum;
+        for _ in 0..max_iter {
+            ap += 1.0;
+            del *= x / ap;
+            sum += del;
+            if del.abs() < sum.abs() * EPS {
+                break;
+            }
+        }
+        1.0 - sum * e
+    } else {
+        let mut b = x + 1.0 - a;
+        let mut c = 1.0 / TINY;
+        let mut d = 1.0 / b;
+        let mut h = d;
+        for i in 1..max_iter {
+            let an = -(i as f64) * (i as f64 - a);
+            b += 2.0;
+            d = an * d + b;
+            if d.abs() < TINY {
+                d = TINY;
+            }
+            c = b + an / c;
+            if c.abs() < TINY {
+                c = TINY;
+            }
+            d = 1.0 / d;
+            let del = d * c;
+            h *= del;
+            if (del - 1.0).abs() < EPS {
+                break;
+            }
+        }
+        e * h
+    }
+}
+
 /// 정규화한 상부 불완전 감마 Q(a, x)
 pub fn gamma_q(a: f64, x: f64) -> f64 {
     if x <= 0.0 {

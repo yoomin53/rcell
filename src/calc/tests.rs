@@ -376,6 +376,59 @@ fn rules_from_random_differential_tests() {
     // 수식 안 XOR: 식을 배열로 계산한다
     assert_eq!(one("XOR({1,2,3}>2)"), CellValue::Bool(true));
     assert_eq!(one("XOR({1,1,0})"), CellValue::Bool(false));
+    // GCD·MULTINOMIAL 은 인수 순서대로 음수를 먼저
+    assert_eq!(one("GCD(-1,\"3\")"), e("#NUM!"));
+    assert_eq!(one("GCD(\"3\",-1)"), e("#VALUE!"));
+    // COUP*·DISC 는 글·논리·오류 인수를 읽지 않는다 (날짜 글도), 날짜는 1 이상
+    assert_eq!(one("COUPNCD(\"2024-03-15\",46000,2,0)"), e("#VALUE!"));
+    assert_eq!(one("COUPNCD(NA(),46000,2,0)"), e("#VALUE!"));
+    assert_eq!(one("COUPNCD(0,46000,2,0)"), e("#NUM!"));
+    assert_eq!(one("DISC(TRUE,46000,95,100,0)"), e("#VALUE!"));
+    // CRITBINOM 은 1 부터 찾고 누적이 기준과 같으면 다음 수
+    assert_eq!(one("CRITBINOM(2,0.3,0.3)"), n(1.0));
+    assert_eq!(one("CRITBINOM(4,0.5,0.3125)"), n(2.0));
+    assert_eq!(one("BINOM.INV(2,0.3,0.3)"), n(0.0));
+    // 낱값 N 만 배열 상수를 원소마다 (SUM(N({1,2})) = 3), 오른쪽 꼬리는 1 에서 빼지 않는다
+    assert_eq!(one("SUM(N({1,2}))"), n(3.0));
+    match one("FDIST(1E10,3,4)") {
+        CellValue::Number(x) => assert!((x / 3.333333332296296e-20 - 1.0).abs() < 1e-9),
+        other => panic!("{other:?}"),
+    }
+    // FISHERINV 는 e^{2x} 꼴이라 작은 x 에서 자리를 잃는다
+    match one("FISHERINV(1E-8)") {
+        CellValue::Number(x) => assert!((x / 9.999999950247594e-9 - 1.0).abs() < 1e-12),
+        other => panic!("{other:?}"),
+    }
+    // CHIDIST 의 x 는 1E10 까지, POISSON.DIST 의 x 는 32비트 안
+    assert_eq!(one("CHIDIST(2E10,3)"), e("#NUM!"));
+    assert_eq!(one("POISSON.DIST(1E12,100,TRUE)"), e("#NUM!"));
+}
+
+/// 데이터베이스 함수: 데이터베이스에 없는 조건 머리글은 어느 행도 맞지 않는다 (대조 실험 conv8)
+#[test]
+fn database_unknown_criteria_header_matches_nothing() {
+    let w = wb(vec![sheet(
+        "S",
+        &[
+            ("A1", "Age"),
+            ("A2", "10"),
+            ("A3", "20"),
+            ("C1", "Age"),
+            ("C2", ">5"),
+            ("D1", "Score"),
+            ("D2", ">5"),
+            ("F1", "Score"),
+            ("F2", ">5"),
+            ("B5", "=DSUM(A1:A3,\"Age\",C1:C2)"),
+            ("B6", "=DSUM(A1:A3,\"Age\",F1:F2)"),
+            ("B7", "=DCOUNT(A1:A3,\"Age\",F1:F2)"),
+            ("B8", "=DAVERAGE(A1:A3,\"Age\",F1:F2)"),
+        ],
+    )]);
+    assert_eq!(calc(&w, "B5"), n(30.0));
+    assert_eq!(calc(&w, "B6"), n(0.0));
+    assert_eq!(calc(&w, "B7"), n(0.0));
+    assert_eq!(calc(&w, "B8"), e("#DIV/0!"));
 }
 
 /// 반복 계산 (calcPr iterate): 파일 값에서 시작해 2×iterateCount 번, 행 차례로 (대조 실험 circ)
