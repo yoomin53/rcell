@@ -390,6 +390,7 @@ fn parse_sheet_view(v: &Element) -> SheetView {
     let mut view = SheetView {
         show_row_col_headers: v.attr_bool("showRowColHeaders").unwrap_or(true),
         show_zeros: v.attr_bool("showZeros").unwrap_or(true),
+        right_to_left: v.attr_bool("rightToLeft").unwrap_or(false),
         show_formulas: v.attr_bool("showFormulas").unwrap_or(false),
         tab_selected: v.attr_bool("tabSelected").unwrap_or(false),
         view: s("view"),

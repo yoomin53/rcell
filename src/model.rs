@@ -1974,6 +1974,8 @@ impl CommentShape {
 pub struct SheetView {
     pub show_row_col_headers: bool,
     pub show_zeros: bool,
+    /// 오른쪽에서 왼쪽 시트 (`rightToLeft` — 열 A 가 오른쪽 끝)
+    pub right_to_left: bool,
     pub show_formulas: bool,
     pub tab_selected: bool,
     /// `normal` / `pageBreakPreview` / `pageLayout`
@@ -2005,6 +2007,7 @@ impl Default for SheetView {
         SheetView {
             show_row_col_headers: true,
             show_zeros: true,
+            right_to_left: false,
             show_formulas: false,
             tab_selected: false,
             view: None,

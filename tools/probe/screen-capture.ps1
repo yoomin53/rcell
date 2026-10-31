@@ -8,7 +8,7 @@
 # rcell 그림과의 비교는 visual-diff.ps1.
 #
 #   #dir<TAB>문서 폴더
-#   파일<TAB>시트번호(1부터)<TAB>시트이름<TAB>그림<TAB>A1x<TAB>A1y<TAB>격자 너비<TAB>격자 높이<TAB>머리글<TAB>눈금선<TAB>보이는 범위<TAB>확대율
+#   파일<TAB>시트번호(1부터)<TAB>시트이름<TAB>그림<TAB>A1x<TAB>A1y<TAB>격자 너비<TAB>격자 높이<TAB>머리글<TAB>눈금선<TAB>보이는 범위<TAB>확대율<TAB>오른쪽에서 왼쪽
 #
 # 사용: powershell -File screen-capture.ps1 -InDir <폴더> -OutDir <출력 폴더> [-Filter *.cell] [-Width 1600] [-Height 1000]
 #   -Only : 파일 이름 정규식 (일부만)
@@ -100,7 +100,8 @@ try {
                 $gh = [int]([double]$win.UsableHeight * 4 / 3)
                 $vr = try { $win.VisibleRange.Address($false, $false) } catch { "" }
                 $zoom = try { [int]$win.Zoom } catch { 100 }
-                $lines.Add(("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}`t{8}`t{9}`t{10}`t{11}" -f $f.Name, $k, $ws.Name, $png, $ax, $ay, $gw, $gh, $heads, [bool]$win.DisplayGridlines, $vr, $zoom))
+                $rtl = try { [bool]$ws.DisplayRightToLeft } catch { $false }
+                $lines.Add(("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}`t{8}`t{9}`t{10}`t{11}`t{12}" -f $f.Name, $k, $ws.Name, $png, $ax, $ay, $gw, $gh, $heads, [bool]$win.DisplayGridlines, $vr, $zoom, $rtl))
             }
             $app.Visible = $false
             Write-Host "OK   $($f.Name) (dpi $([RcCap]::GetDpiForWindow($hwnd)))"
