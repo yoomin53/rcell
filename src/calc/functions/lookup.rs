@@ -213,6 +213,9 @@ fn index(ctx: &mut Ctx, a: &[Value]) -> Value {
             }]))
         }
         Value::Error(e) => Value::Error(*e),
+        // 글·논리·빈 인수는 배열로 보지 않는다 (INDEX("a",1), INDEX(TRUE,1), INDEX(,1) = #VALUE!, 숫자 낱값은
+        // 한 칸 배열: INDEX(5,1) = 5 — 대조 실험 dyn)
+        Value::Text(_) | Value::Bool(_) | Value::Empty => Value::Error(ErrorKind::Value),
         other => {
             let arr = try_v!(to_array(ctx, other));
             let (h, w) = (arr.rows as f64, arr.cols as f64);

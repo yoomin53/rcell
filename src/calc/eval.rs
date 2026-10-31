@@ -380,8 +380,9 @@ impl<'a> Ctx<'a> {
         let v = self.eval_value(x);
         match op {
             UnaryOp::Plus => v,
+            // 0 − x 꼴이라 영의 부호가 뒤집히지 않는다 (-(1-1) = 0, 0*-1 은 -0 — 한셀 대조 실험 negzero)
             UnaryOp::Neg => self.map1(v, |ctx, s| match ctx.num(&s) {
-                Ok(n) => Value::Number(-n),
+                Ok(n) => Value::Number(0.0 - n),
                 Err(e) => Value::Error(e),
             }),
             UnaryOp::Percent => self.map1(v, |ctx, s| match ctx.num(&s) {

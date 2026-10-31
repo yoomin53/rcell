@@ -435,7 +435,7 @@ fn build(cases: &[Case], date1904: bool) -> Workbook {
     }
 }
 
-/// 사용: `<출력 폴더> [--only 분류] [--chunk N] [--list 파일] [--random N --seed S [--emit 파일]]` — `--chunk` 는 한 문서에 경우 N개씩 나눠 쓴다
+/// 사용: `<출력 폴더> [--only 분류] [--chunk N] [--list 파일] [--random N --seed S [--emit 파일] [--d1904]]` — `--chunk` 는 한 문서에 경우 N개씩 나눠 쓴다
 /// (한셀을 죽이는 경우를 좁힐 때). `--list` 파일은 한 줄에 수식 하나 (`@행x열 수식` 은 배열 수식, `#1904` 줄은 1904 날짜 체계).
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -481,15 +481,23 @@ fn main() {
             lines.push(format!("{}({args})", n.to_lowercase()));
         }
         let p = opt("--emit").expect("--names 는 --emit 파일이 필요합니다");
-        std::fs::write(p, lines.join("
-") + "
-").expect("--emit 쓰기");
+        std::fs::write(
+            p,
+            lines.join(
+                "
+",
+            ) + "
+",
+        )
+        .expect("--emit 쓰기");
         return;
     }
     // --syntax N --seed S --emit 파일: 수식 문법 시험용 목록만 쓰고 끝낸다 (문서 없음)
     if let Some(n) = opt("--syntax").and_then(|n| n.parse::<usize>().ok()) {
-        let text = syntax::lines(n, seed).join("
-") + "
+        let text = syntax::lines(n, seed).join(
+            "
+",
+        ) + "
 ";
         let p = opt("--emit").expect("--syntax 는 --emit 파일이 필요합니다");
         std::fs::write(p, text).expect("--emit 쓰기");
@@ -515,8 +523,10 @@ fn main() {
                 .collect();
             std::fs::write(p, text).expect("--emit 쓰기");
         }
-        let name = format!("rand{seed}");
-        vec![(&*Box::leak(name.into_boxed_str()), cases, false)]
+        // --d1904: 1904 날짜 체계 문서로 (이름 끝에 d)
+        let d1904 = args.iter().any(|a| a == "--d1904");
+        let name = format!("rand{seed}{}", if d1904 { "d" } else { "" });
+        vec![(&*Box::leak(name.into_boxed_str()), cases, d1904)]
     } else {
         match opt("--list") {
             Some(path) => {

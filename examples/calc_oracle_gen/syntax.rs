@@ -184,7 +184,24 @@ impl Syn {
             40..=69 => self.rng.pick(REFS).to_string(),
             70..=74 => self
                 .rng
-                .pick(&["TRUE", "FALSE", "true", "False", "#N/A", "#n/a", "#REF!", "#DIV/0!", "#NAME?", "#NULL!", "#VALUE!", "#NUM!", "#GETTING_DATA", "#SPILL!", "#CALC!", "#foo!"])
+                .pick(&[
+                    "TRUE",
+                    "FALSE",
+                    "true",
+                    "False",
+                    "#N/A",
+                    "#n/a",
+                    "#REF!",
+                    "#DIV/0!",
+                    "#NAME?",
+                    "#NULL!",
+                    "#VALUE!",
+                    "#NUM!",
+                    "#GETTING_DATA",
+                    "#SPILL!",
+                    "#CALC!",
+                    "#foo!",
+                ])
                 .to_string(),
             75..=84 => {
                 let a = self.rng.pick(&[
@@ -229,7 +246,9 @@ impl Syn {
             }
             35..=44 => {
                 // 단항
-                let u = self.rng.pick(&["-", "+", "--", "-+", "+-", "- ", "+ ", "---"]);
+                let u = self
+                    .rng
+                    .pick(&["-", "+", "--", "-+", "+-", "- ", "+ ", "---"]);
                 let e = self.expr(depth - 1);
                 format!("{u}{e}")
             }

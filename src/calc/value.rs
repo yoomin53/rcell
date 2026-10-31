@@ -271,7 +271,7 @@ impl<T: Into<Value>> From<Result<T, ErrorKind>> for Value {
 /// 숫자 결과: NaN·무한대는 #NUM!
 pub fn num(v: f64) -> Value {
     if v.is_finite() {
-        Value::Number(if v == 0.0 { 0.0 } else { v })
+        Value::Number(v)
     } else {
         Value::Error(ErrorKind::Num)
     }
@@ -387,6 +387,10 @@ pub fn number_to_text_rounded(v: f64) -> String {
 }
 
 fn format_general(v: f64, round_large: bool) -> String {
+    // 음의 영(-0.0) 은 "-0" 으로 나온다 (CONCATENATE(CEILING(-4,2^53)) = "-0", 대조 실험 syntax)
+    if v == 0.0 && v.is_sign_negative() && v.is_finite() {
+        return "-0".into();
+    }
     if v == 0.0 || !v.is_finite() {
         return "0".into();
     }

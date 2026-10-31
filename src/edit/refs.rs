@@ -1038,8 +1038,14 @@ pub fn normalize_scoped(
                 let prefix = match &r.prefix {
                     _ if drop_sheet => String::new(),
                     // 이름 앞의 시트는 셀 주소처럼 보여도 따옴표를 붙이지 않는다 (`S1!nm`, 참조는 `'S1'!A1`)
-                    Some(p) if matches!(r.body, Body::Name(_)) && p.book.is_none() && p.last.is_none()
-                        && canon(&p.first).unwrap_or_else(|| p.first.clone()).chars().all(|c| c.is_alphanumeric() || c == '_') =>
+                    Some(p)
+                        if matches!(r.body, Body::Name(_))
+                            && p.book.is_none()
+                            && p.last.is_none()
+                            && canon(&p.first)
+                                .unwrap_or_else(|| p.first.clone())
+                                .chars()
+                                .all(|c| c.is_alphanumeric() || c == '_') =>
                     {
                         format!("{}!", canon(&p.first).unwrap_or_else(|| p.first.clone()))
                     }
@@ -1122,8 +1128,10 @@ pub fn normalize_scoped(
                         }
                         // 한셀이 받는 오류 글자는 일곱 가지뿐 (#GETTING_DATA·#SPILL!·#CALC! 은 입력 거부)
                         let up = s.to_ascii_uppercase();
-                        if !["#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A"]
-                            .contains(&up.as_str())
+                        if ![
+                            "#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A",
+                        ]
+                        .contains(&up.as_str())
                         {
                             invalid = true;
                         }
@@ -1351,7 +1359,10 @@ mod tests {
         let none = |_: &str| None;
         let n = |s: &str| normalize_checked(s, &none);
         // 숫자 글자: 15자리, 일반 서식 글, 단항 -·+ 와 함께
-        assert_eq!(n("1E-10+1E+15+1E+20").text, "0.0000000001+1000000000000000+1E+20");
+        assert_eq!(
+            n("1E-10+1E+15+1E+20").text,
+            "0.0000000001+1000000000000000+1E+20"
+        );
         assert_eq!(n("123456789012345678").text, "123456789012344000");
         assert_eq!(n("-123456789012345678").text, "-123456789012345000");
         assert_eq!(n("--0").text, "-0");
@@ -1364,7 +1375,9 @@ mod tests {
         assert_eq!(n("A1==B1").text, "A1=B1");
         assert_eq!(n("A1=>B1").text, "A1>=B1");
         assert_eq!(n("A1=<B1").text, "A1<=B1");
-        for bad in ["A1><B1", "A1<<B1", "A1=!B1", "A1<>=B1", "A1===B1", "#CALC!", "#SPILL!"] {
+        for bad in [
+            "A1><B1", "A1<<B1", "A1=!B1", "A1<>=B1", "A1===B1", "#CALC!", "#SPILL!",
+        ] {
             assert!(n(bad).invalid, "{bad}");
         }
         // 거꾸로 된 범위, 접두사

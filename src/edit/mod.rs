@@ -1812,7 +1812,8 @@ pub fn normalize_formula(wb: &Workbook, text: &str) -> crate::Result<String> {
         use crate::calc::ast::{BinaryOp, Expr};
         match e {
             Expr::Binary(BinaryOp::Union, a, b) => {
-                !(crate::calc::eval::is_reference_expr(a) && crate::calc::eval::is_reference_expr(b))
+                !(crate::calc::eval::is_reference_expr(a)
+                    && crate::calc::eval::is_reference_expr(b))
                     || bad_union(a)
                     || bad_union(b)
             }
