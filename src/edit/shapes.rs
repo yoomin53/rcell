@@ -196,7 +196,7 @@ pub fn add_shape(
     width: f64,
     height: f64,
 ) -> crate::Result<()> {
-    super::guard_action(wb, si, "objects")?;
+    // 한셀 자동화의 도형 더하기는 시트 보호를 보지 않는다 (corpus 대조)
     let (prst, kor, adj) =
         shape_kind(kind).ok_or_else(|| err(format!("도형 종류가 아닙니다: {kind}")))?;
     if width <= 0.0 || height <= 0.0 {

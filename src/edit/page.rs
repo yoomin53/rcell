@@ -354,12 +354,8 @@ pub fn page_setup(wb: &mut Workbook, si: usize, p: &PageSetupEdit) -> crate::Res
         set_local_name(wb, si, "_xlnm.Print_Titles", (!f.is_empty()).then_some(f));
     }
     // 머리글/바닥글
-    let default_font = wb
-        .styles
-        .fonts
-        .first()
-        .and_then(|f| f.name.clone())
-        .unwrap_or_else(|| "맑은 고딕".into());
+    // 머리글/바닥글의 기본 글꼴은 문서 글꼴이 아니라 한셀의 `맑은 고딕` 이다 (corpus 대조: 문서 글꼴이 Arial 이어도 같다)
+    let default_font = "맑은 고딕".to_string();
     let hf_given = [
         &p.header_left,
         &p.header_center,
@@ -370,6 +366,12 @@ pub fn page_setup(wb: &mut Workbook, si: usize, p: &PageSetupEdit) -> crate::Res
     ]
     .iter()
     .any(|x| x.is_some());
+    // 인쇄 영역이 둘 이상이면 한셀은 세로 쪽 수를 받지 않고 배율을 셈하지 않는다 (배율 100 — 대조 실험 ps7)
+    let multi_area = wb
+        .defined_names
+        .iter()
+        .find(|d| d.local_sheet_id == Some(si as u32) && d.name == "_xlnm.Print_Area")
+        .is_some_and(|d| d.formula.split(',').count() > 1);
     let page: &mut PageLayout = &mut wb.sheets[si].page;
     // 여백
     if [
@@ -437,8 +439,8 @@ pub fn page_setup(wb: &mut Workbook, si: usize, p: &PageSetupEdit) -> crate::Res
                 s.fit_to_width = Some(w);
             }
             if let Some(t) = p.fit_tall {
-                if t == 0 && s.fit_to_height.unwrap_or(0) != 0 {
-                    return Err(err("페이지 맞추기 쪽 수를 자동으로 되돌릴 수 없습니다"));
+                if (t == 0 && s.fit_to_height.unwrap_or(0) != 0) || (t != 0 && multi_area) {
+                    return Err(err("페이지 맞추기 쪽 수를 정할 수 없습니다"));
                 }
                 s.fit_to_height = Some(t);
             }
@@ -530,7 +532,12 @@ pub fn page_setup(wb: &mut Workbook, si: usize, p: &PageSetupEdit) -> crate::Res
                 s.fit_to_width.unwrap_or(0) == 0 && s.fit_to_height.unwrap_or(0) == 0
             });
         // 가로·세로 모두 자동이면 배율 100
-        let z = if both_auto {
+        let multi = wb
+            .defined_names
+            .iter()
+            .find(|d| d.local_sheet_id == Some(si as u32) && d.name == "_xlnm.Print_Area")
+            .is_some_and(|d| d.formula.split(',').count() > 1);
+        let z = if both_auto || multi {
             100
         } else {
             crate::print::sheet_print(wb, si).page_scale

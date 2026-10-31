@@ -153,6 +153,10 @@ const SCRIPTS = {
     { op: "addShape", sheet: 0, kind: "ellipse", left: 50.5, top: 70.25, width: 90.5, height: 45.75 },
     { op: "addShape", sheet: 0, kind: "textbox", left: 200, top: 20, width: 90, height: 30 },
   ],
+  table: [
+    { op: "addTable", sheet: 0, range: "A1:D12" },
+    { op: "addTable", sheet: 0, range: "F1:G6", name: "내표", style: "TableStyleLight9", firstColumn: true },
+  ],
   shapes: [
     { op: "moveShape", sheet: 0, shape: 1, left: 100.5, top: 60, width: 300 },
     { op: "moveShape", sheet: 0, shape: 2, left: 20, top: 200 },

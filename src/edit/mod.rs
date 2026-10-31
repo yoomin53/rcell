@@ -41,6 +41,7 @@ pub mod sort;
 pub mod special;
 pub mod structure;
 pub mod style;
+pub mod table;
 pub mod view;
 
 use std::str::FromStr;
@@ -725,6 +726,14 @@ pub enum Edit {
     ShowAllData {
         #[serde(default)]
         sheet: Option<SheetSel>,
+    },
+    /// 표(ListObject) 만들기 (`range` 첫 행이 머리글 — 24절)
+    AddTable {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(flatten)]
+        o: table::TableEdit,
     },
     /// 쪽 설정 (여백·용지·방향·확대·페이지 맞추기·인쇄 영역·반복 제목·머리글/바닥글 …, 준 것만 바꾼다 — 20절)
     PageSetup {
@@ -1592,6 +1601,11 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
         Edit::ShowAllData { sheet } => {
             let i = si(wb, sheet)?;
             filter::show_all_data(wb, i)?;
+            Ok(i)
+        }
+        Edit::AddTable { sheet, range, o } => {
+            let i = si(wb, sheet)?;
+            table::add_table(wb, i, parse_range(range)?, o)?;
             Ok(i)
         }
         Edit::PageSetup { sheet, p } => {
@@ -3572,6 +3586,14 @@ pub fn copy_sheet(
     copy.part = part;
     copy.code_name = code_name;
     copy.view.tab_selected = false;
+    // 복사본의 메모 상자 이름은 `메모 0` 이 된다 (한셀 — 가끔 쓰레기 값이 들어가기도 한다, corpus 대조)
+    for c in &mut copy.comments {
+        if let Some(sh) = &mut c.shape
+            && sh.name.is_some()
+        {
+            sh.name = Some("메모 0".into());
+        }
+    }
     // 복사본 안에서 원본 시트를 이름으로 가리키는 수식은 복사본을 가리키게 한다 (다른 시트를 가리키는 참조는 그대로)
     for c in &mut copy.cells {
         if let Some(f) = &mut c.formula {

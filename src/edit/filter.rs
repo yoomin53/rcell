@@ -109,6 +109,8 @@ fn column_test(
         .iter()
         .filter_map(|&r| Some((r, number(sheet, CellRef { row: r, col })?)))
         .collect();
+    // 데이터 칸에 값이 하나도 없는 열의 조건은 행을 숨기지 않는다 (한셀 — 서식만 있는 빈 열에 조건을 걸어도 모든 행이 보인다, corpus 대조)
+    let empty_col = texts.values().all(|t| t.is_empty());
     // 값 목록·빈 칸
     let values: Option<Vec<String>> = (!fc.values.is_empty() || fc.blank)
         .then(|| fc.values.iter().map(|v| v.to_lowercase()).collect());
@@ -125,6 +127,9 @@ fn column_test(
         _ => None,
     };
     Box::new(move |r: u32| {
+        if empty_col {
+            return true;
+        }
         let text = texts.get(&r).cloned().unwrap_or_default();
         let num = numbers.get(&r).copied();
         if let Some(vals) = &values {
@@ -377,10 +382,7 @@ pub fn auto_filter(
         }
         return Ok(());
     };
-    let width = range.end.col - range.start.col + 1;
-    if field < 1 || field > width {
-        return Err(err("필터 열이 범위를 벗어났습니다"));
-    }
+    // 필터는 먼저 켜지고 열 번호가 범위 밖이면 그다음에 오류가 난다 (한셀 — af5 g6)
     if wb.sheets[si].auto_filter.is_none() {
         wb.sheets[si].auto_filter = Some(crate::model::AutoFilter {
             range: text,
@@ -389,6 +391,10 @@ pub fn auto_filter(
         });
         wb.sheets[si].filter_mode = true;
         set_db_name(wb, true);
+    }
+    let width = range.end.col - range.start.col + 1;
+    if field < 1 || field > width {
+        return Err(err("필터 열이 범위를 벗어났습니다"));
     }
     let col_id = field - 1;
     let col = range.start.col + col_id;
@@ -461,7 +467,8 @@ pub fn auto_filter(
     Ok(())
 }
 
-/// 범위 안에서 값이 든 칸을 모두 품는 가장 작은 범위 (범위가 한 칸이면 그 칸이 든 현재 영역)
+/// 준 범위와 시트의 사용 범위의 겹침 (한셀 `UsedRange` — 행은 행 기록이 있는 처음~끝 행, 열은 칸 기록(빈 서식 칸 포함)이 있는 처음~끝 열.
+/// 대조 실험 af6·af7 과 corpus: 서식만 있는 칸·행 높이만 있는 행도 쓴다). 범위가 한 칸이면 그 칸이 든 현재 영역
 fn data_extent(sheet: &Sheet, range: crate::model::CellRange) -> Option<crate::model::CellRange> {
     if range.start == range.end {
         let r = super::data::current_region(sheet, range.start);
@@ -471,21 +478,23 @@ fn data_extent(sheet: &Sheet, range: crate::model::CellRange) -> Option<crate::m
             .any(|c| !c.value.is_empty() && c.r.row >= r.start.row && c.r.row <= r.end.row);
         return filled.then_some(r);
     }
-    let (mut r0, mut r1, mut c0, mut c1) = (u32::MAX, 0, u32::MAX, 0);
-    for c in &sheet.cells {
-        if c.value.is_empty() && c.formula.is_none() {
-            continue;
-        }
-        let (r, k) = (c.r.row, c.r.col);
-        if r >= range.start.row && r <= range.end.row && k >= range.start.col && k <= range.end.col
-        {
-            r0 = r0.min(r);
-            r1 = r1.max(r);
-            c0 = c0.min(k);
-            c1 = c1.max(k);
-        }
+    let rows = sheet
+        .rows
+        .iter()
+        .map(|r| r.index - 1)
+        .chain(sheet.cells.iter().map(|c| c.r.row));
+    let (ur0, ur1) = rows.fold((u32::MAX, 0u32), |(a, b), r| (a.min(r), b.max(r)));
+    let (uc0, uc1) = sheet
+        .cells
+        .iter()
+        .map(|c| c.r.col)
+        .fold((u32::MAX, 0u32), |(a, b), c| (a.min(c), b.max(c)));
+    if ur0 == u32::MAX || uc0 == u32::MAX {
+        return None;
     }
-    (r0 != u32::MAX).then_some(crate::model::CellRange {
+    let (r0, r1) = (range.start.row.max(ur0), range.end.row.min(ur1));
+    let (c0, c1) = (range.start.col.max(uc0), range.end.col.min(uc1));
+    (r0 <= r1 && c0 <= c1).then_some(crate::model::CellRange {
         start: CellRef { row: r0, col: c0 },
         end: CellRef { row: r1, col: c1 },
     })

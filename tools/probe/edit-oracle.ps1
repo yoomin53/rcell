@@ -459,6 +459,32 @@ function Invoke-Edit($wb, $e) {
             }
         }
         "showAllData" { if ($ws.FilterMode) { $ws.ShowAllData() } }
+        "addTable" {
+            # 표 만들기 (ListObjects.Add — COM 이 객체를 돌려주지 않아 번호로 다시 얻는다): headers 1 있음·2 없음·0 알아서
+            $M = [Type]::Missing
+            $hd = if ($null -ne $e.headers) { [int]$e.headers } else { 1 }
+            [void][System.__ComObject].InvokeMember("Add", [Reflection.BindingFlags]::InvokeMethod, $null, $ws.ListObjects, @(1, $ws.Range([string]$e.range), $M, $hd))
+            $lo = $ws.ListObjects.Item($ws.ListObjects.Count)
+            if ($e.name) { $lo.Name = [string]$e.name }
+            if ($e.style) { $lo.TableStyle = [string]$e.style }
+            if ($null -ne $e.showTotals) { $lo.ShowTotals = [bool]$e.showTotals }
+            if ($null -ne $e.showHeaders) { $lo.ShowHeaders = [bool]$e.showHeaders }
+            if ($null -ne $e.stripes) { $lo.ShowTableStyleRowStripes = [bool]$e.stripes }
+            if ($null -ne $e.firstColumn) { $lo.ShowTableStyleFirstColumn = [bool]$e.firstColumn }
+            if ($null -ne $e.lastColumn) { $lo.ShowTableStyleLastColumn = [bool]$e.lastColumn }
+            if ($null -ne $e.columnStripes) { $lo.ShowTableStyleColumnStripes = [bool]$e.columnStripes }
+        }
+        "tableOp" {
+            # 표 고치기: table(번호 1부터) 에 resize(범위)·name·style·showTotals·showHeaders·unlist·delete
+            $lo = $ws.ListObjects.Item([int]$e.table)
+            if ($e.resize) { $lo.Resize($ws.Range([string]$e.resize)) }
+            if ($e.name) { $lo.Name = [string]$e.name }
+            if ($e.style) { $lo.TableStyle = [string]$e.style }
+            if ($null -ne $e.showTotals) { $lo.ShowTotals = [bool]$e.showTotals }
+            if ($null -ne $e.showHeaders) { $lo.ShowHeaders = [bool]$e.showHeaders }
+            if ($e.unlist) { $lo.Unlist() }
+            if ($e.delete) { $lo.Delete() }
+        }
         "setView" {
             # 보기 설정 (ActiveWindow — 창이 보여야 적용된다): 확대율·눈금선·머리글·0 표시·수식 보기·보기 방식
             $a = $wb.Application

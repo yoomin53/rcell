@@ -1975,3 +1975,27 @@ fn protect_like_hcell() {
     apply(&mut wb, &e(r#"{"op":"unprotectSheet","password":"pw"}"#)).unwrap();
     assert!(wb.sheets[0].protection.is_none());
 }
+
+// 표 만들기 대조 실험(tb1·tb2): 이름 표N, 첫 열 요약 글, 데이터 행이 둘 이상이면 데이터 서식, 한 행 범위는 아래에 빈 행을 끼운다
+#[test]
+fn add_table_like_hcell() {
+    let mut wb = hcell_book();
+    fill_rows(
+        &mut wb,
+        &[&["이름", "점수"], &["가", "1"], &["나", "2"], &["다", "3"]],
+    );
+    let e = |j: &str| serde_json::from_str::<Edit>(j).unwrap();
+    apply(&mut wb, &e(r#"{"op":"addTable","range":"A1:B4"}"#)).unwrap();
+    let t = &wb.sheets[0].tables[0];
+    assert_eq!(
+        (t.name.as_str(), t.range.as_str(), t.id),
+        ("표1", "A1:B4", 1)
+    );
+    assert_eq!(t.columns[0].totals_label.as_deref(), Some("요약"));
+    assert_eq!(t.columns[0].dxfs[1], Some(1));
+    assert_eq!(t.dxfs[5], Some(0));
+    assert_eq!(wb.styles.dxfs.len(), 2);
+    // 한 행 범위: 아래 칸이 한 칸씩 밀린다 (겹치지 않는 자리)
+    apply(&mut wb, &e(r#"{"op":"addTable","range":"D1","name":"둘"}"#)).ok();
+    assert!(apply(&mut wb, &e(r#"{"op":"addTable","range":"A2:B3"}"#)).is_err());
+}
