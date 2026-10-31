@@ -144,8 +144,9 @@ pub struct PageFrame {
     /// 그릴 행: (행 번호, 위 경계, 아래 경계) — 반복 행이 먼저
     pub rows: Vec<(u32, f64, f64)>,
     /// 모든 행·열의 인쇄 크기 (장치 단위) — 페이지 밖으로 이어지는 병합 칸의 자리를 잴 때
-    pub row_dev: Vec<f64>,
-    pub col_dev: Vec<f64>,
+    /// (시트마다 하나를 쪽들이 나눠 쓴다 — 행 수십만 개 시트에서 쪽마다 새로 짓지 않게)
+    pub row_dev: std::sync::Arc<Vec<f64>>,
+    pub col_dev: std::sync::Arc<Vec<f64>>,
     /// 화면 1px 의 장치 크기 (칸 안 여백·점선 무늬): 6.25 × 배율
     pub px: f64,
     /// 배율 (%) — 글꼴 크기 = round(pt × 25/3 × z/100)
@@ -154,8 +155,8 @@ pub struct PageFrame {
     pub origin_x: f64,
     /// 모든 열·행의 화면 px 누적 시작 자리 (번호 = 위치, 끝에 전체) — 그리기 개체는 칸 경계가 아니라 시트의 절대 px 에
     /// 배율을 곱한 자리에 놓인다 (한셀 PDF 그림·도형 실험)
-    pub col_abs: Vec<f64>,
-    pub row_abs: Vec<f64>,
+    pub col_abs: std::sync::Arc<Vec<f64>>,
+    pub row_abs: std::sync::Arc<Vec<f64>>,
     pub gridlines: bool,
     pub black_and_white: bool,
     pub draft: bool,
@@ -418,6 +419,8 @@ pub struct SheetPainter<'a> {
     sheet: &'a Sheet,
     ctx: Views<'a>,
     lay_c: u32,
+    /// 칸 번호를 행 차례로 (쪽마다 모든 칸을 훑지 않고 그 행들의 칸만 찾는다)
+    by_row: Vec<u32>,
 }
 
 impl<'a> SheetPainter<'a> {
@@ -430,18 +433,21 @@ impl<'a> SheetPainter<'a> {
             lay_c = lay_c.max(m.end.col + 1);
         }
         let lay_c = (lay_c + 32).min(16_384);
+        let mut by_row: Vec<u32> = (0..sheet.cells.len() as u32).collect();
+        by_row.sort_by_key(|&i| sheet.cells[i as usize].r.row);
         SheetPainter {
             wb,
             sheet,
             ctx: Views::new(wb, sheet, lay_r, lay_c),
             lay_c,
+            by_row,
         }
     }
 
     /// 페이지 한 장의 칸들
     pub fn page_ops(&self, frame: &PageFrame, measure: &dyn TextMeasure) -> Vec<Op> {
         let (wb, sheet, ctx, lay_c) = (self.wb, self.sheet, &self.ctx, self.lay_c);
-        page_body(wb, sheet, ctx, lay_c, frame, measure)
+        page_body(wb, sheet, ctx, lay_c, &self.by_row, frame, measure)
     }
 }
 
@@ -450,6 +456,7 @@ fn page_body(
     sheet: &Sheet,
     ctx: &Views,
     lay_c: u32,
+    by_row: &[u32],
     frame: &PageFrame,
     measure: &dyn TextMeasure,
 ) -> Vec<Op> {
@@ -474,12 +481,18 @@ fn page_body(
 
     // 칸 내용: 그리는 행의 모든 셀 (넘침이 이웃 값에서 멈추게) + 그리는 칸의 행·열 서식
     let mut views: HashMap<(u32, u32), CellView> = HashMap::new();
-    for c in &sheet.cells {
-        if rows_set.contains(&c.r.row)
-            && c.r.col < lay_c
-            && let Some(v) = ctx.view(c.r.row, c.r.col)
-        {
-            views.insert((c.r.row, c.r.col), v);
+    for &(r, _, _) in &frame.rows {
+        let start = by_row.partition_point(|&i| sheet.cells[i as usize].r.row < r);
+        for &i in &by_row[start..] {
+            let c = &sheet.cells[i as usize];
+            if c.r.row != r {
+                break;
+            }
+            if c.r.col < lay_c
+                && let Some(v) = ctx.view(c.r.row, c.r.col)
+            {
+                views.insert((c.r.row, c.r.col), v);
+            }
         }
     }
     for &(r, _, _) in &frame.rows {

@@ -247,15 +247,11 @@ pub fn frame_with(
     PageFrame {
         cols: bounds(x0 + dx + (hw * 6.25).round(), &cols),
         origin_x: x0 + dx + (hw * 6.25).round(),
-        col_abs: cumulative(&sp.col_px),
-        row_abs: cumulative(&sp.row_px),
+        col_abs: sp.frame_tables.col_abs.clone(),
+        row_abs: sp.frame_tables.row_abs.clone(),
         rows: bounds(y0 + dy + (hh * 6.25).round(), &rows),
-        row_dev: (0..sp.row_px.len() as u32)
-            .map(|r| sp.row_print_px(r) * 6.25)
-            .collect(),
-        col_dev: (0..sp.col_px.len() as u32)
-            .map(|c| sp.col_print_px(c) * 6.25)
-            .collect(),
+        row_dev: sp.frame_tables.row_dev.clone(),
+        col_dev: sp.frame_tables.col_dev.clone(),
         px: 6.25 * z as f64 / 100.0,
         zoom: z,
         gridlines: false,
@@ -263,18 +259,6 @@ pub fn frame_with(
         draft: false,
         errors: ErrorPrint::Displayed,
     }
-}
-
-/// 화면 px 의 누적 시작 자리 (번호마다, 끝에 전체)
-fn cumulative(px: &[u32]) -> Vec<f64> {
-    let mut acc = 0.0;
-    let mut out = Vec::with_capacity(px.len() + 1);
-    for &v in px {
-        out.push(acc);
-        acc += v as f64;
-    }
-    out.push(acc);
-    out
 }
 
 /// 행·열 머리글 (가는 선 상자, 가운데 글자: 열 이름·행 번호)
