@@ -180,6 +180,10 @@ fn index(ctx: &mut Ctx, a: &[Value]) -> Value {
                 return Value::Error(ErrorKind::Ref);
             }
             let area = r[n as usize - 1];
+            // 3차원 참조는 번호 범위를 재기 전에 #VALUE! (INDEX('S1:S3'!A1,"2",5) = #VALUE!, 대조 실험 rand)
+            if area.is_3d() {
+                return Value::Error(ErrorKind::Value);
+            }
             let (h, w) = (area.rows() as f64, area.cols() as f64);
             // 한 행짜리에 인수 하나면 열 번호로 본다
             let (row, col) = match col {
@@ -386,7 +390,16 @@ fn vh_lookup(ctx: &mut Ctx, a: &[Value], vertical: bool) -> Value {
 
 fn lookup(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(scalar_key(ctx, &a[0]));
-    let arr = try_v!(lookup_array(ctx, &a[1]));
+    // 찾을 범위가 3차원 참조면 시트마다 읽어 한 열로 (LOOKUP("",'S1:S3'!A1,…) = #N/A, 대조 실험 rand)
+    let arr = if let Value::Ref(r) = &a[1]
+        && r.len() == 1
+        && r[0].is_3d()
+    {
+        let data = super::flatten(ctx, &a[1]);
+        Rc::new(Array::new(data.len(), 1, data))
+    } else {
+        try_v!(lookup_array(ctx, &a[1]))
+    };
     let (keys, results): (Vec<Value>, Vec<Value>) = match opt(a, 2) {
         None => {
             if arr.cols > arr.rows {

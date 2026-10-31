@@ -141,8 +141,8 @@ rcell 의 `hcmath::lgamma` 는 반정수 k/2 (k ≤ 400) 는 한셀에서 잰 �
 
 `examples/calc_oracle_gen --random N --seed S` (`rand.rs`) 는 함수·인수 종류(숫자·글·논리·날짜·범위·배열·오류·빈 칸)·연산자를
 깊이 3 까지 겹쳐 무작위 수식을 만든다 (같은 시드는 같은 목록, `--emit` 로 글 목록을 남긴다). 한셀에서 작은 묶음(20 개씩)으로
-돌려 rcell 과 견줬다 — 처음 3000 개 가운데 120 가 달랐고, 아래 규칙을 고친 뒤 3–5/500 만 남았다 (`lists/*.txt` 는 규칙마다
-좁혀 본 목록). 한셀이 멈추거나 죽는 수식은 `POISSON.DIST(1E5,1E5,TRUE)` 와 `NUMBERSTRING(1E300,1)` 이 더 있다.
+돌려 rcell 과 견줬다 — 처음 3000 개 가운데 120 가 달랐고, 아래 규칙을 고친 뒤 3–5/500, 4 차(7500 여 개, 인수 종류 확장 포함)에서는 알려진 잔여만 남았다
+(`lists/*.txt` 는 규칙마다 좁혀 본 목록: 모두 한셀 출력 없이 수식만). 한셀이 멈추거나 죽는 수식은 `POISSON.DIST(1E5,1E5,TRUE)` 와 `NUMBERSTRING(1E300,1)` 이 더 있다.
 
 | 규칙 | 한셀 |
 |---|---|
@@ -162,10 +162,27 @@ rcell 의 `hcmath::lgamma` 는 반정수 k/2 (k ≤ 400) 는 한셀에서 잰 �
 | WEIBULL 밀도 | e^{ln α − α ln β + (α−1) ln x − (x/β)^α} 꼴 (끝자리 — 정수 곱 꼴과 다르다): 넘치면 0 (`WEIBULL(65535,36526.5,10,FALSE)` = 0), x = 0 은 α > 1 이면 0, α = 1 이면 #NUM! |
 | GAMMA.DIST 누적 | 끝까지 수렴한 P(a,x) 에 곱하는 지수의 lnΓ 가 한셀 GAMMALN (a = 10⁴ 근처에서 끝자리 1E-11). 아래 급수의 지수가 넘쳐 0 이 되면 #NUM! (`GAMMA.DIST(10,1000,1,TRUE)`) |
 | COMBIN·COMBINA | e^{GAMMALN 차이}, 2⁵³ 보다 작으면 정수로 반올림 (`COMBIN(1030,2)` = 529935, `COMBIN(1029,514)` = 1.4298206865000652E+308, `COMBIN(200,100)` = 9.054851465609245E+58). PERMUT 도 e^{GAMMALN(n+1) − GAMMALN(n−k+1)} 이고 반올림하지 않는다 (`PERMUT(100,1)` = 99.9999999999981, `PERMUT(45598,1)` = 45597.99999943975) |
-| GCD·LCM | 소수를 버리기 전에 0 보다 작으면 #NUM!, 위로는 한도가 없다 (`GCD(1E20,2)` = 2, `LCM(2^53,3)` = 3·2^53) |
+| GCD·LCM | 소수를 버리기 전에 0 보다 작으면 #NUM!. 1 보다 작거나 2^63 이상인 값은 0 으로 본다 (`GCD(0.99)` = 0, `GCD(1E20)` = 0, `GCD(1E20,2)` = 2, `LCM(2^53,3)` = 3·2^53). 두 값 가운데 하나가 0 이면 다른 값을 소수째로 돌려주고 (`GCD(2.9)` = `GCD(2.9,0)` = 2.9, `LCM(2.9)` = 2.9, `LCM(2.9,0)` = 0), 둘 다 있으면 버린 정수의 최대공약수 (`GCD(2.9,4)` = 2) |
 | CHAR(256–65535) | 두 바이트 (높은 쪽이 앞): 앞이 949 의 앞 바이트(81–FE)면 두 바이트 글자 하나 (`CHAR(45217)` = "가", 표에 없는 짝은 #VALUE!); 앞이 ASCII 이고 뒤가 81–FE 면 "앞 글자 + 뒤 한 바이트 글자" (`CHAR(1000)` = U+0003 U+FFFD, `CHAR(1153)` = U+0004 U+0081); 그 밖(`CHAR(256)`, `CHAR(1152)`)은 #VALUE! |
 | TEXT | 논리·빈 칸에 색 지정 서식 (`[Red]0.0`, `[Red]General`, `[Red]@`) 은 #VALUE!. 서식이 빈 글이면 글은 그대로, 음수는 "-", 그 밖은 빈 글 |
 | COMPLEX·DECIMAL·BASE | COMPLEX 의 빈 접미사는 "i". DECIMAL 의 10진은 앞 공백을 건너뛴다 (`DECIMAL(" 12",10)` = 12). BASE(0,2,5) = "0" (0 은 자릿수를 채우지 않는다) |
+| 오류 값 이름의 글 | `"#N/A"`·`"#DIV/0!"` 같은 글(대소문자·뒤 공백 무시)은 숫자·논리·VALUE 로 읽을 때 그 오류 (`NOT("#N/A")` = #N/A, `"#div/0!"+1` = #DIV/0!, `VALUE("#NUM! ")`, `QUARTILE.EXC("#N/A",1)`). `&`·LEN 에서는 보통 글 |
+| 3차원 참조 | `'S1:S3'!A1` 은 `&`·IF·TEXT·연산자·SUMPRODUCT 의 값으로는 #VALUE!. 참조를 받는 함수 (SUM·AVERAGE·LARGE·SMALL·PERCENTILE·QUARTILE·PERCENTRANK·TRIMMEAN·FREQUENCY·STDEV·LOOKUP 의 찾을 범위) 는 시트마다 읽는다. INDEX·ROWS·COLUMNS·AREAS 는 #VALUE! (INDEX 는 번호 범위를 재기 전에), ISREF 는 FALSE, COUNTBLANK 는 #NAME? |
+| 식을 배열로 계산하지 않는 인수 | PERCENTILE·QUARTILE·PERCENTRANK·TRIMMEAN·COVARIANCE.S·FREQUENCY·MATCH·XLOOKUP 의 범위 인수는 식(`범위*2`)을 배열로 계산하지 않는다 — 낱값으로 교차해 #VALUE! (`PERCENTILE(Data!A1:A5*2,0.5)`, `MATCH(2,Data!A1:A5*2,0)`; FREQUENCY 의 자료가 오류면 자료 없음 = 0, 구간이 오류면 #VALUE!), `PERCENTILE(ROW(1:3),0.5)` = 1 (ROW 는 낱값). MODE·MODE.SNGL·MODE.MULT·ROWS·COLUMNS·XOR·CORREL·COVAR·SLOPE 계열은 배열로 계산한다 (`MODE(Data!A1:A5*2)` = 2, `ROWS(Data!A1:A5*2)` = 5, `XOR(Data!A1:A5>2)` = TRUE; AND·OR 은 #VALUE!) |
+| 한 칸 참조·배열 문맥 | 식 안의 한 칸 참조는 배열 수식에서도 낱값 (`XOR(255<=Data!C3,Data!B1&"")` 의 글은 낱값이라 #VALUE!). 낱값 인수에 배열을 주면 배열 수식에서만 원소마다 계산하고 보통 칸에서는 첫 원소 (`TYPE(TRIM({"a","b"}))` = 2, `TYPE({1,2}*2)` = 64). 배열을 돌려주는 함수를 여러 칸에 펼치면 전체가 낱값 #VALUE! (`MUNIT(Data!M5:N6)`). 배열 앞의 낱값 인수가 오류면 펼치지 않고 그 오류 (`NUMBERVALUE(#NULL!,{…})` 는 모든 칸이 #NULL!) |
+| DB | 기간은 수명(첫 해가 열두 달이면) 또는 수명 + 1(달 수 < 12)까지, 넘으면 #NUM! (`DB(1000,100,3,4)` = #NUM!, `DB(1000,100,0.5,1)` = #NUM!, `DB(1000,100,3,4,6)` = 42.2). 수명을 넘는 해는 남은 달수만큼 곱한다 — 수명이 소수여도 (`DB(1000,100,2.5,3,6)` = 83.7388, `DB(1000,100,3.5,4,1)` = 113.79) |
+| TRUNC | 10^자리 가 0 이 되는 −324 이하는 #NUM! (`TRUNC(1023,-323)` = 0) |
+| COMBIN·COMBINA·PERMUT | 소수를 버린 n 이 2147483647 이상이면 #NUM! (COMBIN(2147483646,1) 은 값, COMBINA 는 k 도) |
+| PERMUTATIONA | n^k 가 아니라 n!/(n−k)! + n (k ≥ 1; `PERMUTATIONA(10,3)` = 730, `(100,1)` = 200, `(5,5)` = 125, 끝자리는 e^{…} 꼴이라 1E-15 쯤 다르다). k = 0 은 1, n = 0 은 0, k > n 과 n > 170 은 #NUM! |
+| RANK | 값이 오류면 그 오류 → 범위가 오류면 그 오류 → 값이 글이면 #VALUE! (`RANK(1/0,NA())` = #DIV/0!, `RANK("x",NA())` = #N/A). 범위가 낱값이면 #N/A, 낱 글이 숫자로 읽히면 #N/A (`RANK(1,"50%")`), 아니면 #VALUE! |
+| QUARTILE.EXC | 1·3 사분위의 순위가 범위 밖이면 0 (`QUARTILE.EXC({3},1)` = 0, PERCENTILE.EXC 가 범위 밖 칸을 0 으로 보는 것과 같다) |
+| FLOOR.PRECISE | 배수가 0 이면 첫 인수의 오류·글을 보지 않고 0 (`FLOOR.PRECISE(NA(),0)`; CEILING.PRECISE·FLOOR.MATH·CEILING.MATH 는 #N/A) |
+| SUMPRODUCT·BIT 함수 | SUMPRODUCT 의 오류 낱값은 한 칸 배열 — 크기가 안 맞으면 오류보다 #VALUE! 가 먼저. BIT 함수는 두 인수의 오류·글을 먼저 보고 범위는 그다음 (`BITXOR(-0.5,#VALUE!)` = #VALUE!) |
+| XLOOKUP | 찾은 자리가 돌려줄 범위를 벗어나거나 방향이 다르면 #REF!. 못 찾았는데 넷째 인수가 없으면 쓰레기 값(앞서 계산한 글이나 엉뚱한 칸)을 내서 따를 수 없다 — rcell 은 0 |
+| UNICHAR | 1114110·1114111 은 #N/A (65534·65535·131070 … 1114109 는 글자) |
+| 큰 수의 글 | 15자리 아래를 양수는 버리고 음수는 올린다 (`2^50&""` = 1125899906842620, `(-2^50)&""` = −1125899906842630) — 부호 있는 값의 내림 |
+| 한셀의 오류 (`hcell_bugs`) | XOR 는 한 행에서 이웃한 같은 값의 상수 칸(수식이 아닌 칸)을 한 칸으로 센다 (`Data!N1` = `Data!O1` = 1 이면 `XOR(Data!N1:O1)` = TRUE; 세로 이웃과 수식 칸은 아니다). MINVERSE 의 특이 행렬은 위 완전 피벗 제자리 소거가 피벗 0 에서 멈춘 행렬 (`{1,2,3;2,4,6;3,6,9}` → `{0,0,−1/3;0,0,−2/3;1/3,2/3,1/9}` 처럼 전 칸이 맞는다) |
+| 따라 하지 못한 것 | C 런타임 sin·cos 가 정확한 반올림이 아닌 드문 경우 (`sin(2.5)`: 한셀 0.5984721441039564, 정확한 반올림 …565) — IMEXP·IMSINH·IMSIN 의 허수부가 15자리에서 1 다르다. ERF 는 대부분 정확한 반올림이지만 `ERF(0.01)`·`ERF(0.25)` 는 1 ulp 낮다 (`ERF(2.5)&""` 의 끝자리). XLOOKUP·MATCH 가 쓰레기를 내는 경우 |
 
 ## 5. 함수별 규칙
 

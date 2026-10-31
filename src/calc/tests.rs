@@ -358,6 +358,24 @@ fn rules_from_random_differential_tests() {
     // 음수 큰 수의 글: 15자리 아래는 올림 (양수는 버림)
     assert_eq!(one("(-(2^50))&\"\""), t("-1125899906842630"));
     assert_eq!(one("(2^50)&\"\""), t("1125899906842620"));
+    // PERMUTATIONA 는 n!/(n−k)! + n
+    assert_eq!(one("PERMUTATIONA(10,3)"), n(730.0));
+    assert_eq!(one("PERMUTATIONA(5,5)"), n(125.0));
+    assert_eq!(one("PERMUTATIONA(2,0)"), n(1.0));
+    assert_eq!(one("PERMUTATIONA(171,1)"), e("#NUM!"));
+    assert_eq!(one("PERMUTATIONA(1,2)"), e("#NUM!"));
+    // 보통 칸에서 낱값 인수의 배열은 첫 원소, MUNIT(배열) 은 낱값 #VALUE!
+    assert_eq!(one("TYPE(TRIM({\"a\",\"b\"}))"), n(2.0));
+    assert_eq!(one("TYPE({1,2}*2)"), n(64.0));
+    // 오류 낱값은 한 칸 배열: 크기가 다르면 #VALUE!, 같으면 그 오류
+    assert_eq!(one("SUMPRODUCT({1,2},NA())"), e("#VALUE!"));
+    assert_eq!(one("SUMPRODUCT(NA())"), e("#N/A"));
+    // BIT 함수는 인수의 오류를 범위보다 먼저
+    assert_eq!(one("BITXOR(-0.5,#VALUE!)"), e("#VALUE!"));
+    assert_eq!(one("BITXOR(-0.5,1)"), e("#NUM!"));
+    // 수식 안 XOR: 식을 배열로 계산한다
+    assert_eq!(one("XOR({1,2,3}>2)"), CellValue::Bool(true));
+    assert_eq!(one("XOR({1,1,0})"), CellValue::Bool(false));
 }
 
 /// 반복 계산 (calcPr iterate): 파일 값에서 시작해 2×iterateCount 번, 행 차례로 (대조 실험 circ)
@@ -421,7 +439,9 @@ fn cycle_cells_keep_their_value_without_iteration() {
 #[test]
 fn array_formula_and_lifting() {
     assert_eq!(one("SUM(1/{1,2,4})"), n(1.75));
-    assert_eq!(one("SUM(LEN({\"a\",\"bb\"}))"), n(3.0));
+    // 보통 칸에서는 낱값 인수의 배열 상수가 첫 원소 (한셀 SUM(LEN({"a","bb"})) = 1), 배열 안에서는 원소마다
+    assert_eq!(one("SUM(LEN({\"a\",\"bb\"}))"), n(1.0));
+    assert_eq!(one("SUMPRODUCT(LEN({\"a\",\"bb\"}))"), n(3.0));
     assert_eq!(one("INDEX({1,2;3,4},2,1)"), n(3.0));
     assert_eq!(one("MMULT({1,2},{3;4})"), n(11.0));
     assert_eq!(one("SUMPRODUCT(LEN(B1:B2))"), n(6.0));

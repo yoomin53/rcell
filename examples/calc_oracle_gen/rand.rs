@@ -11,7 +11,8 @@
 //!
 //! 인수 종류 글자: n 숫자 · i 작은 정수 · I 정수(음수 포함) · p 확률 · e 이율 · t 글 · b 논리 · d 날짜 · x 아무 값 ·
 //! X 값·범위·배열 · r 숫자 범위 · R 범위 · a 배열 · k 조건 글 · f 서식 글 · m 일치 유형 · c 열 번호 · y 0–2 ·
-//! z 0–4 · w 주 번호 유형 · u 단위 글 · g 복소수 글 · q 진법 글 · M 행렬 · S 부분합 번호 · Y·D 연·일.
+//! z 0–4 · w 주 번호 유형 · u 단위 글 · g 복소수 글 · q 진법 글 · M 행렬 · S 부분합 번호 · Y·D 연·일 ·
+//! B 데이터베이스 범위 · F 필드 · K 조건 범위.
 //! 인수 글자 뒤 `?` 는 생략할 수 있다는 뜻.
 
 use crate::cases::Case;
@@ -190,6 +191,62 @@ const SIGS: &[(&str, &str, char)] = &[
     ("ADDRESS", "I I y? b? t?", 't'),
     ("CELL", "C R", 'x'),
     ("SHEET SHEETS", "X?", 'n'),
+    // 두 번째 묶음: 분포·재무·데이터베이스·회귀
+    ("BETA.DIST", "n n n b n? n?", 'n'),
+    ("BETADIST", "n n n n? n?", 'n'),
+    ("BETA.INV BETAINV", "p n n n? n?", 'n'),
+    ("CHISQ.DIST.RT CHIDIST", "n i", 'n'),
+    ("CHISQ.TEST CHITEST F.TEST FTEST", "r r", 'n'),
+    ("F.DIST.RT FDIST", "n i i", 'n'),
+    ("HYPGEOM.DIST", "i i i i b", 'n'),
+    ("HYPGEOMDIST", "i i i i", 'n'),
+    ("NEGBINOM.DIST", "i i p b", 'n'),
+    ("NEGBINOMDIST", "i i p", 'n'),
+    ("LOGINV", "p n n", 'n'),
+    ("LOGNORMDIST", "n n n", 'n'),
+    ("CRITBINOM BINOM.INV", "i p p", 'n'),
+    ("BINOM.DIST.RANGE", "i p i i?", 'n'),
+    ("CONFIDENCE.T", "p n i", 'n'),
+    ("Z.TEST ZTEST", "r n n?", 'n'),
+    ("PERCENTRANK PERCENTRANK.INC PERCENTRANK.EXC", "X n i?", 'n'),
+    ("MODE.MULT", "X", 'x'),
+    ("SKEW.P", "X X? X?", 'n'),
+    ("FREQUENCY", "X X", 'x'),
+    ("XMATCH", "x R o? o?", 'n'),
+    ("LINEST LOGEST GROWTH TREND", "r r? r? b?", 'x'),
+    ("FORECAST.LINEAR", "n r r", 'n'),
+    ("SERIESSUM", "n n n r", 'n'),
+    ("ISO.CEILING", "n n?", 'n'),
+    ("FORMULATEXT ISFORMULA", "R", 'x'),
+    ("DATESTRING", "d", 't'),
+    ("WON", "n i?", 't'),
+    ("IMCOT IMCSCH IMSECH", "g", 't'),
+    ("PI", "", 'n'),
+    ("ACCRINT", "d d d e n i z?", 'n'),
+    ("ACCRINTM", "d d e n z?", 'n'),
+    ("AMORDEGRC AMORLINC", "n d d n i e z?", 'n'),
+    (
+        "COUPDAYBS COUPDAYS COUPDAYSNC COUPNCD COUPNUM COUPPCD",
+        "d d i z?",
+        'n',
+    ),
+    ("CUMIPMT CUMPRINC", "e i n i i b", 'n'),
+    ("DISC INTRATE RECEIVED", "d d n n z?", 'n'),
+    ("DOLLARDE DOLLARFR", "n i", 'n'),
+    ("DURATION MDURATION", "d d e e i z?", 'n'),
+    ("ISPMT", "e i i n", 'n'),
+    ("PRICE", "d d e e n i z?", 'n'),
+    ("PRICEDISC", "d d e n z?", 'n'),
+    ("PRICEMAT", "d d d e e z?", 'n'),
+    ("RRI", "i n n", 'n'),
+    ("PDURATION", "e n n", 'n'),
+    ("TBILLEQ TBILLPRICE TBILLYIELD", "d d e", 'n'),
+    ("VDB", "n n i n n n? b?", 'n'),
+    (
+        "DSUM DAVERAGE DCOUNT DCOUNTA DMAX DMIN DPRODUCT DSTDEV DSTDEVP DVAR DVARP DGET",
+        "B F K",
+        'n',
+    ),
 ];
 
 /// 쓰지 않는 함수 (한셀이 모르거나, 죽거나, 값이 바뀐다)
@@ -546,6 +603,7 @@ impl Gen {
         for (names, sig, ret) in SIGS {
             let args: Vec<(char, bool)> = sig
                 .split(' ')
+                .filter(|t| !t.is_empty())
                 .map(|t| (t.chars().next().unwrap(), t.ends_with('?')))
                 .collect();
             for n in names.split(' ') {
@@ -836,6 +894,51 @@ impl Gen {
                 ])
                 .to_string(),
             'C' => self.rng.pick(INFO_TYPES).to_string(),
+            'B' => self
+                .rng
+                .pick(&[
+                    "Data!Q1:T11",
+                    "Data!Q1:S11",
+                    "Data!Q1:R11",
+                    "Data!Q1:T6",
+                    "Data!R1:T11",
+                    "Data!Q2:T11",
+                    "Data!A1:A10",
+                ])
+                .to_string(),
+            'F' => self
+                .rng
+                .pick(&[
+                    "\"Age\"",
+                    "\"Score\"",
+                    "\"Name\"",
+                    "\"age\"",
+                    "\"Dept\"",
+                    "2",
+                    "3",
+                    "4",
+                    "1",
+                    "0",
+                    "5",
+                    "-1",
+                    "\"zzz\"",
+                    "1.9",
+                    "\"\"",
+                ])
+                .to_string(),
+            'K' => self
+                .rng
+                .pick(&[
+                    "Data!V1:W3",
+                    "Data!Y1:Y2",
+                    "Data!V5:W6",
+                    "Data!V1:V3",
+                    "Data!W1:W2",
+                    "Data!V1:Y3",
+                    "Data!Z1:Z2",
+                    "Data!V5:V6",
+                ])
+                .to_string(),
             other => panic!("모르는 인수 종류 {other}"),
         }
     }

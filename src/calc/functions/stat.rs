@@ -49,24 +49,27 @@ pub const FNS: &[FnSpec] = &[
     f("VARA", 1, MANY, R, |c, a| agg(c, a, Agg::NumbersA, 10)),
     f("VARPA", 1, MANY, R, |c, a| agg(c, a, Agg::NumbersA, 11)),
     f("MEDIAN", 1, MANY, R, |c, a| {
-        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
+        // 배열 상수가 첫 자리가 아니면 값을 읽기 전에 #VALUE! (MODE(범위,{"a","b"},오류) = #VALUE!)
         if late_array(a) {
             return Value::Error(ErrorKind::Value);
         }
+        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
         median(&v)
     }),
     f("MODE", 1, MANY, RAR, |c, a| {
-        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
+        // 배열 상수가 첫 자리가 아니면 값을 읽기 전에 #VALUE! (MODE(범위,{"a","b"},오류) = #VALUE!)
         if late_array(a) {
             return Value::Error(ErrorKind::Value);
         }
+        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
         mode_sngl(&v)
     }),
     f("MODE.SNGL", 1, MANY, RAR, |c, a| {
-        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
+        // 배열 상수가 첫 자리가 아니면 값을 읽기 전에 #VALUE! (MODE(범위,{"a","b"},오류) = #VALUE!)
         if late_array(a) {
             return Value::Error(ErrorKind::Value);
         }
+        let v = try_v!(collect_numbers(c, a, Agg::Numbers));
         mode_sngl(&v)
     }),
     f("MODE.MULT", 1, MANY, RAR, mode_mult),
@@ -193,8 +196,14 @@ pub const FNS: &[FnSpec] = &[
         }
         num(0.5 * ((1.0 + x) / (1.0 - x)).mln())
     }),
+    // (e^{2x} − 1)/(e^{2x} + 1) — 작은 x 에서 자리를 잃는다 (FISHERINV(1E-8) = 9.999999950247594E-9, 대조 실험 conv8)
     f("FISHERINV", 1, 1, V, |c, a| {
-        num(try_v!(num_arg(c, a, 0)).mtanh())
+        let e2 = (2.0 * try_v!(num_arg(c, a, 0))).mexp();
+        num(if e2.is_infinite() {
+            1.0
+        } else {
+            (e2 - 1.0) / (e2 + 1.0)
+        })
     }),
     f("PERMUT", 2, 2, V, |c, a| {
         let (nr, kr) = (try_v!(num_arg(c, a, 0)), try_v!(num_arg(c, a, 1)));
@@ -224,7 +233,19 @@ pub const FNS: &[FnSpec] = &[
         if n == 0.0 {
             return Value::Number(0.0);
         }
-        num(n.mpow(k))
+        if k == 0.0 {
+            return Value::Number(1.0);
+        }
+        // 한셀은 n^k 가 아니라 n!/(n−k)! + n 을 낸다 (PERMUTATIONA(10,3) = 730, PERMUTATIONA(100,1) = 200,
+        // k > n 이나 n > 170 은 #NUM!, 대조 실험 conv6·conv7)
+        if k > n || n > 170.0 {
+            return Value::Error(ErrorKind::Num);
+        }
+        let (nf, df) = (
+            try_v!(super::math::fact(n)),
+            try_v!(super::math::fact(n - k)),
+        );
+        num(nf / df + n)
     }),
     // GAMMA: 171 이상은 #NUM!, 결과는 소수 9자리 반올림 (GAMMA(2.5) = 1.329340388, 대조 실험 stat)
     f("GAMMA", 1, 1, V, |c, a| {
@@ -637,6 +658,10 @@ pub fn mode_sngl(v: &[f64]) -> Value {
 /// (MODE.MULT(1,2,2,3,3) = 3, 배열 수식이어도 {3;3;3}, 대조 실험 arrays·newer).
 fn mode_mult(ctx: &mut Ctx, a: &[Value]) -> Value {
     let v = try_v!(collect_numbers(ctx, a, Agg::Numbers));
+    // 숫자가 하나도 없으면 #NUM!, 있는데 겹치는 값이 없으면 #N/A (대조 실험 conv8)
+    if v.is_empty() {
+        return Value::Error(ErrorKind::Num);
+    }
     let mut best: Option<(f64, usize)> = None;
     for x in &v {
         let c = v.iter().filter(|y| *y == x).count();
@@ -832,8 +857,16 @@ fn percentrank(ctx: &mut Ctx, a: &[Value], inclusive: bool) -> Value {
     let v = try_v!(array_numbers(ctx, &a[0]));
     let x = try_v!(num_arg(ctx, a, 1));
     let sig = try_v!(num_or(ctx, a, 2, 3.0)).trunc();
-    if sig < 1.0 || v.is_empty() {
+    if sig < 1.0 {
         return Value::Error(ErrorKind::Num);
+    }
+    // 숫자가 하나도 없으면 PERCENTRANK(.INC) 는 #NUM!, .EXC 는 #N/A (대조 실험 conv8)
+    if v.is_empty() {
+        return Value::Error(if inclusive {
+            ErrorKind::Num
+        } else {
+            ErrorKind::NA
+        });
     }
     let mut s = v;
     s.sort_by(f64::total_cmp);
@@ -1457,6 +1490,13 @@ fn frequency(ctx: &mut Ctx, a: &[Value]) -> Value {
             }
         })
         .collect();
+    // 구간 범위 안의 오류는 첫 번째가 그대로 (FREQUENCY(자료,Data!H1:H5) = #N/A)
+    if let Some(Value::Error(e)) = flatten(ctx, &a[1])
+        .into_iter()
+        .find(|v| matches!(v, Value::Error(_)))
+    {
+        return Value::Error(e);
+    }
     let bins: Vec<f64> = flatten(ctx, &a[1])
         .into_iter()
         .filter_map(|v| {
@@ -1800,8 +1840,9 @@ fn binom_inv(ctx: &mut Ctx, a: &[Value], strict: bool) -> Value {
     let mut k = 0.0;
     while k <= n {
         s += sp::binom_pmf(k, n, p);
+        // CRITBINOM 은 1 부터 찾는다 (CRITBINOM(2,0.3,0.3) = 1, BINOM.INV 는 0, 대조 실험 conv8)
         if if strict {
-            s > alpha
+            k >= 1.0 && s > alpha
         } else {
             s >= alpha * (1.0 - 1e-15)
         } {
@@ -1938,7 +1979,9 @@ fn chi_rt(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x < 0.0 || !(1.0..=1e10).contains(&df) {
         return Value::Error(ErrorKind::Num);
     }
-    num(sp::gamma_q(df / 2.0, x / 2.0))
+    let q = sp::gamma_q(df / 2.0, x / 2.0);
+    // 아주 큰 x 에서 지수가 0 으로 사라져 수가 아니게 되면 0 (CHIDIST(1E15,3) = 0)
+    num(if q.is_nan() { 0.0 } else { q })
 }
 
 fn chi_inv_rt(ctx: &mut Ctx, a: &[Value]) -> Value {

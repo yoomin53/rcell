@@ -618,6 +618,9 @@ fn strict_numbers(ctx: &mut Ctx, a: &[Value]) -> Result<Vec<f64>, ErrorKind> {
     for x in a {
         for y in super::flatten(ctx, x) {
             match y {
+                // 인수 순서대로 하나씩: 앞의 음수가 뒤의 글·오류보다 먼저 #NUM! (GCD(-1,"3") = #NUM!,
+                // GCD("3",-1) = #VALUE!, 대조 실험 conv8)
+                Value::Number(n) if n < 0.0 => return Err(ErrorKind::Num),
                 Value::Number(n) => v.push(n),
                 Value::Empty if matches!(x, Value::Ref(_)) => {}
                 Value::Empty => v.push(0.0),

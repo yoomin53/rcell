@@ -340,14 +340,7 @@ fn dec2(ctx: &mut Ctx, a: &[Value], radix: u32) -> Value {
 /// 비트 함수 인수: 소수점 아래를 버린다. BITAND 만 양의 소수 부분이 있으면 #NUM! (BITAND(0.5,1),
 /// BITAND(-0.5,1) = 0, BITOR(1.5,1) = 1, BITXOR(3.5,1) = 2). 버린 값은 0 이상 2^48 이하 (자리 이동
 /// 함수는 2^48 미만) — 대조 실험 engineering·misc3·misc4
-fn bit_arg(
-    ctx: &mut Ctx,
-    a: &[Value],
-    i: usize,
-    strict: bool,
-    limit: f64,
-) -> Result<u64, ErrorKind> {
-    let x = num_arg(ctx, a, i)?;
+fn bit_check(x: f64, strict: bool, limit: f64) -> Result<u64, ErrorKind> {
     let n = x.trunc();
     // BITAND 만 (−1, 0) 의 음수 소수를 0 으로 받는다; 나머지는 0 보다 작으면 모두 #NUM!
     // (BITXOR(1023,-0.69)·BITRSHIFT(-0.5,6) = #NUM!, 대조 실험 bitops·rand)
@@ -361,8 +354,10 @@ const BIT_MAX: f64 = 281_474_976_710_656.0;
 
 /// 결과가 2^48 을 넘으면 #NUM! (BITOR(2^48,1); BITAND(2^48,2^48) = 2^48 은 된다)
 fn bit(ctx: &mut Ctx, a: &[Value], f: fn(u64, u64) -> u64, strict: bool) -> Value {
-    let x = try_v!(bit_arg(ctx, a, 0, strict, BIT_MAX));
-    let y = try_v!(bit_arg(ctx, a, 1, strict, BIT_MAX));
+    // 두 인수의 오류·글을 먼저 보고 범위는 그다음 (BITXOR(-0.5,#VALUE!) = #VALUE!, 대조 실험 rand)
+    let (xr, yr) = (try_v!(num_arg(ctx, a, 0)), try_v!(num_arg(ctx, a, 1)));
+    let x = try_v!(bit_check(xr, strict, BIT_MAX));
+    let y = try_v!(bit_check(yr, strict, BIT_MAX));
     let r = f(x, y);
     if r > 281_474_976_710_656 {
         return Value::Error(ErrorKind::Num);
@@ -371,8 +366,9 @@ fn bit(ctx: &mut Ctx, a: &[Value], f: fn(u64, u64) -> u64, strict: bool) -> Valu
 }
 
 fn shift(ctx: &mut Ctx, a: &[Value], left: bool) -> Value {
-    let x = try_v!(bit_arg(ctx, a, 0, false, BIT_MAX - 1.0));
+    let xr = try_v!(num_arg(ctx, a, 0));
     let s = try_v!(num_arg(ctx, a, 1)).trunc();
+    let x = try_v!(bit_check(xr, false, BIT_MAX - 1.0));
     if s.abs() > 53.0 {
         return Value::Error(ErrorKind::Num);
     }

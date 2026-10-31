@@ -114,9 +114,11 @@ impl<'a> Ctx<'a> {
     pub fn deref(&mut self, v: Value) -> Value {
         match v {
             Value::Ref(r) => {
-                if self.array_mode {
+                if self.array_mode && !(r.len() == 1 && r[0].is_cell()) {
                     self.ref_to_array(&r)
                 } else {
+                    // 식 안의 한 칸 참조는 배열 문맥에서도 낱값이다 (XOR(255<=Data!C3,Data!B1&"") 의 글은 낱값이라
+                    // #VALUE!, 대조 실험 rand)
                     self.intersect_ref(&r)
                 }
             }
@@ -266,11 +268,6 @@ impl<'a> Ctx<'a> {
         }
         // 여러 시트에 걸친 영역을 배열로 읽으면 #VALUE! ('S1:S3'!A1&"x", SUMPRODUCT('S1:S3'!A1), TEXT 대조 실험).
         // 참조를 받는 함수(SUM·LARGE·TRIMMEAN 등)는 `flatten` 이 시트마다 읽는다.
-        // 한 칸은 배열이 아니라 낱값이다 (XOR(255<=Data!C3,Data!B1&"") 의 글은 낱값이라 #VALUE!, 대조 실험 rand)
-        if areas[0].is_cell() {
-            let a = areas[0];
-            return self.area_cell(&a, a.sheet, a.r0, a.c0);
-        }
         match self.area_to_array(&areas[0]) {
             Ok(a) => Value::Array(Rc::new(a)),
             Err(e) => Value::Error(e),
@@ -537,6 +534,32 @@ impl<'a> Ctx<'a> {
         f: fn(&mut Ctx, &[Value]) -> Value,
         vals: Vec<Value>,
     ) -> Value {
+        // 배열 수식(배열 문맥)이 아니면 원소마다 부르지 않고 첫 원소로 한 번 (TYPE(TRIM({"a","b"})) = 2, 대조 실험 conv7)
+        if !self.array_mode {
+            let args: Vec<Value> = vals
+                .iter()
+                .enumerate()
+                .map(|(i, v)| match v {
+                    Value::Array(a) if spec.class(i) == Arg::V => {
+                        a.data.first().cloned().unwrap_or(Value::Empty)
+                    }
+                    other => other.clone(),
+                })
+                .collect();
+            return f(self, &args);
+        }
+        // 배열 앞의 낱값 인수가 오류면 펼치지 않고 그 오류 하나 (NUMBERVALUE(#NULL!, 배열) 는 모든 칸이 #NULL!,
+        // 대조 실험 rand)
+        let first_array = vals
+            .iter()
+            .position(|v| matches!(v, Value::Array(_)))
+            .unwrap_or(vals.len());
+        if let Some(Value::Error(e)) = vals[..first_array]
+            .iter()
+            .find(|v| matches!(v, Value::Error(_)))
+        {
+            return Value::Error(*e);
+        }
         let mut rows = 1;
         let mut cols = 1;
         let mut first = true;
@@ -568,8 +591,8 @@ impl<'a> Ctx<'a> {
                 }
                 let out = f(self, &args);
                 data.push(match out {
-                    // 배열을 돌려주는 함수를 여러 칸에 펼치면 #VALUE! (MUNIT(범위) — 한셀, 대조 실험 rand)
-                    Value::Array(_) if rows * cols > 1 => Value::Error(ErrorKind::Value),
+                    // 배열을 돌려주는 함수를 여러 칸에 펼치면 전체가 낱값 #VALUE! (MUNIT(범위), 대조 실험 rand)
+                    Value::Array(_) if rows * cols > 1 => return Value::Error(ErrorKind::Value),
                     Value::Array(a) => a
                         .data
                         .first()
