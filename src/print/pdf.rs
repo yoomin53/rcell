@@ -1015,7 +1015,8 @@ S"
         assert_eq!(num(-0.0001), "0");
         assert_eq!(num(2.5), "2.5");
     }
-}    /// 알파 그림 → 한셀 PDF 꼴 스텐실: 알파 128 이상만 칠하고 색은 흰 바탕에 섞는다
+
+    /// 알파 그림 → 한셀 PDF 꼴 스텐실: 알파 128 이상만 칠하고 색은 흰 바탕에 섞는다
     #[test]
     fn stencil_image_composites_over_white() {
         let img = PdfImage {
@@ -1034,5 +1035,4 @@ S"
         assert_eq!(&s.data[0..3], &[255, 0, 0]);
         assert_eq!(&s.data[3..6], &[127, 127, 255]);
     }
-
-
+}
