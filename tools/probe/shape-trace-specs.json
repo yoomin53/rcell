@@ -1,0 +1,253 @@
+[
+ {
+  "prst": "actionButtonHome",
+  "file": "home",
+  "icon": true,
+  "skip": [
+   "norm"
+  ],
+  "minArea": 15
+ },
+ {
+  "prst": "actionButtonHelp",
+  "file": "help",
+  "icon": true,
+  "skip": [
+   "norm"
+  ],
+  "minArea": 15
+ },
+ {
+  "prst": "actionButtonInformation",
+  "file": "info",
+  "icon": true,
+  "skip": [
+   "norm"
+  ],
+  "minArea": 15
+ },
+ {
+  "prst": "actionButtonReturn",
+  "file": "return",
+  "icon": true,
+  "skip": [
+   "norm"
+  ],
+  "minArea": 15
+ },
+ {
+  "prst": "actionButtonDocument",
+  "file": "document",
+  "icon": true,
+  "skip": [
+   "norm"
+  ],
+  "minArea": 15
+ },
+ {
+  "prst": "actionButtonSound",
+  "file": "sound",
+  "icon": true,
+  "skip": [
+   "norm"
+  ],
+  "minArea": 15
+ },
+ {
+  "prst": "actionButtonMovie",
+  "file": "movie",
+  "icon": true,
+  "skip": [
+   "norm"
+  ],
+  "minArea": 15
+ },
+ {
+  "prst": "flowChartMagneticDrum",
+  "file": "flowChartMagneticDrum"
+ },
+ {
+  "prst": "flowChartMagneticTape",
+  "file": "flowChartMagneticTape"
+ },
+ {
+  "prst": "verticalScroll",
+  "file": "verticalScroll"
+ },
+ {
+  "prst": "horizontalScroll",
+  "file": "horizontalScroll"
+ },
+ {
+  "prst": "ribbon2",
+  "file": "ribbon2"
+ },
+ {
+  "prst": "ribbon",
+  "file": "ribbon"
+ },
+ {
+  "prst": "ellipseRibbon2",
+  "file": "ellipseRibbon2"
+ },
+ {
+  "prst": "ellipseRibbon",
+  "file": "ellipseRibbon"
+ },
+ {
+  "prst": "gear6",
+  "file": "gear6"
+ },
+ {
+  "prst": "gear9",
+  "file": "gear9"
+ },
+ {
+  "prst": "curvedRightArrow",
+  "file": "curvedRightArrow"
+ },
+ {
+  "prst": "curvedLeftArrow",
+  "file": "curvedLeftArrow"
+ },
+ {
+  "prst": "curvedUpArrow",
+  "file": "curvedUpArrow"
+ },
+ {
+  "prst": "curvedDownArrow",
+  "file": "curvedDownArrow"
+ },
+ {
+  "prst": "irregularSeal1",
+  "file": "irregularSeal1"
+ },
+ {
+  "prst": "irregularSeal2",
+  "file": "irregularSeal2"
+ },
+ {
+  "prst": "leftRightRibbon",
+  "file": "leftRightRibbon"
+ },
+ {
+  "prst": "mathNotEqual",
+  "file": "mathNotEqual"
+ },
+ {
+  "prst": "uturnArrow",
+  "file": "uturnArrow"
+ },
+ {
+  "prst": "funnel",
+  "file": "funnel"
+ },
+ {
+  "prst": "quadArrow",
+  "file": "quadArrow"
+ },
+ {
+  "prst": "leftRightUpArrow",
+  "file": "leftRightUpArrow"
+ },
+ {
+  "prst": "bentArrow",
+  "file": "bentArrow"
+ },
+ {
+  "prst": "sun",
+  "file": "sun"
+ },
+ {
+  "prst": "swooshArrow",
+  "file": "swooshArrow"
+ },
+ {
+  "prst": "leftCircularArrow",
+  "file": "leftCircularArrow"
+ },
+ {
+  "prst": "circularArrow",
+  "file": "circularArrow"
+ },
+ {
+  "prst": "leftRightCircularArrow",
+  "file": "leftRightCircularArrow"
+ },
+ {
+  "prst": "wave",
+  "file": "wave"
+ },
+ {
+  "prst": "cloudCallout",
+  "file": "cloudCallout"
+ },
+ {
+  "prst": "cloud",
+  "file": "cloud"
+ },
+ {
+  "prst": "star5",
+  "file": "star5"
+ },
+ {
+  "prst": "heart",
+  "file": "heart"
+ },
+ {
+  "prst": "bevel",
+  "file": "bevel"
+ },
+ {
+  "prst": "star7",
+  "file": "star7"
+ },
+ {
+  "prst": "doubleWave",
+  "file": "doubleWave"
+ },
+ {
+  "prst": "star6",
+  "file": "star6"
+ },
+ {
+  "prst": "dodecagon",
+  "file": "dodecagon"
+ },
+ {
+  "prst": "heptagon",
+  "file": "heptagon"
+ },
+ {
+  "prst": "decagon",
+  "file": "decagon"
+ },
+ {
+  "prst": "star10",
+  "file": "star10"
+ },
+ {
+  "prst": "wedgeRectCallout",
+  "file": "wedgeRectCallout"
+ },
+ {
+  "prst": "wedgeRoundRectCallout",
+  "file": "wedgeRoundRectCallout"
+ },
+ {
+  "prst": "flowChartOnlineStorage",
+  "file": "flowChartOnlineStorage"
+ },
+ {
+  "prst": "squareTabs",
+  "file": "squareTabs"
+ },
+ {
+  "prst": "plaqueTabs",
+  "file": "plaqueTabs"
+ },
+ {
+  "prst": "cornerTabs",
+  "file": "cornerTabs"
+ }
+]

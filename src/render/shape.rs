@@ -200,6 +200,15 @@ pub fn preset_paths(
     h: f64,
     adj: &HashMap<String, f64>,
 ) -> Option<Vec<PathSpec>> {
+    // 기본 조정값이면 한셀 화면에서 따라 그린 윤곽을 먼저 쓴다 (조정값을 바꾼 도형은 아래 식)
+    if let Some(t) = super::shape_trace::traced(prst)
+        && adj
+            .iter()
+            .all(|(k, v)| t.adj.iter().any(|(n, d)| n == k && (d - v).abs() < 1.0))
+        && let Some(p) = traced_preset(prst, w, h)
+    {
+        return Some(p);
+    }
     let ss = w.min(h);
     let a = |n: &str, d: f64| adj.get(n).copied().unwrap_or(d) / 100_000.0;
     let one = |d: String| Some(vec![PathSpec::new(d)]);
@@ -1743,8 +1752,57 @@ pub fn preset_paths(
             )])
         }
         "cloud" | "cloudCallout" => one(ellipse(hc, vc, hc, vc)),
-        _ => None,
+        _ => traced_preset(prst, w, h),
     }
+}
+
+/// 한셀 화면에서 따라 그린 윤곽 (`shape_trace.rs`) → 경로들. 동작 단추는 사각형 바탕 위에 그림을 얹는다 (그림은 가운데·짧은
+/// 변 비율), 나머지는 상자 비율로 늘인다
+fn traced_preset(prst: &str, w: f64, h: f64) -> Option<Vec<PathSpec>> {
+    let t = super::shape_trace::traced(prst)?;
+    let ss = w.min(h);
+    let (hc, vc) = (w / 2.0, h / 2.0);
+    let mut out = Vec::new();
+    if prst.starts_with("actionButton") {
+        out.push(PathSpec::new(poly(&[
+            (0.0, 0.0),
+            (w, 0.0),
+            (w, h),
+            (0.0, h),
+        ])));
+    }
+    for l in t.layers {
+        let mut d = String::new();
+        for ring in l.rings {
+            for (i, &(x, y)) in ring.iter().enumerate() {
+                let (px, py) = if t.icon {
+                    (hc + f64::from(x) * ss, vc + f64::from(y) * ss)
+                } else {
+                    (f64::from(x) * w, f64::from(y) * h)
+                };
+                let _ = write!(d, "{}{},{}", if i == 0 { "M" } else { "L" }, f(px), f(py));
+            }
+            d.push('Z');
+        }
+        out.push(PathSpec::with(d, l.fill, l.stroke));
+    }
+    // 소리 단추의 소리선 셋 (선만)
+    if prst == "actionButtonSound" {
+        let p = |x: f64, y: f64| (hc + x * ss, vc + y * ss);
+        for (a, b) in [
+            ((0.1906, -0.1413), (0.3741, -0.28)),
+            ((0.1916, 0.0), (0.3716, 0.0)),
+            ((0.1925, 0.1438), (0.3741, 0.2791)),
+        ] {
+            let (p0, p1) = (p(a.0, a.1), p(b.0, b.1));
+            out.push(PathSpec::with(
+                format!("M{},{}L{},{}", f(p0.0), f(p0.1), f(p1.0), f(p1.1)),
+                PathFill::None,
+                true,
+            ));
+        }
+    }
+    Some(out)
 }
 
 /// 미리 정의된 모양 → SVG 경로 하나 (경로들을 이어 붙인다). 모르는 모양은 None
@@ -2073,12 +2131,17 @@ mod tests {
                 .starts_with("M0,10L80,10")
         );
         assert!(preset_path("unknownShape", 10.0, 10.0, &none).is_none());
-        // 별 5개 꼭짓점: 위 꼭짓점에서 시작
+        // 별 8개 꼭짓점: 위 꼭짓점에서 시작 (5·6·7·10 꼭짓점 별은 한셀 화면에서 따라 그린 윤곽)
         assert!(
-            preset_path("star5", 100.0, 100.0, &none)
+            preset_path("star8", 100.0, 100.0, &none)
                 .unwrap()
                 .starts_with("M50,0")
         );
+        // 따라 그린 윤곽은 기본 조정값일 때만 쓴다
+        let traced = preset_paths("star5", 100.0, 100.0, &none).unwrap();
+        let adjusted = HashMap::from([("adj".to_string(), 30000.0)]);
+        let hand = preset_paths("star5", 100.0, 100.0, &adjusted).unwrap();
+        assert_ne!(traced[0].d, hand[0].d);
         assert_eq!(preset_paths("cube", 100.0, 100.0, &none).unwrap().len(), 4);
     }
 }
