@@ -308,3 +308,47 @@ z 는 모든 페이지가 1:1 쓸 자리 (용지 − 여백)/0.75pt 에 들어�
 - 용지: 페이지 나누기 사실은 A4·B4·A3·A5·B5·Letter·Legal 과 가로 방향으로 쟀다 (2절).
 - 한셀 COM: 열 A 하나가 한 페이지면 첫 `VPageBreaks` 위치가 빈 값이다 (정답 대조는 그 자리를 묻지 않는다). 쓰는 범위가
   1,048,576 행인 시트는 한셀이 페이지를 세다 멈추므로 정답이 없다 (rcell 은 `MAX_PAGES` 5000 에서 자른다).
+
+## 15. 큰 문서와 한도
+
+한셀은 쓰는 범위가 1,048,576 행인 시트의 인쇄에서 멈춘다 (쪽을 세다 끝나지 않는다). rcell 은 같은 문서를 시간·메모리 안에서
+끝내거나 오류로 알린다.
+
+- 쪽 수 한도: `print::MAX_PAGES` = 5000 쪽. 넘으면 `try_workbook_pdf` 가 앞 쪽들만 만들고 `PdfOutput.truncated` 를 참으로
+  (`opts.error_over_pages` 면 `Error::TooLarge`). `rcell pdf` 는 잘렸다고 알린다. 칸 수 한도: `opts.max_cells` (기본 없음).
+- 웹 어셈블리 (`rcell_pdf`): 칸 120만 개 (`WASM_MAX_CELLS`), 3000 쪽 (`WASM_MAX_PAGES`), 압축 푼 XML 72MB·묶음이 아닌 파일 24MB
+  (`WASM_MAX_XML_BYTES`·`WASM_MAX_PLAIN_BYTES`, 불러오기 전에 거른다). 넘으면 `E` + 한국어 메시지를 돌려준다. 한도는 4GB 메모리
+  안에서 칸당 1.6KB (10만 행 × 3 열 = 499MB), 쪽당 45ms 쯤으로 잡았다.
+- 시간·메모리 (Windows, 릴리스 빌드, 모두 PDF 는 바이트로 같다): 앞서 쪽마다 시트 전체를 훑고 쪽마다 행 길이 벡터를 새로 짓던 것을
+  시트마다 한 번 (`SheetPrint.frame_tables`, 행 색인 `SheetPainter.by_row`, 넘침 계산은 4096 행 묶음) 으로 바꿨다.
+
+| 문서 | 명령 | 전 | 후 |
+|---|---|---|---|
+| 100만 행 × 3 열 (칸 300만) | `rcell pages` | 68 s / 4.78 GB | 31.5 s / 0.9 GB |
+| 같은 문서 | `rcell pdf` (5000 쪽에서 자름) | 354 s | 61 s |
+| 10만 행 × 3 열 | `rcell pdf` (2273 쪽) | 20.7 s | 11.7 s |
+| 10만 행 × 3 열 (xlsx 7MB) | 웹 어셈블리 `rcell_pdf` | — | 104 s / 499 MB |
+| 100만 행 × 3 열 (xlsx 22MB, 압축 푼 XML 187MB) | 웹 어셈블리 `rcell_pdf` | 2167 s 뒤 4096 MB 에서 죽음 (trap) | 0.02 s, 오류 "압축 푼 XML 187MB, 한도 72MB" |
+| 100만 행 csv (29MB) | 웹 어셈블리 `rcell_pdf` | (같게 죽음) | 0.03 s, 오류 "파일 29MB, 한도 24MB" |
+
+시험: `tests/print_layout.rs` 의 `pdf_limits_fail_gracefully` (칸 수·쪽 수 한도의 오류·잘림), `million_row_sparse_range_is_capped`
+(쓰는 범위 100만 행에 칸 몇 개 — 쪽 수 한도 안에서 끝난다).
+
+## 16. 다른 입력 형식
+
+한셀은 파일을 연 뒤 인쇄하므로 형식마다 읽기 규칙 (기본 글꼴·열 너비·열 때 다시 계산하는 칸)이 다르다. 같은 내용을 형식별로 저장해
+(한셀 COM 으로 xlsx·xls·nxl·ods·csv·txt 로 저장) 한셀에서 열어 `HPageBreaks`·`VPageBreaks` 와 `ExportAsFixedFormat` PDF 를 얻고
+rcell 로 같은 사본을 열어 비교했다 (`tools/probe/print-oracle.ps1`·`print-diff.ps1`).
+
+| 형식 | 페이지 나누기 대조 | PDF 쪽 수 같음 | 다른 픽셀 % / 잉크 겹침 % |
+|---|---|---|---|
+| xlsx | 33/33 같음 | 16/16 문서 | 0.32 / 92.2 |
+| xls | 66/66 | 32/32 | 0.32 / 91.8 |
+| nxl | 33/33 | 16/16 | 0.33 / 91.5 |
+| ods | 33/33 | 16/16 | 0.45 / 86.6 |
+| csv | 16/16 | 16/16 | 0.09 / 96.3 |
+| txt | 16/16 | 16/16 | 0.09 / 96.3 |
+| htm·mht | rcell 에 읽기가 없다 (한셀은 연다) | — | — |
+
+(말뭉치 비교와 달리 표본이 작은 합성 문서라 숫자끼리만 비교한다.) ods 는 한셀이 ods 의 열 너비·기본 글꼴을 다르게 해석하는 자리가
+남아 다른 형식보다 낮다. csv·txt 는 한셀이 기본 글꼴·표준 열 너비를 쓰므로 차이가 거의 없다.

@@ -786,3 +786,59 @@ fn pattern_fill_is_a_tiling_pattern() {
         "8x8 tile image"
     );
 }
+
+/// 크기 한도는 죽지 않고 오류로 (칸 수), 쪽 수는 앞 쪽들만 또는 오류 — 브라우저(웹 어셈블리)에서 100만 행 시트가 메모리를 다
+/// 쓰기 전에 알리게. 한도 안이면 그대로
+#[test]
+fn pdf_limits_fail_gracefully() {
+    use rcell::print::{PdfOptions, try_workbook_pdf};
+    let mut wb = base();
+    fill(&mut wb, "A1:C200"); // 600 칸, 5 쪽
+    let db = rcell::print::FontDb::new();
+    let opts = |cells, pages, err| PdfOptions {
+        max_cells: cells,
+        max_pages: pages,
+        error_over_pages: err,
+        ..Default::default()
+    };
+    assert!(matches!(
+        try_workbook_pdf(&wb, &db, &opts(Some(100), None, false)),
+        Err(rcell::Error::TooLarge(_))
+    ));
+    let cut = try_workbook_pdf(&wb, &db, &opts(None, Some(2), false)).unwrap();
+    assert!(cut.truncated && cut.pages == 2);
+    assert!(matches!(
+        try_workbook_pdf(&wb, &db, &opts(None, Some(2), true)),
+        Err(rcell::Error::TooLarge(_))
+    ));
+    let all = try_workbook_pdf(&wb, &db, &opts(Some(1000), Some(10), true)).unwrap();
+    assert!(!all.truncated && all.pages == 5);
+}
+
+/// 마지막 칸(1,048,576 행)에만 값이 더 있는 시트: 한셀은 페이지를 세다 멈춘다. rcell 은 배치를 바로 내고 PDF 는 한도 쪽까지
+#[test]
+fn million_row_sparse_range_is_capped() {
+    let mut wb = base();
+    for r in [0u32, 1_048_575] {
+        wb.sheets[0].cells.push(rcell::model::Cell {
+            r: CellRef { row: r, col: 0 },
+            style: 0,
+            value: CellValue::Number(1.0),
+            formula: None,
+        });
+    }
+    let t = std::time::Instant::now();
+    let sp = rcell::print::sheet_print(&wb, 0);
+    assert!(sp.pages.len() > 20_000, "{}", sp.pages.len());
+    let out = rcell::print::try_workbook_pdf(
+        &wb,
+        &rcell::print::FontDb::new(),
+        &rcell::print::PdfOptions {
+            max_pages: Some(3),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(out.truncated && out.pages == 3);
+    assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
+}
