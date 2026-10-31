@@ -144,6 +144,8 @@ rcell 의 `hcmath::lgamma` 는 반정수 k/2 (k ≤ 400) 는 한셀에서 잰 �
 돌려 rcell 과 견줬다 — 처음 3000 개 가운데 120 가 달랐고, 아래 규칙을 고친 뒤 3–5/500, 4 차(7500 여 개, 인수 종류 확장 포함)에서는 알려진 잔여만 남았다
 (`lists/*.txt` 는 규칙마다 좁혀 본 목록: 모두 한셀 출력 없이 수식만). 한셀이 멈추거나 죽는 수식은 `POISSON.DIST(1E5,1E5,TRUE)`, `NUMBERSTRING(1E300,1)`, `ACCRINT` 에 글 날짜·0 을 준 경우(`ACCRINT(44000,"2024-03-15",46000,…)`)가 더 있다.
 
+rcell 은 이 입력과 같은 꼴의 극단값에서 멈추거나 패닉하지 않는다 (`tests/no_hang.rs`: 입력마다 스레드 + 20초 제한, 저장·열기 왕복 포함). 항을 하나씩 더하는 함수는 반복이 2,000,000 을 넘으면 닫힌 꼴이나 근사로 바꾼다 — POISSON.DIST 는 위쪽 불완전 감마, BINOM.DIST 누적·BINOM.INV·CRITBINOM 은 불완전 베타(이분법), HYPGEOM.DIST 누적은 정규 근사, CUMIPMT·CUMPRINC 는 등비수열 합 (한셀은 이런 입력에서 멈추므로 대조할 값이 없다). UNIQUE 는 4000 줄을 넘으면 열쇠로 묶고(글은 대소문자만 접는다), SUBSTITUTE 가 32767 자를 넘기면 #VALUE!, DDB 는 장부가가 잔존가에 닿으면 더 돌지 않는다.
+
 | 규칙 | 한셀 |
 |---|---|
 | 참조가 필요한 인수에 값·배열 | COUNTIF·SUMIF·SUMIFS·COUNTIFS·MAXIFS 의 범위 `{1,2,3}`·`5` 는 #VALUE!. COUNTBLANK 는 #NAME? (오류 값도). ROW·COLUMN 은 #REF!, ROWS("a") 는 #VALUE! (ROWS(5) = 1), SHEETS·CELL 은 #N/A, MATCH(5,5,0) 은 #N/A, RANK 의 범위가 낱값이면 #N/A |

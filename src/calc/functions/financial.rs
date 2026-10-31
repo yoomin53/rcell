@@ -432,6 +432,9 @@ fn ipmt_fn(ctx: &mut Ctx, a: &[Value], interest: bool) -> Value {
     }
 }
 
+/// CUMIPMT·CUMPRINC 가 항을 하나씩 더하는 기간 수의 한계
+const CUM_LOOP_MAX: f64 = 500_000.0;
+
 fn cum(ctx: &mut Ctx, a: &[Value], interest: bool) -> Value {
     let r = try_v!(num_arg(ctx, a, 0));
     let n = try_v!(num_arg(ctx, a, 1)).trunc();
@@ -443,6 +446,17 @@ fn cum(ctx: &mut Ctx, a: &[Value], interest: bool) -> Value {
         return Value::Error(ErrorKind::Num);
     }
     let pm = try_v!(pmt(r, n, p, 0.0, t));
+    // 기간이 아주 많으면 (한셀은 멈춘다) 항을 하나씩 더하지 않고 닫힌 꼴로 — 이자의 등비수열 합
+    if e - s >= CUM_LOOP_MAX {
+        let m = e - s + 1.0;
+        let sum_g = ((1.0 + r).mpow(e) - (1.0 + r).mpow(s - 1.0)) / r;
+        let base = -(p * sum_g + pm * (1.0 + r * t) * ((sum_g - m) / r));
+        let mut int = base * r / (1.0 + r * t);
+        if s == 1.0 && t == 1.0 {
+            int += p * r / (1.0 + r);
+        }
+        return num(if interest { int } else { m * pm - int });
+    }
     let mut total = 0.0;
     let mut k = s;
     while k <= e {
@@ -718,6 +732,10 @@ fn ddb_period(cost: f64, salv: f64, life: f64, per: f64, factor: f64) -> f64 {
     let mut p = 1.0;
     while p <= per {
         dep = (book * rate).min(book - salv);
+        if dep == 0.0 {
+            // 장부가가 잔존가에 닿으면 그 뒤 상각은 0 (기간이 아주 길어도 반복하지 않는다)
+            break;
+        }
         book -= dep;
         p += 1.0;
     }
@@ -730,7 +748,11 @@ fn ddb_book(cost: f64, salv: f64, life: f64, t: f64, factor: f64) -> f64 {
     let mut book = cost;
     let mut p = 1.0;
     while p <= t.floor() {
-        book -= (book * rate).min(book - salv);
+        let d = (book * rate).min(book - salv);
+        if d == 0.0 {
+            break;
+        }
+        book -= d;
         p += 1.0;
     }
     let f = t - t.floor();

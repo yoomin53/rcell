@@ -854,6 +854,9 @@ fn formulatext(ctx: &mut Ctx, a: &[Value]) -> Value {
     }
 }
 
+/// UNIQUE 가 줄 쌍을 모두 견주는 줄 수의 한계 (넘으면 열쇠로 묶는다)
+const UNIQUE_QUADRATIC_MAX: usize = 4000;
+
 fn unique(ctx: &mut Ctx, a: &[Value]) -> Value {
     let arr = try_v!(to_array(ctx, &a[0]));
     let by_col = try_v!(bool_or(ctx, a, 1, false));
@@ -872,15 +875,56 @@ fn unique(ctx: &mut Ctx, a: &[Value]) -> Value {
             .all(|(p, q)| value::lookup_eq(p, q) || (p.is_empty() && q.is_empty()))
     };
     let mut out: Vec<Vec<Value>> = Vec::new();
-    for (i, r) in rows.iter().enumerate() {
-        let count = rows.iter().filter(|o| eq(o, r)).count();
-        if once && count != 1 {
-            continue;
+    if rows.len() > UNIQUE_QUADRATIC_MAX {
+        // 줄이 아주 많으면 비교를 쌍마다 하지 않고 같은 줄의 열쇠로 묶는다 (O(n²) 로 멈추는 것을 막는다.
+        // 글은 대소문자만 접어 묶는다 — 한셀의 정렬 순서 비교와 다를 수 있는 극단 입력 전용)
+        #[derive(Hash, PartialEq, Eq)]
+        enum K {
+            N(u64),
+            T(String),
+            B(bool),
+            E(ErrorKind),
+            Z,
         }
-        if rows[..i].iter().any(|o| eq(o, r)) {
-            continue;
+        let key = |r: &Vec<Value>| -> Vec<K> {
+            r.iter()
+                .map(|v| match v {
+                    Value::Number(x) => {
+                        let y = value::round15(*x);
+                        K::N(if y == 0.0 { 0 } else { y.to_bits() })
+                    }
+                    Value::Text(t) => K::T(value::fold(t)),
+                    Value::Bool(b) => K::B(*b),
+                    Value::Error(e) => K::E(*e),
+                    _ => K::Z,
+                })
+                .collect()
+        };
+        let mut count: std::collections::HashMap<Vec<K>, usize> = std::collections::HashMap::new();
+        for r in &rows {
+            *count.entry(key(r)).or_insert(0) += 1;
         }
-        out.push(r.clone());
+        let mut seen = std::collections::HashSet::new();
+        for r in &rows {
+            let k = key(r);
+            if once && count[&k] != 1 {
+                continue;
+            }
+            if seen.insert(k) {
+                out.push(r.clone());
+            }
+        }
+    } else {
+        for (i, r) in rows.iter().enumerate() {
+            let count = rows.iter().filter(|o| eq(o, r)).count();
+            if once && count != 1 {
+                continue;
+            }
+            if rows[..i].iter().any(|o| eq(o, r)) {
+                continue;
+            }
+            out.push(r.clone());
+        }
     }
     if out.is_empty() {
         return Value::Error(ErrorKind::Calc);

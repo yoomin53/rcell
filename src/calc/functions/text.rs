@@ -404,7 +404,16 @@ fn substitute(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Text(t);
     }
     match opt(a, 3) {
-        None => Value::from(t.replace(&*old, &new)),
+        None => {
+            // 바뀐 글이 한 칸의 글자 한계(32767)를 넘으면 #VALUE! — 만들기 전에 길이로 가려 거대 할당을 피한다
+            let hits = t.matches(&*old).count();
+            let len = t.chars().count() as f64
+                + hits as f64 * (new.chars().count() as f64 - old.chars().count() as f64);
+            if len > 32_767.0 {
+                return Value::Error(ErrorKind::Value);
+            }
+            Value::from(t.replace(&*old, &new))
+        }
         Some(v) => {
             let n = try_v!(ctx.num(v)).trunc();
             if n < 1.0 {

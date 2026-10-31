@@ -1789,6 +1789,9 @@ fn beta_inv(ctx: &mut Ctx, a: &[Value]) -> Value {
     num(lo + (hi - lo) * sp::beta_i_inv(p, al, be))
 }
 
+/// 확률 항을 하나씩 더하는 반복 수의 한계 — 넘으면 닫힌 꼴이나 근사로 (한셀은 이런 입력에서 멈추거나 죽는다)
+const SUM_LOOP_MAX: f64 = 2_000_000.0;
+
 fn binom_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
     let k = try_v!(num_arg(ctx, a, 0)).trunc();
     let n = try_v!(num_arg(ctx, a, 1)).trunc();
@@ -1796,6 +1799,14 @@ fn binom_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
     let cum = try_v!(bool_or(ctx, a, 3, true));
     if k < 0.0 || n < 0.0 || k > n || !(0.0..=1.0).contains(&p) {
         return Value::Error(ErrorKind::Num);
+    }
+    if cum && (if k > n * p { n - k } else { k }) > SUM_LOOP_MAX {
+        // 항이 아주 많으면 (한셀은 멈춘다) 더하지 않고 불완전 베타로 P(X ≤ k) = I_{1−p}(n−k, k+1)
+        return num(if k >= n {
+            1.0
+        } else {
+            sp::beta_i(1.0 - p, n - k, k + 1.0)
+        });
     }
     if cum {
         // 평균 n·p 보다 위의 k 는 1 − 위쪽 꼬리 (k+1…n 을 차례로 더한다) — 한셀과 끝자리까지 같다
@@ -1839,6 +1850,33 @@ fn binom_inv(ctx: &mut Ctx, a: &[Value], strict: bool) -> Value {
     let alpha = try_v!(num_arg(ctx, a, 2));
     if n < 0.0 || p <= 0.0 || p >= 1.0 || alpha <= 0.0 || alpha >= 1.0 {
         return Value::Error(ErrorKind::Num);
+    }
+    if n > SUM_LOOP_MAX {
+        // 항이 아주 많으면 (한셀은 멈춘다) 누적 확률을 불완전 베타로 두고 이분법으로 찾는다
+        let cdf = |k: f64| {
+            if k >= n {
+                1.0
+            } else {
+                sp::beta_i(1.0 - p, n - k, k + 1.0)
+            }
+        };
+        let ok = |k: f64| {
+            if strict {
+                k >= 1.0 && cdf(k) > alpha
+            } else {
+                cdf(k) >= alpha * (1.0 - 1e-15)
+            }
+        };
+        let (mut lo, mut hi) = (0.0f64, n);
+        while hi - lo > 1.0 {
+            let mid = ((lo + hi) / 2.0).floor();
+            if ok(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        return num(if ok(lo) { lo } else { hi });
     }
     let mut s = 0.0;
     let mut k = 0.0;
@@ -1943,6 +1981,16 @@ fn hypgeom(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
         |x: f64| sp::binom_coef(m, x) * sp::binom_coef(big - m, n - x) / sp::binom_coef(big, n);
     if cum {
         let lo = (n - (big - m)).max(0.0);
+        if k - lo > SUM_LOOP_MAX {
+            // 항이 아주 많으면 (한셀은 멈춘다) 정규 근사 (연속 보정) — 초기하 분포의 평균·분산
+            let (mean, pr) = (n * m / big, m / big);
+            let var = n * pr * (1.0 - pr) * (big - n) / (big - 1.0).max(1.0);
+            return num(if var > 0.0 {
+                hc::norm_cdf((k + 0.5 - mean) / var.sqrt())
+            } else {
+                f64::from(k >= mean)
+            });
+        }
         let mut s = 0.0;
         let mut x = lo;
         while x <= k {
@@ -1969,6 +2017,15 @@ fn poisson(ctx: &mut Ctx, a: &[Value]) -> Value {
     let floor_l = (-20.0f64).mexp();
     let lm = if m < floor_l { floor_l.mln() } else { m.mln() };
     let pmf = |k: f64, l: f64| (k * lm - m - l).mexp();
+    if x > SUM_LOOP_MAX {
+        // 항이 아주 많으면 (한셀은 멈춘다: POISSON.DIST(1E5,1E5,TRUE)) 더하지 않고 닫힌 꼴 —
+        // 누적은 위쪽 불완전 감마 Q(x+1, m), 질량은 ln Γ(x+1) 로
+        return num(if cum {
+            sp::gamma_q_hc(x + 1.0, m)
+        } else {
+            pmf(x, crate::calc::hcmath::lgamma(x + 1.0))
+        });
+    }
     let mut l = 0.0;
     let mut k = 0.0;
     if !cum {
