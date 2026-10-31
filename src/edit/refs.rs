@@ -1198,7 +1198,9 @@ pub fn normalize_scoped(
                                         if matches!(toks.last(), Some(T::Raw(p)) if p == "+") {
                                             toks.push(T::Raw(String::new()));
                                         }
-                                        T::Operand(crate::calc::value::number_to_text(-v), false)
+                                        // 영은 부호 없이 (-0 → 0)
+                                        let nv = if v == 0.0 { 0.0 } else { -v };
+                                        T::Operand(crate::calc::value::number_to_text(nv), false)
                                     } else {
                                         T::Operand(crate::calc::value::number_to_text(v), false)
                                     }
