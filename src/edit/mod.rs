@@ -1333,7 +1333,7 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             let f1 = if kind == "list" && !formula1.starts_with('=') {
                 format!("\"{formula1}\"")
             } else {
-                formula1.trim_start_matches('=').to_string()
+                normalize_object_formula(wb, formula1)?
             };
             let dv = crate::model::DataValidation {
                 kind: kind.clone(),
@@ -1341,7 +1341,8 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
                 formula1: Some(f1),
                 formula2: formula2
                     .as_ref()
-                    .map(|f| f.trim_start_matches('=').to_string()),
+                    .map(|f| normalize_object_formula(wb, f))
+                    .transpose()?,
                 allow_blank: true,
                 show_input: true,
                 show_error: true,
@@ -1370,7 +1371,11 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             bold,
         } => {
             let i = si(wb, sheet)?;
-            let formulas = formula1.iter().chain(formula2.iter()).cloned().collect();
+            let formulas = formula1
+                .iter()
+                .chain(formula2.iter())
+                .map(|f| normalize_object_formula(wb, f))
+                .collect::<crate::Result<Vec<_>>>()?;
             objects::add_cf(
                 wb,
                 i,
@@ -1960,6 +1965,27 @@ pub fn jump(sheet: &Sheet, r: CellRef, dr: i32, dc: i32) -> CellRef {
 }
 
 /// 입력한 수식을 한셀이 저장하는 꼴로 고르고 문법을 확인한다 (`=` 없이)
+/// 조건부 서식·데이터 유효성에 넣은 수식의 저장 글: 셀에 넣은 수식과 같이 고른 뒤 (한셀 실험: `sum(a1:a3)>1` →
+/// `SUM(A1:A3)>1`, `1.5E+3` → `1500`), 앞의 `=` 는 뗀다. 식 전체가 정의되지 않은 이름 하나면 글이다
+/// (`nm` → `"nm"`, `R1C1` → `"R1C1"`)
+pub fn normalize_object_formula(wb: &Workbook, text: &str) -> crate::Result<String> {
+    let t = text.trim().trim_start_matches('=');
+    let n = normalize_formula(wb, t)?;
+    let ident = n
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && n.chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.'));
+    let known = canon_name(wb)(&n).is_some()
+        || n.eq_ignore_ascii_case("TRUE")
+        || n.eq_ignore_ascii_case("FALSE");
+    if ident && !known && CellRef::parse(&n).is_none() {
+        return Ok(format!("\"{n}\""));
+    }
+    Ok(n)
+}
+
 pub fn normalize_formula(wb: &Workbook, text: &str) -> crate::Result<String> {
     // `==1` 은 수식이 아니다 (한셀: 입력은 오류, CSV 열기는 글)
     if text.trim_start().starts_with('=') {

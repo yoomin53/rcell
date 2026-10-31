@@ -2011,3 +2011,27 @@ fn formula_local_names_like_hcell() {
         "SUM(\"DOLLAR(\")+DOLLARDE(1,2)"
     );
 }
+
+/// 조건부 서식·유효성에 넣은 수식도 셀 수식처럼 한셀의 저장 글로 고른다 (한셀 COM 으로 넣은 서식의 XML 과 같다)
+#[test]
+fn object_formulas_are_normalized_like_hancell() {
+    let mut wb = new_workbook();
+    let cf = |f: &str| -> Edit {
+        serde_json::from_str(&format!(
+            r#"{{"op":"addCf","range":"D1","type":"expression","formula1":"{f}"}}"#
+        ))
+        .unwrap()
+    };
+    for (input, stored) in [
+        ("=sum(a1:a3)>1", "SUM(A1:A3)>1"),
+        ("A1 > 5", "A1>5"),
+        ("1.5E+3", "1500"),
+        ("STDEV.S(A1:A5)>1", "STDEV.S(A1:A5)>1"),
+        ("nm", "\\\"nm\\\""),
+        ("TRUE", "TRUE"),
+    ] {
+        apply(&mut wb, &cf(input)).unwrap();
+        let got = &wb.sheets[0].conditional_formats.last().unwrap().rules[0].formulas[0];
+        assert_eq!(got, &stored.replace("\\\"", "\""), "{input}");
+    }
+}
