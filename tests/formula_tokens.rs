@@ -30,11 +30,19 @@ fn u16_at(d: &[u8], at: usize) -> Option<usize> {
 }
 
 fn u32_at(d: &[u8], at: usize) -> Option<usize> {
-    Some(u32::from_le_bytes([*d.get(at)?, *d.get(at + 1)?, *d.get(at + 2)?, *d.get(at + 3)?]) as usize)
+    Some(u32::from_le_bytes([
+        *d.get(at)?,
+        *d.get(at + 1)?,
+        *d.get(at + 2)?,
+        *d.get(at + 3)?,
+    ]) as usize)
 }
 
 fn hex(d: &[u8]) -> String {
-    d.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+    d.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// 바이너리 파트 이름의 시트 순번 (`xl/worksheets/sheet3.bin` → 3)

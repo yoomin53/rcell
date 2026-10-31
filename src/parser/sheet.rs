@@ -705,6 +705,7 @@ fn parse_cell(c: &Element, r: CellRef, shared: &[RichText]) -> Cell {
                 del1: flag("del1"),
                 del2: flag("del2"),
             }),
+            calc_always: flag("ca"),
         }
     });
     Cell {

@@ -2548,7 +2548,7 @@ fn read_sheet(
                         .map(|e| CellValue::Error(formula::error_text(e).into()))
                         .unwrap_or_default(),
                 };
-                let _grbit = r.u16();
+                let grbit = r.u16().unwrap_or(0);
                 let at = CellRef { row, col };
                 let rgce = parsed_formula(&mut r).unwrap_or_default();
                 let ctx = Context {
@@ -2584,8 +2584,10 @@ fn read_sheet(
                     r: at,
                     style,
                     value,
+                    // grbitFlags 0x02 fAlwaysCalc
                     formula: text.map(|text| Formula {
                         text,
+                        calc_always: grbit & 0x02 != 0,
                         ..Default::default()
                     }),
                 });

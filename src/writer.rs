@@ -1527,8 +1527,9 @@ fn formula_xml(f: &crate::model::Formula) -> String {
         .as_deref()
         .map(|r| format!(" ref=\"{}\"", esc(r)))
         .unwrap_or_default();
+    let ca = if f.always_calc() { " ca=\"1\"" } else { "" };
     match (f.kind, &f.data_table) {
-        (FormulaKind::Array, _) => format!("<x:f t=\"array\"{range}>{}</x:f>", esc(&f.text)),
+        (FormulaKind::Array, _) => format!("<x:f t=\"array\"{range}{ca}>{}</x:f>", esc(&f.text)),
         (FormulaKind::DataTable, Some(d)) => {
             let mut s = format!("<x:f t=\"dataTable\"{range}");
             if d.two_d {
@@ -1550,7 +1551,7 @@ fn formula_xml(f: &crate::model::Formula) -> String {
             s
         }
         _ if f.text.is_empty() => String::new(),
-        _ => format!("<x:f>{}</x:f>", esc(&f.text)),
+        _ => format!("<x:f{ca}>{}</x:f>", esc(&f.text)),
     }
 }
 

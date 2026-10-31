@@ -103,6 +103,7 @@ pub fn encode(text: &str, place: Place, r: &mut dyn Resolver) -> Result<Encoded,
             _ => None,
         },
         volatile: false,
+        in_chain: false,
     };
     g.emit(&node, root)?;
     let mut rgce = g.out;
@@ -250,7 +251,8 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
                 let mut last = None;
                 if c.get(i) == Some(&':') {
                     let (w2, e2) = word(&c, i + 1);
-                    if !w2.is_empty() && c.get(e2) == Some(&'!') {
+                    // 셀 참조 꼴의 낱말(`A1:Data!B2` 의 A1)은 시트 이름이 아니다
+                    if !w2.is_empty() && c.get(e2) == Some(&'!') && parse_cell(&w).is_none() {
                         last = Some(w2);
                         i = e2;
                     }
@@ -858,12 +860,22 @@ impl Parser<'_> {
         if let Some((c, r)) = parse_cell(&w) {
             return Node::Ref(sheet, Area::Cell(c, r));
         }
+        // 열·행 범위(`A:B`, `1:3`)의 앞쪽: `:` 뒤가 같은 꼴의 열·행일 때만 (`nm:A1` 의 nm 은 이름)
         let next_colon = matches!(self.t.get(self.i), Some(Tok::Op(":")));
         if next_colon {
-            if let Some(c) = parse_col(&w) {
+            let after = self.t.get(self.i + 1);
+            if let Some(c) = parse_col(&w)
+                && matches!(after, Some(Tok::Word(w2)) if parse_col(w2).is_some())
+            {
                 return Node::Ref(sheet, Area::Cols(c, c));
             }
-            if let Some(r) = parse_row(&w) {
+            if let Some(r) = parse_row(&w)
+                && match after {
+                    Some(Tok::Word(w2)) => parse_row(w2).is_some(),
+                    Some(Tok::Num(v)) => v.fract() == 0.0 && *v >= 1.0,
+                    _ => false,
+                }
+            {
                 return Node::Ref(sheet, Area::Rows(r, r));
             }
         }
@@ -1012,6 +1024,74 @@ struct Gen<'a> {
     /// 상대 토큰의 기준 셀
     base: Option<CellRef>,
     volatile: bool,
+    /// 참조 연산 식(`:`·공백·`,` 와 그 사이의 괄호) 안이다 — 맨 바깥 연산에만 PtgMem* 을 붙인다
+    in_chain: bool,
+}
+
+/// 참조 연산 식의 컴파일 시점 값: 영역 목록 [첫 행, 끝 행, 첫 열, 끝 열], 빈 결과·오류, 또는 실행 때 알 수 있는 것
+enum Static {
+    Areas(Vec<[u32; 4]>),
+    Err,
+    Dynamic,
+}
+
+fn static_eval(n: &Node) -> Static {
+    match n {
+        Node::Paren(x) => static_eval(x),
+        Node::Err(_) => Static::Err,
+        Node::Ref(None, area) => match *area {
+            Area::Cell(c, r) => Static::Areas(vec![[r.n, r.n, c.n, c.n]]),
+            Area::Range(c1, r1, c2, r2) => Static::Areas(vec![[
+                r1.n.min(r2.n),
+                r1.n.max(r2.n),
+                c1.n.min(c2.n),
+                c1.n.max(c2.n),
+            ]]),
+            Area::Cols(c1, c2) => Static::Areas(vec![[0, MAX_ROW, c1.n.min(c2.n), c1.n.max(c2.n)]]),
+            Area::Rows(r1, r2) => Static::Areas(vec![[r1.n.min(r2.n), r1.n.max(r2.n), 0, MAX_COL]]),
+            Area::Err => Static::Err,
+        },
+        Node::Bin(op @ (":" | " " | ","), a, b) => {
+            let (x, y) = (static_eval(a), static_eval(b));
+            let (x, y) = match (x, y) {
+                (Static::Err, _) | (_, Static::Err) => return Static::Err,
+                (Static::Dynamic, _) | (_, Static::Dynamic) => return Static::Dynamic,
+                (Static::Areas(x), Static::Areas(y)) => (x, y),
+            };
+            match *op {
+                "," => Static::Areas(x.into_iter().chain(y).collect()),
+                // 범위: 모든 영역을 덮는 직사각형 하나
+                ":" => {
+                    let all: Vec<&[u32; 4]> = x.iter().chain(&y).collect();
+                    Static::Areas(vec![[
+                        all.iter().map(|a| a[0]).min().unwrap_or(0),
+                        all.iter().map(|a| a[1]).max().unwrap_or(0),
+                        all.iter().map(|a| a[2]).min().unwrap_or(0),
+                        all.iter().map(|a| a[3]).max().unwrap_or(0),
+                    ]])
+                }
+                // 교집합: 쌍마다 겹치는 곳 (비면 #NULL!)
+                _ => {
+                    let mut out = Vec::new();
+                    for a in &x {
+                        for b in &y {
+                            let (r1, r2) = (a[0].max(b[0]), a[1].min(b[1]));
+                            let (c1, c2) = (a[2].max(b[2]), a[3].min(b[3]));
+                            if r1 <= r2 && c1 <= c2 {
+                                out.push([r1, r2, c1, c2]);
+                            }
+                        }
+                    }
+                    if out.is_empty() {
+                        Static::Err
+                    } else {
+                        Static::Areas(out)
+                    }
+                }
+            }
+        }
+        _ => Static::Dynamic,
+    }
 }
 
 impl Gen<'_> {
@@ -1027,6 +1107,16 @@ impl Gen<'_> {
     }
 
     fn emit(&mut self, n: &Node, want: ArgClass) -> Result<(), String> {
+        let was = self.in_chain;
+        if !matches!(n, Node::Paren(_) | Node::Bin(":" | " " | ",", ..)) {
+            self.in_chain = false;
+        }
+        let r = self.emit_node(n, want);
+        self.in_chain = was;
+        r
+    }
+
+    fn emit_node(&mut self, n: &Node, want: ArgClass) -> Result<(), String> {
         match n {
             Node::Num(v) => self.number(*v),
             Node::Str(s) => {
@@ -1084,18 +1174,44 @@ impl Gen<'_> {
                     _ => 0x11,
                 };
                 if ptg >= 0x0F {
-                    // 참조 연산자: 피연산자는 참조. 합집합은 PtgMemFunc 로 감싼다
-                    let mem = ptg == 0x10 && !matches!(want, ArgClass::Array);
+                    // 참조 연산자: 피연산자는 참조. 맨 바깥 연산 식은 한셀이 PtgMemArea(컴파일 때 영역을 아는 것, 뒤에
+                    // 그 영역 목록 PtgExtraMem), PtgMemErr(빈 교집합·오류), PtgMemFunc(이름·함수·3차원 참조라 실행 때
+                    // 아는 것)로 감싼다 (한셀 토큰 대조, docs/format/cell-binary.md)
+                    let root = !self.in_chain;
                     let start = self.out.len();
-                    if mem {
-                        self.out.extend_from_slice(&[0x09 | class_bits(want), 0, 0]);
+                    // (머리 크기, cce 자리) — cce 는 뒤따르는 토큰 바이트 수
+                    let mut head = 0;
+                    if root {
+                        let cls = class_bits(want);
+                        match static_eval(n) {
+                            Static::Areas(areas) => {
+                                self.out.extend_from_slice(&[0x06 | cls, 0, 0, 0, 0, 0, 0]);
+                                self.extra
+                                    .extend_from_slice(&(areas.len() as u32).to_le_bytes());
+                                for a in areas {
+                                    for v in a {
+                                        self.extra.extend_from_slice(&v.to_le_bytes());
+                                    }
+                                }
+                                head = 7;
+                            }
+                            Static::Err => {
+                                self.out.extend_from_slice(&[0x07 | cls, 0, 0, 0, 0, 0, 0]);
+                                head = 7;
+                            }
+                            Static::Dynamic => {
+                                self.out.extend_from_slice(&[0x09 | cls, 0, 0]);
+                                head = 3;
+                            }
+                        }
                     }
+                    self.in_chain = true;
                     self.emit(a, ArgClass::Ref)?;
                     self.emit(b, ArgClass::Ref)?;
                     self.out.push(ptg);
-                    if mem {
-                        let len = self.out.len() - start - 3;
-                        self.patch16(start + 1, len);
+                    if root {
+                        let len = self.out.len() - start - head;
+                        self.patch16(start + head - 2, len);
                     }
                 } else {
                     self.emit(a, operand(want))?;

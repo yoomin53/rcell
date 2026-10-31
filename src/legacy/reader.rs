@@ -1966,7 +1966,7 @@ fn read_sheet(
                     continue;
                 };
                 let Some(val) = r.take(8) else { continue };
-                let _grbit = r.u16();
+                let grbit = r.u16().unwrap_or(0);
                 let _chn = r.u32();
                 let cce = r.u16().unwrap_or(0) as usize;
                 let rgce = r.take(cce).unwrap_or_default();
@@ -2049,6 +2049,11 @@ fn read_sheet(
                     }),
                 };
                 let is_string = val[6] == 0xFF && val[7] == 0xFF && val[0] == 0;
+                // grbit 0x0001 fAlwaysCalc
+                let formula = formula.map(|mut f| {
+                    f.calc_always = grbit & 0x0001 != 0;
+                    f
+                });
                 sheet.cells.push(Cell {
                     r: at,
                     style: style(ixfe),

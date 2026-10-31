@@ -2139,7 +2139,8 @@ impl SheetCtx<'_, '_> {
                     }
                 };
                 // grbitFlags: 0x02 fAlwaysCalc (휘발성 함수, 한셀 XML 의 ca="1")
-                p.u16(if e.volatile { 0x02 } else { 0 }).fmla(&e);
+                let always = e.volatile || c.formula.as_ref().is_some_and(|f| f.always_calc());
+                p.u16(if always { 0x02 } else { 0 }).fmla(&e);
                 o.p(ty, &p);
             }
             None => match &c.value {

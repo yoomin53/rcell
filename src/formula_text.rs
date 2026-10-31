@@ -356,3 +356,88 @@ mod tests {
         assert_eq!(sh("XFD1", 0, 1), "#REF!");
     }
 }
+
+/// 수식에 휘발성 함수가 있는가 — 한셀은 이런 수식에 `<f ca="1">` (항상 다시 계산)를 단다. 한셀 실험: NOW·TODAY·RAND·
+/// RANDBETWEEN·OFFSET·INDIRECT·CELL·INFO (RANDARRAY·ROW·INDEX·SUBTOTAL 은 아니다)
+pub fn has_volatile(formula: &str) -> bool {
+    const VOLATILE: [&str; 8] = [
+        "NOW",
+        "TODAY",
+        "RAND",
+        "RANDBETWEEN",
+        "OFFSET",
+        "INDIRECT",
+        "CELL",
+        "INFO",
+    ];
+    let c: Vec<char> = formula.chars().collect();
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            // 글·따옴표 시트 이름·구조적 참조는 건너뛴다 (같은 따옴표 두 개는 이스케이프)
+            q @ ('"' | '\'') => {
+                i += 1;
+                while i < c.len() {
+                    if c[i] == q {
+                        if c.get(i + 1) == Some(&q) {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            '[' => {
+                let mut depth = 0;
+                while i < c.len() {
+                    match c[i] {
+                        '\'' => i += 1,
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            ch if ch.is_alphanumeric() || ch == '_' || ch == '.' => {
+                let s = i;
+                while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_' || c[i] == '.') {
+                    i += 1;
+                }
+                if c.get(i) == Some(&'(') {
+                    let name: String = c[s..i].iter().collect::<String>().to_ascii_uppercase();
+                    let name = name.strip_prefix("_XLFN.").unwrap_or(&name);
+                    if VOLATILE.contains(&name) {
+                        return true;
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod volatile_tests {
+    use super::has_volatile;
+
+    #[test]
+    fn volatile_functions() {
+        assert!(has_volatile("TODAY()-TODAY()"));
+        assert!(has_volatile("SUM(OFFSET(A1,1,1):B2)"));
+        assert!(has_volatile("IF(A1,_xlfn.RANDBETWEEN(1,2),0)"));
+        assert!(!has_volatile("SUM(A1:A3)+ROW()"));
+        assert!(!has_volatile("\"NOW()\"&'RAND(x)'!A1"));
+        assert!(!has_volatile("Table1[[#This Row],[RAND(]]"));
+        assert!(!has_volatile("RANDARRAY()"));
+    }
+}

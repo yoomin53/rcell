@@ -2631,6 +2631,17 @@ pub struct Formula {
     /// 데이터 표의 입력 (`t="dataTable"`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_table: Option<DataTableInput>,
+    /// 항상 다시 계산 (`<f ca="1">`, 이진 BrtFmla 의 fAlwaysCalc, 레거시 FORMULA 의 grbit 0x0001) — 휘발성 함수
+    /// (NOW·TODAY·RAND·RANDBETWEEN·OFFSET·INDIRECT·CELL·INFO)를 쓰거나 한셀이 순환 참조에 든 칸으로 보았을 때
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub calc_always: bool,
+}
+
+impl Formula {
+    /// 항상 다시 계산해야 하는가: 표시가 있거나 휘발성 함수를 쓴다 (한셀이 `ca="1"` 을 다는 때)
+    pub fn always_calc(&self) -> bool {
+        self.calc_always || crate::formula_text::has_volatile(&self.text)
+    }
 }
 
 /// 데이터 표 (What-If 분석)의 입력: `dt2D`, `dtr`, `r1`, `r2`, `del1`, `del2`

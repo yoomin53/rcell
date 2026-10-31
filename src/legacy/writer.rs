@@ -3717,7 +3717,10 @@ fn write_formula(out: &mut Out, ctx: &SheetCtx, c: &Cell, xf: u16, sst: &mut Sst
     }
     // grbit: 0x0008 공유 수식, 0x0001 휘발 함수가 있음 (관측: TODAY() 수식)
     let mut grbit: u16 = if enc.exp.is_some() { 0x0008 } else { 0 };
-    if enc.rgce.starts_with(&[0x19, 0x01]) || enc.rel.starts_with(&[0x19, 0x01]) {
+    if enc.rgce.starts_with(&[0x19, 0x01])
+        || enc.rel.starts_with(&[0x19, 0x01])
+        || c.formula.as_ref().is_some_and(|f| f.always_calc())
+    {
         grbit |= 0x0001;
     }
     b.u16(grbit)
