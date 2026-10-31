@@ -742,7 +742,17 @@ pub fn shape_png(
         shadow.extend(ops);
         ops = shadow;
     }
-    webpng::encode_png(png_w, png_h, &webpng::draw(&ops, png_w, png_h, &fonts))
+    webpng::encode_png(
+        png_w,
+        png_h,
+        &webpng::draw(
+            &ops,
+            png_w,
+            png_h,
+            &fonts,
+            sh.kind != crate::model::ShapeKind::Chart,
+        ),
+    )
 }
 
 /// 그림(PNG·BMP)을 w × h 크기 PNG 로 다시 그린다 (한셀 웹 저장은 그림도 크기에 맞춘 RGBA PNG 로 넣는다).

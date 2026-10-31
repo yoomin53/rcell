@@ -44,6 +44,8 @@ pub struct EscherShape {
     pub anchor_flag: u16,
     /// OfficeArtChildAnchor (그룹 안 좌표)
     pub child_anchor: Option<[i32; 4]>,
+    /// 그룹의 자식 좌표 범위 (OfficeArtFSPGR: left, top, right, bottom)
+    pub group_rect: Option<[i32; 4]>,
     /// 그룹이면 자식 (SpgrContainer)
     pub children: Vec<EscherShape>,
     /// ClientTextbox 가 있으면 TXO 가 따른다
@@ -187,6 +189,11 @@ fn shape(d: &[u8]) -> EscherShape {
                 let rw2 = u32_at(16).unwrap_or(0);
                 let dy2 = u16_at(20).unwrap_or(0) as u32;
                 s.anchor = Some([col1, dx1, rw1, dy1, col2, dx2, rw2, dy2]);
+            }
+            // OfficeArtFSPGR
+            0xF009 => {
+                let v: Vec<i32> = (0..4).map(|i| u32_at(i * 4).unwrap_or(0) as i32).collect();
+                s.group_rect = Some([v[0], v[1], v[2], v[3]]);
             }
             // OfficeArtChildAnchor: left, top, right, bottom (i32)
             0xF00F => {

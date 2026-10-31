@@ -372,11 +372,17 @@ impl<'a> Ctx<'a> {
     // -----------------------------------------------------------------------
 
     fn unary(&mut self, op: UnaryOp, x: &Expr) -> Value {
+        // 단항 + 는 아무것도 하지 않는다: 참조는 참조로 남는다 (MAX(+'S1:S2'!A1,1) 이 3차원 참조를 읽는다,
+        // COLUMN(+nm) = 1 — 대조 실험 syntax)
+        if op == UnaryOp::Plus {
+            return self.eval(x);
+        }
         let v = self.eval_value(x);
         match op {
             UnaryOp::Plus => v,
+            // 0 − x 꼴이라 영의 부호가 뒤집히지 않는다 (-(1-1) = 0, 0*-1 은 -0 — 한셀 대조 실험 negzero)
             UnaryOp::Neg => self.map1(v, |ctx, s| match ctx.num(&s) {
-                Ok(n) => Value::Number(-n),
+                Ok(n) => Value::Number(0.0 - n),
                 Err(e) => Value::Error(e),
             }),
             UnaryOp::Percent => self.map1(v, |ctx, s| match ctx.num(&s) {

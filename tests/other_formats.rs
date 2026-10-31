@@ -450,3 +450,62 @@ fn web_page_shapes_become_png() {
     dims.sort();
     assert_eq!(dims, vec![(624, 23), (624, 33), (624, 176), (681, 389)]);
 }
+
+/// 도형 묶음: `.xls`·레거시로 쓰면 묶음이 중첩 SpgrContainer 로 남고 (자식은 ChildAnchor), 묶음 안 차트도 차트 부분 스트림과 함께 쓰인다
+/// (한셀 .xls 의 MSODRAWING 은 바이트까지 같다 — docs/format/other-formats.md 5절)
+#[test]
+fn grouped_chart_survives_xls_and_legacy() {
+    use rcell::model::{Anchor, Shape, ShapeKind, Xfrm};
+    let mut wb = sample();
+    let xf = |x, y, cx, cy| Xfrm {
+        x,
+        y,
+        cx,
+        cy,
+        ..Default::default()
+    };
+    let chart = Shape {
+        kind: ShapeKind::Chart,
+        name: "차트 1".into(),
+        xfrm: Some(xf(4_114_800, 209_550, 4_800_600, 3_143_250)),
+        chart: Some(rcell::model::Chart {
+            kind: "bar".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let rect = Shape {
+        kind: ShapeKind::Shape,
+        name: "사각형 12".into(),
+        geometry: Some("rect".into()),
+        xfrm: Some(xf(3_700_000, 3_500_000, 2_000_000, 500_000)),
+        ..Default::default()
+    };
+    let group = Shape {
+        kind: ShapeKind::Group,
+        name: "그룹 10".into(),
+        anchor: Anchor::default(),
+        xfrm: Some(xf(3_600_000, 150_000, 6_000_000, 4_000_000)),
+        children: vec![chart, rect],
+        ..Default::default()
+    };
+    wb.sheets[0].shapes.push(group);
+    let dir = std::env::temp_dir().join(format!("rcell-grp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["g.xls", "g.legacy.cell"] {
+        let p = dir.join(name);
+        rcell::save(&wb, &p).unwrap();
+        let back = rcell::open(&p).unwrap();
+        let g = back.sheets[0]
+            .shapes
+            .iter()
+            .find(|s| s.kind == ShapeKind::Group)
+            .unwrap_or_else(|| panic!("{name}: 묶음이 없다"));
+        let kinds: Vec<_> = g.children.iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, [ShapeKind::Chart, ShapeKind::Shape], "{name}");
+        // 자식 위치는 묶음 안 좌표 그대로
+        let c0 = g.children[0].xfrm.as_ref().unwrap();
+        assert_eq!((c0.x, c0.cx), (4_114_800, 4_800_600), "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

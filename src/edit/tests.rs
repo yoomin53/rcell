@@ -1797,3 +1797,217 @@ fn newline_input_turns_on_wrap_like_hcell() {
     assert!(!wrap(&wb, "A2"));
     assert!(!wrap(&wb, "A3"));
 }
+
+// 쪽 설정 대조 실험(ps1–ps5): 여백 포인트, 인쇄 영역·반복 제목 이름, 머리글 글꼴, 페이지 맞추기 배율
+#[test]
+fn page_setup_like_hcell() {
+    let mut wb = hcell_book();
+    let edit: Edit = serde_json::from_str(
+        r#"{"op":"pageSetup","marginLeft":36,"orientation":"landscape","printArea":"A1:C10,E1:F5","printTitleRows":"1:2","headerCenter":"&A 쪽 &P","centerH":true}"#,
+    )
+    .unwrap();
+    apply(&mut wb, &edit).unwrap();
+    let p = &wb.sheets[0].page;
+    assert!((p.margins.as_ref().unwrap().left - 0.5).abs() < 1e-9);
+    assert_eq!(
+        p.setup.as_ref().unwrap().orientation.as_deref(),
+        Some("landscape")
+    );
+    assert!(p.print_options.as_ref().unwrap().horizontal_centered);
+    assert!(
+        p.header_footer
+            .as_ref()
+            .unwrap()
+            .odd_header
+            .as_deref()
+            .unwrap()
+            .starts_with("&C&\"")
+    );
+    let n = wb.sheets[0].name.clone();
+    let find = |name: &str| {
+        wb.defined_names
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.formula.clone())
+    };
+    assert_eq!(
+        find("_xlnm.Print_Area").unwrap(),
+        format!("{n}!$A$1:$C$10,{n}!$E$1:$F$5")
+    );
+    assert_eq!(find("_xlnm.Print_Titles").unwrap(), format!("{n}!$1:$2"));
+    // 지우기
+    let edit: Edit = serde_json::from_str(r#"{"op":"pageSetup","printArea":""}"#).unwrap();
+    apply(&mut wb, &edit).unwrap();
+    assert!(
+        !wb.defined_names
+            .iter()
+            .any(|d| d.name == "_xlnm.Print_Area")
+    );
+}
+
+// 보기 설정 대조 실험(vw1–vw3): 일반·미리 보기 확대율을 따로 두고 12 아래는 12
+#[test]
+fn set_view_like_hcell() {
+    let mut wb = hcell_book();
+    let e = |j: &str| serde_json::from_str::<Edit>(j).unwrap();
+    apply(
+        &mut wb,
+        &e(r#"{"op":"setView","zoom":130,"gridlines":false}"#),
+    )
+    .unwrap();
+    let s = &wb.sheets[0];
+    assert!(!s.show_grid_lines);
+    assert_eq!(s.view.zoom_scale, Some(130));
+    apply(&mut wb, &e(r#"{"op":"setView","view":"pageBreakPreview"}"#)).unwrap();
+    // 미리 보기 확대율 기본은 75, 일반 확대율은 그대로 130
+    assert_eq!(wb.sheets[0].view.zoom_scale, Some(75));
+    assert_eq!(wb.sheets[0].view.zoom_scale_normal, Some(130));
+    apply(&mut wb, &e(r#"{"op":"setView","view":"normal","zoom":10}"#)).unwrap();
+    assert_eq!(wb.sheets[0].view.zoom_scale, Some(12));
+    assert!(wb.sheets[0].view.view.is_none());
+}
+
+// 도형 더하기 대조 실험(sa1–sa3): 번호는 가장 큰 번호 + 1, 이름은 `<종류> <번호 − 1>`, 위치·크기는 px 반올림
+#[test]
+fn add_shape_like_hcell() {
+    let mut wb = hcell_book();
+    let add = |wb: &mut Workbook, j: &str| {
+        apply(wb, &serde_json::from_str::<Edit>(j).unwrap()).unwrap();
+    };
+    add(
+        &mut wb,
+        r#"{"op":"addShape","kind":"rect","left":300,"top":300,"width":100,"height":60}"#,
+    );
+    add(
+        &mut wb,
+        r#"{"op":"addShape","kind":"ellipse","left":50.5,"top":70.25,"width":90.5,"height":45.75}"#,
+    );
+    let s = &wb.sheets[0].shapes;
+    assert_eq!((s[0].id, s[0].name.as_str()), (2, "직사각형 1"));
+    assert_eq!((s[1].id, s[1].name.as_str()), (3, "타원 2"));
+    assert_eq!(s[1].geometry.as_deref(), Some("ellipse"));
+}
+
+// 시트 복사 대조 실험(cs1): 이름 `원본 (N)`, 선택되고, 복사본 안에서 원본을 이름으로 가리키는 수식은 복사본을 가리킨다
+#[test]
+fn copy_sheet_like_hcell() {
+    let mut wb = hcell_book();
+    let n = wb.sheets[0].name.clone();
+    set_input(&mut wb, 0, "A1".parse().unwrap(), "5").unwrap();
+    set_input(&mut wb, 0, "A2".parse().unwrap(), &format!("={n}!A1+1")).unwrap();
+    apply(
+        &mut wb,
+        &serde_json::from_str::<Edit>(r#"{"op":"copySheet"}"#).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(wb.sheets.len(), 2);
+    assert_eq!(wb.sheets[1].name, format!("{n} (2)"));
+    assert!(wb.sheets[1].view.tab_selected && !wb.sheets[0].view.tab_selected);
+    let f = |i: usize| {
+        wb.sheets[i]
+            .cell("A2".parse().unwrap())
+            .and_then(|c| c.formula.as_ref())
+            .map(|f| f.text.clone())
+    };
+    assert_eq!(f(0).unwrap(), format!("{n}!A1+1"));
+    assert!(f(1).unwrap().contains(" (2)'!A1+1"));
+}
+
+// 자동 필터 대조 실험(af4–af7): 값이 든 범위로 줄이고, 같음 조건은 보이는 값 중에 있으면 값 목록, 상위는 경계값
+#[test]
+fn auto_filter_like_hcell() {
+    let mut wb = hcell_book();
+    fill_rows(
+        &mut wb,
+        &[&["k", "v"], &["a", "10"], &["b", "20"], &["c", "30"]],
+    );
+    let e = |j: &str| serde_json::from_str::<Edit>(j).unwrap();
+    apply(
+        &mut wb,
+        &e(r#"{"op":"autoFilter","range":"A1:H20","field":1,"criteria1":"b"}"#),
+    )
+    .unwrap();
+    let af = wb.sheets[0].auto_filter.as_ref().unwrap();
+    assert_eq!(af.range, "A1:B4");
+    assert_eq!(af.columns[0].values, ["b"]);
+    let hidden = |wb: &Workbook| {
+        wb.sheets[0]
+            .rows
+            .iter()
+            .filter(|r| r.hidden)
+            .map(|r| r.index)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(hidden(&wb), [2, 4]);
+    apply(
+        &mut wb,
+        &e(r#"{"op":"autoFilter","range":"A1:B4","field":2,"criteria1":"2","operator":"top"}"#),
+    )
+    .unwrap();
+    let fc = &wb.sheets[0].auto_filter.as_ref().unwrap().columns[1];
+    assert_eq!(fc.top10, Some((true, false, 2.0)));
+    apply(&mut wb, &e(r#"{"op":"showAllData"}"#)).unwrap();
+    assert!(hidden(&wb).is_empty());
+}
+
+// 보호 대조 실험(pr1): 암호가 있는 보호에 다시 걸면 오류, 틀린 암호로 풀면 오류
+#[test]
+fn protect_like_hcell() {
+    let mut wb = hcell_book();
+    let e = |j: &str| serde_json::from_str::<Edit>(j).unwrap();
+    apply(
+        &mut wb,
+        &e(r#"{"op":"protectSheet","password":"pw","sorting":true}"#),
+    )
+    .unwrap();
+    assert_eq!(
+        wb.sheets[0]
+            .protection
+            .as_ref()
+            .unwrap()
+            .password
+            .as_deref(),
+        Some("cf75")
+    );
+    assert!(apply(&mut wb, &e(r#"{"op":"protectSheet","password":"x"}"#)).is_err());
+    assert!(apply(&mut wb, &e(r#"{"op":"unprotectSheet","password":"bad"}"#)).is_err());
+    assert!(wb.sheets[0].protection.is_some());
+    apply(&mut wb, &e(r#"{"op":"unprotectSheet","password":"pw"}"#)).unwrap();
+    assert!(wb.sheets[0].protection.is_none());
+}
+
+// 표 만들기 대조 실험(tb1·tb2): 이름 표N, 첫 열 요약 글, 데이터 행이 둘 이상이면 데이터 서식, 한 행 범위는 아래에 빈 행을 끼운다
+#[test]
+fn add_table_like_hcell() {
+    let mut wb = hcell_book();
+    fill_rows(
+        &mut wb,
+        &[&["이름", "점수"], &["가", "1"], &["나", "2"], &["다", "3"]],
+    );
+    let e = |j: &str| serde_json::from_str::<Edit>(j).unwrap();
+    apply(&mut wb, &e(r#"{"op":"addTable","range":"A1:B4"}"#)).unwrap();
+    let t = &wb.sheets[0].tables[0];
+    assert_eq!(
+        (t.name.as_str(), t.range.as_str(), t.id),
+        ("표1", "A1:B4", 1)
+    );
+    assert_eq!(t.columns[0].totals_label.as_deref(), Some("요약"));
+    assert_eq!(t.columns[0].dxfs[1], Some(1));
+    assert_eq!(t.dxfs[5], Some(0));
+    assert_eq!(wb.styles.dxfs.len(), 2);
+    // 한 행 범위: 아래 칸이 한 칸씩 밀린다 (겹치지 않는 자리)
+    apply(&mut wb, &e(r#"{"op":"addTable","range":"D1","name":"둘"}"#)).ok();
+    assert!(apply(&mut wb, &e(r#"{"op":"addTable","range":"A2:B3"}"#)).is_err());
+}
+
+#[test]
+fn formula_local_names_like_hcell() {
+    assert_eq!(
+        formula_local("DBCS(A1)&DOLLAR(1)&USDOLLAR(2)"),
+        "JUNJA(A1)&WON(1)&DOLLAR(2)"
+    );
+    assert_eq!(
+        formula_local("SUM(\"DOLLAR(\")+DOLLARDE(1,2)"),
+        "SUM(\"DOLLAR(\")+DOLLARDE(1,2)"
+    );
+}
