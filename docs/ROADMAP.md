@@ -73,6 +73,8 @@
   처음 500 개 가운데 14–35 개가 달랐고, 한셀의 규칙 90여 가지(오류 값 이름의 글, 보통 칸의 배열 상수, 한 칸 참조, 3차원 참조, 인수 읽는
   차례, 데이터베이스 조건 머리글, COUP*·DISC 의 인수, 큰 자유도의 CHIDIST …)를 따른 뒤 0.2–0.6% 만 남았다 (모두 아래 알려진 차이)
 - [x] 수식 글 왕복 (`tools/probe/formula-probe.ps1`, `tests/formula_text_oracle.rs`): 한셀이 입력을 읽어 돌려주는 `Formula`·`FormulaLocal` 을 무작위 문법 수식 5500개와 함수 이름 512개로 견줘 98.5% 같게 맞췄다 (숫자 글자 15자리, 단항 부호 접기, 연산자 철자, 거꾸로 된 범위, 시트 범위 이름, 입력 거부). FormulaLocal 은 Formula 와 같고 DBCS·DOLLAR·USDOLLAR 만 JUNJA·WON·DOLLAR. 문법 무작위 수식 3552개의 계산도 98.7%
+- [x] 수식 토큰 저장 (`tests/formula_tokens.rs`, `docs/format/cell-binary.md` 4.6): 한셀이 같은 문서를 바이너리·레거시로 저장해 쓴 수식 토큰열과 rcell 이 XML 원본에서 쓴 것을 칸마다 바이트로 견줬다. 무작위 문법 수식 2000개: 바이너리 99.55%, 레거시 99.55% (처음 75%·72%), 함수 480개 × 인자 칸 전수 조사: 바이너리 99.9%. 고친 것: 참조 연산 식의 PtgMemArea·MemErr·MemFunc 와 영역 목록, 배열 상수(PtgArray 15바이트·레거시 배열 상수 쓰기), 토큰 클래스 모델(함수·칸·연산자별 표 `ftab_kinds.rs`, 새 함수 `_xlfn.` 108개 칸 종류), 숫자 앞 단항 +·-0, XTI 거꾸로 쓴 시트 범위, 레거시 추가 기능 함수 84개의 PtgNameX(SUPBOOK·EXTERNNAME), 인자 30개 넘는 호출은 #VALUE!, `ca="1"` 보존, XML 저장에 `_xlfn.` 접두사, 조건부 서식·유효성 수식 글 고르기. 남은 것: 순환 안에 함수 인자 참조가 있으면 한셀은 반복을 횟수 1배로 돈다 (calc.md), 한셀이 같은 수식에 fAlwaysCalc 을 다는 까닭(9칸), RATE 의 한셀 반복법(후보 탐색에서 못 찾음)
+- [x] 멈춤·충돌 방지 (`tests/no_hang.rs`): 한셀이 멈추거나 죽는 입력(POISSON.DIST(1E5,1E5,TRUE), NUMBERSTRING(1E300,1), ACCRINT 글 날짜 …)과 극단값 200여 개를 스레드 + 20초 제한으로 시험하고 네 서식 저장·열기 왕복도 본다. 항 수가 큰 누적 분포·CUMIPMT 는 닫힌 꼴로, UNIQUE 는 해시로, SUBSTITUTE 는 글자 수 한계로 바꿨다
 - [ ] 계산: 남은 차이 — CHISQ.INV 반올림 경계, GAMMA(음수), BESSELY·BESSELI 의 한셀 근사,
   RATE·XIRR 의 반복, C 런타임의 정확하지 않은 반올림(sin·pow … 0.1–0.4%: IMEXP·IMSINH·IMSIN 의 15자리), ERF 의 1ulp,
   한셀의 오류·쓰레기 값(XLOOKUP 못 찾음, 특이 행렬 MINVERSE, XOR 가 이웃 상수 칸을 한 칸으로 셈 — `CalcOptions::hcell_bugs`)
