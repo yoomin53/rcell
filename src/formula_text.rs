@@ -309,54 +309,6 @@ fn col_name(mut n: i64) -> String {
     s.iter().rev().collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::shift_references as sh;
-
-    #[test]
-    fn relative_and_absolute() {
-        assert_eq!(sh("IF(H28,H28*B28,\"\")", 1, 0), "IF(H29,H29*B29,\"\")");
-        assert_eq!(sh("$A$1+A$1+$A1+A1", 2, 3), "$A$1+D$1+$A3+D3");
-        assert_eq!(sh("SUM(B2:B10)", 0, 1), "SUM(C2:C10)");
-        assert_eq!(sh("SUM(A:A)+SUM($1:2)", 1, 1), "SUM(B:B)+SUM($1:3)");
-    }
-
-    #[test]
-    fn leaves_non_references_alone() {
-        assert_eq!(sh("LOG10(A1)&\"A1\"", 1, 0), "LOG10(A2)&\"A1\"");
-        assert_eq!(sh("'Q1 A1'!B2+Sheet2!C3", 1, 0), "'Q1 A1'!B3+Sheet2!C4");
-        assert_eq!(sh("1E+10+A1*1.5", 1, 0), "1E+10+A2*1.5");
-        assert_eq!(
-            sh("Table1[[#This Row],[A1]]+이율", 1, 0),
-            "Table1[[#This Row],[A1]]+이율"
-        );
-        assert_eq!(sh("IFERROR(A1,#N/A)", 1, 0), "IFERROR(A2,#N/A)");
-        assert_eq!(sh("TRUE+R2D2", 1, 1), "TRUE+R2D2");
-    }
-
-    #[test]
-    fn external_book_numbers() {
-        use super::map_external_books as mx;
-        let f = "'[3]Q 1'!A1+[1]Intro!B2+T[[#This Row],[1]]&\"[3]x\"";
-        assert_eq!(
-            mx(f, |n| (n == 3).then_some(2)),
-            "'[2]Q 1'!A1+[1]Intro!B2+T[[#This Row],[1]]&\"[3]x\""
-        );
-        let mut seen = Vec::new();
-        mx(f, |n| {
-            seen.push(n);
-            None
-        });
-        assert_eq!(seen, [3, 1]);
-    }
-
-    #[test]
-    fn off_sheet_is_ref_error() {
-        assert_eq!(sh("A1048576", 1, 0), "#REF!");
-        assert_eq!(sh("XFD1", 0, 1), "#REF!");
-    }
-}
-
 /// 수식에 휘발성 함수가 있는가 — 한셀은 이런 수식에 `<f ca="1">` (항상 다시 계산)를 단다. 한셀 실험: NOW·TODAY·RAND·
 /// RANDBETWEEN·OFFSET·INDIRECT·CELL·INFO (RANDARRAY·ROW·INDEX·SUBTOTAL 은 아니다)
 pub fn has_volatile(formula: &str) -> bool {
@@ -426,6 +378,244 @@ pub fn has_volatile(formula: &str) -> bool {
     false
 }
 
+/// 한셀이 XML 에 `_xlfn.` 을 붙여 저장하는 함수 (한셀에 함수 이름을 모두 입력해 저장한 대조 실험). 접두사 없이 쓰면
+/// 한셀이 문서를 열 때 모르는 함수(#NAME?)로 읽는다
+const XLFN_FUNCTIONS: &[&str] = &[
+    "ACOT",
+    "ACOTH",
+    "ARABIC",
+    "BASE",
+    "BETA.INV",
+    "BINOM.DIST",
+    "BINOM.DIST.RANGE",
+    "BINOM.INV",
+    "BITAND",
+    "BITLSHIFT",
+    "BITOR",
+    "BITRSHIFT",
+    "BITXOR",
+    "CEILING.MATH",
+    "CEILING.PRECISE",
+    "CHISQ.DIST",
+    "CHISQ.DIST.RT",
+    "CHISQ.INV",
+    "CHISQ.INV.RT",
+    "CHISQ.TEST",
+    "COMBINA",
+    "CONCAT",
+    "CONFIDENCE.NORM",
+    "CONFIDENCE.T",
+    "COT",
+    "COTH",
+    "COVARIANCE.P",
+    "COVARIANCE.S",
+    "CSC",
+    "CSCH",
+    "DAYS",
+    "DECIMAL",
+    "ERF.PRECISE",
+    "ERFC.PRECISE",
+    "EXPON.DIST",
+    "F.DIST",
+    "F.DIST.RT",
+    "F.INV",
+    "F.INV.RT",
+    "F.TEST",
+    "FLOOR.MATH",
+    "FLOOR.PRECISE",
+    "FORMULATEXT",
+    "GAMMA",
+    "GAMMA.DIST",
+    "GAMMALN.PRECISE",
+    "GAUSS",
+    "HYPGEOM.DIST",
+    "IFNA",
+    "IFS",
+    "IMCOSH",
+    "IMCOT",
+    "IMCSC",
+    "IMCSCH",
+    "IMSEC",
+    "IMSECH",
+    "IMSINH",
+    "IMTAN",
+    "ISFORMULA",
+    "ISO.CEILING",
+    "LOGNORM.DIST",
+    "LOGNORM.INV",
+    "MAXIFS",
+    "MINIFS",
+    "MODE.MULT",
+    "MODE.SNGL",
+    "MUNIT",
+    "NEGBINOM.DIST",
+    "NETWORKDAYS.INTL",
+    "NORM.DIST",
+    "NORM.INV",
+    "NORM.S.DIST",
+    "NORM.S.INV",
+    "NUMBERVALUE",
+    "PERCENTILE.EXC",
+    "PERCENTILE.INC",
+    "PERCENTRANK.EXC",
+    "PERCENTRANK.INC",
+    "PERMUTATIONA",
+    "PHI",
+    "POISSON.DIST",
+    "QUARTILE.EXC",
+    "QUARTILE.INC",
+    "SEC",
+    "SECH",
+    "SEQUENCE",
+    "SHEET",
+    "SHEETS",
+    "SKEW.P",
+    "STDEV.P",
+    "STDEV.S",
+    "SWITCH",
+    "T.DIST",
+    "T.DIST.2T",
+    "T.DIST.RT",
+    "T.INV",
+    "T.INV.2T",
+    "TEXTJOIN",
+    "UNICHAR",
+    "UNICODE",
+    "UNIQUE",
+    "VAR.P",
+    "VAR.S",
+    "WEIBULL.DIST",
+    "WORKDAY.INTL",
+    "XLOOKUP",
+    "XOR",
+    "Z.TEST",
+];
+
+/// 수식 글의 함수 이름에 `_xlfn.` 접두사를 붙인다 (XML 저장용, 이미 붙은 것은 그대로).
+/// 글(`"..."`)·따옴표 시트 이름(`'...'`)·구조적 참조(`[...]`) 안은 건드리지 않는다
+pub fn with_future_prefix(formula: &str) -> std::borrow::Cow<'_, str> {
+    let c: Vec<char> = formula.chars().collect();
+    let mut out = String::with_capacity(formula.len() + 8);
+    let mut changed = false;
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            q @ ('"' | '\'') => {
+                out.push(q);
+                i += 1;
+                while i < c.len() {
+                    out.push(c[i]);
+                    if c[i] == q {
+                        if c.get(i + 1) == Some(&q) {
+                            out.push(q);
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            '[' => {
+                let mut depth = 0;
+                while i < c.len() {
+                    out.push(c[i]);
+                    match c[i] {
+                        '\'' => {
+                            i += 1;
+                            if let Some(&n) = c.get(i) {
+                                out.push(n);
+                            }
+                        }
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            ch if ch.is_alphanumeric() || ch == '_' || ch == '.' => {
+                let s = i;
+                while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_' || c[i] == '.') {
+                    i += 1;
+                }
+                let word: String = c[s..i].iter().collect();
+                // 함수 이름: 바로 뒤가 `(`
+                let is_call = c.get(i) == Some(&'(');
+                if is_call && XLFN_FUNCTIONS.contains(&word.to_ascii_uppercase().as_str()) {
+                    out.push_str("_xlfn.");
+                    changed = true;
+                }
+                out.push_str(&word);
+            }
+            ch => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    if changed {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(formula)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shift_references as sh;
+
+    #[test]
+    fn relative_and_absolute() {
+        assert_eq!(sh("IF(H28,H28*B28,\"\")", 1, 0), "IF(H29,H29*B29,\"\")");
+        assert_eq!(sh("$A$1+A$1+$A1+A1", 2, 3), "$A$1+D$1+$A3+D3");
+        assert_eq!(sh("SUM(B2:B10)", 0, 1), "SUM(C2:C10)");
+        assert_eq!(sh("SUM(A:A)+SUM($1:2)", 1, 1), "SUM(B:B)+SUM($1:3)");
+    }
+
+    #[test]
+    fn leaves_non_references_alone() {
+        assert_eq!(sh("LOG10(A1)&\"A1\"", 1, 0), "LOG10(A2)&\"A1\"");
+        assert_eq!(sh("'Q1 A1'!B2+Sheet2!C3", 1, 0), "'Q1 A1'!B3+Sheet2!C4");
+        assert_eq!(sh("1E+10+A1*1.5", 1, 0), "1E+10+A2*1.5");
+        assert_eq!(
+            sh("Table1[[#This Row],[A1]]+이율", 1, 0),
+            "Table1[[#This Row],[A1]]+이율"
+        );
+        assert_eq!(sh("IFERROR(A1,#N/A)", 1, 0), "IFERROR(A2,#N/A)");
+        assert_eq!(sh("TRUE+R2D2", 1, 1), "TRUE+R2D2");
+    }
+
+    #[test]
+    fn external_book_numbers() {
+        use super::map_external_books as mx;
+        let f = "'[3]Q 1'!A1+[1]Intro!B2+T[[#This Row],[1]]&\"[3]x\"";
+        assert_eq!(
+            mx(f, |n| (n == 3).then_some(2)),
+            "'[2]Q 1'!A1+[1]Intro!B2+T[[#This Row],[1]]&\"[3]x\""
+        );
+        let mut seen = Vec::new();
+        mx(f, |n| {
+            seen.push(n);
+            None
+        });
+        assert_eq!(seen, [3, 1]);
+    }
+
+    #[test]
+    fn off_sheet_is_ref_error() {
+        assert_eq!(sh("A1048576", 1, 0), "#REF!");
+        assert_eq!(sh("XFD1", 0, 1), "#REF!");
+    }
+}
+
 #[cfg(test)]
 mod volatile_tests {
     use super::has_volatile;
@@ -439,5 +629,25 @@ mod volatile_tests {
         assert!(!has_volatile("\"NOW()\"&'RAND(x)'!A1"));
         assert!(!has_volatile("Table1[[#This Row],[RAND(]]"));
         assert!(!has_volatile("RANDARRAY()"));
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::with_future_prefix;
+
+    #[test]
+    fn prefixes_future_functions_only() {
+        assert_eq!(
+            with_future_prefix("STDEV.S(A1:A3)+SUM(1)+BITAND(1,2)"),
+            "_xlfn.STDEV.S(A1:A3)+SUM(1)+_xlfn.BITAND(1,2)"
+        );
+        // 이미 붙은 것·글·시트 이름·함수가 아닌 이름은 그대로
+        assert_eq!(with_future_prefix("_xlfn.STDEV.S(1)"), "_xlfn.STDEV.S(1)");
+        assert_eq!(
+            with_future_prefix("\"STDEV.S(1)\"&'T(1)'!A1"),
+            "\"STDEV.S(1)\"&'T(1)'!A1"
+        );
+        assert_eq!(with_future_prefix("STDEV.S+1"), "STDEV.S+1");
     }
 }

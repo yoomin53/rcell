@@ -332,12 +332,18 @@ fn small_sheet(name: &'static str, vals: [f64; 3]) -> Sheet {
 }
 
 fn formula_cell(at: CellRef, text: &str, array: Option<&str>) -> Cell {
+    // RCELL_GEN_XLFN: 한셀이 저장하는 꼴(`_xlfn.` 접두사)로 — 수식 토큰 대조 실험용
+    let text = if std::env::var_os("RCELL_GEN_XLFN").is_some() {
+        rcell::formula_text::with_future_prefix(text).into_owned()
+    } else {
+        text.to_string()
+    };
     Cell {
         r: at,
         style: 0,
         value: CellValue::Number(0.0),
         formula: Some(Formula {
-            text: text.into(),
+            text,
             kind: if array.is_some() {
                 FormulaKind::Array
             } else {
@@ -346,6 +352,7 @@ fn formula_cell(at: CellRef, text: &str, array: Option<&str>) -> Cell {
             shared_index: None,
             range: array.map(str::to_string),
             data_table: None,
+            calc_always: false,
         }),
     }
 }

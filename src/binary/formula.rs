@@ -18,6 +18,7 @@
 //! - 이름·이름 정의의 합집합(`A,B`)은 `PtgMemFunc` 로 감싼다
 //! - 공유 수식·조건부 서식·유효성은 기준 셀에 대한 상대 토큰(`PtgRefN`/`PtgAreaN`, 행 오프셋은 20비트)
 
+use crate::legacy::classes::{Ctx, Kind, Ret};
 use crate::legacy::ftab::{self, ArgClass};
 use crate::model::CellRef;
 
@@ -90,9 +91,9 @@ pub fn encode(text: &str, place: Place, r: &mut dyn Resolver) -> Result<Encoded,
         return Err(format!("남은 토큰 {:?}", &toks[p.i..]));
     }
     let root = match place {
-        Place::Name => ArgClass::Ref,
-        Place::Array => ArgClass::Array,
-        _ => ArgClass::Value,
+        Place::Name => Ctx::reference(),
+        Place::Array => Ctx::array(),
+        _ => Ctx::value(),
     };
     let mut g = Gen {
         out: Vec::new(),
@@ -1008,15 +1009,6 @@ fn class_bits(c: ArgClass) -> u8 {
     }
 }
 
-/// 연산자의 피연산자: 값 (배열 자리면 배열)
-fn operand(want: ArgClass) -> ArgClass {
-    if want == ArgClass::Array {
-        ArgClass::Array
-    } else {
-        ArgClass::Value
-    }
-}
-
 struct Gen<'a> {
     out: Vec<u8>,
     extra: Vec<u8>,
@@ -1106,17 +1098,17 @@ impl Gen<'_> {
         self.out[at..at + 2].copy_from_slice(&v.to_le_bytes());
     }
 
-    fn emit(&mut self, n: &Node, want: ArgClass) -> Result<(), String> {
+    fn emit(&mut self, n: &Node, ctx: Ctx) -> Result<(), String> {
         let was = self.in_chain;
         if !matches!(n, Node::Paren(_) | Node::Bin(":" | " " | ",", ..)) {
             self.in_chain = false;
         }
-        let r = self.emit_node(n, want);
+        let r = self.emit_node(n, ctx);
         self.in_chain = was;
         r
     }
 
-    fn emit_node(&mut self, n: &Node, want: ArgClass) -> Result<(), String> {
+    fn emit_node(&mut self, n: &Node, ctx: Ctx) -> Result<(), String> {
         match n {
             Node::Num(v) => self.number(*v),
             Node::Str(s) => {
@@ -1131,28 +1123,31 @@ impl Gen<'_> {
             Node::Bool(b) => self.out.extend_from_slice(&[0x1D, *b as u8]),
             Node::Err(e) => self.out.extend_from_slice(&[0x1C, *e]),
             Node::Missing => self.out.push(0x16),
-            Node::Ref(sheet, area) => self.reference(sheet.as_ref(), area, want)?,
-            Node::Name(sheet, name) => self.name(sheet.as_ref(), name, want)?,
+            Node::Ref(sheet, area) => self.reference(sheet.as_ref(), area, ctx.bare)?,
+            Node::Name(sheet, name) => self.name(sheet.as_ref(), name, ctx.bare)?,
             Node::List(table, spec) => self.list(table, spec)?,
             Node::Neg(x) => {
                 if let Node::Num(v) = x.as_ref() {
                     // 수 앞의 '-' 는 음수 하나로 (한셀: ABS(-5) → PtgNum -5)
                     self.number(-v);
                 } else {
-                    self.emit(x, operand(want))?;
+                    self.emit(x, ctx.operand())?;
                     self.out.push(0x13);
                 }
             }
+            // 숫자 상수 앞의 단항 + 는 토큰을 만들지 않는다 (한셀은 `+1000` 을 `1000` 으로 저장한다 — 글에는 남는다)
             Node::Plus(x) => {
-                self.emit(x, operand(want))?;
-                self.out.push(0x12);
+                self.emit(x, ctx.operand())?;
+                if !matches!(x.as_ref(), Node::Num(_)) {
+                    self.out.push(0x12);
+                }
             }
             Node::Percent(x) => {
-                self.emit(x, operand(want))?;
+                self.emit(x, ctx.operand())?;
                 self.out.push(0x14);
             }
             Node::Paren(x) => {
-                self.emit(x, want)?;
+                self.emit(x, ctx)?;
                 self.out.push(0x15);
             }
             Node::Bin(op, a, b) => {
@@ -1182,7 +1177,7 @@ impl Gen<'_> {
                     // (머리 크기, cce 자리) — cce 는 뒤따르는 토큰 바이트 수
                     let mut head = 0;
                     if root {
-                        let cls = class_bits(want);
+                        let cls = class_bits(ctx.bare);
                         match static_eval(n) {
                             Static::Areas(areas) => {
                                 self.out.extend_from_slice(&[0x06 | cls, 0, 0, 0, 0, 0, 0]);
@@ -1206,27 +1201,27 @@ impl Gen<'_> {
                         }
                     }
                     self.in_chain = true;
-                    self.emit(a, ArgClass::Ref)?;
-                    self.emit(b, ArgClass::Ref)?;
+                    self.emit(a, Ctx::reference())?;
+                    self.emit(b, Ctx::reference())?;
                     self.out.push(ptg);
                     if root {
                         let len = self.out.len() - start - head;
                         self.patch16(start + head - 2, len);
                     }
                 } else {
-                    self.emit(a, operand(want))?;
-                    self.emit(b, operand(want))?;
+                    self.emit(a, ctx.operand())?;
+                    self.emit(b, ctx.operand())?;
                     self.out.push(ptg);
                 }
             }
-            Node::Func(name, args) => self.func(name, args, want)?,
-            Node::Array(rows) => self.array(rows, want)?,
+            Node::Func(name, args) => self.func(name, args, ctx)?,
+            Node::Array(rows) => self.array(rows, ctx)?,
         }
         Ok(())
     }
 
     fn number(&mut self, v: f64) {
-        if v.fract() == 0.0 && (0.0..=65535.0).contains(&v) && !(v == 0.0 && v.is_sign_negative()) {
+        if v.fract() == 0.0 && (0.0..=65535.0).contains(&v) {
             self.out.push(0x1E);
             self.u16(v as u16);
         } else {
@@ -1424,40 +1419,36 @@ impl Gen<'_> {
         Ok(())
     }
 
-    fn func(&mut self, name: &str, args: &[Node], want: ArgClass) -> Result<(), String> {
+    fn func(&mut self, name: &str, args: &[Node], ctx: Ctx) -> Result<(), String> {
         let up = name.to_ascii_uppercase();
         let plain = up.strip_prefix("_XLFN.").unwrap_or(&up);
         let Some((idx, fixed)) = ftab::by_name(plain) else {
-            return self.udf(name, args, want);
+            return self.udf(name, args, ctx);
         };
-        let sig = ftab::signature(idx);
+        let arg = |k: usize| ctx.arg(ftab::slot_kind(idx, k), false);
         if ftab::is_volatile(idx) {
             self.volatile = true;
         }
-        let ret = match sig.ret {
-            ArgClass::Ref => want,
-            _ => operand(want),
-        };
-        let cls = class_bits(ret);
+        let cls = class_bits(ctx.func_class(ftab::ret_kind(idx)));
         let argc = args.len();
         // 인자 하나인 SUM: tAttrSum
         if idx == 4 && argc == 1 {
-            self.emit(&args[0], sig.param(0))?;
+            self.emit(&args[0], arg(0))?;
             self.out.extend_from_slice(&[0x19, 0x10, 0x00, 0x00]);
             return Ok(());
         }
         // IF: tAttrIf, tAttrGoto
         if idx == 1 && (2..=3).contains(&argc) {
-            self.emit(&args[0], sig.param(0))?;
+            self.emit(&args[0], arg(0))?;
             let at_if = self.out.len();
             self.out.extend_from_slice(&[0x19, 0x02, 0, 0]);
-            self.emit(&args[1], sig.param(1))?;
+            self.emit(&args[1], arg(1))?;
             let mut gotos = vec![self.out.len()];
             self.out.extend_from_slice(&[0x19, 0x08, 0, 0]);
             let skip = self.out.len() - (at_if + 4);
             self.patch16(at_if + 2, skip);
             if argc == 3 {
-                self.emit(&args[2], sig.param(2))?;
+                self.emit(&args[2], arg(2))?;
                 gotos.push(self.out.len());
                 self.out.extend_from_slice(&[0x19, 0x08, 0, 0]);
             }
@@ -1471,11 +1462,11 @@ impl Gen<'_> {
         }
         // IFERROR: tAttr 0x80 (오류 쪽 길이), tAttrGoto
         if idx == 480 && argc == 2 {
-            self.emit(&args[0], sig.param(0))?;
+            self.emit(&args[0], arg(0))?;
             let at = self.out.len();
             self.out.extend_from_slice(&[0x19, 0x80, 0, 0]);
             let start = self.out.len();
-            self.emit(&args[1], sig.param(1))?;
+            self.emit(&args[1], arg(1))?;
             let len = self.out.len() - start;
             self.patch16(at + 2, len);
             let g = self.out.len();
@@ -1488,7 +1479,7 @@ impl Gen<'_> {
         }
         // CHOOSE: tAttrChoose (선택지 수 + 오프셋 표), 선택지마다 tAttrGoto
         if idx == 100 && argc >= 2 {
-            self.emit(&args[0], sig.param(0))?;
+            self.emit(&args[0], arg(0))?;
             let n = argc - 1;
             let at = self.out.len();
             self.out.extend_from_slice(&[0x19, 0x04]);
@@ -1499,7 +1490,7 @@ impl Gen<'_> {
             for (k, a) in args[1..].iter().enumerate() {
                 let off = self.out.len() - table;
                 self.patch16(table + 2 * k, off);
-                self.emit(a, sig.param(k + 1))?;
+                self.emit(a, arg(k + 1))?;
                 gotos.push(self.out.len());
                 self.out.extend_from_slice(&[0x19, 0x08, 0, 0]);
             }
@@ -1515,7 +1506,7 @@ impl Gen<'_> {
             return Ok(());
         }
         for (k, a) in args.iter().enumerate() {
-            self.emit(a, sig.param(k))?;
+            self.emit(a, arg(k))?;
         }
         if fixed == Some(argc as u8) {
             self.out.push(0x01 | cls);
@@ -1529,32 +1520,39 @@ impl Gen<'_> {
     }
 
     /// 표에 없는 함수: 이름(PtgName) + PtgFuncVar(255)
-    fn udf(&mut self, name: &str, args: &[Node], want: ArgClass) -> Result<(), String> {
+    fn udf(&mut self, name: &str, args: &[Node], ctx: Ctx) -> Result<(), String> {
         let i = self.r.name(None, name);
         self.out.push(0x23);
         self.u32(i);
-        for a in args {
-            self.emit(a, ArgClass::Ref)?;
+        // 새 함수(`_xlfn.STDEV.S` …)는 사용자 함수 꼴이어도 칸 종류가 따로 있고 반환은 값이다
+        let up = name.to_ascii_uppercase();
+        let plain = up.strip_prefix("_XLFN.").unwrap_or(&up);
+        let future = ftab::future_slot(plain, 0).is_some();
+        for (k, a) in args.iter().enumerate() {
+            let c = match ftab::future_slot(plain, k) {
+                Some(kind) => ctx.arg(kind, false),
+                None => ctx.arg(Kind::R, true),
+            };
+            self.emit(a, c)?;
         }
         let argc = u8::try_from(args.len() + 1).map_err(|_| "인자가 너무 많음")?;
-        self.out
-            .extend_from_slice(&[0x02 | class_bits(operand(want)), argc, 0xFF, 0x00]);
+        self.out.extend_from_slice(&[
+            0x02 | class_bits(ctx.func_class(if future { Ret::V } else { Ret::R })),
+            argc,
+            0xFF,
+            0x00,
+        ]);
         Ok(())
     }
 
     /// 배열 상수: PtgArray + rgcb 의 PtgExtraArray (열 수 u32, 행 수 u32, 값마다 형식 u8 + 값)
-    fn array(&mut self, rows: &[Vec<Node>], want: ArgClass) -> Result<(), String> {
+    fn array(&mut self, rows: &[Vec<Node>], ctx: Ctx) -> Result<(), String> {
         let cols = rows.first().map_or(0, Vec::len);
         if cols == 0 || rows.iter().any(|r| r.len() != cols) {
             return Err("배열 상수의 행 길이가 다름".into());
         }
         // PtgArray 는 토큰 번호가 곧 클래스 비트다 (0x20/0x40/0x60)
-        let cls = if want == ArgClass::Ref {
-            ArgClass::Array
-        } else {
-            want
-        };
-        self.out.push(class_bits(cls));
+        self.out.push(class_bits(ctx.array_const()));
         self.out.extend_from_slice(&[0; ARRAY_UNUSED]);
         self.extra
             .extend_from_slice(&(rows.len() as u32).to_le_bytes());

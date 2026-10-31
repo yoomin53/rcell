@@ -287,6 +287,7 @@ struct Tally {
     differ: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compare(
     kind: &str,
     book: &str,

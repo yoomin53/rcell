@@ -417,6 +417,11 @@ pub struct Signature {
 }
 
 impl Signature {
+    /// 인자 목록 밖의 인자가 되풀이를 시작하는 자리
+    pub fn cycle(&self) -> usize {
+        self.cycle
+    }
+
     /// `i` 번째(0부터) 인자의 클래스
     pub fn param(&self, i: usize) -> ArgClass {
         let p = self.params;
@@ -498,6 +503,71 @@ pub fn signature(index: u16) -> Signature {
 pub fn is_volatile(index: u16) -> bool {
     // RAND, NOW, OFFSET, CELL, INDIRECT, TODAY, INFO, RANDBETWEEN
     matches!(index, 63 | 74 | 78 | 125 | 148 | 221 | 244 | 464)
+}
+
+/// 함수의 반환 종류 ([`super::ftab_kinds`] 의 표, 없으면 [`signature`] 에서)
+pub fn ret_kind(index: u16) -> super::classes::Ret {
+    use super::classes::Ret;
+    match super::ftab_kinds::KINDS.binary_search_by_key(&index, |k| k.0) {
+        Ok(i) => match super::ftab_kinds::KINDS[i].1 {
+            b'R' => Ret::R,
+            b'A' => Ret::A,
+            _ => Ret::V,
+        },
+        Err(_) => match signature(index).ret {
+            ArgClass::Ref => Ret::R,
+            ArgClass::Array => Ret::A,
+            ArgClass::Value => Ret::V,
+        },
+    }
+}
+
+/// 함수의 `k` 번째(0부터) 인자 칸 종류
+pub fn slot_kind(index: u16, k: usize) -> super::classes::Kind {
+    use super::classes::Kind;
+    let from = |c: u8| match c {
+        b'R' => Kind::R,
+        b'B' => Kind::B,
+        b'A' => Kind::A,
+        b'D' => Kind::D,
+        b'T' => Kind::T,
+        b'W' => Kind::W,
+        b'X' => Kind::X,
+        _ => Kind::V,
+    };
+    let sig = signature(index);
+    match super::ftab_kinds::KINDS.binary_search_by_key(&index, |e| e.0) {
+        Ok(i) => {
+            let s = super::ftab_kinds::KINDS[i].2.as_bytes();
+            if k < s.len() {
+                return from(s[k]);
+            }
+            // 목록 밖: signature 의 되풀이 자리 (없으면 마지막 칸 종류)
+            let cyc = sig.cycle().min(s.len() - 1);
+            from(s[cyc + (k - cyc) % (s.len() - cyc)])
+        }
+        Err(_) => match sig.param(k) {
+            ArgClass::Ref => Kind::R,
+            ArgClass::Array => Kind::A,
+            ArgClass::Value => Kind::V,
+        },
+    }
+}
+
+/// `_xlfn.` 이름 함수(새 함수)의 `k` 번째 인자 칸 종류. 표에 없는 이름이면 None
+pub fn future_slot(name: &str, k: usize) -> Option<super::classes::Kind> {
+    use super::classes::Kind;
+    let i = super::ftab_kinds::FUTURE_KINDS
+        .binary_search_by(|e| e.0.cmp(name))
+        .ok()?;
+    let s = super::ftab_kinds::FUTURE_KINDS[i].1.as_bytes();
+    Some(match s[k.min(s.len() - 1)] {
+        b'R' => Kind::R,
+        b'B' => Kind::B,
+        b'A' => Kind::A,
+        b'D' => Kind::D,
+        _ => Kind::V,
+    })
 }
 
 #[cfg(test)]

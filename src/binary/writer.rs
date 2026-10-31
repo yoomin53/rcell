@@ -1105,7 +1105,8 @@ impl Resolver for Book<'_> {
                 (SupBook::Ext(n - 1), f, l)
             }
         };
-        let key = (sb, f.min(l), f.max(l));
+        // 거꾸로 쓴 시트 범위(`S2:S1`)도 쓴 차례 그대로 따로 둔다 (한셀 바이너리 대조)
+        let key = (sb, f, l);
         Some(match self.xtis.iter().position(|x| *x == key) {
             Some(i) => {
                 if let Some(h) = self.hits.get_mut(i) {

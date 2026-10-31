@@ -681,6 +681,7 @@ fn open_recalc_rules() {
             shared_index: None,
             range: None,
             data_table: None,
+            ..Default::default()
         }),
     };
     wb.sheets[0].cells = vec![

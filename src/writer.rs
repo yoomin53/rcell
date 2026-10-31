@@ -11,6 +11,7 @@
 //!
 //! 개인정보 보호를 위해 저장 경로(`x15ac:absPath`), 작성자 등은 쓰지 않는다.
 
+use crate::formula_text::with_future_prefix;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{Cursor, Write};
@@ -961,7 +962,7 @@ fn conditional_formats_xml(sheet: &Sheet, sheet_no: usize) -> (String, String) {
             }
             s.push('>');
             for f in &r.formulas {
-                let _ = write!(s, "<x:formula>{}</x:formula>", esc(f));
+                let _ = write!(s, "<x:formula>{}</x:formula>", esc(&with_future_prefix(f)));
             }
             if let Some(c) = &r.color_scale {
                 s.push_str("<x:colorScale>");
@@ -1073,10 +1074,18 @@ fn data_validations_xml(sheet: &Sheet) -> String {
         }
         let _ = write!(s, " sqref=\"{}\">", esc(&d.sqref));
         if let Some(f) = &d.formula1 {
-            let _ = write!(s, "<x:formula1>{}</x:formula1>", esc(f));
+            let _ = write!(
+                s,
+                "<x:formula1>{}</x:formula1>",
+                esc(&with_future_prefix(f))
+            );
         }
         if let Some(f) = &d.formula2 {
-            let _ = write!(s, "<x:formula2>{}</x:formula2>", esc(f));
+            let _ = write!(
+                s,
+                "<x:formula2>{}</x:formula2>",
+                esc(&with_future_prefix(f))
+            );
         }
         s.push_str("</x:dataValidation>");
     }
@@ -1529,7 +1538,10 @@ fn formula_xml(f: &crate::model::Formula) -> String {
         .unwrap_or_default();
     let ca = if f.always_calc() { " ca=\"1\"" } else { "" };
     match (f.kind, &f.data_table) {
-        (FormulaKind::Array, _) => format!("<x:f t=\"array\"{range}{ca}>{}</x:f>", esc(&f.text)),
+        (FormulaKind::Array, _) => format!(
+            "<x:f t=\"array\"{range}{ca}>{}</x:f>",
+            esc(&with_future_prefix(&f.text))
+        ),
         (FormulaKind::DataTable, Some(d)) => {
             let mut s = format!("<x:f t=\"dataTable\"{range}");
             if d.two_d {
@@ -1551,7 +1563,7 @@ fn formula_xml(f: &crate::model::Formula) -> String {
             s
         }
         _ if f.text.is_empty() => String::new(),
-        _ => format!("<x:f{ca}>{}</x:f>", esc(&f.text)),
+        _ => format!("<x:f{ca}>{}</x:f>", esc(&with_future_prefix(&f.text))),
     }
 }
 
@@ -2314,7 +2326,11 @@ pub fn write(wb: &Workbook, flavor: Flavor) -> Result<Vec<u8>> {
             if let Some(c) = &d.comment {
                 let _ = write!(wbx, " comment=\"{}\"", esc(c));
             }
-            let _ = write!(wbx, ">{}</x:definedName>", esc(&d.formula));
+            let _ = write!(
+                wbx,
+                ">{}</x:definedName>",
+                esc(&with_future_prefix(&d.formula))
+            );
         }
         wbx.push_str("</x:definedNames>");
     }

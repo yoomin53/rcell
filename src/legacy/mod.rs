@@ -12,11 +12,13 @@
 mod art;
 pub mod biff;
 mod cf;
+pub mod classes;
 mod dxf;
 pub mod encode;
 pub mod escher;
 pub mod formula;
 pub mod ftab;
+pub mod ftab_kinds;
 pub mod lossy;
 pub(crate) mod pivot;
 pub(crate) mod pivotw;
