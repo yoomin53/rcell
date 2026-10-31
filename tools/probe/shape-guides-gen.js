@@ -16,6 +16,36 @@ const squeeze = (x) =>
     .replace(/\s*\/>/g, "/>")
     .replace(/>\s+</g, "><")
     .trim();
+// 자주 나오는 글을 한 글자로 (크기를 3분의 1 쯤으로) — 읽을 때 shape_guides::definition 이 되돌린다
+const TOKENS = [
+  ['<gd name="', "Á"],
+  ['" fmla="', "Â"],
+  ['"/>', "Ã"],
+  ['<pt x="', "Ä"],
+  ['" y="', "Å"],
+  ["<moveTo>", "Æ"],
+  ["</moveTo>", "Ç"],
+  ["<lnTo>", "È"],
+  ["</lnTo>", "É"],
+  ['<arcTo wR="', "Ê"],
+  ['" hR="', "Ë"],
+  ['" stAng="', "Ì"],
+  ['" swAng="', "Í"],
+  ["<cubicBezTo>", "Î"],
+  ["</cubicBezTo>", "Ï"],
+  ["<quadBezTo>", "Ð"],
+  ["</quadBezTo>", "Ñ"],
+  ["<close/>", "Ò"],
+  ["<path", "Ó"],
+  ["</path>", "Ô"],
+  ["</gdLst>", "Õ"],
+  ["<gdLst>", "Ö"],
+  ["</avLst>", "Ø"],
+  ["<avLst>", "Ù"],
+  ["</pathLst>", "Ú"],
+  ["<pathLst>", "Û"],
+];
+const pack = (x) => TOKENS.reduce((t, [a, b]) => t.split(a).join(b), x);
 let out = `// Copyright 2026 yoomin53 (https://github.com/yoomin53)
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -40,7 +70,10 @@ for (const prst of list) {
   const body = ["avLst", "gdLst", "pathLst"].map(get).join("");
   const name = prst.toUpperCase();
   out += `        "${prst}" => ${name},\n`;
-  consts.push(`const ${name}: &str = r#"<g xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">${body}</g>"#;`);
+  consts.push(`const ${name}: &str = r#"${pack(`<g xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">${body}</g>`)}"#;`);
 }
-out += `        _ => return None,\n    })\n}\n\n` + consts.join("\n") + "\n";
+out += `        _ => return None,\n    })\n}\n\n`;
+out += "/// 줄인 글자 → 원래 글 (생성기의 TOKENS 를 거꾸로)\npub fn expand(packed: &str) -> String {\n    let mut s = packed.to_string();\n";
+for (const [a, b] of TOKENS.slice().reverse()) out += `    s = s.replace('${b}', ${JSON.stringify(a)});\n`;
+out += "    s\n}\n\n" + consts.join("\n") + "\n";
 process.stdout.write(out);

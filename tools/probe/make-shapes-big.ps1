@@ -3,8 +3,8 @@
 #
 # rcell — 한컴 셀(.cell) 포맷 클린룸 오픈소스 구현
 #
-# 도형 윤곽 따라 그리기 (0/3): 한셀(COM)로 msoAutoShapeType 목록의 도형을 큰 크기(기본 240×240pt)로 시트마다 8개 (4 × 2) 그려 저장한다.
-# 갈무리(screen-capture.ps1) → shape-trace.ps1 → shape-trace-gen.js 순으로 윤곽 표를 만든다.
+# 도형 윤곽 살펴보기 (0/2): 한셀(COM)로 msoAutoShapeType 목록의 도형을 큰 크기(기본 240×240pt)로 시트마다 8개 (4 × 2) 그려 저장한다.
+# 갈무리(screen-capture.ps1) → shape-trace.ps1 로 윤곽을 벡터화해 가이드 수식 정의(shape-guides-gen.js 의 표)와 맞춰 본다.
 param([Parameter(Mandatory = $true)][string]$OutDir, [string]$Types = "", [double]$W = 240, [double]$H = 240, [string]$Name = "shapes2", [int]$Cols = 4, [int]$Rows = 2)
 # shape tracing experiment: the given msoAutoShapeTypes big (default 240 x 240 pt), 8 per sheet, text-free
 $ErrorActionPreference = "Stop"
