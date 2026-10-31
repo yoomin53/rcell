@@ -1372,6 +1372,8 @@ struct NameRec {
     local: Option<u32>,
     formula: String,
     rgce: Vec<u8>,
+    /// 토큰 뒤에 붙는 자료 (배열 상수)
+    tail: Vec<u8>,
     /// 설명 (`definedName/@comment`)
     comment: Option<String>,
 }
@@ -1386,12 +1388,17 @@ fn builtin_code(name: &str) -> Option<u8> {
 struct Tables<'a> {
     wb: &'a Workbook,
     sheet_names: Vec<String>,
-    /// SUPBOOK: None = 이 문서, Some(n) = 외부 연결 n (1부터)
+    /// SUPBOOK: None = 이 문서, Some(n) = 외부 연결 n (1부터), Some(ADDIN) = 추가 기능
     supbooks: Vec<Option<usize>>,
+    /// 추가 기능 함수 이름 (쓴 차례, EXTERNNAME 번호는 1부터)
+    addins: Vec<String>,
     /// (SUPBOOK 번호, 첫 시트, 끝 시트)
     xti: Vec<(u16, u16, u16)>,
     names: Vec<NameRec>,
 }
+
+/// SUPBOOK 표에서 추가 기능을 나타내는 값
+const ADDIN: usize = usize::MAX;
 
 impl Tables<'_> {
     fn supbook(&mut self, book: Option<usize>) -> u16 {
@@ -1404,6 +1411,16 @@ impl Tables<'_> {
 }
 
 impl Resolve for Tables<'_> {
+    fn addin_name(&mut self, name: &str) -> (u16, u32) {
+        let n = match self.addins.iter().position(|a| a == name) {
+            Some(i) => i,
+            None => {
+                self.addins.push(name.to_string());
+                self.addins.len() - 1
+            }
+        };
+        (self.xti(Some(ADDIN), 0xFFFE, 0xFFFE), n as u32 + 1)
+    }
     fn table(&mut self, name: &str) -> Option<(u32, usize, Vec<String>)> {
         self.wb.sheets.iter().enumerate().find_map(|(si, s)| {
             s.tables
@@ -1463,6 +1480,7 @@ impl Resolve for Tables<'_> {
                 local: None,
                 formula: String::new(),
                 rgce: Vec::new(),
+                tail: Vec::new(),
                 comment: None,
             });
             self.names.len() - 1
@@ -1488,6 +1506,7 @@ impl Resolve for Tables<'_> {
             local: None,
             formula: String::new(),
             rgce: Vec::new(),
+            tail: Vec::new(),
             comment: None,
         });
         self.names.len() as u32
@@ -2196,6 +2215,7 @@ fn workbook_stream_inner(
         wb,
         sheet_names: wb.sheets.iter().map(|s| s.name.clone()).collect(),
         supbooks: Vec::new(),
+        addins: Vec::new(),
         xti: Vec::new(),
         names: wb
             .defined_names
@@ -2208,6 +2228,7 @@ fn workbook_stream_inner(
                 local: d.local_sheet_id,
                 formula: d.formula.clone(),
                 rgce: Vec::new(),
+                tail: Vec::new(),
                 comment: d.comment.clone().filter(|c| !c.is_empty()),
             })
             .collect(),
@@ -2232,8 +2253,11 @@ fn workbook_stream_inner(
             root: Class::Ref,
             ..Default::default()
         };
-        match encode::encode(&f, opts, &mut tables) {
-            Ok(t) => tables.names[i].rgce = t,
+        match encode::encode_with_extra(&f, opts, &mut tables) {
+            Ok((t, tail)) => {
+                tables.names[i].rgce = t;
+                tables.names[i].tail = tail;
+            }
             Err(e) => report
                 .warnings
                 .push(enc_err(&format!("이름 {}", tables.names[i].name), e)),
@@ -2701,20 +2725,30 @@ fn workbook_stream_inner(
         let used: Vec<bool> = (0..tables.supbooks.len())
             .map(|i| tables.xti.iter().any(|x| x.0 as usize == i))
             .collect();
+        // 추가 기능 SUPBOOK 은 마지막 (한셀: 이 문서, 추가 기능 차례)
+        let mut order: Vec<usize> = (0..tables.supbooks.len()).filter(|&i| used[i]).collect();
+        order.sort_by_key(|&i| tables.supbooks[i] == Some(ADDIN));
         let mut renum = vec![0u16; tables.supbooks.len()];
-        let mut next = 0u16;
-        for (i, &u) in used.iter().enumerate() {
-            renum[i] = next;
-            next += u16::from(u);
+        for (new, &i) in order.iter().enumerate() {
+            renum[i] = new as u16;
         }
-        for (i, sb) in tables.supbooks.iter().enumerate() {
-            if !used[i] {
-                continue;
-            }
+        for &i in &order {
+            let sb = &tables.supbooks[i];
             let mut b = Buf::new();
             match sb {
                 None => {
                     b.u16(wb.sheets.len() as u16).u16(0x0401);
+                }
+                Some(ADDIN) => {
+                    b.u16(1).u16(0x3A01);
+                    out.rec_buf(0x01AE, &mut b);
+                    // EXTERNNAME: 옵션 u16, 예약 u32, 글자 수 u16, UTF-16, 수식 길이 u16 (0)
+                    for name in &tables.addins {
+                        let mut e = Buf::new();
+                        e.u16(0).u32(0).u16(units(name) as u16).utf16(name).u16(0);
+                        out.rec_buf(0x0023, &mut e);
+                    }
+                    continue;
                 }
                 Some(n) => {
                     let link = &wb.external_links[n - 1];
@@ -2769,7 +2803,7 @@ fn workbook_stream_inner(
         for &u in &name_units {
             b.u16(u);
         }
-        b.bytes(&n.rgce);
+        b.bytes(&n.rgce).bytes(&n.tail);
         if let Some(c) = &n.comment {
             b.u8(0).utf16(c);
         }

@@ -15,6 +15,8 @@
 //! - 0–65535 의 정수는 PtgInt, 그 밖의 수는 PtgNum. 숫자 상수에 바로 붙은 단항 `-` 는 음수 PtgNum 으로 접는다.
 //! - PtgStr 은 모든 글자가 U+00FF 이하면 1바이트(플래그 0), 아니면 UTF-16(플래그 1).
 
+use super::classes::{Ctx, Kind, Ret};
+use super::ftab::{self, ArgClass};
 use crate::model::CellRef;
 
 const MAX_ROW: u32 = 1_048_575;
@@ -26,6 +28,14 @@ pub enum Class {
     Ref,
     Val,
     Arr,
+}
+
+fn to_class(c: ArgClass) -> Class {
+    match c {
+        ArgClass::Ref => Class::Ref,
+        ArgClass::Value => Class::Val,
+        ArgClass::Array => Class::Arr,
+    }
 }
 
 impl Class {
@@ -52,6 +62,8 @@ pub trait Resolve {
     fn ext_name(&mut self, book: usize, name: &str) -> Option<(u16, u32)>;
     /// BIFF8 함수표에 없는 함수 이름(`_xlfn.…`, 한컴 함수)의 NAME 번호 (없으면 붙인다)
     fn func_name(&mut self, name: &str) -> u32;
+    /// 추가 기능 함수 이름 → (ixti, EXTERNNAME 번호 1부터) — 없으면 붙인다
+    fn addin_name(&mut self, name: &str) -> (u16, u32);
     /// 새 함수(Excel 2007 이후)를 썼다 — 한셀은 번호로 쓰는 IFERROR 도 `_xlfn.` 이름을 남긴다 (관측)
     fn note_future(&mut self, _name: &str) {}
     /// 표 이름 → (표 번호, 표가 있는 시트, 열 이름들). 구조적 참조(PtgList)에 쓴다
@@ -111,8 +123,7 @@ fn err<T>(m: impl Into<String>) -> Result<T, EncodeError> {
 }
 
 // ---------------------------------------------------------------------------
-// 함수 표: 번호, 반환 클래스, 인자 클래스 (마지막 글자가 되풀이된다)
-// R 참조, V 값, A 배열, O 함수 토큰 자신의 클래스를 따른다 (IF·CHOOSE 의 결과 인자)
+// 함수 표: 번호, 반환 클래스 (인자 클래스는 [`super::classes`] 와 [`super::ftab_kinds`])
 // ---------------------------------------------------------------------------
 
 struct FuncInfo {
@@ -121,15 +132,6 @@ struct FuncInfo {
     /// 고정 인자 수 (None = 가변, PtgFuncVar)
     fixed: Option<u8>,
     ret: u8,
-    params: &'static [u8],
-}
-
-fn class_of(c: u8) -> Class {
-    match c {
-        b'R' => Class::Ref,
-        b'A' => Class::Arr,
-        _ => Class::Val,
-    }
 }
 
 /// BIFF8 함수의 반환·인자 클래스. 표에 없는 함수는 값 → 값.
@@ -193,13 +195,12 @@ fn lookup_function(name: &str) -> Option<FuncInfo> {
         if let Some((n, fixed)) = super::ftab::lookup(index)
             && n == upper
         {
-            let (ret, params) = classes(index);
+            let (ret, _) = classes(index);
             return Some(FuncInfo {
                 index,
                 name: n,
                 fixed,
                 ret,
-                params,
             });
         }
     }
@@ -208,7 +209,8 @@ fn lookup_function(name: &str) -> Option<FuncInfo> {
 
 /// 휘발 함수 — 수식 맨 앞에 tAttrVolatile 을 둔다
 fn is_volatile(index: u16) -> bool {
-    matches!(index, 63 | 74 | 78 | 125 | 148 | 221 | 244)
+    // RAND, NOW, OFFSET, CELL, INDIRECT, CALL, TODAY, INFO
+    matches!(index, 63 | 74 | 78 | 125 | 148 | 150 | 221 | 244)
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,14 +1129,6 @@ fn static_eval(n: &Node) -> Static {
     }
 }
 
-/// 클래스 정하기: 기대 클래스 + 배열 강제 여부 → 피연산자 클래스
-fn operand_class(expected: Class, forced_array: bool) -> Class {
-    match expected {
-        Class::Val if forced_array => Class::Arr,
-        c => c,
-    }
-}
-
 impl Emitter<'_> {
     fn u8(&mut self, v: u8) {
         self.out.push(v);
@@ -1349,12 +1343,12 @@ impl Emitter<'_> {
         }
     }
 
-    fn emit(&mut self, n: &Node, expected: Class, forced: bool) -> Result<(), EncodeError> {
+    fn emit(&mut self, n: &Node, ctx: Ctx) -> Result<(), EncodeError> {
         let was = self.in_chain;
         if !matches!(n, Node::Paren(_) | Node::Binary(":" | " " | ",", ..)) {
             self.in_chain = false;
         }
-        let r = self.emit_node(n, expected, forced);
+        let r = self.emit_node(n, ctx);
         self.in_chain = was;
         r
     }
@@ -1407,16 +1401,9 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn emit_node(&mut self, n: &Node, expected: Class, forced: bool) -> Result<(), EncodeError> {
+    fn emit_node(&mut self, n: &Node, ctx: Ctx) -> Result<(), EncodeError> {
         match n {
-            Node::Array(rows) => {
-                let class = if expected == Class::Val && !forced {
-                    Class::Val
-                } else {
-                    Class::Arr
-                };
-                self.array(rows, class)?;
-            }
+            Node::Array(rows) => self.array(rows, to_class(ctx.array_const()))?,
             Node::Num(v) => self.number(*v),
             Node::Str(s) => self.string(s),
             Node::Bool(b) => {
@@ -1428,7 +1415,7 @@ impl Emitter<'_> {
                 self.u8(*e);
             }
             Node::Missing => self.u8(0x16),
-            Node::Ref(r) => self.reference(r, operand_class(expected, forced))?,
+            Node::Ref(r) => self.reference(r, to_class(ctx.bare))?,
             Node::Name(p, name) => {
                 // 표 이름만 쓴 것(`COUNTA(Table1)`)은 열 없는 구조적 참조 (표 대조 실험: 플래그 0)
                 match self
@@ -1437,12 +1424,12 @@ impl Emitter<'_> {
                     .filter(|_| p.first.is_none() && p.book.is_none())
                 {
                     Some(_) => self.list(name, "")?,
-                    None => self.name(p, name, operand_class(expected, forced))?,
+                    None => self.name(p, name, to_class(ctx.bare))?,
                 }
             }
             Node::List(t, spec) => self.list(t, spec)?,
             Node::Paren(x) => {
-                self.emit(x, expected, forced)?;
+                self.emit(x, ctx)?;
                 self.u8(0x15);
             }
             Node::Unary(op, x) => {
@@ -1452,13 +1439,13 @@ impl Emitter<'_> {
                     (Node::Num(v), "-") => self.number(-v),
                     (Node::Num(v), _) => self.number(*v),
                     _ => {
-                        self.emit(x, Class::Val, forced)?;
+                        self.emit(x, ctx.operand())?;
                         self.u8(if *op == "-" { 0x13 } else { 0x12 });
                     }
                 }
             }
             Node::Percent(x) => {
-                self.emit(x, Class::Val, forced)?;
+                self.emit(x, ctx.operand())?;
                 self.u8(0x14);
             }
             Node::Binary(op, a, b) => {
@@ -1479,11 +1466,11 @@ impl Emitter<'_> {
                     "," => 0x10,
                     _ => 0x11,
                 };
-                // 참조 연산자(범위·교집합·합집합)의 피연산자는 참조, 나머지는 값
+                // 참조 연산자(범위·교집합·합집합)의 피연산자는 참조, 나머지는 연산자의 피연산자
                 let cls = if matches!(ptg, 0x0F..=0x11) {
-                    Class::Ref
+                    Ctx::reference()
                 } else {
-                    Class::Val
+                    ctx.operand()
                 };
                 // 참조 연산 식은 맨 바깥에서 PtgMemArea (컴파일 때 영역을 아는 것: 영역 목록 PtgExtraMem 이 뒤따른다),
                 // PtgMemErr (빈 교집합·오류), PtgMemFunc (이름·함수·3차원 참조) 로 감싼다 (관측: 이름 Print_Area 의 두
@@ -1492,7 +1479,7 @@ impl Emitter<'_> {
                 let at = self.out.len();
                 let mut head = 0;
                 if root {
-                    let bits = expected.bits();
+                    let bits = to_class(ctx.bare).bits();
                     match static_eval(n) {
                         Static::Areas(areas) => {
                             self.out.extend_from_slice(&[0x06 | bits, 0, 0, 0, 0, 0, 0]);
@@ -1518,15 +1505,15 @@ impl Emitter<'_> {
                 if matches!(ptg, 0x0F..=0x11) {
                     self.in_chain = true;
                 }
-                self.emit(a, cls, forced)?;
-                self.emit(b, cls, forced)?;
+                self.emit(a, cls)?;
+                self.emit(b, cls)?;
                 self.u8(ptg);
                 if root {
                     let len = (self.out.len() - at - head) as u16;
                     self.out[at + head - 2..at + head].copy_from_slice(&len.to_le_bytes());
                 }
             }
-            Node::Func(name, args) => self.func(name, args, expected, forced)?,
+            Node::Func(name, args) => self.func(name, args, ctx)?,
         }
         Ok(())
     }
@@ -1593,15 +1580,33 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn func(
-        &mut self,
-        name: &str,
-        args: &[Node],
-        expected: Class,
-        forced: bool,
-    ) -> Result<(), EncodeError> {
-        let Some(info) = lookup_function(name).filter(|f| f.index <= 367 || f.index == 480) else {
-            return self.user_func(name, args, expected, forced);
+    fn func(&mut self, name: &str, args: &[Node], ctx: Ctx) -> Result<(), EncodeError> {
+        let up = name.to_ascii_uppercase();
+        let plain = up.strip_prefix("_XLFN.").unwrap_or(&up);
+        // 한셀 전용 SUBTOTALA (1904)는 한셀 전용 번호로 부른다 (CONVERTK 는 이름)
+        if let Some((idx @ 1904, fixed)) = ftab::by_name(plain) {
+            for (k, a) in args.iter().enumerate() {
+                self.emit(a, ctx.arg(ftab::slot_kind(idx, k), false))?;
+            }
+            let tc = to_class(ctx.func_class(Ret::V));
+            match fixed {
+                Some(n) if n as usize == args.len() => {
+                    self.u8(0x01 | tc.bits());
+                }
+                _ => {
+                    self.u8(0x02 | tc.bits());
+                    self.u8(args.len() as u8);
+                }
+            }
+            self.u16(idx);
+            return Ok(());
+        }
+        // 한셀이 모르는 함수(타이·큐브 …)는 번호가 아니라 이름으로 부른다
+        let Some(info) = lookup_function(name)
+            .filter(|f| f.index <= 367 || f.index == 480)
+            .filter(|_| !crate::calc::functions::hcell_unknown(plain))
+        else {
+            return self.user_func(name, args, ctx);
         };
         if info.index == 480 {
             self.res.note_future("IFERROR");
@@ -1609,61 +1614,38 @@ impl Emitter<'_> {
         if is_volatile(info.index) {
             self.volatile = true;
         }
-        // 함수 토큰 자신의 클래스: 참조를 돌려주는 함수는 자리의 클래스, 값·배열을 돌려주는 함수는 값(배열 자리면
-        // 배열) — 배열 수식 맨 위의 TRANSPOSE 도 0x41 (수식 대조 실험, 바이너리 BrtArrFmla 도 같다)
-        let token_class = match info.ret {
-            b'R' => operand_class(expected, forced),
-            _ => {
-                if expected == Class::Arr || forced {
-                    Class::Arr
-                } else {
-                    Class::Val
-                }
-            }
-        };
-        let in_array = self.opts.array;
-        // 조건부 서식·유효성: IF·CHOOSE 의 첫 인자도 배열 (cfdv_x 하위 20% 틀 `IF(INT(COUNT(R)*20%)>0,…)` 의 COUNT 0x62)
-        let ref_array = self.opts.ref_array;
-        let first_forced = ref_array && matches!(info.index, 1 | 100);
-        let param = |i: usize| -> (Class, bool) {
-            let c = info
-                .params
-                .get(i)
-                .or(info.params.last())
-                .copied()
-                .unwrap_or(b'V');
-            match c {
-                b'O' => (token_class, forced || in_array),
-                b'A' => (Class::Arr, true),
-                b'R' => (Class::Ref, forced || in_array || ref_array),
-                other => (
-                    class_of(other),
-                    forced || in_array || (first_forced && i == 0),
-                ),
+        // 함수 토큰 자신의 클래스와 인자 칸의 맥락 ([`super::classes`] — 한셀 대조 표). 조건부 서식·유효성: IF·CHOOSE 의
+        // 첫 인자도 배열 (cfdv_x 하위 20% 틀 `IF(INT(COUNT(R)*20%)>0,…)` 의 COUNT 0x62)
+        let token_class = to_class(ctx.func_class(ftab::ret_kind(info.index)));
+        let first_forced = ctx.cf && matches!(info.index, 1 | 100);
+        let param = |i: usize| -> Ctx {
+            if first_forced && i == 0 {
+                ctx.arg(Kind::A, false)
+            } else if info.index == 100 && i >= 1 {
+                // 레거시 CHOOSE 의 값 자리는 참조 (바이너리는 값 — 한셀 대조)
+                ctx.arg(Kind::R, false)
+            } else {
+                ctx.arg(ftab::slot_kind(info.index, i), false)
             }
         };
         // SUM 인자 하나 → tAttrSum
         if info.index == 4 && args.len() == 1 {
-            let (c, f) = param(0);
-            self.emit(&args[0], c, f)?;
+            self.emit(&args[0], param(0))?;
             self.out.extend_from_slice(&[0x19, 0x10, 0x00, 0x00]);
             return Ok(());
         }
         // IF → 조건, tAttrIf, 참 값, tAttrGoto, [거짓 값, tAttrGoto], tFuncVar
         if info.index == 1 && (2..=3).contains(&args.len()) {
-            let (c0, f0) = param(0);
-            self.emit(&args[0], c0, f0)?;
+            self.emit(&args[0], param(0))?;
             let if_at = self.out.len();
             self.out.extend_from_slice(&[0x19, 0x02, 0, 0]);
-            let (c1, f1) = param(1);
-            self.emit(&args[1], c1, f1)?;
+            self.emit(&args[1], param(1))?;
             let goto1 = self.out.len();
             self.out.extend_from_slice(&[0x19, 0x08, 0, 0]);
             let else_start = self.out.len();
             let mut gotos = vec![goto1];
             if args.len() == 3 {
-                let (c2, f2) = param(2);
-                self.emit(&args[2], c2, f2)?;
+                self.emit(&args[2], param(2))?;
                 gotos.push(self.out.len());
                 self.out.extend_from_slice(&[0x19, 0x08, 0, 0]);
             }
@@ -1685,8 +1667,7 @@ impl Emitter<'_> {
         }
         // CHOOSE → 번호, tAttrChoose(점프 표), 값마다 tAttrGoto, tFuncVar
         if info.index == 100 && args.len() >= 2 {
-            let (c0, f0) = param(0);
-            self.emit(&args[0], c0, f0)?;
+            self.emit(&args[0], param(0))?;
             let n = args.len() - 1;
             let choose_at = self.out.len();
             self.out.extend_from_slice(&[0x19, 0x04]);
@@ -1696,10 +1677,9 @@ impl Emitter<'_> {
             let base = self.out.len();
             let mut starts = Vec::new();
             let mut gotos = Vec::new();
-            for a in &args[1..] {
+            for (k, a) in args[1..].iter().enumerate() {
                 starts.push(self.out.len() - base);
-                let (c, f) = param(1);
-                self.emit(a, c, f)?;
+                self.emit(a, param(k + 1))?;
                 gotos.push(self.out.len());
                 self.out.extend_from_slice(&[0x19, 0x08, 0, 0]);
             }
@@ -1724,8 +1704,7 @@ impl Emitter<'_> {
             return Ok(());
         }
         for (i, a) in args.iter().enumerate() {
-            let (c, f) = param(i);
-            self.emit(a, c, f)?;
+            self.emit(a, param(i))?;
         }
         match info.fixed {
             Some(n) if n as usize == args.len() => {
@@ -1744,13 +1723,28 @@ impl Emitter<'_> {
 
     /// BIFF8 함수표에 없는 함수: 첫 인자 자리에 이름(PtgName)을 두고 PtgFuncVar 255.
     /// Excel 2007 이후 함수는 `_xlfn.` 을 붙인 이름이다.
-    fn user_func(
-        &mut self,
-        name: &str,
-        args: &[Node],
-        expected: Class,
-        forced: bool,
-    ) -> Result<(), EncodeError> {
+    fn user_func(&mut self, name: &str, args: &[Node], ctx: Ctx) -> Result<(), EncodeError> {
+        // 추가 기능 함수: PtgNameX (추가 기능 SUPBOOK 의 EXTERNNAME), 함수 토큰은 값 (한셀 레거시 저장 실험)
+        let up = name.to_ascii_uppercase();
+        if ftab::is_addin(&up) {
+            if let Some((idx, _)) = ftab::by_name(&up) {
+                if ftab::is_volatile(idx) {
+                    self.volatile = true;
+                }
+                let (ixti, n) = self.res.addin_name(&up);
+                self.u8(0x39);
+                self.u16(ixti);
+                self.u32(n);
+                for (k, a) in args.iter().enumerate() {
+                    self.emit(a, ctx.arg(ftab::slot_kind(idx, k), false))?;
+                }
+                let tc = to_class(ctx.func_class(Ret::V));
+                self.u8(0x02 | tc.bits());
+                self.u8((args.len() + 1) as u8);
+                self.u16(0x00FF);
+                return Ok(());
+            }
+        }
         let full = if name.contains('.') && name.to_ascii_lowercase().starts_with("_xlfn.") {
             name.to_string()
         } else if lookup_function(name).is_some() {
@@ -1761,14 +1755,18 @@ impl Emitter<'_> {
         let idx = self.res.func_name(&full);
         self.u8(0x23);
         self.u32(idx);
-        for a in args {
-            self.emit(a, Class::Ref, forced)?;
+        // 새 함수(`_xlfn.STDEV.S` …)는 사용자 함수 꼴이어도 칸 종류가 따로 있고 반환은 값이다
+        let up = name.to_ascii_uppercase();
+        let plain = up.strip_prefix("_XLFN.").unwrap_or(&up);
+        let future = ftab::future_slot(plain, 0).is_some();
+        for (k, a) in args.iter().enumerate() {
+            let c = match ftab::future_slot(plain, k) {
+                Some(kind) => ctx.arg(kind, false),
+                None => ctx.arg(Kind::R, true),
+            };
+            self.emit(a, c)?;
         }
-        let token_class = if expected == Class::Arr || forced {
-            Class::Arr
-        } else {
-            Class::Val
-        };
+        let token_class = to_class(ctx.func_class(if future { Ret::V } else { Ret::R }));
         self.u8(0x02 | token_class.bits());
         self.u8((args.len() + 1) as u8);
         self.u16(0x00FF);
@@ -1801,7 +1799,16 @@ pub fn encode_with_extra(
         in_chain: false,
         extra: Vec::new(),
     };
-    e.emit(&node, opts.root, opts.root == Class::Arr)?;
+    let root = if opts.array || opts.root == Class::Arr {
+        Ctx::array_formula()
+    } else if opts.ref_array {
+        Ctx::cf()
+    } else if opts.root == Class::Ref {
+        Ctx::reference()
+    } else {
+        Ctx::value()
+    };
+    e.emit(&node, root)?;
     let mut out = e.out;
     if e.volatile {
         let mut v = vec![0x19, 0x01, 0x00, 0x00];
@@ -1823,6 +1830,9 @@ mod tests {
     }
 
     impl Resolve for Fake {
+        fn addin_name(&mut self, _name: &str) -> (u16, u32) {
+            (0, 1)
+        }
         fn sheet(&self, name: &str) -> Option<usize> {
             ["Sheet1", "Sheet2", "첫 시트"]
                 .iter()
@@ -1866,6 +1876,52 @@ mod tests {
             names: vec!["XYZ".into()],
         };
         hex(&encode(text, Options::default(), &mut f).unwrap())
+    }
+
+    fn enc_both(text: &str) -> (String, String) {
+        let mut f = Fake {
+            xti: Vec::new(),
+            names: vec!["XYZ".into()],
+        };
+        let (a, b) = encode_with_extra(text, Options::default(), &mut f).unwrap();
+        (hex(&a), hex(&b))
+    }
+
+    // 한셀 2024 가 수식 문법 시험 문서(수천 가지)를 레거시로 저장한 토큰열
+    #[test]
+    fn arrays_and_reference_operators_follow_hancell() {
+        // 배열 상수: PtgArray 8바이트 + 자료 (열 수−1 u16, 행 수−1 u32, 값마다 형식 u8: 1 수·2 글·4 논리·0x10 오류)
+        let (t, x) = enc_both("{-1,2}");
+        assert_eq!(t, "40 00 00 00 00 00 00 00");
+        assert_eq!(
+            x,
+            "01 00 00 00 00 00 01 00 00 00 00 00 00 f0 bf 01 00 00 00 00 00 00 00 40"
+        );
+        let (_, x) = enc_both("{1,\"a\";#N/A,TRUE}");
+        assert_eq!(
+            x,
+            "01 00 01 00 00 00 01 00 00 00 00 00 00 f0 3f 02 01 00 00 61 10 2a 00 00 00 00 00 00 00 04 01 00 00 00 00 00 00 00"
+        );
+        // 참조 연산: 정적 영역 PtgMemArea(6) + 영역 목록, 빈 교집합 PtgMemErr(7), 이름이 끼면 PtgMemFunc(9)
+        let (t, x) = enc_both("(A1,B2)");
+        assert_eq!(
+            t,
+            "46 00 00 00 00 0f 00 24 00 00 00 00 00 c0 24 01 00 00 00 01 c0 10 15"
+        );
+        assert_eq!(
+            x,
+            "02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00"
+        );
+        let (t, _) = enc_both("A1 B1");
+        assert_eq!(
+            t,
+            "47 00 00 00 00 0f 00 24 00 00 00 00 00 c0 24 00 00 00 00 01 c0 0f"
+        );
+        let (t, _) = enc_both("A1:XYZ");
+        assert!(t.starts_with("49 0d 00 24"), "{t}");
+        // 숫자 앞의 단항 + 는 토큰이 없고, --1 은 -1 과 단항 -
+        assert_eq!(enc_both("+1000").0, "1e e8 03");
+        assert_eq!(enc_both("--1").0, "1f 00 00 00 00 00 00 f0 bf 13");
     }
 
     // 아래 토큰열은 한셀 2024 가 같은 수식을 레거시로 저장한 것과 같다 (말뭉치 formulas 대조)

@@ -505,6 +505,104 @@ pub fn is_volatile(index: u16) -> bool {
     matches!(index, 63 | 74 | 78 | 125 | 148 | 150 | 221 | 244 | 464)
 }
 
+/// 한셀 레거시가 추가 기능(Analysis ToolPak) SUPBOOK 의 EXTERNNAME(PtgNameX) 으로 부르는 함수 (한셀 레거시 저장 실험)
+const ADDIN_FUNCTIONS: &[&str] = &[
+    "ACCRINT",
+    "ACCRINTM",
+    "AMORDEGRC",
+    "AMORLINC",
+    "BESSELI",
+    "BESSELJ",
+    "BESSELK",
+    "BESSELY",
+    "BIN2DEC",
+    "BIN2HEX",
+    "BIN2OCT",
+    "COMPLEX",
+    "CONVERT",
+    "COUPDAYBS",
+    "COUPDAYS",
+    "COUPDAYSNC",
+    "COUPNCD",
+    "COUPNUM",
+    "COUPPCD",
+    "CUMIPMT",
+    "CUMPRINC",
+    "DEC2BIN",
+    "DEC2HEX",
+    "DEC2OCT",
+    "DELTA",
+    "DISC",
+    "DOLLARDE",
+    "DOLLARFR",
+    "DURATION",
+    "EDATE",
+    "EFFECT",
+    "EOMONTH",
+    "ERF",
+    "ERFC",
+    "FACTDOUBLE",
+    "FVSCHEDULE",
+    "GCD",
+    "GESTEP",
+    "HEX2BIN",
+    "HEX2DEC",
+    "HEX2OCT",
+    "IMABS",
+    "IMAGINARY",
+    "IMARGUMENT",
+    "IMCONJUGATE",
+    "IMCOS",
+    "IMDIV",
+    "IMEXP",
+    "IMLN",
+    "IMLOG10",
+    "IMLOG2",
+    "IMPOWER",
+    "IMPRODUCT",
+    "IMREAL",
+    "IMSIN",
+    "IMSQRT",
+    "IMSUB",
+    "IMSUM",
+    "INTRATE",
+    "ISEVEN",
+    "ISODD",
+    "LCM",
+    "MDURATION",
+    "MROUND",
+    "MULTINOMIAL",
+    "NETWORKDAYS",
+    "NOMINAL",
+    "OCT2BIN",
+    "OCT2DEC",
+    "OCT2HEX",
+    "PRICE",
+    "PRICEDISC",
+    "PRICEMAT",
+    "QUOTIENT",
+    "RANDBETWEEN",
+    "RECEIVED",
+    "SERIESSUM",
+    "SQRTPI",
+    "TBILLEQ",
+    "TBILLPRICE",
+    "TBILLYIELD",
+    "WEEKNUM",
+    "WORKDAY",
+    "XIRR",
+    "XNPV",
+    "YEARFRAC",
+    "YIELD",
+    "YIELDDISC",
+    "YIELDMAT",
+];
+
+/// 추가 기능 함수인가 (대문자 이름)
+pub fn is_addin(name: &str) -> bool {
+    ADDIN_FUNCTIONS.binary_search(&name).is_ok()
+}
+
 /// 함수의 반환 종류 ([`super::ftab_kinds`] 의 표, 없으면 [`signature`] 에서)
 pub fn ret_kind(index: u16) -> super::classes::Ret {
     use super::classes::Ret;
@@ -525,6 +623,8 @@ pub fn ret_kind(index: u16) -> super::classes::Ret {
 /// 함수의 `k` 번째(0부터) 인자 칸 종류
 pub fn slot_kind(index: u16, k: usize) -> super::classes::Kind {
     use super::classes::Kind;
+    // 한셀 전용 SUBTOTALA 는 SUBTOTAL 과 같다
+    let index = if index == 1904 { 344 } else { index };
     let from = |c: u8| match c {
         b'R' => Kind::R,
         b'B' => Kind::B,

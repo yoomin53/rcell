@@ -2234,7 +2234,7 @@ impl SheetCtx<'_, '_> {
                 .fmla(
                     &format!("{} 조건부 서식 {}", sheet.name, cf.sqref),
                     f,
-                    Place::Relative(base),
+                    Place::Cf(base),
                 )
                 .unwrap_or_default();
             let mut p = P::new();
@@ -2359,7 +2359,7 @@ impl SheetCtx<'_, '_> {
                     self.fmla(
                         &format!("{} 유효성 {}", sheet.name, d.sqref),
                         t,
-                        Place::Relative(base),
+                        Place::Cf(base),
                     )
                 })
                 .unwrap_or_default()

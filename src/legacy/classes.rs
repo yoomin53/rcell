@@ -60,6 +60,10 @@ pub struct Ctx {
     pub arr_call: bool,
     /// 배열 상수의 클래스 — 칸이 정한다 (연산자 안에서도 그대로)
     pub arr: ArgClass,
+    /// 배열 수식의 맨 위: 맨 위 식은 셀 수식과 같고 함수 인자 안은 배열 연산이다
+    pub arrf: bool,
+    /// 조건부 서식·유효성 수식: 참조 칸(R)의 연산자 안은 배열, IF·CHOOSE 의 첫 인자는 배열
+    pub cf: bool,
 }
 
 impl Ctx {
@@ -71,6 +75,8 @@ impl Ctx {
             strong: false,
             arr_call: false,
             arr: ArgClass::Value,
+            arrf: false,
+            cf: false,
         }
     }
 
@@ -82,17 +88,30 @@ impl Ctx {
             strong: false,
             arr_call: false,
             arr: ArgClass::Array,
+            arrf: false,
+            cf: false,
         }
     }
 
-    /// 배열 수식
-    pub const fn array() -> Ctx {
+    /// 배열 수식 (맨 위는 셀 수식과 같은 값, 함수 인자 안은 배열 연산 — 한셀 수식 대조 실험: `{B1:B3*2}` 의
+    /// 참조는 값, `{SUM(B1:B3*2)}` 의 참조는 배열)
+    pub const fn array_formula() -> Ctx {
         Ctx {
-            bare: ArgClass::Array,
-            inner: ArgClass::Array,
-            strong: true,
+            bare: ArgClass::Value,
+            inner: ArgClass::Value,
+            strong: false,
             arr_call: false,
             arr: ArgClass::Array,
+            arrf: true,
+            cf: false,
+        }
+    }
+
+    /// 조건부 서식·데이터 유효성 수식
+    pub const fn cf() -> Ctx {
+        Ctx {
+            cf: true,
+            ..Ctx::value()
         }
     }
 
@@ -104,11 +123,19 @@ impl Ctx {
             strong: self.strong,
             arr_call: false,
             arr: self.arr,
+            arrf: self.arrf,
+            cf: self.cf,
         }
     }
 
     /// 함수 인자 칸의 맥락. `udf` 는 사용자 함수(이름으로 부르는 함수)
     pub fn arg(self, kind: Kind, udf: bool) -> Ctx {
+        // 조건부 서식·유효성: 참조 칸의 연산자 안은 배열 (맨 참조는 참조 그대로)
+        let kind = if self.cf && !udf && matches!(kind, Kind::R | Kind::X) {
+            Kind::B
+        } else {
+            kind
+        };
         let (bare, inner, strong, arr_call) = match kind {
             Kind::V | Kind::W => (ArgClass::Value, ArgClass::Value, false, false),
             Kind::R | Kind::X => (ArgClass::Ref, ArgClass::Value, false, false),
@@ -123,27 +150,33 @@ impl Ctx {
         } else {
             ArgClass::Array
         };
-        if self.inner != ArgClass::Array {
+        // 배열 수식의 맨 위 식을 지나면 함수 인자 안은 배열 연산이다
+        let array_mode = self.inner == ArgClass::Array || self.arrf;
+        let outer_strong = self.strong || self.arrf;
+        if !array_mode {
             return Ctx {
                 bare,
                 inner,
                 strong,
                 arr_call,
                 arr: if udf { ArgClass::Array } else { arr },
+                arrf: false,
+                cf: self.cf,
             };
         }
-        // 배열 연산 중
         if udf {
             return Ctx {
                 bare: ArgClass::Ref,
-                inner: if self.strong {
+                inner: if outer_strong {
                     ArgClass::Array
                 } else {
                     ArgClass::Value
                 },
-                strong: self.strong,
+                strong: outer_strong,
                 arr_call: false,
                 arr: ArgClass::Array,
+                arrf: false,
+                cf: self.cf,
             };
         }
         Ctx {
@@ -153,9 +186,11 @@ impl Ctx {
                 bare
             },
             inner: ArgClass::Array,
-            strong: self.strong || strong,
+            strong: outer_strong || strong,
             arr_call,
             arr: ArgClass::Array,
+            arrf: false,
+            cf: self.cf,
         }
     }
 
@@ -213,6 +248,13 @@ mod tests {
         // 사용자 함수: ROWS 칸 안에서는 연산자가 값, SUMPRODUCT 칸 안에서는 배열
         assert_eq!(rows.arg(Kind::R, true).inner, V);
         assert_eq!(top.arg(Kind::A, false).arg(Kind::R, true).inner, A);
+        // 배열 수식: 맨 위는 값, 함수 인자 안은 배열 연산 ({B1:B3*2} 의 참조는 값, {SUM(B1:B3*2)} 의 참조는 배열)
+        let af = Ctx::array_formula();
+        assert_eq!(af.operand().bare, V);
+        assert_eq!(af.arg(Kind::R, false).operand().bare, A);
+        // 조건부 서식: AND(A1>1) 의 참조는 배열, MAX(A1) 의 맨 참조는 참조
+        let cf = Ctx::cf().arg(Kind::R, false);
+        assert_eq!((cf.bare, cf.operand().bare), (R, A));
         // 배열 상수
         assert_eq!(top.array_const(), V);
         assert_eq!(sum.array_const(), A);

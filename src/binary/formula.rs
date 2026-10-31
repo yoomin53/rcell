@@ -67,8 +67,10 @@ pub enum Place {
     Array,
     /// 이름 정의 (참조 클래스)
     Name,
-    /// 공유 수식·조건부 서식·유효성: 이 셀에 대한 상대 토큰 (값 클래스)
+    /// 공유 수식: 이 셀에 대한 상대 토큰 (값 클래스)
     Relative(CellRef),
+    /// 조건부 서식·유효성: 이 셀에 대한 상대 토큰 (참조 칸 안의 식은 배열 클래스)
+    Cf(CellRef),
 }
 
 /// 토큰열 (`rgce`) 과 덧붙은 데이터 (`rgcb`, 배열 상수)
@@ -92,7 +94,8 @@ pub fn encode(text: &str, place: Place, r: &mut dyn Resolver) -> Result<Encoded,
     }
     let root = match place {
         Place::Name => Ctx::reference(),
-        Place::Array => Ctx::array(),
+        Place::Array => Ctx::array_formula(),
+        Place::Cf(_) => Ctx::cf(),
         _ => Ctx::value(),
     };
     let mut g = Gen {
@@ -100,7 +103,7 @@ pub fn encode(text: &str, place: Place, r: &mut dyn Resolver) -> Result<Encoded,
         extra: Vec::new(),
         r,
         base: match place {
-            Place::Relative(b) => Some(b),
+            Place::Relative(b) | Place::Cf(b) => Some(b),
             _ => None,
         },
         volatile: false,
@@ -1722,6 +1725,57 @@ mod tests {
             xtis: Vec::new(),
         };
         encode(f, Place::Cell, &mut r).unwrap().rgce
+    }
+
+    /// (rgce, rgcb) 한 쌍
+    fn enc_both(f: &str) -> (Vec<u8>, Vec<u8>) {
+        let mut r = R {
+            names: vec!["MILEAGE_RATE".into()],
+            xtis: Vec::new(),
+        };
+        let e = encode(f, Place::Cell, &mut r).unwrap();
+        (e.rgce, e.rgcb)
+    }
+
+    // 한셀 2024 가 수식 문법 시험 문서(수천 가지)를 바이너리로 저장한 토큰열 (docs/format/cell-binary.md "토큰 클래스")
+    #[test]
+    fn arrays_and_reference_operators_follow_hancell() {
+        // 배열 상수: PtgArray 는 15바이트 (빈 14바이트), 자료는 행 수·열 수·값마다 형식 1바이트
+        let (rgce, rgcb) = enc_both("{-1,2}");
+        assert_eq!(rgce, hex("40 00 00 00 00 00 00 00 00 00 00 00 00 00 00"));
+        assert_eq!(
+            rgcb,
+            hex("01 00 00 00 02 00 00 00 00 00 00 00 00 00 00 f0 bf 00 00 00 00 00 00 00 00 40")
+        );
+        // 합집합·교집합·범위: 정적 영역은 PtgMemArea + 영역 목록, 빈 교집합은 PtgMemErr, 이름이 끼면 PtgMemFunc
+        let (rgce, rgcb) = enc_both("(A1,B2)");
+        assert_eq!(
+            rgce,
+            hex("46 00 00 00 00 0f 00 24 00 00 00 00 00 c0 24 01 00 00 00 01 c0 10 15")
+        );
+        assert_eq!(
+            rgcb,
+            hex(
+                "02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00"
+            )
+        );
+        let (rgce, _) = enc_both("A1 B1");
+        assert_eq!(
+            rgce,
+            hex("47 00 00 00 00 0f 00 24 00 00 00 00 00 c0 24 00 00 00 00 01 c0 0f")
+        );
+        let (rgce, _) = enc_both("A1:MILEAGE_RATE");
+        assert_eq!(&rgce[..3], &[0x49, 0x0d, 0x00]);
+        // A1:B2 B1:C3 → B1:B2 한 영역
+        let (rgce, rgcb) = enc_both("A1:B2 B1:C3");
+        assert_eq!(rgce[0], 0x46);
+        assert_eq!(
+            rgcb,
+            hex("01 00 00 00 00 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00")
+        );
+        // 숫자 앞의 단항 + 는 토큰이 없고, -0 은 정수 0
+        assert_eq!(enc_both("+1000").0, hex("1e e8 03"));
+        assert_eq!(enc_both("-0").0, hex("1e 00 00"));
     }
 
     // 아래 토큰열은 한셀 2024 가 저장한 바이너리 .cell 에서 관측한 그대로다 (formulas/values/서식 파일).
