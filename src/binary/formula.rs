@@ -23,8 +23,8 @@ use crate::model::CellRef;
 
 const MAX_ROW: u32 = 1_048_575;
 const MAX_COL: u32 = 16_383;
-/// PtgArray 뒤의 빈 바이트 수 (레거시 디코더와 같게 7)
-const ARRAY_UNUSED: usize = 7;
+/// PtgArray 뒤의 빈 바이트 수 ([MS-XLSB] 2.5.97.? PtgArray 는 14바이트 — 한셀이 그렇게 쓴다)
+const ARRAY_UNUSED: usize = 14;
 
 /// 수식 하나를 쓰는 데 필요한 문서 정보
 pub trait Resolver {
@@ -1464,8 +1464,8 @@ impl Gen<'_> {
                         self.extra.push(*b as u8);
                     }
                     Node::Err(e) => {
-                        self.extra.push(0x04);
-                        self.extra.push(*e);
+                        // 오류 칸: 형식, 코드, 채움 3바이트 (한셀은 앞서 쓴 수식의 찌꺼기를 남긴다 — 0 으로)
+                        self.extra.extend_from_slice(&[0x04, *e, 0, 0, 0]);
                     }
                     _ => return Err("배열 상수 값".into()),
                 }
