@@ -31,6 +31,7 @@ mod numfit;
 pub mod page;
 mod paint;
 mod shape;
+mod shape_defs;
 mod shape_trace;
 mod sparkline;
 mod svgops;

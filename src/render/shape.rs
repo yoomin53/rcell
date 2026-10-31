@@ -200,6 +200,10 @@ pub fn preset_paths(
     h: f64,
     adj: &HashMap<String, f64>,
 ) -> Option<Vec<PathSpec>> {
+    // 수식·경로 정의가 있는 모양은 그것으로 (조정값·가로세로 비율을 따른다)
+    if let Some(p) = defined_preset(prst, w, h, adj) {
+        return Some(p);
+    }
     // 기본 조정값이면 한셀 화면에서 따라 그린 윤곽을 먼저 쓴다 (조정값을 바꾼 도형은 아래 식)
     if let Some(t) = super::shape_trace::traced(prst)
         && adj
@@ -1818,6 +1822,97 @@ fn traced_preset(prst: &str, w: f64, h: f64) -> Option<Vec<PathSpec>> {
     Some(out)
 }
 
+/// 수식·경로 정의 글 (`shape_defs.rs`)로 그린 모양. 조정값은 문서의 값(없으면 정의의 기본값)
+fn defined_preset(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> Option<Vec<PathSpec>> {
+    let text = super::shape_defs::def(prst)?;
+    let emu = crate::units::EMU_PER_PX as f64;
+    let mut gd = Guides::new(w * emu, h * emu);
+    let k = 1.0 / emu;
+    let mut out: Vec<PathSpec> = Vec::new();
+    // 지금 만드는 경로: SVG, 채움, 선, 현재 점, 시작점
+    let mut cur: Option<(String, PathFill, bool)> = None;
+    let (mut pt, mut start) = ((0.0f64, 0.0f64), (0.0f64, 0.0f64));
+    let flush = |cur: &mut Option<(String, PathFill, bool)>, out: &mut Vec<PathSpec>| {
+        if let Some((d, fill, stroke)) = cur.take()
+            && !d.is_empty()
+        {
+            out.push(PathSpec::with(d, fill, stroke));
+        }
+    };
+    for line in text.lines() {
+        let p: Vec<&str> = line.split_whitespace().collect();
+        let Some(&op) = p.first() else { continue };
+        let v = |i: usize, gd: &Guides| gd.get(p.get(i).copied().unwrap_or("0"));
+        match op {
+            "av" if p.len() >= 3 => {
+                let name = p[1];
+                let val = adj
+                    .get(name)
+                    .copied()
+                    .unwrap_or_else(|| p[2].parse().unwrap_or(0.0));
+                gd.vals.insert(name.to_string(), val);
+            }
+            "gd" if p.len() >= 3 => {
+                let val = gd.eval(&p[2..].join(" "));
+                gd.vals.insert(p[1].to_string(), val);
+            }
+            "path" => {
+                flush(&mut cur, &mut out);
+                let fill = p
+                    .iter()
+                    .skip(1)
+                    .find(|t| **t != "nostroke")
+                    .map_or(PathFill::Norm, |t| PathFill::parse(Some(t)));
+                cur = Some((String::new(), fill, !p.contains(&"nostroke")));
+            }
+            "M" | "L" | "C" | "A" | "Z" => {
+                let Some((d, _, _)) = cur.as_mut() else {
+                    continue;
+                };
+                match op {
+                    "M" => {
+                        pt = (v(1, &gd) * k, v(2, &gd) * k);
+                        start = pt;
+                        let _ = write!(d, "M{},{}", f(pt.0), f(pt.1));
+                    }
+                    "L" => {
+                        pt = (v(1, &gd) * k, v(2, &gd) * k);
+                        let _ = write!(d, "L{},{}", f(pt.0), f(pt.1));
+                    }
+                    "C" => {
+                        let c1 = (v(1, &gd) * k, v(2, &gd) * k);
+                        let c2 = (v(3, &gd) * k, v(4, &gd) * k);
+                        pt = (v(5, &gd) * k, v(6, &gd) * k);
+                        let _ = write!(
+                            d,
+                            "C{},{} {},{} {},{}",
+                            f(c1.0),
+                            f(c1.1),
+                            f(c2.0),
+                            f(c2.1),
+                            f(pt.0),
+                            f(pt.1)
+                        );
+                    }
+                    "A" => {
+                        let (wr, hr) = (v(1, &gd) * k, v(2, &gd) * k);
+                        let (st, sw) = (v(3, &gd) / 60000.0, v(4, &gd) / 60000.0);
+                        d.push_str(&arc_svg(pt, wr, hr, st, sw));
+                        pt = arc_end(pt, wr, hr, st, sw);
+                    }
+                    _ => {
+                        d.push('Z');
+                        pt = start;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    flush(&mut cur, &mut out);
+    (!out.is_empty()).then_some(out)
+}
+
 /// 미리 정의된 모양 → SVG 경로 하나 (경로들을 이어 붙인다). 모르는 모양은 None
 pub fn preset_path(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> Option<String> {
     preset_paths(prst, w, h, adj).map(|v| v.into_iter().map(|p| p.d).collect())
@@ -2156,5 +2251,22 @@ mod tests {
         let hand = preset_paths("star5", 100.0, 100.0, &adjusted).unwrap();
         assert_ne!(traced[0].d, hand[0].d);
         assert_eq!(preset_paths("cube", 100.0, 100.0, &none).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn defined_presets_follow_size_and_adjust() {
+        let none = HashMap::new();
+        // 수식 정의 모양은 어떤 가로세로 비율이든 같은 꼴로 그리고, 조정값을 따른다
+        for (w, h) in [(100.0, 100.0), (180.0, 90.0), (90.0, 180.0)] {
+            for name in ["bentArrow", "uturnArrow"] {
+                let p = defined_preset(name, w, h, &none).unwrap();
+                assert_eq!(p.len(), 1);
+                assert!(p[0].d.starts_with("M0,") && p[0].d.ends_with('Z'), "{name}");
+            }
+        }
+        let thick = HashMap::from([("adj1".to_string(), 40000.0)]);
+        let a = defined_preset("bentArrow", 100.0, 100.0, &none).unwrap();
+        let b = defined_preset("bentArrow", 100.0, 100.0, &thick).unwrap();
+        assert_ne!(a[0].d, b[0].d);
     }
 }
