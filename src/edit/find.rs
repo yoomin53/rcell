@@ -100,7 +100,7 @@ fn date_time_text(wb: &Workbook, v: f64, dated: bool, timed: bool) -> String {
 }
 
 /// 셀의 표시된 글
-fn display_text(wb: &Workbook, si: usize, r: CellRef) -> Option<String> {
+pub(crate) fn display_text(wb: &Workbook, si: usize, r: CellRef) -> Option<String> {
     let c = wb.sheets.get(si)?.cell(r)?;
     if c.value.is_empty() {
         return None;

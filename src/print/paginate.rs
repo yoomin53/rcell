@@ -9,7 +9,8 @@
 //! 1. 페이지 나누기: 행·열의 화면 px 에 배율을 곱해 쌓는다. 배율 지정이면 쓸 수 있는 자리는 1/100 인치 단위
 //!    round((용지 − 여백)/0.72pt), 페이지에 맞추기면 화면 px 단위 (용지 − 여백)/0.75pt.
 //! 2. 인쇄 배율 z (%): 행·열을 하나씩 round(px × z/100) 화면 px 로 줄였을 때 모든 페이지가 (용지 − 여백)/0.75pt
-//!    안에 들어갈 때까지 1 씩 줄인다. 배율 100 은 99 부터 (내용이 아주 작으면 세로만 6.25 배로 늘리는 한셀 동작을 따른다).
+//!    안에 들어갈 때까지 1 씩 줄인다. 배율 100 은 인쇄 차례의 첫 한 페이지 시트만 99 부터 (내용이 아주 작으면 세로만
+//!    6.25 배로 늘리는 한셀 동작을 따른다).
 
 use super::paper::{Paper, paper};
 use crate::model::{CellRef, PageLayout, Sheet, Workbook};
@@ -92,6 +93,8 @@ pub struct SheetPrint {
     /// 행·열의 화면 px (0부터, 숨김은 0)
     pub row_px: Vec<u32>,
     pub col_px: Vec<u32>,
+    /// 열의 한셀 안 너비 (px 소수 — COM `Range.Width` × 4/3). 그릴 때의 열 너비는 이 값에 배율을 곱해 반올림한다
+    pub col_exact: Vec<f64>,
 }
 
 impl SheetPrint {
@@ -110,13 +113,25 @@ impl SheetPrint {
         if self.tall {
             px as f64
         } else {
-            scaled(px, self.print_scale) as f64
+            // 한셀 PDF (열 너비 3.3·5·8.43·2·1.5 글자, 배율 50–200): 열 하나의 인쇄 너비는 한셀 안의 너비(소수 px)에
+            // 배율을 곱해 반올림한 px (너비 3.3 글자 = 32.6px, 배율 99 → 32px)
+            let ex = self.col_exact.get(c as usize).copied().unwrap_or(px as f64);
+            if px == 0 {
+                0.0
+            } else {
+                (ex * self.print_scale as f64 / 100.0 + 0.5).floor()
+            }
         }
     }
 }
 
 /// 키 큰 모드의 세로 배수 (600 dpi / 96 dpi)
 const TALL: f64 = 6.25;
+
+/// 열 너비 px → 0.05pt 로 반올림한 px
+fn quantize(px: f64) -> f64 {
+    (px * PX * 20.0).round() / 20.0 / PX
+}
 
 /// round(px × z / 100), 반은 올림
 fn scaled(px: u32, z: u32) -> u32 {
@@ -457,6 +472,14 @@ fn printable(s: &Settings) -> (f64, f64) {
 
 /// 시트의 인쇄 배치를 계산한다
 pub fn sheet_print(wb: &Workbook, sheet_index: usize) -> SheetPrint {
+    sheet_print_with(wb, sheet_index, true)
+}
+
+/// [`sheet_print`] — `first_untall`: 인쇄 차례에서 키 큰 모드가 아닌 시트가 아직 나오지 않았는가. 한셀은 배율 100 인 시트
+/// 가운데 키 큰 모드가 아닌 첫 시트만 99 부터 시작하고 나머지는 100 부터다 (시트 셋·다섯 개 실험: 키 큰 모드가 아닌 시트
+/// 가운데 첫째만 글자 91, 나머지는 92 — 시트를 지우거나 옮기거나 숨겨도 인쇄 차례의 첫째. 두 페이지로 나뉜 첫 시트도 99:
+/// 말뭉치 차트 문서). 키 큰 모드(작은 내용)의 시트는 늘 100
+pub fn sheet_print_with(wb: &Workbook, sheet_index: usize, first_untall: bool) -> SheetPrint {
     let s = settings(wb, sheet_index);
     let sheet = &wb.sheets[sheet_index];
     let max_r = s
@@ -515,7 +538,9 @@ pub fn sheet_print(wb: &Workbook, sheet_index: usize) -> SheetPrint {
             }
         })
         .collect();
-    let col_exact: Vec<f64> = geo.col_px.clone();
+    // 한셀은 열 너비(pt)를 0.05pt 로 반올림해 둔다 (COM Width: 5 글자 34.65pt, 8.43 글자 55.25pt) — 서식 파일 열 15.71 글자
+    // (109.98px → 82.5pt → 110.0px)가 배율 75 에서 82.5 → 83px 로 찍힌다
+    let col_exact: Vec<f64> = geo.col_px.iter().map(|&v| quantize(v)).collect();
 
     let (pw, ph) = printable(&s);
     let avail100 = (
@@ -630,17 +655,31 @@ pub fn sheet_print(wb: &Workbook, sheet_index: usize) -> SheetPrint {
             .map(|&i| scaled(px.get(i as usize).copied().unwrap_or(0), z))
             .sum()
     };
+    // 열은 한셀 안의 소수 px × 배율을 반올림한 px (그릴 때의 열 너비와 같다)
+    let col_sum = |list: &[u32], z: u32| -> u32 {
+        list.iter()
+            .map(|&i| {
+                let px = col_px.get(i as usize).copied().unwrap_or(0);
+                let ex = col_exact.get(i as usize).copied().unwrap_or(px as f64);
+                if px == 0 {
+                    0
+                } else {
+                    (ex * z as f64 / 100.0 + 0.5).floor() as u32
+                }
+            })
+            .sum()
+    };
     let fits = |z: u32| {
         pages.iter().all(|p| {
             let h = sum(&p.title_rows, &row_px, z) + sum(&p.rows, &row_px, z);
-            let w = sum(&p.title_cols, &col_px, z) + sum(&p.cols, &col_px, z);
+            let w = col_sum(&p.title_cols, z) + col_sum(&p.cols, z);
             h as f64 <= avail75.1 + 1e-9 && w as f64 <= avail75.0 + 1e-9
         })
     };
     let mut tall = false;
     let mut z = page_scale;
     if matches!(s.scaling, Scaling::Zoom(100)) {
-        // 배율 100: 세로 6.25 배로도 들어가면 그렇게 (가로 1:1), 아니면 99 부터
+        // 배율 100: 세로 6.25 배로도 들어가면 그렇게 (가로 1:1), 아니면 100 부터 (첫 한 페이지 시트는 99)
         tall = pages.iter().all(|p| {
             let h: u32 = p
                 .title_rows
@@ -656,7 +695,7 @@ pub fn sheet_print(wb: &Workbook, sheet_index: usize) -> SheetPrint {
                 .sum();
             h as f64 * TALL <= avail75.1 + 1e-9 && w as f64 <= avail75.0 + 1e-9
         }) && pages.iter().any(|p| !p.rows.is_empty());
-        z = if tall { 100 } else { 99 };
+        z = if !tall && first_untall { 99 } else { 100 };
     }
     if !tall {
         while z > 10 && !fits(z) {
@@ -673,12 +712,27 @@ pub fn sheet_print(wb: &Workbook, sheet_index: usize) -> SheetPrint {
         v_breaks,
         row_px,
         col_px,
+        col_exact: col_exact.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 한셀 COM 열 너비 (pt 를 0.05 로 반올림): 5 글자 34.65pt = 46.2px, 3.3 글자 24.45pt = 32.6px, 8.43 글자 55.25pt,
+    /// 서식 파일 15.71 글자 82.5pt = 110.0px (배율 75 에서 82.5 → 83px)
+    #[test]
+    fn column_width_is_quantized_to_a_twentieth_of_a_point() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(close(quantize(46.21875), 34.65 / 0.75));
+        assert!(close(quantize(32.59375), 24.45 / 0.75));
+        assert!(close(quantize(73.65625), 55.25 / 0.75));
+        assert!(close(quantize(109.98), 110.0));
+        assert_eq!((quantize(109.98) * 75.0 / 100.0 + 0.5).floor(), 83.0);
+        // 3.3 글자 열은 배율 99 에서 32px (화면 격자 33px 에 배율을 곱한 33 이 아니다)
+        assert_eq!((quantize(32.59375) * 99.0 / 100.0 + 0.5).floor(), 32.0);
+    }
 
     #[test]
     fn print_names() {
