@@ -677,13 +677,52 @@ pub unsafe extern "C" fn rcell_font_add(ptr: *const u8, len: usize) {
     FONTS.with(|f| f.borrow_mut().add_data(bytes));
 }
 
-fn pdf_of(wb: &Workbook, recalc: rcell::print::OpenRecalc) -> Vec<u8> {
+/// 브라우저의 메모리(웹 어셈블리 4GB 이하)에 맞춘 한도: 칸당 1.6KB 쯤 들어 (10만 행 × 3 열 = 499MB) 칸 120만 개, 쪽당 45ms 쯤 들어
+/// (10만 행 2273 쪽 = 103 s) 쪽 3000 개. 넘으면 죽는 대신 오류로 알린다
+const WASM_MAX_CELLS: usize = 1_200_000;
+const WASM_MAX_PAGES: usize = 3000;
+/// 불러오기 전에 거르는 파일 크기 한도: 칸당 1.6KB 라 칸 수는 불러온 뒤에야 알 수 있는데, 100만 행 문서(칸 300만 개, 압축 푼 XML 160MB)는
+/// 4GB 를 다 쓰고 죽는다. 압축 푼 XML 부분 합이 72MB (10만 행 3 열 = 18MB 의 4 배) 를 넘거나, 묶음이 아닌 파일(csv·txt)이 24MB 를 넘으면 오류
+const WASM_MAX_XML_BYTES: u64 = 72 << 20;
+const WASM_MAX_PLAIN_BYTES: usize = 24 << 20;
+
+fn check_input_size(bytes: &[u8]) -> rcell::Result<()> {
+    let too_big = |what: String| Err(rcell::Error::TooLarge(what));
+    match rcell::container::list_entries(bytes) {
+        Ok(entries) => {
+            let xml: u64 = entries
+                .iter()
+                .filter(|(n, _)| n.ends_with(".xml") || n.starts_with('/'))
+                .map(|(_, sz)| *sz)
+                .sum();
+            if xml > WASM_MAX_XML_BYTES {
+                return too_big(format!(
+                    "압축 푼 XML {}MB, 한도 {}MB",
+                    xml >> 20,
+                    WASM_MAX_XML_BYTES >> 20
+                ));
+            }
+            Ok(())
+        }
+        Err(_) if bytes.len() > WASM_MAX_PLAIN_BYTES => too_big(format!(
+            "파일 {}MB, 한도 {}MB",
+            bytes.len() >> 20,
+            WASM_MAX_PLAIN_BYTES >> 20
+        )),
+        Err(_) => Ok(()),
+    }
+}
+
+fn pdf_of(wb: &Workbook, recalc: rcell::print::OpenRecalc) -> rcell::Result<Vec<u8>> {
     FONTS.with(|f| {
         let opts = rcell::print::PdfOptions {
             recalc,
+            max_cells: Some(WASM_MAX_CELLS),
+            max_pages: Some(WASM_MAX_PAGES),
+            error_over_pages: true,
             ..Default::default()
         };
-        rcell::print::workbook_pdf(wb, &f.borrow(), &opts)
+        rcell::print::try_workbook_pdf(wb, &f.borrow(), &opts).map(|o| o.bytes)
     })
 }
 
@@ -696,13 +735,15 @@ pub unsafe extern "C" fn rcell_pdf(ptr: *const u8, len: usize) -> u64 {
     let bytes = input(ptr, len);
     // 한셀이 열 때 다시 계산하는 칸 (형식·계산 엔진 번호)
     let mode = |wb: &Workbook| rcell::print::open_recalc(&bytes, wb);
-    run(rcell::from_bytes(bytes.clone()).map(|wb| pdf_of(&wb, mode(&wb))))
+    run(check_input_size(&bytes)
+        .and_then(|()| rcell::from_bytes(bytes.clone()))
+        .and_then(|wb| pdf_of(&wb, mode(&wb))))
 }
 
 /// 편집 중인 문서 → PDF
 #[unsafe(no_mangle)]
 pub extern "C" fn rcell_doc_pdf(id: u32) -> u64 {
     run(with_doc(id, |d| {
-        Ok(pdf_of(&d.wb, rcell::print::OpenRecalc::None))
+        pdf_of(&d.wb, rcell::print::OpenRecalc::None)
     }))
 }

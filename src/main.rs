@@ -1181,14 +1181,23 @@ fn pdf(input: &Path, output: &Path, sheets: &[String], fonts: &[PathBuf]) -> rce
         date,
         time,
         max_pages: None,
+        max_cells: None,
+        error_over_pages: false,
         quality_settings: false,
         // 한셀이 열 때 다시 계산하는 칸 (형식·계산 엔진 번호)
         recalc: std::fs::read(input)
             .map(|b| rcell::print::open_recalc(&b, &wb))
             .unwrap_or_default(),
     };
-    let bytes = rcell::print::workbook_pdf(&wb, &db, &opts);
-    std::fs::write(output, bytes)?;
+    let out = rcell::print::try_workbook_pdf(&wb, &db, &opts)?;
+    if out.truncated {
+        eprintln!(
+            "쪽이 너무 많아 앞 {} 쪽까지만 PDF 로 만들었습니다 (한도 {} 쪽)",
+            out.pages,
+            rcell::print::MAX_PAGES
+        );
+    }
+    std::fs::write(output, out.bytes)?;
     Ok(())
 }
 

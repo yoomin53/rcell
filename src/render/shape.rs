@@ -105,1886 +105,51 @@ pub struct PathSpec {
 }
 
 impl PathSpec {
-    fn new(d: String) -> PathSpec {
-        PathSpec {
-            d,
-            fill: PathFill::Norm,
-            stroke: true,
-        }
-    }
     fn with(d: String, fill: PathFill, stroke: bool) -> PathSpec {
         PathSpec { d, fill, stroke }
     }
 }
 
-fn poly(pts: &[(f64, f64)]) -> String {
-    let mut s = String::new();
-    for (i, (x, y)) in pts.iter().enumerate() {
-        let _ = write!(s, "{}{},{}", if i == 0 { "M" } else { "L" }, f(*x), f(*y));
-    }
-    s.push('Z');
-    s
-}
-
-fn open(pts: &[(f64, f64)]) -> String {
-    let mut s = poly(pts);
-    s.pop();
-    s
-}
-
-/// 타원 (중심, 반지름) 하나를 닫힌 경로로
-fn ellipse(cx: f64, cy: f64, rx: f64, ry: f64) -> String {
-    format!(
-        "M{},{}A{},{} 0 1 1 {},{}A{},{} 0 1 1 {},{}Z",
-        f(cx - rx),
-        f(cy),
-        f(rx),
-        f(ry),
-        f(cx + rx),
-        f(cy),
-        f(rx),
-        f(ry),
-        f(cx - rx),
-        f(cy)
-    )
-}
-
-/// 모서리를 둥글린 사각형 (모서리마다 반지름: 왼위·오른위·오른아래·왼아래)
-fn round_rect(x: f64, y: f64, w: f64, h: f64, r: [f64; 4]) -> String {
-    let m = (w / 2.0).min(h / 2.0);
-    let [a, b, c, d] = r.map(|v| v.clamp(0.0, m));
-    let arc = |rr: f64, ex: f64, ey: f64| {
-        if rr > 0.0 {
-            format!("A{},{} 0 0 1 {},{}", f(rr), f(rr), f(ex), f(ey))
-        } else {
-            format!("L{},{}", f(ex), f(ey))
-        }
-    };
-    format!(
-        "M{},{}H{}{}V{}{}H{}{}V{}{}Z",
-        f(x + a),
-        f(y),
-        f(x + w - b),
-        arc(b, x + w, y + b),
-        f(y + h - c),
-        arc(c, x + w - c, y + h),
-        f(x + d),
-        arc(d, x, y + h - d),
-        f(y + a),
-        arc(a, x + a, y)
-    )
-}
-
-/// 정다각형·별: n 꼭짓점 (별이면 2n), 타원(w/2, h/2)에 내접, 위 꼭짓점부터
-fn star(w: f64, h: f64, n: usize, inner: Option<f64>) -> String {
-    let (cx, cy) = (w / 2.0, h / 2.0);
-    let k = if inner.is_some() { 2 * n } else { n };
-    let pts: Vec<(f64, f64)> = (0..k)
-        .map(|i| {
-            let ang = -std::f64::consts::FRAC_PI_2 + i as f64 * std::f64::consts::TAU / k as f64;
-            let r = match inner {
-                Some(ri) if i % 2 == 1 => ri,
-                _ => 1.0,
-            };
-            (cx + cx * r * ang.cos(), cy + cy * r * ang.sin())
-        })
-        .collect();
-    poly(&pts)
-}
-
-/// 미리 정의된 모양 → 경로들 (w×h px 상자). 조정값은 1/100000 단위 비율. 모르는 모양은 None
-/// (그리는 쪽이 사각형으로 그린다). 모양은 ECMA-376 의 이름과 기본 조정값을 따라 직접 그린 근사다
+/// 미리 정의된 모양 → 경로들 (w×h px 상자). 조정값은 avLst 의 값(1/100000 단위 비율, 각도는 1/60000 도). 모르는 모양은 None
+/// (그리는 쪽이 사각형으로 그린다). 모양은 `shape_guides.rs` 의 가이드 수식으로 — 표준 모양 정의와 같은 구조를 한셀 화면과 모양·가로세로
+/// 비율·조정값마다 대조했다
 pub fn preset_paths(
     prst: &str,
     w: f64,
     h: f64,
     adj: &HashMap<String, f64>,
 ) -> Option<Vec<PathSpec>> {
-    // 수식·경로 정의가 있는 모양은 그것으로 (조정값·가로세로 비율을 따른다)
-    if let Some(p) = defined_preset(prst, w, h, adj) {
-        return Some(p);
-    }
-    // 기본 조정값이면 한셀 화면에서 따라 그린 윤곽을 먼저 쓴다 (조정값을 바꾼 도형은 아래 식)
-    if let Some(t) = super::shape_trace::traced(prst)
-        && adj
-            .iter()
-            .all(|(k, v)| t.adj.iter().any(|(n, d)| n == k && (d - v).abs() < 1.0))
-        && let Some(p) = traced_preset(prst, w, h)
-    {
-        return Some(p);
-    }
-    let ss = w.min(h);
-    let a = |n: &str, d: f64| adj.get(n).copied().unwrap_or(d) / 100_000.0;
-    let one = |d: String| Some(vec![PathSpec::new(d)]);
-    let (hc, vc) = (w / 2.0, h / 2.0);
-    match prst {
-        "rect" | "flowChartProcess" | "textBox" => {
-            one(poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]))
-        }
-        "flowChartPredefinedProcess" => {
-            let x = w / 8.0;
-            Some(vec![
-                PathSpec::new(poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])),
-                PathSpec::with(
-                    format!("M{},0V{}M{},0V{}", f(x), f(h), f(w - x), f(h)),
-                    PathFill::None,
-                    true,
-                ),
-            ])
-        }
-        "flowChartInternalStorage" => {
-            let (x, y) = (w / 8.0, h / 8.0);
-            Some(vec![
-                PathSpec::new(poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])),
-                PathSpec::with(
-                    format!("M{},0V{}M0,{}H{}", f(x), f(h), f(y), f(w)),
-                    PathFill::None,
-                    true,
-                ),
-            ])
-        }
-        // 단말: 양 끝이 타원 반쪽 (가로 반지름 3475/21600 × 폭, 세로 h/2)
-        "flowChartTerminator" => {
-            let rx = w * 3475.0 / 21600.0;
-            one(format!(
-                "M{rx},0H{x1}A{rx},{ry} 0 0 1 {x1},{h}H{rx}A{rx},{ry} 0 0 1 {rx},0Z",
-                rx = f(rx),
-                x1 = f(w - rx),
-                ry = f(vc),
-                h = f(h)
-            ))
-        }
-        "roundRect" | "flowChartAlternateProcess" => {
-            let r = match prst {
-                "flowChartAlternateProcess" => ss / 6.0,
-                _ => ss * a("adj", 16667.0),
-            };
-            one(round_rect(0.0, 0.0, w, h, [r; 4]))
-        }
-        "round1Rect" => one(round_rect(
-            0.0,
-            0.0,
-            w,
-            h,
-            [0.0, ss * a("adj", 16667.0), 0.0, 0.0],
-        )),
-        "round2SameRect" => {
-            let (t, b) = (ss * a("adj1", 16667.0), ss * a("adj2", 0.0));
-            one(round_rect(0.0, 0.0, w, h, [t, t, b, b]))
-        }
-        "round2DiagRect" => {
-            let (p, q) = (ss * a("adj1", 16667.0), ss * a("adj2", 0.0));
-            one(round_rect(0.0, 0.0, w, h, [p, q, p, q]))
-        }
-        "snip1Rect" => {
-            let x = ss * a("adj", 16667.0);
-            one(poly(&[(0.0, 0.0), (w - x, 0.0), (w, x), (w, h), (0.0, h)]))
-        }
-        "snip2SameRect" => {
-            let x = ss * a("adj1", 16667.0);
-            let y = ss * a("adj2", 0.0);
-            one(poly(&[
-                (x, 0.0),
-                (w - x, 0.0),
-                (w, x),
-                (w, h - y),
-                (w - y, h),
-                (y, h),
-                (0.0, h - y),
-                (0.0, x),
-            ]))
-        }
-        "snipRoundRect" => {
-            let r = ss * a("adj1", 16667.0);
-            let x = ss * a("adj2", 16667.0);
-            one(format!(
-                "M{},0H{}L{},{}V{}H0V{}A{},{} 0 0 1 {},0Z",
-                f(r),
-                f(w - x),
-                f(w),
-                f(x),
-                f(h),
-                f(r),
-                f(r),
-                f(r),
-                f(r)
-            ))
-        }
-        "ellipse" | "flowChartConnector" => one(ellipse(hc, vc, hc, vc)),
-        "triangle" | "flowChartExtract" => {
-            let x = if prst == "triangle" {
-                w * a("adj", 50000.0)
-            } else {
-                hc
-            };
-            one(poly(&[(0.0, h), (x, 0.0), (w, h)]))
-        }
-        "flowChartMerge" => one(poly(&[(0.0, 0.0), (w, 0.0), (hc, h)])),
-        "rtTriangle" => one(poly(&[(0.0, 0.0), (0.0, h), (w, h)])),
-        "diamond" | "flowChartDecision" => one(poly(&[(hc, 0.0), (w, vc), (hc, h), (0.0, vc)])),
-        "flowChartSort" => Some(vec![
-            PathSpec::new(poly(&[(hc, 0.0), (w, vc), (hc, h), (0.0, vc)])),
-            PathSpec::with(format!("M0,{}H{}", f(vc), f(w)), PathFill::None, true),
-        ]),
-        "flowChartCollate" => one(poly(&[(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)])),
-        "parallelogram" | "flowChartInputOutput" => {
-            let x = if prst == "parallelogram" {
-                ss * a("adj", 25000.0)
-            } else {
-                w / 5.0
-            };
-            one(poly(&[(x, 0.0), (w, 0.0), (w - x, h), (0.0, h)]))
-        }
-        "trapezoid" => {
-            let x = ss * a("adj", 25000.0);
-            one(poly(&[(0.0, h), (x, 0.0), (w - x, 0.0), (w, h)]))
-        }
-        "flowChartManualOperation" => {
-            let x = w / 5.0;
-            one(poly(&[(0.0, 0.0), (w, 0.0), (w - x, h), (x, h)]))
-        }
-        "flowChartManualInput" => one(poly(&[(0.0, h / 5.0), (w, 0.0), (w, h), (0.0, h)])),
-        "flowChartPunchedCard" => one(poly(&[
-            (w / 5.0, 0.0),
-            (w, 0.0),
-            (w, h),
-            (0.0, h),
-            (0.0, h / 5.0),
-        ])),
-        "flowChartOffpageConnector" => one(poly(&[
-            (0.0, 0.0),
-            (w, 0.0),
-            (w, h * 0.8),
-            (hc, h),
-            (0.0, h * 0.8),
-        ])),
-        "flowChartDelay" => one(format!(
-            "M0,0H{}A{},{} 0 0 1 {},{}H0Z",
-            f(hc),
-            f(hc),
-            f(vc),
-            f(hc),
-            f(h)
-        )),
-        "flowChartDisplay" => one(format!(
-            "M0,{}L{},0H{}A{},{} 0 0 1 {},{}H{}Z",
-            f(vc),
-            f(w / 6.0),
-            f(w * 5.0 / 6.0),
-            f(w / 6.0),
-            f(vc),
-            f(w * 5.0 / 6.0),
-            f(h),
-            f(w / 6.0)
-        )),
-        "flowChartOnlineStorage" => one(format!(
-            "M{},0H{}A{},{} 0 0 0 {},{}H{}A{},{} 0 0 1 {},0Z",
-            f(w / 6.0),
-            f(w),
-            f(w / 6.0),
-            f(vc),
-            f(w),
-            f(h),
-            f(w / 6.0),
-            f(w / 6.0),
-            f(vc),
-            f(w / 6.0)
-        )),
-        "flowChartSummingJunction" | "flowChartOr" => {
-            let (dx, dy) = (
-                hc * std::f64::consts::FRAC_1_SQRT_2,
-                vc * std::f64::consts::FRAC_1_SQRT_2,
-            );
-            let cross = if prst == "flowChartOr" {
-                format!("M{},0V{}M0,{}H{}", f(hc), f(h), f(vc), f(w))
-            } else {
-                format!(
-                    "M{},{}L{},{}M{},{}L{},{}",
-                    f(hc - dx),
-                    f(vc - dy),
-                    f(hc + dx),
-                    f(vc + dy),
-                    f(hc + dx),
-                    f(vc - dy),
-                    f(hc - dx),
-                    f(vc + dy)
-                )
-            };
-            Some(vec![
-                PathSpec::new(ellipse(hc, vc, hc, vc)),
-                PathSpec::with(cross, PathFill::None, true),
-            ])
-        }
-        // 천공 테이프: 위·아래 변이 반타원 두 개씩 (rx = w/4, ry = h/10)
-        "flowChartPunchedTape" => {
-            let (rx, ry) = (w / 4.0, h / 10.0);
-            one(format!(
-                "M0,{y0}A{rx},{ry} 0 0 0 {hc},{y0}A{rx},{ry} 0 0 1 {w},{y0}V{y1}A{rx},{ry} 0 0 0 {hc},{y1}A{rx},{ry} 0 0 1 0,{y1}Z",
-                y0 = f(ry),
-                y1 = f(h - ry),
-                rx = f(rx),
-                ry = f(ry),
-                hc = f(hc),
-                w = f(w)
-            ))
-        }
-        // 문서: 21600 칸 경로 — 오른쪽 아래 17322, 곡선 조절점 (10800, 17322)·(10800, 23922), 왼쪽 아래 20172
-        "flowChartDocument" => {
-            let k = |v: f64| v / 21600.0;
-            one(format!(
-                "M0,0H{}V{}C{},{} {},{} 0,{}Z",
-                f(w),
-                f(h * k(17322.0)),
-                f(hc),
-                f(h * k(17322.0)),
-                f(hc),
-                f(h * k(23922.0)),
-                f(h * k(20172.0))
-            ))
-        }
-        // 여러 문서: 21600 칸 경로 셋 (앞 문서가 왼쪽 아래, 뒤 둘은 오른쪽 위로 비켜 보이는 테두리만)
-        "flowChartMultidocument" => {
-            let (sx, sy) = (w / 21600.0, h / 21600.0);
-            let p = |x: f64, y: f64| format!("{},{}", f(x * sx), f(y * sy));
-            Some(vec![
-                PathSpec::new(format!(
-                    "M{}H{}V{}C{} {} {}V{}H{}Z",
-                    p(2972.0, 0.0),
-                    f(21600.0 * sx),
-                    f(14392.0 * sy),
-                    p(20800.0, 14392.0),
-                    p(20000.0, 14467.0),
-                    p(20000.0, 14467.0),
-                    f(1815.0 * sy),
-                    f(2972.0 * sx)
-                )),
-                PathSpec::new(format!(
-                    "M{}H{}V{}C{} {} {}V{}H{}Z",
-                    p(1532.0, 1815.0),
-                    f(20000.0 * sx),
-                    f(16252.0 * sy),
-                    p(19298.0, 16252.0),
-                    p(18595.0, 16352.0),
-                    p(18595.0, 16352.0),
-                    f(3675.0 * sy),
-                    f(1532.0 * sx)
-                )),
-                PathSpec::new(format!(
-                    "M{}H{}V{}C{} {} {}Z",
-                    p(0.0, 3675.0),
-                    f(18595.0 * sx),
-                    f(18022.0 * sy),
-                    p(9298.0, 18022.0),
-                    p(9298.0, 23542.0),
-                    p(0.0, 20782.0)
-                )),
-            ])
-        }
-        "homePlate" => {
-            let x = (ss * a("adj", 50000.0)).min(w);
-            one(poly(&[
-                (0.0, 0.0),
-                (w - x, 0.0),
-                (w, vc),
-                (w - x, h),
-                (0.0, h),
-            ]))
-        }
-        "pentagon" => one(poly(&[
-            (hc, 0.0),
-            (w, h * 0.3820),
-            (w * 0.8090, h),
-            (w * 0.1910, h),
-            (0.0, h * 0.3820),
-        ])),
-        "chevron" => {
-            let x = (ss * a("adj", 50000.0)).min(w);
-            one(poly(&[
-                (0.0, 0.0),
-                (w - x, 0.0),
-                (w, vc),
-                (w - x, h),
-                (0.0, h),
-                (x, vc),
-            ]))
-        }
-        "hexagon" | "flowChartPreparation" => {
-            let x = if prst == "hexagon" {
-                ss * a("adj", 25000.0)
-            } else {
-                w / 5.0
-            };
-            one(poly(&[
-                (0.0, vc),
-                (x, 0.0),
-                (w - x, 0.0),
-                (w, vc),
-                (w - x, h),
-                (x, h),
-            ]))
-        }
-        "octagon" => {
-            let x = ss * a("adj", 29289.0);
-            one(poly(&[
-                (x, 0.0),
-                (w - x, 0.0),
-                (w, x),
-                (w, h - x),
-                (w - x, h),
-                (x, h),
-                (0.0, h - x),
-                (0.0, x),
-            ]))
-        }
-        "heptagon" => one(star(w, h, 7, None)),
-        "decagon" => one(star(w, h, 10, None)),
-        "dodecagon" => one(star(w, h, 12, None)),
-        "plus" => {
-            let x = ss * a("adj", 25000.0);
-            let (x0, y0) = (x, x);
-            let (x1, y1) = (w - x, h - x);
-            one(poly(&[
-                (x0, 0.0),
-                (x1, 0.0),
-                (x1, y0),
-                (w, y0),
-                (w, y1),
-                (x1, y1),
-                (x1, h),
-                (x0, h),
-                (x0, y1),
-                (0.0, y1),
-                (0.0, y0),
-                (x0, y0),
-            ]))
-        }
-        // 수식 모양: 가로 폭 w × 73490/100000, 세로 폭 h × 73490/100000 안 (도형 모양 실험 5번 시트)
-        "mathPlus" => {
-            let (dx1, dy1) = (w * 0.36745, h * 0.36745);
-            let dx2 = ss * a("adj1", 23520.0).clamp(0.0, 0.7349) / 2.0;
-            let (x1, x2, x3, x4) = (hc - dx1, hc - dx2, hc + dx2, hc + dx1);
-            let (y1, y2, y3, y4) = (vc - dy1, vc - dx2, vc + dx2, vc + dy1);
-            one(poly(&[
-                (x1, y2),
-                (x2, y2),
-                (x2, y1),
-                (x3, y1),
-                (x3, y2),
-                (x4, y2),
-                (x4, y3),
-                (x3, y3),
-                (x3, y4),
-                (x2, y4),
-                (x2, y3),
-                (x1, y3),
-            ]))
-        }
-        "mathMinus" => {
-            let dy1 = h * a("adj1", 23520.0) / 2.0;
-            let dx1 = w * 0.36745;
-            one(poly(&[
-                (hc - dx1, vc - dy1),
-                (hc + dx1, vc - dy1),
-                (hc + dx1, vc + dy1),
-                (hc - dx1, vc + dy1),
-            ]))
-        }
-        "mathEqual" => {
-            let a1 = a("adj1", 23520.0).clamp(0.0, 0.36745);
-            let a2 = a("adj2", 11760.0).clamp(0.0, 1.0 - a1 * 2.0);
-            let (dy1, dy2, dx1) = (h * a1, h * a2 / 2.0, w * 0.36745);
-            let (y2, y3) = (vc - dy2, vc + dy2);
-            let (x1, x2) = (hc - dx1, hc + dx1);
-            Some(vec![
-                PathSpec::new(poly(&[(x1, y2 - dy1), (x2, y2 - dy1), (x2, y2), (x1, y2)])),
-                PathSpec::new(poly(&[(x1, y3), (x2, y3), (x2, y3 + dy1), (x1, y3 + dy1)])),
-            ])
-        }
-        "mathDivide" => {
-            let a1 = a("adj1", 23520.0).clamp(0.01, 0.36745);
-            let a3 = a("adj3", 11760.0).clamp(0.01, ((0.7349 - a1) / 4.0).min(0.36745 * w / h));
-            let a2 = a("adj2", 5880.0).clamp(0.0, 0.7349 - 4.0 * a3 - a1);
-            let (dy1, yg, rad, dx1) = (h * a1 / 2.0, h * a2 / 2.0, h * a3, w * 0.36745);
-            let (y3, y4) = (vc - dy1, vc + dy1);
-            let (c1, c2) = (y3 - yg - rad, y4 + yg + rad);
-            Some(vec![
-                PathSpec::new(ellipse(hc, c1, rad, rad)),
-                PathSpec::new(ellipse(hc, c2, rad, rad)),
-                PathSpec::new(poly(&[
-                    (hc - dx1, y3),
-                    (hc + dx1, y3),
-                    (hc + dx1, y4),
-                    (hc - dx1, y4),
-                ])),
-            ])
-        }
-        "mathMultiply" => {
-            let th = ss * a("adj1", 23520.0).clamp(0.0, 0.51965);
-            let ang = h.atan2(w);
-            let (sa, ca, ta) = (ang.sin(), ang.cos(), ang.tan());
-            let dl = (w * w + h * h).sqrt();
-            let lm = dl - dl * 0.51965;
-            let (xm, ym) = (ca * lm / 2.0, sa * lm / 2.0);
-            let (dxam, dyam) = (sa * th / 2.0, ca * th / 2.0);
-            let (xa, ya, xb, yb) = (xm - dxam, ym + dyam, xm + dxam, ym - dyam);
-            let yc = (hc - xb) * ta + yb;
-            let (xd, xe) = (w - xb, w - xa);
-            let xfe = (vc - ya) / ta;
-            let (xf, xl) = (xe - xfe, xa + xfe);
-            let (yg, yh, yi) = (h - ya, h - yb, h - yc);
-            one(poly(&[
-                (xa, ya),
-                (xb, yb),
-                (hc, yc),
-                (xd, yb),
-                (xe, ya),
-                (xf, vc),
-                (xe, yg),
-                (xd, yh),
-                (hc, yi),
-                (xb, yh),
-                (xa, yg),
-                (xl, vc),
-            ]))
-        }
-        "corner" => {
-            let x1 = ss * a("adj2", 50000.0).clamp(0.0, w / ss);
-            let y1 = h - ss * a("adj1", 50000.0).clamp(0.0, h / ss);
-            one(poly(&[
-                (0.0, 0.0),
-                (x1, 0.0),
-                (x1, y1),
-                (w, y1),
-                (w, h),
-                (0.0, h),
-            ]))
-        }
-        "pieWedge" => one(format!(
-            "M0,{h}A{w},{h} 0 0 1 {w},0V{h}Z",
-            w = f(w),
-            h = f(h)
-        )),
-        "lineInv" => Some(vec![PathSpec::with(
-            format!("M0,{}L{},0", f(h), f(w)),
-            PathFill::None,
-            true,
-        )]),
-        // 차트 모양: 테두리 없는 채운 상자 + 선
-        "chartX" | "chartStar" | "chartPlus" => {
-            let mut d = String::new();
-            if prst != "chartPlus" {
-                let _ = write!(d, "M0,0L{w},{h}M0,{h}L{w},0", w = f(w), h = f(h));
-            }
-            if prst == "chartStar" {
-                let _ = write!(d, "M{},0V{}", f(hc), f(h));
-            }
-            if prst == "chartPlus" {
-                let _ = write!(d, "M{},0V{}M0,{}H{}", f(hc), f(h), f(vc), f(w));
-            }
-            Some(vec![
-                PathSpec::with(
-                    poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]),
-                    PathFill::Norm,
-                    false,
-                ),
-                PathSpec::with(d, PathFill::None, true),
-            ])
-        }
-        "star4" | "star5" | "star6" | "star7" | "star8" | "star10" | "star12" | "star16"
-        | "star24" | "star32" => {
-            let n: usize = prst[4..].parse().unwrap_or(5);
-            let d = match n {
-                4 => 12500.0,
-                5 => 19098.0,
-                6 => 28868.0,
-                7 => 34601.0,
-                10 => 42533.0,
-                _ => 37500.0,
-            };
-            one(star(w, h, n, Some(a("adj", d) * 2.0)))
-        }
-        "rightArrow" | "leftArrow" | "upArrow" | "downArrow" | "leftRightArrow" | "upDownArrow"
-        | "notchedRightArrow" => {
-            let horiz = matches!(
-                prst,
-                "rightArrow" | "leftArrow" | "leftRightArrow" | "notchedRightArrow"
-            );
-            let (len, thick) = if horiz { (w, h) } else { (h, w) };
-            let shaft = thick * a("adj1", 50000.0);
-            let both = matches!(prst, "leftRightArrow" | "upDownArrow");
-            let head = (ss * a("adj2", 50000.0)).min(if both { len / 2.0 } else { len });
-            let (y1, y2) = ((thick - shaft) / 2.0, (thick + shaft) / 2.0);
-            let x2 = len - head;
-            // 오른쪽 화살표를 기준으로 만들고 방향에 맞게 돌린다
-            let mut base = vec![];
-            if both {
-                base.extend([(0.0, thick / 2.0), (head, 0.0), (head, y1)]);
-            } else {
-                base.push((0.0, y1));
-            }
-            base.extend([
-                (x2, y1),
-                (x2, 0.0),
-                (len, thick / 2.0),
-                (x2, thick),
-                (x2, y2),
-            ]);
-            if both {
-                base.extend([(head, y2), (head, thick)]);
-            } else {
-                base.push((0.0, y2));
-                if prst == "notchedRightArrow" {
-                    base.push((head * shaft / thick, thick / 2.0));
-                }
-            }
-            let pts: Vec<(f64, f64)> = base
-                .iter()
-                .map(|&(x, y)| match prst {
-                    "leftArrow" => (len - x, y),
-                    "downArrow" | "upDownArrow" => (y, x),
-                    "upArrow" => (y, len - x),
-                    _ => (x, y),
-                })
-                .collect();
-            one(poly(&pts))
-        }
-        "can" | "flowChartMagneticDisk" => {
-            let ry = if prst == "can" {
-                ss * a("adj", 25000.0) / 2.0
-            } else {
-                h / 6.0
-            }
-            .min(vc);
-            Some(vec![
-                PathSpec::with(
-                    format!(
-                        "M0,{ry}A{},{ry} 0 0 1 {},{ry}V{}A{},{ry} 0 0 1 0,{}Z",
-                        f(hc),
-                        f(w),
-                        f(h - ry),
-                        f(hc),
-                        f(h - ry),
-                        ry = f(ry)
-                    ),
-                    PathFill::Norm,
-                    false,
-                ),
-                // 자기 디스크의 윗면은 밝게 칠하지 않는다 (한셀 화면 — 원기둥만)
-                PathSpec::with(
-                    ellipse(hc, ry, hc, ry),
-                    if prst == "can" {
-                        PathFill::Lighten
-                    } else {
-                        PathFill::Norm
-                    },
-                    false,
-                ),
-                PathSpec::with(
-                    format!(
-                        "M0,{ry}A{},{ry} 0 0 1 {},{ry}A{},{ry} 0 0 1 0,{ry}V{}A{},{ry} 0 0 0 {},{}V{ry}",
-                        f(hc),
-                        f(w),
-                        f(hc),
-                        f(h - ry),
-                        f(hc),
-                        f(w),
-                        f(h - ry),
-                        ry = f(ry)
-                    ),
-                    PathFill::None,
-                    true,
-                ),
-            ])
-        }
-        "cube" => {
-            let d = ss * a("adj", 25000.0);
-            Some(vec![
-                PathSpec::with(
-                    poly(&[(0.0, d), (w - d, d), (w - d, h), (0.0, h)]),
-                    PathFill::Norm,
-                    false,
-                ),
-                PathSpec::with(
-                    poly(&[(0.0, d), (d, 0.0), (w, 0.0), (w - d, d)]),
-                    PathFill::LightenLess,
-                    false,
-                ),
-                PathSpec::with(
-                    poly(&[(w - d, d), (w, 0.0), (w, h - d), (w - d, h)]),
-                    PathFill::DarkenLess,
-                    false,
-                ),
-                PathSpec::with(
-                    format!(
-                        "{}M0,{}L{},0M{},{}L{},0",
-                        poly(&[
-                            (0.0, d),
-                            (d, 0.0),
-                            (w, 0.0),
-                            (w, h - d),
-                            (w - d, h),
-                            (0.0, h)
-                        ]),
-                        f(d),
-                        f(d),
-                        f(w - d),
-                        f(d),
-                        f(w)
-                    ) + &format!("M0,{}H{}V{}", f(d), f(w - d), f(h)),
-                    PathFill::None,
-                    true,
-                ),
-            ])
-        }
-        "bevel" => {
-            let d = ss * a("adj", 12500.0);
-            Some(vec![
-                PathSpec::with(
-                    poly(&[(d, d), (w - d, d), (w - d, h - d), (d, h - d)]),
-                    PathFill::Norm,
-                    false,
-                ),
-                PathSpec::with(
-                    poly(&[(0.0, 0.0), (w, 0.0), (w - d, d), (d, d)]),
-                    PathFill::LightenLess,
-                    false,
-                ),
-                PathSpec::with(
-                    poly(&[(0.0, 0.0), (d, d), (d, h - d), (0.0, h)]),
-                    PathFill::Lighten,
-                    false,
-                ),
-                PathSpec::with(
-                    poly(&[(w, 0.0), (w, h), (w - d, h - d), (w - d, d)]),
-                    PathFill::DarkenLess,
-                    false,
-                ),
-                PathSpec::with(
-                    poly(&[(0.0, h), (d, h - d), (w - d, h - d), (w, h)]),
-                    PathFill::Darken,
-                    false,
-                ),
-                PathSpec::with(
-                    poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])
-                        + &poly(&[(d, d), (w - d, d), (w - d, h - d), (d, h - d)])
-                        + &format!(
-                            "M0,0L{},{}M{},0L{},{}M0,{}L{},{}M{},{}L{},{}",
-                            f(d),
-                            f(d),
-                            f(w),
-                            f(w - d),
-                            f(d),
-                            f(h),
-                            f(d),
-                            f(h - d),
-                            f(w),
-                            f(h),
-                            f(w - d),
-                            f(h - d)
-                        ),
-                    PathFill::None,
-                    true,
-                ),
-            ])
-        }
-        "foldedCorner" => {
-            let d = ss * a("adj", 16667.0);
-            Some(vec![
-                PathSpec::with(
-                    poly(&[(0.0, 0.0), (w, 0.0), (w, h - d), (w - d, h), (0.0, h)]),
-                    PathFill::Norm,
-                    false,
-                ),
-                PathSpec::with(
-                    format!(
-                        "M{},{}L{},{}L{},{}Z",
-                        f(w - d),
-                        f(h),
-                        f(w - d * 0.8),
-                        f(h - d * 0.8),
-                        f(w),
-                        f(h - d)
-                    ),
-                    PathFill::DarkenLess,
-                    false,
-                ),
-                PathSpec::with(
-                    format!(
-                        "M{},{}L{},{}L{},{}L{},{}L0,{}V0H{}V{}",
-                        f(w - d),
-                        f(h),
-                        f(w - d * 0.8),
-                        f(h - d * 0.8),
-                        f(w),
-                        f(h - d),
-                        f(w - d),
-                        f(h),
-                        f(h),
-                        f(w),
-                        f(h - d)
-                    ),
-                    PathFill::None,
-                    true,
-                ),
-            ])
-        }
-        "frame" => {
-            let d = ss * a("adj1", 12500.0);
-            one(poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])
-                + &poly(&[(d, d), (d, h - d), (w - d, h - d), (w - d, d)]))
-        }
-        "donut" => {
-            let d = ss * a("adj", 25000.0);
-            one(ellipse(hc, vc, hc, vc)
-                + &format!(
-                    "M{},{}A{},{} 0 1 0 {},{}A{},{} 0 1 0 {},{}Z",
-                    f(d),
-                    f(vc),
-                    f(hc - d),
-                    f(vc - d),
-                    f(w - d),
-                    f(vc),
-                    f(hc - d),
-                    f(vc - d),
-                    f(d),
-                    f(vc)
-                ))
-        }
-        "noSmoking" => {
-            let d = ss * a("adj", 18750.0);
-            let (rx, ry) = (hc - d, vc - d);
-            let k = std::f64::consts::FRAC_1_SQRT_2;
-            one(ellipse(hc, vc, hc, vc)
-                + &format!(
-                    "M{},{}A{},{} 0 0 0 {},{}ZM{},{}A{},{} 0 0 0 {},{}Z",
-                    f(hc - rx * k + d * 0.5),
-                    f(vc - ry * k - d * 0.5),
-                    f(rx),
-                    f(ry),
-                    f(hc + rx * k + d * 0.5),
-                    f(vc + ry * k - d * 0.5),
-                    f(hc + rx * k - d * 0.5),
-                    f(vc + ry * k + d * 0.5),
-                    f(rx),
-                    f(ry),
-                    f(hc - rx * k - d * 0.5),
-                    f(vc - ry * k + d * 0.5)
-                ))
-        }
-        "plaque" => {
-            let r = ss * a("adj", 16667.0);
-            one(format!(
-                "M{r},0H{}A{r},{r} 0 0 0 {},{r}V{}A{r},{r} 0 0 0 {},{}H{r}A{r},{r} 0 0 0 0,{}V{r}A{r},{r} 0 0 0 {r},0Z",
-                f(w - r),
-                f(w),
-                f(h - r),
-                f(w - r),
-                f(h),
-                f(h - r),
-                r = f(r)
-            ))
-        }
-        // 눈물: 왼쪽 위·오른쪽 아래·왼쪽 아래는 타원, 오른쪽 위는 끝점 (x1, y1) 으로 가는 2차 곡선 둘 (도형 모양 실험)
-        "teardrop" => {
-            let k = a("adj", 100000.0).clamp(0.0, 2.0);
-            let (x1, y1) = (hc + hc * k, vc - vc * k);
-            let (x2, y2) = ((hc + x1) / 2.0, (vc + y1) / 2.0);
-            one(format!(
-                "M0,{vc}A{hc},{vc} 0 0 1 {hc},0Q{x2},0 {x1},{y1}Q{w},{y2} {w},{vc}A{hc},{vc} 0 0 1 {hc},{h}A{hc},{vc} 0 0 1 0,{vc}Z",
-                vc = f(vc),
-                hc = f(hc),
-                x1 = f(x1),
-                y1 = f(y1),
-                x2 = f(x2),
-                y2 = f(y2),
-                w = f(w),
-                h = f(h)
-            ))
-        }
-        "heart" => one(format!(
-            "M{},{}C{},{} {},{} {},{}C{},{} {},{} {},{}C{},{} {},{} {},{}C{},{} {},{} {},{}Z",
-            f(hc),
-            f(h * 0.25),
-            f(hc + w * 0.15),
-            f(-h * 0.1),
-            f(w * 1.05),
-            f(h * 0.05),
-            f(w * 0.95),
-            f(h * 0.4),
-            f(w * 0.9),
-            f(h * 0.6),
-            f(hc + w * 0.2),
-            f(h * 0.75),
-            f(hc),
-            f(h),
-            f(hc - w * 0.2),
-            f(h * 0.75),
-            f(w * 0.1),
-            f(h * 0.6),
-            f(w * 0.05),
-            f(h * 0.4),
-            f(-w * 0.05),
-            f(h * 0.05),
-            f(hc - w * 0.15),
-            f(-h * 0.1),
-            f(hc),
-            f(h * 0.25)
-        )),
-        "smileyFace" => {
-            let k = a("adj", 4653.0);
-            let smile_y = h * 0.75 + h * k;
-            Some(vec![
-                PathSpec::new(ellipse(hc, vc, hc, vc)),
-                PathSpec::with(
-                    ellipse(w * 0.35, h * 0.37, w * 0.05, h * 0.05)
-                        + &ellipse(w * 0.65, h * 0.37, w * 0.05, h * 0.05),
-                    PathFill::DarkenLess,
-                    true,
-                ),
-                PathSpec::with(
-                    format!(
-                        "M{},{}Q{},{} {},{}",
-                        f(w * 0.25),
-                        f(h * 0.68),
-                        f(hc),
-                        f(smile_y + h * 0.08),
-                        f(w * 0.75),
-                        f(h * 0.68)
-                    ),
-                    PathFill::None,
-                    true,
-                ),
-            ])
-        }
-        "lightningBolt" => {
-            const P: [(f64, f64); 11] = [
-                (8458.0, 0.0),
-                (12960.0, 6176.0),
-                (11053.0, 6862.0),
-                (16564.0, 11853.0),
-                (14353.0, 12825.0),
-                (21600.0, 21600.0),
-                (10533.0, 14290.0),
-                (12290.0, 13563.0),
-                (5333.0, 8508.0),
-                (7305.0, 7811.0),
-                (0.0, 3923.0),
-            ];
-            let pts: Vec<(f64, f64)> = P
-                .iter()
-                .map(|&(x, y)| (x / 21600.0 * w, y / 21600.0 * h))
-                .collect();
-            one(poly(&pts))
-        }
-        "moon" => {
-            let k = a("adj", 50000.0);
-            one(format!(
-                "M{},0A{},{} 0 0 0 {},{}A{},{} 0 0 1 {},0Z",
-                f(w),
-                f(w),
-                f(vc),
-                f(w),
-                f(h),
-                f(w * (1.0 - k)),
-                f(vc),
-                f(w)
-            ))
-        }
-        "pie" | "chord" | "arc" | "blockArc" => {
-            let (st, en) = match prst {
-                "arc" => (a("adj1", 16_200_000.0), a("adj2", 0.0)),
-                "blockArc" => (a("adj1", 10_800_000.0), a("adj2", 0.0)),
-                "chord" => (a("adj1", 2_700_000.0), a("adj2", 16_200_000.0)),
-                _ => (a("adj1", 0.0), a("adj2", 16_200_000.0)),
-            };
-            // 각도 (1/60000 도 → 도). 조정값 a() 는 1/100000 로 나눴으므로 되돌린다
-            let (st, en) = (st * 100_000.0 / 60_000.0, en * 100_000.0 / 60_000.0);
-            let mut sw = (en - st).rem_euclid(360.0);
-            if sw == 0.0 {
-                sw = 360.0;
-            }
-            let pt = |deg: f64, rx: f64, ry: f64| {
-                let t = ellipse_param(rx, ry, deg);
-                (hc + rx * t.cos(), vc + ry * t.sin())
-            };
-            let (p0, p1) = (pt(st, hc, vc), pt(st + sw, hc, vc));
-            let large = if sw > 180.0 { 1 } else { 0 };
-            let arc = format!("A{},{} 0 {large} 1 {},{}", f(hc), f(vc), f(p1.0), f(p1.1));
-            match prst {
-                "arc" => Some(vec![PathSpec::with(
-                    format!("M{},{}{arc}", f(p0.0), f(p0.1)),
-                    PathFill::None,
-                    true,
-                )]),
-                "chord" => one(format!("M{},{}{arc}Z", f(p0.0), f(p0.1))),
-                "blockArc" => {
-                    let d = ss * a("adj3", 25000.0);
-                    let (rx, ry) = (hc - d, vc - d);
-                    let (q1, q0) = (pt(st + sw, rx, ry), pt(st, rx, ry));
-                    one(format!(
-                        "M{},{}{arc}L{},{}A{},{} 0 {large} 0 {},{}Z",
-                        f(p0.0),
-                        f(p0.1),
-                        f(q1.0),
-                        f(q1.1),
-                        f(rx),
-                        f(ry),
-                        f(q0.0),
-                        f(q0.1)
-                    ))
-                }
-                _ => one(format!(
-                    "M{},{}L{},{}{arc}Z",
-                    f(hc),
-                    f(vc),
-                    f(p0.0),
-                    f(p0.1)
-                )),
-            }
-        }
-        // 화살표 설명선: 상자 + 화살표 (adj1 화살 목 굵기, adj2 화살촉 너비, adj3 화살촉 길이, adj4 상자 길이 — 비율)
-        "rightArrowCallout" | "leftArrowCallout" | "upArrowCallout" | "downArrowCallout" => {
-            let horiz = matches!(prst, "rightArrowCallout" | "leftArrowCallout");
-            let (len, across) = if horiz { (w, h) } else { (h, w) };
-            let a2 = a("adj2", 25000.0).clamp(0.0, 0.5 * across / ss);
-            let a1 = a("adj1", 25000.0).clamp(0.0, a2 * 2.0);
-            let a3 = a("adj3", 25000.0).clamp(0.0, len / ss);
-            let a4 = a("adj4", 64977.0).clamp(0.0, 1.0 - a3 * ss / len);
-            let mid = across / 2.0;
-            let (o1, o2, o3, o4) = (
-                mid - ss * a2,
-                mid - ss * a1 / 2.0,
-                mid + ss * a1 / 2.0,
-                mid + ss * a2,
-            );
-            let (hd, bx) = (ss * a3, len * a4);
-            // 오른쪽 화살표 꼴의 (길이, 가로지름) 점들 → 방향마다 돌린다
-            let pts = [
-                (0.0, 0.0),
-                (bx, 0.0),
-                (bx, o2),
-                (len - hd, o2),
-                (len - hd, o1),
-                (len, mid),
-                (len - hd, o4),
-                (len - hd, o3),
-                (bx, o3),
-                (bx, across),
-                (0.0, across),
-            ];
-            let map: Vec<(f64, f64)> = pts
-                .iter()
-                .map(|&(p, q)| match prst {
-                    "rightArrowCallout" => (p, q),
-                    "leftArrowCallout" => (w - p, q),
-                    "downArrowCallout" => (q, p),
-                    _ => (q, h - p),
-                })
-                .collect();
-            one(poly(&map))
-        }
-        "leftRightArrowCallout" | "upDownArrowCallout" => {
-            let horiz = prst == "leftRightArrowCallout";
-            let (len, across) = if horiz { (w, h) } else { (h, w) };
-            let a2 = a("adj2", 25000.0).clamp(0.0, 0.5 * across / ss);
-            let a1 = a("adj1", 25000.0).clamp(0.0, a2 * 2.0);
-            let a3 = a("adj3", 25000.0).clamp(0.0, 0.5 * len / ss);
-            let a4 = a("adj4", 48123.0).clamp(0.0, 1.0 - a3 * ss / (len / 2.0));
-            let mid = across / 2.0;
-            let (o1, o2, o3, o4) = (
-                mid - ss * a2,
-                mid - ss * a1 / 2.0,
-                mid + ss * a1 / 2.0,
-                mid + ss * a2,
-            );
-            let hd = ss * a3;
-            let (b0, b1) = (len / 2.0 - len * a4 / 2.0, len / 2.0 + len * a4 / 2.0);
-            let pts = [
-                (0.0, mid),
-                (hd, o1),
-                (hd, o2),
-                (b0, o2),
-                (b0, 0.0),
-                (b1, 0.0),
-                (b1, o2),
-                (len - hd, o2),
-                (len - hd, o1),
-                (len, mid),
-                (len - hd, o4),
-                (len - hd, o3),
-                (b1, o3),
-                (b1, across),
-                (b0, across),
-                (b0, o3),
-                (hd, o3),
-                (hd, o4),
-            ];
-            let map: Vec<(f64, f64)> = pts
-                .iter()
-                .map(|&(p, q)| if horiz { (p, q) } else { (q, p) })
-                .collect();
-            one(poly(&map))
-        }
-        "quadArrowCallout" => {
-            let a2 = a("adj2", 18515.0).clamp(0.0, 0.5);
-            let a1 = a("adj1", 18515.0).clamp(0.0, a2 * 2.0);
-            let a3 = a("adj3", 18515.0).clamp(0.0, 0.5 - a2);
-            let a4 = a("adj4", 48123.0).clamp(a1, 1.0 - a3 * 2.0);
-            let (dx2, dx3, ah) = (ss * a2, ss * a1 / 2.0, ss * a3);
-            let (dx1, dy1) = (w * a4 / 2.0, h * a4 / 2.0);
-            let (x2, x7, x3, x6, x4, x5, x8) = (
-                hc - dx1,
-                hc + dx1,
-                hc - dx2,
-                hc + dx2,
-                hc - dx3,
-                hc + dx3,
-                w - ah,
-            );
-            let (y2, y7, y3, y6, y4, y5, y8) = (
-                vc - dy1,
-                vc + dy1,
-                vc - dx2,
-                vc + dx2,
-                vc - dx3,
-                vc + dx3,
-                h - ah,
-            );
-            one(poly(&[
-                (0.0, vc),
-                (ah, y3),
-                (ah, y4),
-                (x2, y4),
-                (x2, y2),
-                (x4, y2),
-                (x4, ah),
-                (x3, ah),
-                (hc, 0.0),
-                (x6, ah),
-                (x5, ah),
-                (x5, y2),
-                (x7, y2),
-                (x7, y4),
-                (x8, y4),
-                (x8, y3),
-                (w, vc),
-                (x8, y6),
-                (x8, y5),
-                (x7, y5),
-                (x7, y7),
-                (x5, y7),
-                (x5, y8),
-                (x6, y8),
-                (hc, h),
-                (x3, y8),
-                (x4, y8),
-                (x4, y7),
-                (x2, y7),
-                (x2, y5),
-                (ah, y5),
-                (ah, y6),
-            ]))
-        }
-        "stripedRightArrow" => {
-            let a1 = a("adj1", 50000.0).clamp(0.0, 1.0);
-            let a2 = a("adj2", 50000.0).clamp(0.0, 0.84375 * w / ss);
-            let (y1, y2) = (vc - h * a1 / 2.0, vc + h * a1 / 2.0);
-            let (x4, x5) = (ss * 5.0 / 32.0, w - ss * a2);
-            Some(vec![
-                PathSpec::new(poly(&[
-                    (0.0, y1),
-                    (ss / 32.0, y1),
-                    (ss / 32.0, y2),
-                    (0.0, y2),
-                ])),
-                PathSpec::new(poly(&[
-                    (ss / 16.0, y1),
-                    (ss / 8.0, y1),
-                    (ss / 8.0, y2),
-                    (ss / 16.0, y2),
-                ])),
-                PathSpec::new(poly(&[
-                    (x4, y1),
-                    (x5, y1),
-                    (x5, 0.0),
-                    (w, vc),
-                    (x5, h),
-                    (x5, y2),
-                    (x4, y2),
-                ])),
-            ])
-        }
-        "bentUpArrow" => {
-            let (a1, a2, a3) = (
-                a("adj1", 25000.0).clamp(0.0, 0.5),
-                a("adj2", 25000.0).clamp(0.0, 0.5),
-                a("adj3", 25000.0).clamp(0.0, 0.5),
-            );
-            let y1 = ss * a3;
-            let (x1, x3) = (w - ss * a2 * 2.0, w - ss * a2);
-            let (x2, x4) = (x3 - ss * a1 / 2.0, x3 + ss * a1 / 2.0);
-            let y2 = h - ss * a1;
-            one(poly(&[
-                (0.0, y2),
-                (x2, y2),
-                (x2, y1),
-                (x1, y1),
-                (x3, 0.0),
-                (w, y1),
-                (x4, y1),
-                (x4, h),
-                (0.0, h),
-            ]))
-        }
-        "leftUpArrow" => {
-            let a2 = a("adj2", 25000.0).clamp(0.0, 0.5);
-            let a1 = a("adj1", 25000.0).clamp(0.0, a2 * 2.0);
-            let a3 = a("adj3", 25000.0).clamp(0.0, 1.0 - a2 * 4.0);
-            let x1 = ss * a3;
-            let (x2, y2) = (w - ss * a2 * 2.0, h - ss * a2 * 2.0);
-            let (x4, y4) = (w - ss * a2, h - ss * a2);
-            let dx3 = ss * a1 / 2.0;
-            let (x3, x5, y3, y5) = (x4 - dx3, x4 + dx3, y4 - dx3, y4 + dx3);
-            one(poly(&[
-                (0.0, y4),
-                (x1, y2),
-                (x1, y3),
-                (x3, y3),
-                (x3, x1),
-                (x2, x1),
-                (x4, 0.0),
-                (w, x1),
-                (x5, x1),
-                (x5, y5),
-                (x1, y5),
-                (x1, h),
-            ]))
-        }
-        "nonIsoscelesTrapezoid" => {
-            let (x2, dx3) = (ss * a("adj1", 25000.0), ss * a("adj2", 25000.0));
-            one(poly(&[(0.0, h), (x2, 0.0), (w - dx3, 0.0), (w, h)]))
-        }
-        "diagStripe" => {
-            let k = a("adj", 50000.0);
-            one(poly(&[(0.0, h * k), (w * k, 0.0), (w, 0.0), (0.0, h)]))
-        }
-        "snip2DiagRect" => {
-            let (l, r) = (ss * a("adj1", 0.0), ss * a("adj2", 16667.0));
-            one(poly(&[
-                (l, 0.0),
-                (w - r, 0.0),
-                (w, r),
-                (w, h - l),
-                (w - l, h),
-                (r, h),
-                (0.0, h - r),
-                (0.0, l),
-            ]))
-        }
-        "halfFrame" => {
-            let x1 = ss * a("adj2", 33333.0).clamp(0.0, w / ss);
-            let g2 = h - h * x1 / w;
-            let y1 = ss * a("adj1", 33333.0).clamp(0.0, g2 / ss);
-            let (x2, y2) = (w - y1 * w / h, h - x1 * h / w);
-            one(poly(&[
-                (0.0, 0.0),
-                (w, 0.0),
-                (x2, y1),
-                (x1, y1),
-                (x1, y2),
-                (0.0, h),
-            ]))
-        }
-        "flowChartOfflineStorage" => Some(vec![
-            PathSpec::new(poly(&[(0.0, 0.0), (w, 0.0), (hc, h)])),
-            PathSpec::with(
-                format!("M{},{}H{}", f(w * 0.4), f(h * 0.8), f(w * 0.6)),
-                PathFill::None,
-                true,
-            ),
-        ]),
-        // 동작 단추: 사각형 + 어둡게 칠한 그림 (빈 단추·앞·뒤·처음·끝 — 도형 모양 실험 4번 시트)
-        "actionButtonBlank" => one(poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])),
-        "actionButtonBackPrevious"
-        | "actionButtonForwardNext"
-        | "actionButtonBeginning"
-        | "actionButtonEnd" => {
-            let dx2 = ss * 3.0 / 8.0;
-            let (g9, g10, g11, g12) = (vc - dx2, vc + dx2, hc - dx2, hc + dx2);
-            let g13 = ss * 3.0 / 4.0;
-            let mut icon = Vec::new();
-            match prst {
-                "actionButtonBackPrevious" => icon.push(poly(&[(g11, vc), (g12, g9), (g12, g10)])),
-                "actionButtonForwardNext" => icon.push(poly(&[(g12, vc), (g11, g9), (g11, g10)])),
-                "actionButtonBeginning" => {
-                    let (g16, g17) = (g11 + g13 / 8.0, g11 + g13 / 4.0);
-                    icon.push(poly(&[(g17, vc), (g12, g9), (g12, g10)]));
-                    icon.push(poly(&[(g11, g9), (g16, g9), (g16, g10), (g11, g10)]));
-                }
-                _ => {
-                    let (g16, g17) = (g11 + g13 * 3.0 / 4.0, g11 + g13 * 7.0 / 8.0);
-                    icon.push(poly(&[(g16, vc), (g11, g9), (g11, g10)]));
-                    icon.push(poly(&[(g17, g9), (g12, g9), (g12, g10), (g17, g10)]));
-                }
-            }
-            let mut v = vec![PathSpec::new(poly(&[
-                (0.0, 0.0),
-                (w, 0.0),
-                (w, h),
-                (0.0, h),
-            ]))];
-            v.extend(
-                icon.into_iter()
-                    .map(|d| PathSpec::with(d, PathFill::Darken, true)),
-            );
-            Some(v)
-        }
-        // 선 설명선: 사각형 + 꺾인 지시선 (adj 홀수 = y, 짝수 = x — 상자 기준 비율). border 는 사각형 테두리,
-        // accent 는 첫 점 x 의 세로 강조선 (도형 모양 실험)
-        "callout1"
-        | "callout2"
-        | "callout3"
-        | "borderCallout1"
-        | "borderCallout2"
-        | "borderCallout3"
-        | "accentCallout1"
-        | "accentCallout2"
-        | "accentCallout3"
-        | "accentBorderCallout1"
-        | "accentBorderCallout2"
-        | "accentBorderCallout3" => {
-            let def: &[f64] = match prst.as_bytes().last() {
-                Some(b'1') => &[18750.0, -8333.0, 112500.0, -38333.0],
-                Some(b'2') => &[18750.0, -8333.0, 18750.0, -16667.0, 112500.0, -46667.0],
-                _ => &[
-                    18750.0, -8333.0, 18750.0, -16667.0, 100000.0, -16667.0, 112963.0, -8333.0,
-                ],
-            };
-            let pts: Vec<(f64, f64)> = def
-                .chunks(2)
-                .enumerate()
-                .map(|(k, d)| {
-                    let y = h * a(&format!("adj{}", 2 * k + 1), d[0]);
-                    let x = w * a(&format!("adj{}", 2 * k + 2), d[1]);
-                    (x, y)
-                })
-                .collect();
-            let border = prst.contains("order");
-            let mut v = vec![PathSpec::with(
-                poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]),
-                PathFill::Norm,
-                border,
-            )];
-            if prst.starts_with("accent") {
-                v.push(PathSpec::with(
-                    format!("M{},0V{}", f(pts[0].0), f(h)),
-                    PathFill::None,
-                    true,
-                ));
-            }
-            let mut d = String::new();
-            for (i, (x, y)) in pts.iter().enumerate() {
-                let _ = write!(d, "{}{},{}", if i == 0 { 'M' } else { 'L' }, f(*x), f(*y));
-            }
-            v.push(PathSpec::with(d, PathFill::None, true));
-            Some(v)
-        }
-        "wedgeRectCallout" | "wedgeRoundRectCallout" | "wedgeEllipseCallout" => {
-            let tx = hc + w * a("adj1", -20833.0);
-            let ty = vc + h * a("adj2", 62500.0);
-            if prst == "wedgeEllipseCallout" {
-                // 꼬리 밑변: 끝을 향한 방향의 양쪽 ±10도
-                let ang = (ty - vc).atan2(tx - hc);
-                let p = |da: f64| (hc + hc * (ang + da).cos(), vc + vc * (ang + da).sin());
-                let (b0, b1) = (p(-0.17), p(0.17));
-                return one(format!(
-                    "M{},{}L{},{}L{},{}A{},{} 0 1 1 {},{}Z",
-                    f(b0.0),
-                    f(b0.1),
-                    f(tx),
-                    f(ty),
-                    f(b1.0),
-                    f(b1.1),
-                    f(hc),
-                    f(vc),
-                    f(b0.0),
-                    f(b0.1)
-                ));
-            }
-            let r = if prst == "wedgeRoundRectCallout" {
-                ss * a("adj3", 16667.0)
-            } else {
-                0.0
-            };
-            // 꼬리가 나가는 변: 끝이 칸 밖으로 더 멀리 나간 쪽
-            let (dx, dy) = ((tx - hc) / w, (ty - vc) / h);
-            let inside = tx >= 0.0 && tx <= w && ty >= 0.0 && ty <= h;
-            if inside {
-                return one(round_rect(0.0, 0.0, w, h, [r; 4]));
-            }
-            let mut pts: Vec<(f64, f64)> = vec![(0.0, 0.0)];
-            if dy < 0.0 && dy.abs() >= dx.abs() {
-                pts.extend([(w * 5.0 / 12.0, 0.0), (tx, ty), (w * 7.0 / 12.0, 0.0)]);
-            }
-            pts.push((w, 0.0));
-            if dx > 0.0 && dx.abs() > dy.abs() {
-                pts.extend([(w, h * 5.0 / 12.0), (tx, ty), (w, h * 7.0 / 12.0)]);
-            }
-            pts.push((w, h));
-            if dy > 0.0 && dy.abs() >= dx.abs() {
-                pts.extend([(w * 7.0 / 12.0, h), (tx, ty), (w * 5.0 / 12.0, h)]);
-            }
-            pts.push((0.0, h));
-            if dx < 0.0 && dx.abs() > dy.abs() {
-                pts.extend([(0.0, h * 7.0 / 12.0), (tx, ty), (0.0, h * 5.0 / 12.0)]);
-            }
-            if r <= 0.0 {
-                return one(poly(&pts));
-            }
-            // 둥근 모서리: 꼭짓점 넷을 반지름 r 의 호로 (둥근 사각형 설명선)
-            let corner = |p: (f64, f64)| [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].contains(&p);
-            let mut d = format!("M{},0", f(r));
-            for &(x, y) in pts.iter().skip(1).chain(std::iter::once(&(0.0, 0.0))) {
-                if corner((x, y)) {
-                    let (ax, ay, bx, by) = match (x == 0.0, y == 0.0) {
-                        (false, true) => (w - r, 0.0, w, r),
-                        (false, false) => (w, h - r, w - r, h),
-                        (true, false) => (r, h, 0.0, h - r),
-                        _ => (0.0, r, r, 0.0),
-                    };
-                    let _ = write!(
-                        d,
-                        "L{},{}A{},{} 0 0 1 {},{}",
-                        f(ax),
-                        f(ay),
-                        f(r),
-                        f(r),
-                        f(bx),
-                        f(by)
-                    );
-                } else {
-                    let _ = write!(d, "L{},{}", f(x), f(y));
-                }
-            }
-            d.push('Z');
-            one(d)
-        }
-        "wave" | "doubleWave" => {
-            let amp = h * a("adj1", if prst == "wave" { 12500.0 } else { 6250.0 });
-            let n = if prst == "wave" { 1.0 } else { 2.0 };
-            let seg = w / (2.0 * n);
-            let mut d = format!("M0,{}", f(amp));
-            let mut x = 0.0;
-            let mut up = true;
-            while x < w - 0.01 {
-                let _ = write!(
-                    d,
-                    "Q{},{} {},{}",
-                    f(x + seg / 2.0),
-                    f(if up { amp * 3.0 } else { -amp }),
-                    f(x + seg),
-                    f(amp)
-                );
-                x += seg;
-                up = !up;
-            }
-            let _ = write!(d, "L{},{}", f(w), f(h - amp));
-            let mut x = w;
-            let mut up = n == 1.0;
-            while x > 0.01 {
-                let _ = write!(
-                    d,
-                    "Q{},{} {},{}",
-                    f(x - seg / 2.0),
-                    f(if up { h - amp * 3.0 } else { h + amp }),
-                    f(x - seg),
-                    f(h - amp)
-                );
-                x -= seg;
-                up = !up;
-            }
-            d.push('Z');
-            one(d)
-        }
-        "leftBracket" | "rightBracket" | "leftBrace" | "rightBrace" | "bracketPair"
-        | "bracePair" => {
-            let r = ss * a("adj", 8333.0);
-            let lb = format!(
-                "M{},0A{},{} 0 0 0 0,{}V{}A{},{} 0 0 0 {},{}",
-                f(w.min(r * 2.0)),
-                f(r),
-                f(r),
-                f(r),
-                f(h - r),
-                f(r),
-                f(r),
-                f(w.min(r * 2.0)),
-                f(h)
-            );
-            let d = match prst {
-                "leftBracket" => format!(
-                    "M{},0A{},{} 0 0 0 0,{}V{}A{},{} 0 0 0 {},{}",
-                    f(w),
-                    f(w),
-                    f(r),
-                    f(r),
-                    f(h - r),
-                    f(w),
-                    f(r),
-                    f(w),
-                    f(h)
-                ),
-                "rightBracket" => format!(
-                    "M0,0A{},{} 0 0 1 {},{}V{}A{},{} 0 0 1 0,{}",
-                    f(w),
-                    f(r),
-                    f(w),
-                    f(r),
-                    f(h - r),
-                    f(w),
-                    f(r),
-                    f(h)
-                ),
-                "leftBrace" => format!(
-                    "M{},0Q{},0 {},{}V{}Q{},{} 0,{}Q{},{} {},{}V{}Q{},{} {},{}",
-                    f(w),
-                    f(hc),
-                    f(hc),
-                    f(r),
-                    f(vc - r),
-                    f(hc),
-                    f(vc),
-                    f(vc),
-                    f(hc),
-                    f(vc),
-                    f(hc),
-                    f(vc + r),
-                    f(h - r),
-                    f(hc),
-                    f(h),
-                    f(w),
-                    f(h)
-                ),
-                "rightBrace" => format!(
-                    "M0,0Q{},0 {},{}V{}Q{},{} {},{}Q{},{} {},{}V{}Q{},{} 0,{}",
-                    f(hc),
-                    f(hc),
-                    f(r),
-                    f(vc - r),
-                    f(hc),
-                    f(vc),
-                    f(w),
-                    f(vc),
-                    f(hc),
-                    f(vc),
-                    f(hc),
-                    f(vc + r),
-                    f(h - r),
-                    f(hc),
-                    f(h),
-                    f(h)
-                ),
-                "bracketPair" => format!(
-                    "{lb}M{},0A{},{} 0 0 1 {},{}V{}A{},{} 0 0 1 {},{}",
-                    f(w - (r * 2.0).min(w)),
-                    f(r),
-                    f(r),
-                    f(w),
-                    f(r),
-                    f(h - r),
-                    f(r),
-                    f(r),
-                    f(w - (r * 2.0).min(w)),
-                    f(h)
-                ),
-                _ => format!(
-                    "M{},0Q0,0 0,{}V{}Q0,{} {},{}M{},0Q{},0 {},{}V{}Q{},{} {},{}",
-                    f(r * 2.0),
-                    f(r * 2.0),
-                    f(h - r * 2.0),
-                    f(h),
-                    f(r * 2.0),
-                    f(h),
-                    f(w - r * 2.0),
-                    f(w),
-                    f(w),
-                    f(r * 2.0),
-                    f(h - r * 2.0),
-                    f(w),
-                    f(h),
-                    f(w - r * 2.0),
-                    f(h)
-                ),
-            };
-            Some(vec![PathSpec::with(d, PathFill::None, true)])
-        }
-        "line" | "straightConnector1" => Some(vec![PathSpec::with(
-            format!("M0,0L{},{}", f(w), f(h)),
-            PathFill::None,
-            true,
-        )]),
-        "bentConnector2" => Some(vec![PathSpec::with(
-            open(&[(0.0, 0.0), (w, 0.0), (w, h)]),
-            PathFill::None,
-            true,
-        )]),
-        "bentConnector3" => {
-            let x = w * a("adj1", 50000.0);
-            Some(vec![PathSpec::with(
-                open(&[(0.0, 0.0), (x, 0.0), (x, h), (w, h)]),
-                PathFill::None,
-                true,
-            )])
-        }
-        "curvedConnector3" => {
-            let x = w * a("adj1", 50000.0);
-            Some(vec![PathSpec::with(
-                format!(
-                    "M0,0C{},0 {},{} {},{}S{},{} {},{}",
-                    f(x / 2.0),
-                    f(x),
-                    f(h / 4.0),
-                    f(x),
-                    f(vc),
-                    f(x + (w - x) / 2.0),
-                    f(h),
-                    f(w),
-                    f(h)
-                ),
-                PathFill::None,
-                true,
-            )])
-        }
-        "cloud" | "cloudCallout" => one(ellipse(hc, vc, hc, vc)),
-        _ => traced_preset(prst, w, h),
-    }
+    // 글상자는 사각형
+    let prst = if prst == "textBox" { "rect" } else { prst };
+    guide_paths(prst, w, h, adj)
 }
 
-/// 한셀 화면에서 따라 그린 윤곽 (`shape_trace.rs`) → 경로들. 동작 단추는 사각형 바탕 위에 그림을 얹는다 (그림은 가운데·짧은
-/// 변 비율), 나머지는 상자 비율로 늘인다
-fn traced_preset(prst: &str, w: f64, h: f64) -> Option<Vec<PathSpec>> {
-    let t = super::shape_trace::traced(prst)?;
-    let ss = w.min(h);
-    let (hc, vc) = (w / 2.0, h / 2.0);
-    let mut out = Vec::new();
-    if prst.starts_with("actionButton") {
-        out.push(PathSpec::new(poly(&[
-            (0.0, 0.0),
-            (w, 0.0),
-            (w, h),
-            (0.0, h),
-        ])));
-    }
-    for l in t.layers {
-        let mut d = String::new();
-        for ring in l.rings {
-            for (i, &(x, y)) in ring.iter().enumerate() {
-                let (px, py) = if t.icon {
-                    (hc + f64::from(x) * ss, vc + f64::from(y) * ss)
-                } else {
-                    (f64::from(x) * w, f64::from(y) * h)
-                };
-                let _ = write!(d, "{}{},{}", if i == 0 { "M" } else { "L" }, f(px), f(py));
-            }
-            d.push('Z');
-        }
-        out.push(PathSpec::with(d, l.fill, l.stroke));
-    }
-    // 가로세로 비율을 따르는 윤곽: x = ax·w + bx·ss, y = ay·h + by·ss
-    for l in t.lin {
-        let mut d = String::new();
-        for ring in l.rings {
-            for (i, &(ax, bx, ay, by)) in ring.iter().enumerate() {
-                let px = f64::from(ax) * w + f64::from(bx) * ss;
-                let py = f64::from(ay) * h + f64::from(by) * ss;
-                let _ = write!(d, "{}{},{}", if i == 0 { "M" } else { "L" }, f(px), f(py));
-            }
-            d.push('Z');
-        }
-        out.push(PathSpec::with(d, l.fill, l.stroke));
-    }
-    // 소리 단추의 소리선 셋 (선만)
-    if prst == "actionButtonSound" {
-        let p = |x: f64, y: f64| (hc + x * ss, vc + y * ss);
-        for (a, b) in [
-            ((0.1906, -0.1413), (0.3741, -0.28)),
-            ((0.1916, 0.0), (0.3716, 0.0)),
-            ((0.1925, 0.1438), (0.3741, 0.2791)),
-        ] {
-            let (p0, p1) = (p(a.0, a.1), p(b.0, b.1));
-            out.push(PathSpec::with(
-                format!("M{},{}L{},{}", f(p0.0), f(p0.1), f(p1.0), f(p1.1)),
-                PathFill::None,
-                true,
-            ));
-        }
-    }
-    Some(out)
-}
-
-/// 정의 글의 경로 한 토막 (바탕 좌표, 각도는 도)
-enum Seg {
-    M((f64, f64)),
-    L((f64, f64)),
-    C([(f64, f64); 3]),
-    A(f64, f64, f64, f64),
-    Z,
-}
-
-/// 축을 맞춘 변환 (뒤집기·가로세로 바꾸기): 점 = M·p + t
-struct Xf {
-    m: [f64; 4],
-    t: (f64, f64),
-}
-
-impl Xf {
-    /// 바탕 크기 (bw × bh) 의 상자가 변환 뒤 (0, 0) 에서 시작하게 옮김을 정한다
-    fn new(m: [f64; 4], bw: f64, bh: f64) -> Xf {
-        let at = |x: f64, y: f64| (m[0] * x + m[1] * y, m[2] * x + m[3] * y);
-        let c = [at(0.0, 0.0), at(bw, 0.0), at(0.0, bh), at(bw, bh)];
-        let min_x = c.iter().map(|p| p.0).fold(f64::MAX, f64::min);
-        let min_y = c.iter().map(|p| p.1).fold(f64::MAX, f64::min);
-        Xf {
-            m,
-            t: (-min_x, -min_y),
-        }
-    }
-
-    fn pt(&self, p: (f64, f64)) -> (f64, f64) {
-        (
-            self.m[0] * p.0 + self.m[1] * p.1 + self.t.0,
-            self.m[2] * p.0 + self.m[3] * p.1 + self.t.1,
-        )
-    }
-
-    /// 호의 가로·세로 반지름, 시작각, 휘는각 (각도는 실제 방향이라 등거리 변환이면 방향 벡터를 그대로 옮기면 된다)
-    fn arc(&self, wr: f64, hr: f64, st: f64, sw: f64) -> (f64, f64, f64, f64) {
-        let (c, s) = (st.to_radians().cos(), st.to_radians().sin());
-        let g = (self.m[2] * c + self.m[3] * s)
-            .atan2(self.m[0] * c + self.m[1] * s)
-            .to_degrees();
-        let det = self.m[0] * self.m[3] - self.m[1] * self.m[2];
-        let (a, b) = if self.m[1] != 0.0 { (hr, wr) } else { (wr, hr) };
-        (a, b, g, sw * det.signum())
-    }
-}
-
-/// 토막들을 SVG 경로 글로 (변환 적용)
-fn segs_svg(segs: &[Seg], xf: &Xf) -> String {
-    let mut d = String::new();
-    // 바탕 좌표의 현재 점·시작점
-    let (mut pt, mut start) = ((0.0f64, 0.0f64), (0.0f64, 0.0f64));
-    for s in segs {
-        match s {
-            Seg::M(p) => {
-                (pt, start) = (*p, *p);
-                let q = xf.pt(*p);
-                let _ = write!(d, "M{},{}", f(q.0), f(q.1));
-            }
-            Seg::L(p) => {
-                pt = *p;
-                let q = xf.pt(*p);
-                let _ = write!(d, "L{},{}", f(q.0), f(q.1));
-            }
-            Seg::C(c) => {
-                let (a, b, e) = (xf.pt(c[0]), xf.pt(c[1]), xf.pt(c[2]));
-                pt = c[2];
-                let _ = write!(
-                    d,
-                    "C{},{} {},{} {},{}",
-                    f(a.0),
-                    f(a.1),
-                    f(b.0),
-                    f(b.1),
-                    f(e.0),
-                    f(e.1)
-                );
-            }
-            Seg::A(wr, hr, st, sw) => {
-                let (a, b, g, w2) = xf.arc(*wr, *hr, *st, *sw);
-                d.push_str(&arc_svg(xf.pt(pt), a, b, g, w2));
-                pt = arc_end(pt, *wr, *hr, *st, *sw);
-            }
-            Seg::Z => {
-                d.push('Z');
-                pt = start;
-            }
-        }
-    }
-    d
-}
-
-/// 수식·경로 정의 글 (`shape_defs.rs`)로 그린 모양. 조정값은 문서의 값(없으면 정의의 기본값)
-fn defined_preset(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> Option<Vec<PathSpec>> {
-    let def = super::shape_defs::def(prst)?;
-    let (text, m) = (def.text, def.xf);
-    let emu = crate::units::EMU_PER_PX as f64;
-    // 가로세로를 바꾸는 변환이면 바탕 모양은 바꾼 크기로 그린다
-    let (bw, bh) = if m[1] != 0.0 { (h, w) } else { (w, h) };
-    let xf = Xf::new(m, bw, bh);
-    let mut gd = Guides::new(bw * emu, bh * emu);
-    let k = 1.0 / emu;
-    let mut out: Vec<PathSpec> = Vec::new();
-    // 지금 만드는 경로: 토막들, 채움, 선
-    let mut cur: Option<(Vec<Seg>, PathFill, bool)> = None;
-    let flush = |cur: &mut Option<(Vec<Seg>, PathFill, bool)>, out: &mut Vec<PathSpec>| {
-        if let Some((segs, fill, stroke)) = cur.take()
-            && !segs.is_empty()
-        {
-            out.push(PathSpec::with(segs_svg(&segs, &xf), fill, stroke));
-        }
+/// 가이드 수식 모양 (`shape_guides.rs`) → 경로들. 정의는 처음 쓸 때 한 번만 읽는다. 조정값은 avLst 의 기본값 위에 문서의 값을 덮어쓴다
+fn guide_paths(prst: &str, w: f64, h: f64, adj: &HashMap<String, f64>) -> Option<Vec<PathSpec>> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<std::sync::Arc<Element>>>>> =
+        OnceLock::new();
+    let xml = super::shape_guides::definition(prst)?;
+    let geom = {
+        let mut cache = CACHE.get_or_init(Default::default).lock().ok()?;
+        cache
+            .entry(prst.to_string())
+            .or_insert_with(|| {
+                crate::xml::parse(&super::shape_guides::expand(xml), "shape_guides")
+                    .ok()
+                    .map(std::sync::Arc::new)
+            })
+            .clone()?
     };
-    for line in text.lines() {
-        let p: Vec<&str> = line.split_whitespace().collect();
-        let Some(&op) = p.first() else { continue };
-        let v = |i: usize, gd: &Guides| gd.get(p.get(i).copied().unwrap_or("0"));
-        match op {
-            "av" if p.len() >= 3 => {
-                let name = p[1];
-                let val = adj
-                    .get(name)
-                    .copied()
-                    .unwrap_or_else(|| p[2].parse().unwrap_or(0.0));
-                gd.vals.insert(name.to_string(), val);
-            }
-            "gd" if p.len() >= 3 => {
-                let val = gd.eval(&p[2..].join(" "));
-                gd.vals.insert(p[1].to_string(), val);
-            }
-            "path" => {
-                flush(&mut cur, &mut out);
-                let fill = p
-                    .iter()
-                    .skip(1)
-                    .find(|t| **t != "nostroke")
-                    .map_or(PathFill::Norm, |t| PathFill::parse(Some(t)));
-                cur = Some((Vec::new(), fill, !p.contains(&"nostroke")));
-            }
-            "M" | "L" | "C" | "A" | "Z" => {
-                let Some((segs, _, _)) = cur.as_mut() else {
-                    continue;
-                };
-                let pt = |i: usize| (v(i, &gd) * k, v(i + 1, &gd) * k);
-                segs.push(match op {
-                    "M" => Seg::M(pt(1)),
-                    "L" => Seg::L(pt(1)),
-                    "C" => Seg::C([pt(1), pt(3), pt(5)]),
-                    "A" => Seg::A(
-                        v(1, &gd) * k,
-                        v(2, &gd) * k,
-                        v(3, &gd) / 60000.0,
-                        v(4, &gd) / 60000.0,
-                    ),
-                    _ => Seg::Z,
-                });
-            }
-            _ => {}
-        }
+    let emu = crate::units::EMU_PER_PX as f64;
+    let mut gd = Guides::new(w * emu, h * emu);
+    gd.define_list(geom.child_ns(A, "avLst"));
+    for (k, v) in adj {
+        gd.set(k, *v);
     }
-    flush(&mut cur, &mut out);
-    if def.reverse {
-        out.reverse();
-    }
+    gd.define_list(geom.child_ns(A, "gdLst"));
+    let list = geom.child_ns(A, "pathLst")?;
+    let out = paths_of(list, &gd, w, h, w * emu, h * emu);
     (!out.is_empty()).then_some(out)
 }
 
@@ -2007,6 +172,13 @@ impl Guides {
             vals: HashMap::new(),
             w,
             h,
+        }
+    }
+
+    /// 이미 정한 값(조정값)을 문서의 값으로 바꾼다
+    pub fn set(&mut self, name: &str, v: f64) {
+        if self.vals.contains_key(name) {
+            self.vals.insert(name.to_string(), v);
         }
     }
 
@@ -2178,13 +350,14 @@ pub(super) fn paths_of(
                 }
                 "quadBezTo" if pts.len() == 2 => {
                     cur = pts[1];
+                    // 한셀은 이차 곡선을 제어점 둘이 같은 삼차 곡선으로 그린다 (진짜 이차 곡선보다 제어점 쪽으로 더 휜다)
                     let _ = write!(
                         d,
-                        "Q{},{} {},{}",
-                        f(pts[0].0),
-                        f(pts[0].1),
+                        "C{c0},{c1} {c0},{c1} {},{}",
                         f(cur.0),
-                        f(cur.1)
+                        f(cur.1),
+                        c0 = f(pts[0].0),
+                        c1 = f(pts[0].1)
                     );
                 }
                 "arcTo" => {
@@ -2193,8 +366,8 @@ pub(super) fn paths_of(
                     let hr = gd.get(c.attr("hR").unwrap_or("0")) * sy;
                     let st = gd.get(c.attr("stAng").unwrap_or("0")) / 60000.0;
                     let sw = gd.get(c.attr("swAng").unwrap_or("0")) / 60000.0;
-                    d.push_str(&arc_svg(cur, wr, hr, st, sw));
-                    cur = arc_end(cur, wr, hr, st, sw);
+                    d.push_str(&arc_svg(cur, (wr, hr), (sx, sy), st, sw));
+                    cur = arc_end(cur, (wr, hr), (sx, sy), st, sw);
                 }
                 "close" => {
                     d.push('Z');
@@ -2212,6 +385,37 @@ pub(super) fn paths_of(
             p.attr_bool("stroke").unwrap_or(true),
         ));
     }
+    fills_then_strokes(out)
+}
+
+/// 한셀은 경로마다 칠하고 긋지 않고, 모든 경로의 채우기를 차례로 칠한 뒤 모든 경로의 선을 긋는다 (차트 X·더하기·별: 선만 있는
+/// 경로가 채운 경로보다 앞에 정의돼도 선이 위에 보인다). 뒤에 채우기가 더 없으면 경로를 그대로 둔다 (한 경로는 채우기·선을 한 번에)
+fn fills_then_strokes(paths: Vec<PathSpec>) -> Vec<PathSpec> {
+    let last_fill = paths.iter().rposition(|p| p.fill != PathFill::None);
+    let mut out = Vec::with_capacity(paths.len());
+    let mut deferred: Vec<PathSpec> = Vec::new();
+    for (i, p) in paths.into_iter().enumerate() {
+        if last_fill.is_some_and(|l| l > i) {
+            // 뒤에 채우기가 더 있다: 선은 미룬다
+            if p.stroke {
+                deferred.push(PathSpec::with(p.d.clone(), PathFill::None, true));
+            }
+            if p.fill != PathFill::None {
+                out.push(PathSpec::with(p.d, p.fill, false));
+            }
+        } else if p.fill != PathFill::None && !deferred.is_empty() {
+            // 마지막 채우기: 채우고, 미룬 선들, 이 경로의 선
+            out.push(PathSpec::with(p.d.clone(), p.fill, false));
+            out.append(&mut deferred);
+            if p.stroke {
+                out.push(PathSpec::with(p.d, PathFill::None, true));
+            }
+        } else {
+            out.append(&mut deferred);
+            out.push(p);
+        }
+    }
+    out.append(&mut deferred);
     out
 }
 
@@ -2221,24 +425,27 @@ fn ellipse_param(wr: f64, hr: f64, deg: f64) -> f64 {
     (wr * a.sin()).atan2(hr * a.cos())
 }
 
-/// 호의 끝점 (현재 점이 시작각 위에 있다)
-fn arc_end(cur: (f64, f64), wr: f64, hr: f64, st: f64, sw: f64) -> (f64, f64) {
-    let t0 = ellipse_param(wr, hr, st);
-    let t1 = ellipse_param(wr, hr, st + sw);
+/// 호의 끝점 (현재 점이 시작각 위에 있다). 반지름 (wr, hr) 은 그릴 크기(px), 각도는 경로 좌표계의 실제 방향이므로
+/// 경로 → px 배율 (kx, ky) 로 되돌린 반지름으로 매개변수 각도를 구한다 (경로 크기가 상자와 다르면 원이 늘어난다)
+fn arc_end(cur: (f64, f64), r: (f64, f64), k: (f64, f64), st: f64, sw: f64) -> (f64, f64) {
+    let (wr, hr) = r;
+    let t0 = ellipse_param(wr / k.0, hr / k.1, st);
+    let t1 = ellipse_param(wr / k.0, hr / k.1, st + sw);
     let (cx, cy) = (cur.0 - wr * t0.cos(), cur.1 - hr * t0.sin());
     (cx + wr * t1.cos(), cy + hr * t1.sin())
 }
 
 /// 호 하나를 SVG 로 (거의 한 바퀴면 반씩 나눈다)
-fn arc_svg(cur: (f64, f64), wr: f64, hr: f64, st: f64, sw: f64) -> String {
+fn arc_svg(cur: (f64, f64), r: (f64, f64), k: (f64, f64), st: f64, sw: f64) -> String {
     if sw.abs() >= 359.9 {
         let half = sw / 2.0;
-        let mid = arc_end(cur, wr, hr, st, half);
-        return arc_svg(cur, wr, hr, st, half) + &arc_svg(mid, wr, hr, st + half, half);
+        let mid = arc_end(cur, r, k, st, half);
+        return arc_svg(cur, r, k, st, half) + &arc_svg(mid, r, k, st + half, half);
     }
-    let end = arc_end(cur, wr, hr, st, sw);
+    let end = arc_end(cur, r, k, st, sw);
     // 각도 방향의 큰 호 판단은 매개변수 각도로
-    let dt = ellipse_param(wr, hr, st + sw) - ellipse_param(wr, hr, st);
+    let (pw, ph) = (r.0 / k.0, r.1 / k.1);
+    let dt = ellipse_param(pw, ph, st + sw) - ellipse_param(pw, ph, st);
     let dt = if sw > 0.0 {
         dt.rem_euclid(std::f64::consts::TAU)
     } else {
@@ -2252,8 +459,8 @@ fn arc_svg(cur: (f64, f64), wr: f64, hr: f64, st: f64, sw: f64) -> String {
     let sweep = if sw > 0.0 { 1 } else { 0 };
     format!(
         "A{},{} 0 {large} {sweep} {},{}",
-        f(wr.abs()),
-        f(hr.abs()),
+        f(r.0.abs()),
+        f(r.1.abs()),
         f(end.0),
         f(end.1)
     )
@@ -2304,9 +511,10 @@ mod tests {
     #[test]
     fn presets() {
         let none = HashMap::new();
+        // 표준 모양 정의의 첫 점: 왼쪽 가운데에서 시작해 위·오른쪽·아래로
         assert_eq!(
             preset_path("diamond", 100.0, 50.0, &none).unwrap(),
-            "M50,0L100,25L50,50L0,25Z"
+            "M0,25L50,0L100,25L50,50Z"
         );
         assert!(
             preset_path("rightArrow", 100.0, 40.0, &none)
@@ -2314,34 +522,66 @@ mod tests {
                 .starts_with("M0,10L80,10")
         );
         assert!(preset_path("unknownShape", 10.0, 10.0, &none).is_none());
-        // 별 8개 꼭짓점: 위 꼭짓점에서 시작 (5·6·7·10 꼭짓점 별은 한셀 화면에서 따라 그린 윤곽)
-        assert!(
-            preset_path("star8", 100.0, 100.0, &none)
-                .unwrap()
-                .starts_with("M50,0")
+        // 글상자는 사각형
+        assert_eq!(
+            preset_path("textBox", 10.0, 10.0, &none),
+            preset_path("rect", 10.0, 10.0, &none)
         );
-        // 따라 그린 윤곽은 기본 조정값일 때만 쓴다
-        let traced = preset_paths("star5", 100.0, 100.0, &none).unwrap();
+        // 조정값이 모양을 바꾼다
         let adjusted = HashMap::from([("adj".to_string(), 30000.0)]);
-        let hand = preset_paths("star5", 100.0, 100.0, &adjusted).unwrap();
-        assert_ne!(traced[0].d, hand[0].d);
-        assert_eq!(preset_paths("cube", 100.0, 100.0, &none).unwrap().len(), 4);
+        assert_ne!(
+            preset_paths("star5", 100.0, 100.0, &none).unwrap()[0].d,
+            preset_paths("star5", 100.0, 100.0, &adjusted).unwrap()[0].d
+        );
+        // 표준 모양 187 개 모두: 빈 경로 없음, 좌표는 유한한 수
+        let all = include_str!("shape_guides.rs")
+            .lines()
+            .filter_map(|l| {
+                l.trim()
+                    .strip_prefix('"')?
+                    .split('"')
+                    .next()
+                    .map(String::from)
+            })
+            .filter(|n| n.chars().all(|c| c.is_ascii_alphanumeric()) && !n.is_empty())
+            .filter(|n| super::super::shape_guides::definition(n).is_some())
+            .collect::<Vec<_>>();
+        assert!(all.len() >= 187, "{}", all.len());
+        for n in &all {
+            for (w, h) in [(120.0, 93.0), (53.0, 200.0), (200.0, 53.0)] {
+                let ps = preset_paths(n, w, h, &none).unwrap_or_else(|| panic!("{n}"));
+                assert!(!ps.is_empty(), "{n}");
+                for p in &ps {
+                    assert!(!p.d.contains("NaN") && !p.d.contains("inf"), "{n}: {}", p.d);
+                }
+            }
+        }
     }
 
     #[test]
-    fn defined_presets_follow_size_and_adjust() {
+    fn arc_shapes_follow_the_aspect_ratio() {
         let none = HashMap::new();
-        // 수식 정의 모양은 어떤 가로세로 비율이든 같은 꼴로 그리고, 조정값을 따른다
-        for (w, h) in [(100.0, 100.0), (180.0, 90.0), (90.0, 180.0)] {
-            for name in ["bentArrow", "uturnArrow"] {
-                let p = defined_preset(name, w, h, &none).unwrap();
-                assert_eq!(p.len(), 1);
-                assert!(p[0].d.starts_with("M0,") && p[0].d.ends_with('Z'), "{name}");
-            }
-        }
-        let thick = HashMap::from([("adj1".to_string(), 40000.0)]);
-        let a = defined_preset("bentArrow", 100.0, 100.0, &none).unwrap();
-        let b = defined_preset("bentArrow", 100.0, 100.0, &thick).unwrap();
-        assert_ne!(a[0].d, b[0].d);
+        // 굽은 아래 화살표의 호는 정사각형 윤곽을 늘인 것이 아니라 가로세로 비율마다 다른 타원 호다
+        let a = preset_paths("curvedDownArrow", 100.0, 100.0, &none).unwrap();
+        let b = preset_paths("curvedDownArrow", 200.0, 50.0, &none).unwrap();
+        let radii = |p: &[PathSpec]| -> Vec<String> {
+            p[0].d
+                .split('A')
+                .skip(1)
+                .filter_map(|s| s.split(' ').next().map(String::from))
+                .collect()
+        };
+        assert!(!radii(&a).is_empty());
+        assert_ne!(radii(&a), radii(&b));
+        // 한셀은 이차 곡선을 제어점 둘이 같은 삼차 곡선으로 그린다
+        let sw = preset_path("swooshArrow", 100.0, 100.0, &none).unwrap();
+        assert!(sw.contains('C') && !sw.contains('Q'));
+        // 선만 있는 경로가 앞에 정의돼도 선은 채우기 위 (차트 X)
+        let x = preset_paths("chartX", 50.0, 50.0, &none).unwrap();
+        assert!(x[0].fill != PathFill::None && !x[0].stroke);
+        assert!(x.last().unwrap().fill == PathFill::None && x.last().unwrap().stroke);
+        // 경로 크기가 상자와 다른 모양(구름)의 호도 늘어난 원: 반지름 비가 상자 비
+        let c = preset_paths("cloud", 200.0, 100.0, &none).unwrap();
+        assert!(c[0].d.contains('A'));
     }
 }
