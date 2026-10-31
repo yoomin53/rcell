@@ -764,6 +764,8 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
     let page_refs: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
     let content_refs: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
 
+    // 한셀 PDF 는 PDF 1.4 이고 쪽마다 MediaBox·TrimBox·BleedBox 가 같다
+    pdf.set_version(1, 4);
     pdf.catalog(catalog).pages(tree);
     pdf.pages(tree)
         .kids(page_refs.iter().copied())
@@ -773,8 +775,11 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
         .producer(TextStr("rcell"));
     for (i, (size, _)) in pages.iter().enumerate() {
         let mut page = pdf.page(page_refs[i]);
+        let media = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
         page.parent(tree)
-            .media_box(Rect::new(0.0, 0.0, size.width as f32, size.height as f32))
+            .media_box(media)
+            .trim_box(media)
+            .bleed_box(media)
             .contents(content_refs[i]);
         let mut res = page.resources();
         let mut f = res.fonts();
@@ -836,7 +841,8 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
             }
             w.finish();
         }
-        let mut flags = FontFlags::SYMBOLIC;
+        // 한셀 PDF 의 글꼴 설명자는 Flags 32 (보통 글꼴)
+        let mut flags = FontFlags::NON_SYMBOLIC;
         if m.fixed {
             flags |= FontFlags::FIXED_PITCH;
         }

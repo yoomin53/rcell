@@ -735,3 +735,20 @@ fn open_recalc_rules() {
     apply_open_recalc(&mut f, OpenRecalc::Full);
     assert_eq!(value(&f, "B1"), CellValue::Number(10.0));
 }
+
+/// 한셀 PDF 의 껍데기: PDF 1.4, 쪽마다 MediaBox·TrimBox·BleedBox 가 같다 (한셀 COM ExportAsFixedFormat 의 PDF 구조 대조)
+#[test]
+fn pdf_has_hcell_shell() {
+    let mut wb = base();
+    fill(&mut wb, "A1:B3");
+    let bytes = rcell::print::workbook_pdf(
+        &wb,
+        &rcell::print::FontDb::new(),
+        &rcell::print::PdfOptions::default(),
+    );
+    assert!(bytes.starts_with(b"%PDF-1.4"));
+    let s = String::from_utf8_lossy(&bytes);
+    for key in ["/MediaBox", "/TrimBox", "/BleedBox"] {
+        assert!(s.contains(key), "{key}");
+    }
+}
