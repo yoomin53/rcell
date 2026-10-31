@@ -1098,6 +1098,10 @@ fn pdf(input: &Path, output: &Path, sheets: &[String], fonts: &[PathBuf]) -> rce
         time,
         max_pages: None,
         quality_settings: false,
+        // 한셀이 열 때 다시 계산하는 칸 (형식·계산 엔진 번호)
+        recalc: std::fs::read(input)
+            .map(|b| rcell::print::open_recalc(&b, &wb))
+            .unwrap_or_default(),
     };
     let bytes = rcell::print::workbook_pdf(&wb, &db, &opts);
     std::fs::write(output, bytes)?;
@@ -1112,8 +1116,16 @@ fn pages(file: &Path) -> rcell::Result<()> {
             .collect::<Vec<_>>()
             .join(",")
     };
+    // 배율 100 의 99 는 인쇄 차례(보이는 시트)에서 키 큰 모드가 아닌 첫 시트만
+    let mut untall_seen = false;
     for (i, sh) in wb.sheets.iter().enumerate() {
-        let p = rcell::print::sheet_print(&wb, i);
+        let visible = sh.state == rcell::model::SheetState::Visible
+            && sh.kind == rcell::model::SheetKind::Worksheet;
+        let p = rcell::print::sheet_print_with(&wb, i, !untall_seen);
+        if visible {
+            untall_seen |=
+                !p.tall && matches!(p.settings.scaling, rcell::print::Scaling::Zoom(100));
+        }
         let scale = match p.settings.scaling {
             rcell::print::Scaling::Zoom(z) => z.to_string(),
             rcell::print::Scaling::Fit { .. } => format!("fit{}", p.page_scale),

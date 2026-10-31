@@ -21,6 +21,7 @@ mod cell;
 mod draw;
 mod icons;
 mod layout;
+pub mod metafile;
 mod metrics;
 mod note;
 mod numfit;

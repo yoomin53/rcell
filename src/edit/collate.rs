@@ -16,6 +16,7 @@
 use std::cmp::Ordering;
 
 use super::collate_data::{HANGUL, IGNORE_CASE, MULTI, TABLES};
+use super::collate_kana::KANA;
 
 /// 글자 하나의 가중치
 enum Weight {
@@ -56,6 +57,16 @@ fn hanja(cp: u32) -> Option<Weight> {
 
 fn weight(c: char, ignore_case: bool) -> Weight {
     let cp = c as u32;
+    // 가나의 탁점·반탁점은 주 가중치 없이 발음 구별 가중치만 (정렬 키 `01 03`·`01 04`)
+    match cp {
+        0x3099 | 0x309B | 0xFF9E => return Weight::One(0, 3, 2),
+        0x309A | 0x309C | 0xFF9F => return Weight::One(0, 4, 2),
+        _ => {}
+    }
+    // 장음·반복 기호(ゝ ゞ ー ヽ ヾ ｰ)는 정렬 키가 모두 같다 (주 가중치 맨 끝)
+    if matches!(cp, 0x309D | 0x309E | 0x30FC | 0x30FD | 0x30FE | 0xFF70) {
+        return Weight::One(0xFFFF, 2, 2);
+    }
     if let Some(w) = hanja(cp) {
         return w;
     }
@@ -108,9 +119,54 @@ struct Key {
     special: Vec<u8>,
 }
 
+/// 가나 글자의 갈래 (1 작은 글자, 2 가타카나, 4 반각) — 가나가 아니면 None
+fn kana_class(c: char) -> Option<u8> {
+    let cp = c as u32;
+    let i = KANA.partition_point(|&(_, b, _)| b < cp);
+    KANA.get(i)
+        .and_then(|&(a, _, f)| (a..).contains(&cp).then_some(f))
+}
+
+/// 가나 글자마다 같은 갈래를 묶음으로: 갈래가 선 글자(c4)까지 그 앞 보통 글자(e4)를 적고 ff 로 닫는다 (갈래가 선 글자가 없으면 ff 만)
+fn kana_group(flags: &[bool]) -> Vec<u8> {
+    let mut v = Vec::new();
+    if let Some(last) = flags.iter().rposition(|&f| f) {
+        v.extend(flags[..=last].iter().map(|&f| if f { 0xC4 } else { 0xE4 }));
+    }
+    v.push(0xFF);
+    v
+}
+
+/// 가나 글자의 모음 가중치: 행마다 8 칸씩 (か행 0x220A … わ행 0x224A) 첫 글자가 `아` 모음, ん·모음 글자는 그대로
+fn kana_vowel(prim: u32) -> u32 {
+    match prim {
+        0x220A..=0x2251 => 0x2202 + (prim - 0x220A) % 8,
+        p => p,
+    }
+}
+
 fn key(s: &str, ignore_case: bool) -> Key {
     let mut k = Key::default();
+    let mut kana: Vec<u8> = Vec::new();
+    // 직전 글자가 가나면 (모음 가중치, 갈래) — 장음 기호(ー ｰ)는 앞 글자의 모음을 되풀이하고 갈래를 물려받는다
+    let mut prev: Option<(u32, u8)> = None;
+    let mut prolonged = 0usize;
     for c in s.chars() {
+        if matches!(c as u32, 0x30FC | 0xFF70)
+            && let Some((v, f)) = prev
+        {
+            k.prim.push(v);
+            k.diac.push(2);
+            k.case.push(2);
+            kana.push(f);
+            prolonged += 1;
+            continue;
+        }
+        let class = kana_class(c);
+        if let Some(f) = class {
+            kana.push(f);
+        }
+        prev = None;
         match weight(c, ignore_case) {
             Weight::Ignore => {}
             Weight::Special(w, cs) => {
@@ -118,10 +174,21 @@ fn key(s: &str, ignore_case: bool) -> Key {
                 k.special
                     .extend_from_slice(&[(pos >> 8) as u8, pos as u8, w, cs]);
             }
+            // 가나의 탁점·반탁점(ﾞ ﾟ ゛ ゜)은 앞 글자의 발음 구별 가중치에 더한다 (ｶﾞ = ｶ 2 + ﾞ 3 = ガ 5)
+            Weight::One(0, d, _)
+                if matches!(c as u32, 0x3099..=0x309C | 0xFF9E | 0xFF9F) && !k.diac.is_empty() =>
+            {
+                if let Some(last) = k.diac.last_mut() {
+                    *last += d;
+                }
+            }
             Weight::One(p, d, cs) => {
                 k.prim.push(p);
                 k.diac.push(d);
                 k.case.push(cs);
+                if let Some(f) = class {
+                    prev = Some((kana_vowel(p), f));
+                }
             }
             Weight::Multi(i) => {
                 let (_, prims, diac, cs, ic) = MULTI[i];
@@ -138,6 +205,25 @@ fn key(s: &str, ignore_case: bool) -> Key {
         while v.last() == Some(&2) {
             v.pop();
         }
+    }
+    // 가나는 특수 부분 맨 앞에 [작은 글자] 02 [가타카나] [반각] 묶음을 둔다 (한셀 정렬 키: ｧ < ァ < ぁ < ｱ < ア < あ,
+    // ｱｲ < アイ < アい < あイ < あい)
+    if !kana.is_empty() {
+        let mut g = kana_group(&kana.iter().map(|f| f & 1 != 0).collect::<Vec<_>>());
+        // 장음 기호마다 `05` 하나 (`03 05 …` 다음에 `02`)
+        if prolonged > 0 {
+            g.push(0x03);
+            g.extend(std::iter::repeat_n(0x05, prolonged));
+        }
+        g.push(0x02);
+        g.extend(kana_group(
+            &kana.iter().map(|f| f & 2 != 0).collect::<Vec<_>>(),
+        ));
+        g.extend(kana_group(
+            &kana.iter().map(|f| f & 4 != 0).collect::<Vec<_>>(),
+        ));
+        g.extend(std::mem::take(&mut k.special));
+        k.special = g;
     }
     k
 }
@@ -193,6 +279,33 @@ mod tests {
         fix(&mut input);
         let got = sorted(&input, false);
         assert_eq!(got, want.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    }
+
+    /// 가나 (한셀 정렬 대조 실험): 작은 글자 < 보통, 반각 < 전각 가타카나 < 히라가나, 장음 기호는 앞 글자의 모음, 탁점은 발음 구별
+    #[test]
+    fn kana_like_hcell() {
+        let want = [
+            "ｧ", "ァ", "ぁ", "ｱ", "ア", "あ", "ｱｲ", "アイ", "アい", "あイ", "あい", "ｲ", "イ",
+            "い", "ヴ", "う゛", "ｶ", "カ", "か", "ｶﾞ", "ガ", "が", "ワ", "わ", "ﾝ", "ン", "ん",
+            "ー",
+        ];
+        for w in want.windows(2) {
+            assert_eq!(
+                compare(w[0], w[1], false),
+                Ordering::Less,
+                "{} < {}",
+                w[0],
+                w[1]
+            );
+        }
+        // 장음 기호끼리는 같다 (안정 정렬이 입력 차례를 지킨다)
+        assert_eq!(compare("ー", "ｰ", false), Ordering::Equal);
+        // 장음 기호 = 앞 글자의 모음 (おー = おお), 앞 글자가 없으면 맨 끝
+        assert_eq!(compare("おー", "おお", false), Ordering::Greater);
+        assert_eq!(compare("おー", "おッｷ", false), Ordering::Less);
+        assert_eq!(compare("キｰ", "ぎぃ", false), Ordering::Less);
+        assert_eq!(compare("ぎぃ", "ギか", false), Ordering::Less);
+        assert_eq!(compare("ーあ", "ん", false), Ordering::Greater);
     }
 
     #[test]

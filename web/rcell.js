@@ -1189,6 +1189,51 @@
     edit({ op: "sort", sheet: sheet, range: rangeText(g), keys: keys, header: header }, true);
   }
 
+  // 데이터 도구: 중복 항목 제거, 텍스트 나누기, 부분합 (한셀 Range.RemoveDuplicates·TextToColumns·Subtotal)
+  function removeDupDialog() {
+    var g = range();
+    if (g.r0 === g.r1 && g.c0 === g.c1) {
+      status("중복을 제거할 범위를 고르세요", true);
+      return;
+    }
+    var t = window.prompt("견줄 열 (범위 안 번호, 쉼표로 여럿 — 비우면 모든 열)", "");
+    if (t == null) return;
+    var cols = t.split(",").map(function (x) { return parseInt(x, 10); }).filter(function (n) { return n > 0; });
+    var header = window.confirm("첫 행이 머리글인가요?");
+    edit({ op: "removeDuplicates", sheet: sheet, range: rangeText(g), columns: cols, header: header }, true);
+  }
+
+  function textToColumnsDialog() {
+    var g = range();
+    var t = window.prompt("구분 문자 (쉼표 , 탭 \\t 세미콜론 ; 공백 _ 중 골라 이어 적기, 그 밖의 글자는 그대로)", ",");
+    if (t == null) return;
+    var o = { op: "textToColumns", sheet: sheet, range: rangeText({ r0: g.r0, c0: sel.active.c, r1: g.r1, c1: sel.active.c }) };
+    var other = "";
+    t.replace(/\\t/g, "\t").split("").forEach(function (ch) {
+      if (ch === ",") o.comma = true;
+      else if (ch === "\t") o.tab = true;
+      else if (ch === ";") o.semicolon = true;
+      else if (ch === "_" || ch === " ") o.space = true;
+      else other = ch;
+    });
+    if (other) o.other = other;
+    o.consecutive = window.confirm("연속된 구분 문자를 하나로 취급할까요?");
+    edit(o, true);
+  }
+
+  function subtotalDialog() {
+    var g = range();
+    var t = window.prompt("부분합 — 기준 열 번호, 함수, 합계 열 번호들 (예: 1,sum,3,4). 함수: sum count average max min product", "1,sum,2");
+    if (t == null) return;
+    var p = t.split(",").map(function (x) { return x.trim(); });
+    var totals = p.slice(2).map(function (x) { return parseInt(x, 10); }).filter(function (n) { return n > 0; });
+    if (!(parseInt(p[0], 10) > 0) || !totals.length) {
+      status("부분합 설정을 읽지 못했습니다: " + t, true);
+      return;
+    }
+    edit({ op: "subtotal", sheet: sheet, range: rangeText({ r0: g.r0, c0: g.c0, r1: g.r0, c1: g.c0 }), groupBy: parseInt(p[0], 10), func: p[1] || "sum", totals: totals }, true);
+  }
+
   // 채우기 핸들: 씨앗 범위 g 를 끌어 넓힌 범위로
   function fillTarget(g, r, c) {
     var down = r - g.r1, up = g.r0 - r, right = c - g.c1, left = g.c0 - c;
@@ -1468,6 +1513,9 @@
       ["내림차순 정렬", function () { sortSel(true); }],
       ["정렬…", sortDialog],
       ["연속 데이터…", seriesDialog],
+      ["중복 항목 제거…", removeDupDialog],
+      ["텍스트 나누기…", textToColumnsDialog],
+      ["부분합…", subtotalDialog],
       ["찾기 (Ctrl+F)", findNext],
       ["바꾸기 (Ctrl+H)", replaceDialog],
       null,

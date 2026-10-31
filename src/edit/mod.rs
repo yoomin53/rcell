@@ -26,12 +26,15 @@ mod cfpaste;
 pub mod clip;
 pub mod collate;
 mod collate_data;
+mod collate_kana;
+pub mod data;
 pub mod fill;
 mod filter;
 pub mod find;
 pub mod input;
 pub mod objects;
 pub mod refs;
+pub mod shapes;
 pub mod sort;
 pub mod special;
 pub mod structure;
@@ -98,6 +101,10 @@ pub enum SheetSel {
     Name(String),
 }
 
+fn yes() -> bool {
+    true
+}
+
 fn one() -> u32 {
     1
 }
@@ -112,6 +119,14 @@ fn shift_up() -> cells::ShiftDir {
 
 fn one_f() -> f64 {
     1.0
+}
+
+/// 텍스트 나누기의 필드 형식 (`col` 은 필드 번호 1부터, `kind` 는 `general` `text` `skip`)
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct FieldSpec {
+    pub col: u32,
+    #[serde(default)]
+    pub kind: String,
 }
 
 /// 편집 명령 하나. 행은 1부터(한셀 화면과 같다), 열은 이름(`C`), 셀·범위는 A1 표기.
@@ -485,6 +500,91 @@ pub enum Edit {
         col: String,
         #[serde(default = "one")]
         count: u32,
+    },
+    /// 중복 항목 제거 (`columns` 는 범위 안 열 번호 1부터 — 비면 모든 열, `header` 면 첫 행은 견주지 않는다)
+    RemoveDuplicates {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(default)]
+        columns: Vec<u32>,
+        #[serde(default)]
+        header: bool,
+    },
+    /// 텍스트 나누기 (한 열을 구분 문자로 — `dest` 가 없으면 그 열에서 시작)
+    TextToColumns {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(default)]
+        dest: Option<String>,
+        #[serde(default)]
+        tab: bool,
+        #[serde(default)]
+        semicolon: bool,
+        #[serde(default)]
+        comma: bool,
+        #[serde(default)]
+        space: bool,
+        /// 그 밖의 구분 문자 (글자 하나)
+        #[serde(default)]
+        other: Option<String>,
+        #[serde(default)]
+        consecutive: bool,
+        /// 묶는 따옴표: `"` (기본), `'`, 빈 글(없음)
+        #[serde(default)]
+        qualifier: Option<String>,
+        #[serde(default)]
+        fields: Vec<FieldSpec>,
+    },
+    /// 부분합 (`group_by`·`totals` 는 범위 안 열 번호 1부터, `func`: sum count average max min product countNums stdev stdevp var varp)
+    Subtotal {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        group_by: u32,
+        #[serde(default)]
+        func: Option<String>,
+        totals: Vec<u32>,
+        #[serde(default = "yes")]
+        replace: bool,
+        #[serde(default)]
+        page_breaks: bool,
+        #[serde(default = "yes")]
+        summary_below: bool,
+    },
+    /// 도형·그림·차트 옮기기·크기 바꾸기 (`shape`: 번호 1부터 또는 이름, 위치·크기는 포인트)
+    MoveShape {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        shape: shapes::ShapeSel,
+        #[serde(default)]
+        left: Option<f64>,
+        #[serde(default)]
+        top: Option<f64>,
+        #[serde(default)]
+        width: Option<f64>,
+        #[serde(default)]
+        height: Option<f64>,
+    },
+    /// 도형·그림·차트 지우기
+    DeleteShape {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        shape: shapes::ShapeSel,
+    },
+    /// 통합 (`sources`: `시트!A1:B5` 꼴 범위 글들, `dest` 부터 값으로 합친다)
+    Consolidate {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        dest: String,
+        sources: Vec<String>,
+        #[serde(default)]
+        func: Option<String>,
+        #[serde(default)]
+        top_row: bool,
+        #[serde(default)]
+        left_column: bool,
     },
     /// 행 높이 자동 맞춤
     AutoFitRows {
@@ -1194,6 +1294,127 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
             objects::autofit_cols(wb, i, c, c + count.max(&1) - 1)?;
             Ok(i)
         }
+        Edit::RemoveDuplicates {
+            sheet,
+            range,
+            columns,
+            header,
+        } => {
+            let i = si(wb, sheet)?;
+            data::remove_duplicates(wb, i, parse_range(range)?, columns, *header)?;
+            Ok(i)
+        }
+        Edit::TextToColumns {
+            sheet,
+            range,
+            dest,
+            tab,
+            semicolon,
+            comma,
+            space,
+            other,
+            consecutive,
+            qualifier,
+            fields,
+        } => {
+            let i = si(wb, sheet)?;
+            let opt = data::SplitOptions {
+                tab: *tab,
+                semicolon: *semicolon,
+                comma: *comma,
+                space: *space,
+                other: other.as_deref().and_then(|t| t.chars().next()),
+                consecutive: *consecutive,
+                qualifier: match qualifier.as_deref() {
+                    None => Some('"'),
+                    Some(q) => q.chars().next(),
+                },
+                fields: fields
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.col,
+                            match f.kind.as_str() {
+                                "text" => data::FieldKind::Text,
+                                "skip" => data::FieldKind::Skip,
+                                _ => data::FieldKind::General,
+                            },
+                        )
+                    })
+                    .collect(),
+            };
+            let d = dest.as_deref().map(|t| t.parse::<CellRef>()).transpose()?;
+            data::text_to_columns(wb, i, parse_range(range)?, d, &opt)?;
+            Ok(i)
+        }
+        Edit::Subtotal {
+            sheet,
+            range,
+            group_by,
+            func,
+            totals,
+            replace,
+            page_breaks,
+            summary_below,
+        } => {
+            let i = si(wb, sheet)?;
+            let o = data::SubtotalOptions {
+                group_by: *group_by,
+                func: func.clone().unwrap_or_else(|| "sum".into()),
+                totals: totals.clone(),
+                replace: *replace,
+                page_breaks: *page_breaks,
+                summary_below: *summary_below,
+            };
+            data::subtotal(wb, i, parse_range(range)?, &o)?;
+            Ok(i)
+        }
+        Edit::MoveShape {
+            sheet,
+            shape,
+            left,
+            top,
+            width,
+            height,
+        } => {
+            let i = si(wb, sheet)?;
+            shapes::move_shape(wb, i, shape, *left, *top, *width, *height)?;
+            Ok(i)
+        }
+        Edit::DeleteShape { sheet, shape } => {
+            let i = si(wb, sheet)?;
+            shapes::delete_shape(wb, i, shape)?;
+            Ok(i)
+        }
+        Edit::Consolidate {
+            sheet,
+            dest,
+            sources,
+            func,
+            top_row,
+            left_column,
+        } => {
+            let i = si(wb, sheet)?;
+            let mut src = Vec::new();
+            for t in sources {
+                // `시트!A1:B5` (시트 이름은 작은따옴표로 묶을 수 있다), 시트가 없으면 대상 시트
+                let (sh, r) = match t.rfind('!') {
+                    Some(k) => {
+                        let name = t[..k].trim_matches('\'').to_string();
+                        (sheet_index(wb, Some(&SheetSel::Name(name)))?, &t[k + 1..])
+                    }
+                    None => (i, t.as_str()),
+                };
+                src.push((sh, parse_range(&r.replace('$', ""))?));
+            }
+            let o = data::ConsolidateOptions {
+                func: func.clone().unwrap_or_else(|| "sum".into()),
+                top_row: *top_row,
+                left_column: *left_column,
+            };
+            data::consolidate(wb, i, dest.parse::<CellRef>()?, &src, &o)?;
+            Ok(i)
+        }
         Edit::AutoFitRows { sheet, row, count } => {
             let i = si(wb, sheet)?;
             let r = row.saturating_sub(1);
@@ -1633,13 +1854,24 @@ pub fn set_input(wb: &mut Workbook, si: usize, r: CellRef, text: &str) -> crate:
             quote_prefix,
         } => {
             let cur_qp = wb.styles.xf(style).is_some_and(|x| x.quote_prefix);
-            let new_style = if num_fmt.is_some() || cur_qp != quote_prefix {
+            // 줄 바꿈이 든 글을 넣으면 한셀은 칸 서식에 자동 줄 바꿈을 켠다 (`'` 앞붙임·`\r\n` 도 같다 — 실험)
+            let cur_wrap = wb
+                .styles
+                .xf(style)
+                .and_then(|x| x.alignment.as_ref())
+                .is_some_and(|a| a.wrap_text);
+            let need_wrap = !cur_wrap && matches!(&value, CellValue::Text(t) if t.contains('\n'));
+            let new_style = if num_fmt.is_some() || cur_qp != quote_prefix || need_wrap {
                 Restyler::default().apply(&mut wb.styles, style, &|_, x| {
                     if let Some(id) = num_fmt {
                         x.num_fmt_id = id;
                         x.apply_number_format = Some(true);
                     }
                     x.quote_prefix = quote_prefix;
+                    if need_wrap {
+                        x.alignment.get_or_insert_with(Default::default).wrap_text = true;
+                        x.apply_alignment = Some(true);
+                    }
                 })
             } else {
                 style

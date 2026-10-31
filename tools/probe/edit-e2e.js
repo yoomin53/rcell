@@ -121,6 +121,15 @@ const SCRIPTS = {
     { op: "deleteValidation", sheet: 0, range: "A1:B20" },
     { op: "deleteComment", sheet: 0, range: "A1:D20" },
   ],
+  data: [
+    { op: "removeDuplicates", sheet: 0, range: "B2:F40", columns: [1, 2], header: true },
+    { op: "textToColumns", sheet: 0, range: "C3:C30", dest: "AK3", comma: true, space: true },
+  ],
+  shapes: [
+    { op: "moveShape", sheet: 0, shape: 1, left: 100.5, top: 60, width: 300 },
+    { op: "moveShape", sheet: 0, shape: 2, left: 20, top: 200 },
+    { op: "deleteShape", sheet: 0, shape: 3 },
+  ],
   sort: [
     { op: "sort", sheet: 0, range: "A1:H40", keys: [{ by: "B" }], header: true },
     { op: "sort", sheet: 0, range: "B3:F30", keys: [{ by: "C", desc: true }, { by: "B" }] },
