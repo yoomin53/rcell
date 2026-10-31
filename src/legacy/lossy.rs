@@ -705,23 +705,6 @@ pub(crate) fn canonical_structured_refs(text: &str, tables: &[String]) -> String
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_font_codes_per_section() {
-        assert_eq!(
-            with_default_fonts("&L왼쪽&C&\"굴림,Bold\"가운데&R&P / &N", "맑은 고딕"),
-            "&L&\"맑은 고딕,Regular\"왼쪽&C&\"굴림,Bold\"가운데&R&\"맑은 고딕,Regular\"&P / &N"
-        );
-        assert_eq!(
-            with_default_fonts("&C&D &T", "맑은 고딕"),
-            "&C&\"맑은 고딕,Regular\"&D &T"
-        );
-    }
-}
-
 /// 한셀이 `.xls` 를 열 때 잃는 것 (한셀이 저장한 `.xls` 61개를 한셀로 다시 열어 `.cell` 로 저장한 것과 맞대 본 결과 —
 /// docs/format/other-formats.md 5.3절). 기본 열기가 이 손실을 그대로 따른다; 원본을 그대로 읽으려면 열기 선택 `keep_original`.
 ///
@@ -862,4 +845,21 @@ fn union_sqref(a: &str, b: &str) -> String {
         }
     }
     format!("{a} {b}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_font_codes_per_section() {
+        assert_eq!(
+            with_default_fonts("&L왼쪽&C&\"굴림,Bold\"가운데&R&P / &N", "맑은 고딕"),
+            "&L&\"맑은 고딕,Regular\"왼쪽&C&\"굴림,Bold\"가운데&R&\"맑은 고딕,Regular\"&P / &N"
+        );
+        assert_eq!(
+            with_default_fonts("&C&D &T", "맑은 고딕"),
+            "&C&\"맑은 고딕,Regular\"&D &T"
+        );
+    }
 }
