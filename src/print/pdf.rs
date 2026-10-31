@@ -409,6 +409,28 @@ fn color(c: [u8; 3]) -> String {
     )
 }
 
+/// 알파가 있는 그림을 한셀 PDF 처럼 1비트 스텐실 마스크 꼴로: 알파 128 이상이 칠해지고, 색은 흰 바탕에 섞어 둔다
+/// (한셀 차트 그림은 그림 전체가 거의 칠해지고, 마스크는 둥근 모서리 밖과 가장자리 두 줄만 뺀다)
+fn stencil_image(mut img: PdfImage) -> PdfImage {
+    let Some(alpha) = img.alpha.take() else {
+        return img;
+    };
+    for (px, a) in img.data.as_chunks_mut::<3>().0.iter_mut().zip(&alpha) {
+        let a = *a as u32;
+        for v in px {
+            *v = ((*v as u32 * a + 255 * (255 - a) + 127) / 255) as u8;
+        }
+    }
+    img.alpha = Some(
+        alpha
+            .iter()
+            .map(|a| if *a >= 128 { 255 } else { 0 })
+            .collect(),
+    );
+    img.stencil = true;
+    img
+}
+
 /// 그리기 목록 → 내용 스트림 (장치 단위). 글꼴은 `/F{n}` (넣은 글꼴 번호), 표준 CID 글꼴은 `/FK`
 fn content(
     ops: &[Op],
@@ -554,7 +576,7 @@ fn content(
                 x1,
                 y1,
                 ops: sub,
-            } => match super::raster::render(sub, (*x0, *y0, *x1, *y1), fonts) {
+            } => match super::raster::render(sub, (*x0, *y0, *x1, *y1), fonts).map(stencil_image) {
                 Some(img) => {
                     let (ox, oy) = (x0.round(), y0.round());
                     let (w, h) = (img.width as f64, img.height as f64);
@@ -890,18 +912,43 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
             x.color_space().device_rgb();
         }
         if let Some(m) = mask {
-            x.s_mask(*m);
+            if im.stencil {
+                x.pair(Name(b"Mask"), *m);
+            } else {
+                x.s_mask(*m);
+            }
         }
         x.finish();
         if let (Some(m), Some(a)) = (mask, &im.alpha) {
-            let z = deflate(a);
-            let mut x = pdf.image_xobject(*m, &z);
-            x.filter(Filter::FlateDecode);
-            x.width(im.width as i32);
-            x.height(im.height as i32);
-            x.bits_per_component(8);
-            x.color_space().device_gray();
-            x.finish();
+            if im.stencil {
+                // 1비트: 1 = 가려진다 (칠하지 않는다), 0 = 칠한다. 줄마다 바이트로 채운다
+                let stride = (im.width as usize).div_ceil(8);
+                let mut bits = vec![0u8; stride * im.height as usize];
+                for y in 0..im.height as usize {
+                    for x in 0..im.width as usize {
+                        if a[y * im.width as usize + x] == 0 {
+                            bits[y * stride + x / 8] |= 0x80 >> (x % 8);
+                        }
+                    }
+                }
+                let z = deflate(&bits);
+                let mut x = pdf.image_xobject(*m, &z);
+                x.filter(Filter::FlateDecode);
+                x.width(im.width as i32);
+                x.height(im.height as i32);
+                x.bits_per_component(1);
+                x.image_mask(true);
+                x.finish();
+            } else {
+                let z = deflate(a);
+                let mut x = pdf.image_xobject(*m, &z);
+                x.filter(Filter::FlateDecode);
+                x.width(im.width as i32);
+                x.height(im.height as i32);
+                x.bits_per_component(8);
+                x.color_space().device_gray();
+                x.finish();
+            }
         }
     }
     // 글꼴 파일이 없는 글자: 한국어 표준 CID 글꼴 (보는 프로그램의 대체 글꼴)
@@ -968,4 +1015,24 @@ S"
         assert_eq!(num(-0.0001), "0");
         assert_eq!(num(2.5), "2.5");
     }
-}
+}    /// 알파 그림 → 한셀 PDF 꼴 스텐실: 알파 128 이상만 칠하고 색은 흰 바탕에 섞는다
+    #[test]
+    fn stencil_image_composites_over_white() {
+        let img = PdfImage {
+            width: 3,
+            height: 1,
+            components: 3,
+            dct: false,
+            data: vec![255, 0, 0, 0, 0, 255, 0, 255, 0],
+            alpha: Some(vec![255, 128, 40]),
+            stencil: false,
+        };
+        let s = stencil_image(img);
+        assert!(s.stencil);
+        assert_eq!(s.alpha.as_deref(), Some(&[255u8, 255, 0][..]));
+        // 불투명은 그대로, 반투명(128)은 흰색과 섞인다
+        assert_eq!(&s.data[0..3], &[255, 0, 0]);
+        assert_eq!(&s.data[3..6], &[127, 127, 255]);
+    }
+
+

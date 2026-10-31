@@ -271,6 +271,7 @@ pub fn render(
         dct: false,
         data: rgb,
         alpha: (!opaque).then_some(alpha),
+        stencil: false,
     })
 }
 

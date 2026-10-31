@@ -1655,11 +1655,12 @@ fn object_ops(
                 if rot == 0.0 && !fh && !fv && ch.legacy.is_none() {
                     let mut sub = Vec::new();
                     super::svgops::svg_ops(&svg, m, &mw, &mut sub);
+                    // 한셀 차트 그림은 상자보다 아래로 두 줄 더 높고 (칠하지 않는 줄 — 마스크가 가린다), 위·왼쪽·너비는 상자와 같다
                     ops.push(Op::Raster {
                         x0: x,
                         y0: y,
                         x1: x + w,
-                        y1: y + h,
+                        y1: y + h + 2.0,
                         ops: sub,
                     });
                 } else {
@@ -1764,9 +1765,18 @@ pub fn objects_ops(
             v.last().copied().unwrap_or(0.0) + (i as usize - n) as f64 * dflt
         })
     };
+    // 페이지 첫 열·행의 자리: 앞 페이지들에 찍힌 열·행의 인쇄 크기(장치 단위)의 합 (한셀 PDF: 둘째 쪽 차트 자리 — 개체가 쪽을 넘을 때
+    // 절대 px × 배율이 아니라 인쇄 열 너비(정수 px × 6.25)를 쌓는다). 인쇄 크기를 모르면 절대 px
+    let page0 = |dev: &[f64], first: u32, abs: &[f64], dflt: f64| -> f64 {
+        if (first as usize) <= dev.len() && !dev.is_empty() && k > 0.0 {
+            dev[..first as usize].iter().sum::<f64>() / k
+        } else {
+            start(abs, first, dflt)
+        }
+    };
     let (x_page0, y_page0) = (
-        start(&frame.col_abs, fc.0, 64.0),
-        start(&frame.row_abs, fr.0, 20.0),
+        page0(&frame.col_dev, fc.0, &frame.col_abs, 64.0),
+        page0(&frame.row_dev, fr.0, &frame.row_abs, 20.0),
     );
     let at = |m: &crate::model::Marker| -> Option<(f64, f64)> {
         Some((
