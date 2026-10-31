@@ -265,6 +265,18 @@ async function main() {
     await cdp.eval("rcellEditor.edit({ op: \"replace\", find: \"목\", replace: \"목요일\" })");
     check("바꾸기", (await cdp.eval("rcellEditor.cell(\"O4\").input")) === "목요일");
 
+    // 데이터 도구: 중복 항목 제거, 텍스트 나누기, 부분합 (빈 자리 AA 열에 만든다)
+    for (const [cell, v] of [["AA1", "k"], ["AB1", "v"], ["AA2", "a"], ["AB2", "1"], ["AA3", "A"], ["AB3", "1"], ["AA4", "b"], ["AB4", "2"]]) {
+      await cdp.eval(`rcellEditor.edit({ op: "set", cell: "${cell}", input: "${v}" })`);
+    }
+    await cdp.eval("rcellEditor.edit({ op: \"removeDuplicates\", range: \"AA1:AB4\", columns: [1, 2], header: true })");
+    check("중복 항목 제거", (await cdp.eval("rcellEditor.cell(\"AA3\").input")) === "b" && (await cdp.eval("rcellEditor.cell(\"AA4\").input")) === "");
+    await cdp.eval("rcellEditor.edit({ op: \"set\", cell: \"AD1\", input: \"x,y\" })");
+    await cdp.eval("rcellEditor.edit({ op: \"textToColumns\", range: \"AD1\", dest: \"AF1\", comma: true })");
+    check("텍스트 나누기", (await cdp.eval("rcellEditor.cell(\"AG1\").input")) === "y");
+    await cdp.eval("rcellEditor.edit({ op: \"subtotal\", range: \"AA1\", groupBy: 1, func: \"sum\", totals: [2] })");
+    check("부분합", String(await cdp.eval("rcellEditor.cell(\"AA3\").input")).endsWith("합계"), await cdp.eval("rcellEditor.cell(\"AA3\").input"));
+
     const shot1 = await cdp.send("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(outDir, "smoke-edit.png"), Buffer.from(shot1.data, "base64"));
 
