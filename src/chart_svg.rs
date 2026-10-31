@@ -45,7 +45,7 @@ const VAL_GAP: f64 = 14.0;
 const LEG_ROW: f64 = 18.0;
 const LEG_KEY: f64 = 8.0;
 const LEG_KEY_GAP: f64 = 5.0;
-const LEG_RIGHT: f64 = 12.5;
+const LEG_RIGHT: f64 = 10.0;
 const LEG_PLOT_GAP: f64 = 15.0;
 const LEG_LINE: (f64, f64, f64, f64) = (16.0, 1.5, 11.5, 9.5);
 
@@ -409,6 +409,9 @@ impl Font {
                 } else if c == '/' {
                     // 레거시 값 레이블 "/표준" 이 10pt 돋움에서 31px (한셀 화면)
                     0.38
+                } else if c == '%' && self.family.as_deref().is_some_and(|f| f.contains("돋움")) {
+                    // 레거시 100% 축 레이블 "100%" 가 10pt 돋움에서 32.5px (한셀 화면: 축이 틀 + 60, 레이블 시작 + 20)
+                    0.94
                 } else if c.is_ascii_uppercase() {
                     0.64
                 } else {
