@@ -431,6 +431,19 @@ function Invoke-Edit($wb, $e) {
         "unprotectWorkbook" {
             if ($null -ne $e.password) { [void]$wb.Unprotect([string]$e.password) } else { [void]$wb.Unprotect() }
         }
+        "autoFilter" {
+            # 자동 필터 (Range.AutoFilter): range 만 주면 켠다(이미 켜져 있으면 끈다), field(1부터)·criteria1·operator·criteria2·values 로 조건
+            $M = [Type]::Missing
+            $rg = $ws.Range([string]$e.range)
+            if ($null -eq $e.field) { [void]$rg.AutoFilter() }
+            else {
+                $c1 = if ($null -ne $e.values) { [object[]]@($e.values | ForEach-Object { [string]$_ }) } elseif ($null -ne $e.criteria1) { [string]$e.criteria1 } else { $M }
+                $op = if ($null -ne $e.operator) { @{ "and" = 1; "or" = 2; "top" = 3; "bottom" = 4; "topPercent" = 5; "bottomPercent" = 6 }[[string]$e.operator] } elseif ($null -ne $e.values) { 7 } else { $M }
+                $c2 = if ($null -ne $e.criteria2) { [string]$e.criteria2 } else { $M }
+                [void]$rg.AutoFilter([int]$e.field, $c1, $op, $c2)
+            }
+        }
+        "showAllData" { if ($ws.FilterMode) { $ws.ShowAllData() } }
         "setView" {
             # 보기 설정 (ActiveWindow — 창이 보여야 적용된다): 확대율·눈금선·머리글·0 표시·수식 보기·보기 방식
             $a = $wb.Application

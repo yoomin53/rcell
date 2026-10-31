@@ -125,6 +125,11 @@ const SCRIPTS = {
     { op: "removeDuplicates", sheet: 0, range: "B2:F40", columns: [1, 2], header: true },
     { op: "textToColumns", sheet: 0, range: "C3:C30", dest: "AK3", comma: true, space: true },
   ],
+  filter: [
+    { op: "autoFilter", sheet: 0, range: "A1:F30", field: 3, criteria1: ">=1" },
+    { op: "autoFilter", sheet: 0, range: "A1:F30", field: 2, criteria1: "항목 2" },
+    { op: "autoFilter", sheet: 0, range: "A1:F30", field: 1, criteria1: "3", operator: "top" },
+  ],
   view: [
     { op: "setView", sheet: 0, zoom: 130, gridlines: false, headings: false },
     { op: "setView", sheet: 0, view: "pageBreakPreview", zoom: 90 },

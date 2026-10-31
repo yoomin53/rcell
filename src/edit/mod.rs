@@ -29,7 +29,7 @@ mod collate_data;
 mod collate_kana;
 pub mod data;
 pub mod fill;
-mod filter;
+pub mod filter;
 pub mod find;
 pub mod input;
 pub mod objects;
@@ -692,6 +692,27 @@ pub enum Edit {
     },
     /// 틀 고정 풀기
     Unfreeze {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+    },
+    /// 자동 필터 켜기·끄기·조건 걸기 (`field` 없이 `range` 만이면 켜고 이미 켜져 있으면 끈다, `field`(1부터)와 `criteria1` 로
+    /// 조건, `criteria1` 없이 `field` 만이면 그 열 조건 지우기 — 22절)
+    AutoFilter {
+        #[serde(default)]
+        sheet: Option<SheetSel>,
+        range: String,
+        #[serde(default)]
+        field: Option<u32>,
+        #[serde(default)]
+        criteria1: Option<String>,
+        /// `and`(기본) / `or` / `top` / `bottom` / `topPercent` / `bottomPercent`
+        #[serde(default)]
+        operator: Option<String>,
+        #[serde(default)]
+        criteria2: Option<String>,
+    },
+    /// 필터 조건을 모두 지우고 숨긴 행을 보인다 (자동 필터는 그대로)
+    ShowAllData {
         #[serde(default)]
         sheet: Option<SheetSel>,
     },
@@ -1515,6 +1536,31 @@ pub fn apply(wb: &mut Workbook, e: &Edit) -> crate::Result<usize> {
         Edit::Unfreeze { sheet } => {
             let i = si(wb, sheet)?;
             view::unfreeze(wb, i)?;
+            Ok(i)
+        }
+        Edit::AutoFilter {
+            sheet,
+            range,
+            field,
+            criteria1,
+            operator,
+            criteria2,
+        } => {
+            let i = si(wb, sheet)?;
+            filter::auto_filter(
+                wb,
+                i,
+                parse_range(range)?,
+                *field,
+                criteria1.as_deref(),
+                operator.as_deref(),
+                criteria2.as_deref(),
+            )?;
+            Ok(i)
+        }
+        Edit::ShowAllData { sheet } => {
+            let i = si(wb, sheet)?;
+            filter::show_all_data(wb, i)?;
             Ok(i)
         }
         Edit::PageSetup { sheet, p } => {
