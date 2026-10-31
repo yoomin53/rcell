@@ -360,6 +360,7 @@ pub(crate) fn moved_comment_box(
     new: &crate::render::Geometry,
     a: [u32; 8],
     cell: CellRef,
+    cap: bool,
 ) -> [u32; 8] {
     let (oc, nc) = (anchor_cols(old), anchor_cols(new));
     let left = if a[0] == 0 {
@@ -370,10 +371,46 @@ pub(crate) fn moved_comment_box(
     let width = at_px(&oc, a[4], a[5]) - left;
     let height = at_px(&old.rows, a[6], a[7]) - at_px(&old.rows, a[2], a[3]);
     let (lc, lo) = (cell.col, 14);
-    let (tr, to) = (cell.row.saturating_sub(2), 10);
-    let (rc, ro) = locate_px(&nc, (at_px(&nc, lc, lo) + width).max(0));
+    let (tr, to) = (up_visible(&new.rows, cell.row, 2), 10);
+    // A 열에서 시작한 상자의 오른쪽 끝은 새 시작 열의 오른쪽 가장자리 − 1px 를 넘지 못한다 (한셀 — 옛 끝이 69 든 70 이든
+    // 옮기면 `70`, 다시 옮기면 `0`; 대조 실험 cb1·cb2)
+    let mut end = (at_px(&nc, lc, lo) + width).max(0);
+    if cap
+        && a[0] == 0
+        && let Some(&(l, w)) = nc.get(lc as usize)
+    {
+        end = end.min(l as i64 + w as i64 - 1);
+    }
+    let (rc, ro) = locate_end_col(&nc, end);
     let (br, bo) = locate_px(&new.rows, (at_px(&new.rows, tr, to) + height).max(0));
     [lc, lo, tr, to, rc, ro, br, bo]
+}
+
+/// 끝 열 자리: 열 경계에 닿으면 앞 열의 끝(열 너비)으로 적는다 (한셀 — 끝이 C 열 너비에 닿으면 `2, 70`, 행은 다음 행 처음, cb1)
+fn locate_end_col(list: &[(u32, u32)], pos: i64) -> (u32, u32) {
+    for (i, &(l, w)) in list.iter().enumerate() {
+        if pos > l as i64 && pos <= (l + w) as i64 {
+            return (i as u32, (pos - l as i64) as u32);
+        }
+    }
+    locate_px(list, pos)
+}
+
+/// 메모 상자 끝 제한(A 열에서 시작한 상자)을 쓰는가: 화면 배율이 100 일 때만 맞는다 (다른 배율은 1px 씩 달라진다, docs/editing.md 11절)
+pub(crate) fn box_cap(sheet: &Sheet) -> bool {
+    sheet.view.zoom_scale.unwrap_or(100) == 100
+}
+
+/// 보이는 행 `n` 개만큼 위의 행 (숨긴 행은 세지 않고 건너뛴다 — 한셀의 메모 상자 자리, 대조 실험 cb1)
+pub(crate) fn up_visible(rows: &[(u32, u32)], row: u32, n: u32) -> u32 {
+    let (mut r, mut k) = (row, 0);
+    while r > 0 && k < n {
+        r -= 1;
+        if rows.get(r as usize).is_none_or(|x| x.1 > 0) {
+            k += 1;
+        }
+    }
+    r
 }
 
 /// 메모 상자가 닿는 가장 큰 행·열
@@ -1513,11 +1550,12 @@ pub fn shift(wb: &mut Workbook, si: usize, op: Shift) -> crate::Result<()> {
         };
         let new = crate::render::sheet_geometry(wb, &wb.sheets[si], ext.0 + n, ext.1 + n);
         let sheet = &mut wb.sheets[si];
+        let cap = box_cap(sheet);
         for (i, a) in moved_boxes {
             let c = &mut sheet.comments[i];
             let cell = c.cell;
             if let Some(s) = &mut c.shape {
-                s.anchor = moved_comment_box(&old, &new, a, cell);
+                s.anchor = moved_comment_box(&old, &new, a, cell, cap);
             }
         }
     }
