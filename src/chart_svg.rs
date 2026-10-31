@@ -2329,7 +2329,10 @@ fn draw_axis_chart(
     };
     let cat_dy = |f: &Font| {
         if legacy {
-            f.px() * 1.39 - 1.0 + if legacy_wide_cats { 8.0 } else { 0.0 }
+            // 한글 항목 이름은 한 줄 더 위 (한셀 화면: "1월" 이름 잉크가 숫자 이름보다 1px 위)
+            let hangul = cats.iter().any(|c| c.chars().any(crate::render::is_wide));
+            f.px() * 1.39 - if hangul { 2.0 } else { 1.0 }
+                + if legacy_wide_cats { 8.0 } else { 0.0 }
         } else {
             22.5 * f.size / BASE_PT + f.px() * 0.35
         }
