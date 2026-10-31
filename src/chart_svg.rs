@@ -1783,7 +1783,7 @@ fn draw_axis_chart(
     };
     // 원근 3차원 (rAngAx 0): 상자를 돌려 그린다. 레거시 3차원(VtChart)도 원근 상자로 (회전·높이는 VtChartPlot)
     if first.three_d
-        && !horizontal
+        && (!horizontal || (legacy && first.kind == "bar"))
         && !xy
         && matches!(first.kind, "bar" | "line" | "area")
         && ((legacy
@@ -1809,9 +1809,15 @@ fn draw_axis_chart(
             val_font: &val_font,
             cat_font: &cat_font,
             range: (vlo, vhi, percent),
-            left: inner.x + val_label_w,
+            left: inner.x
+                + if horizontal {
+                    cats.iter().map(|c| cat_font.width(c)).fold(0.0, f64::max) + VAL_GAP
+                } else {
+                    val_label_w
+                },
             right: inner.x + inner.w,
             h,
+            horizontal,
         };
         draw_perspective(out, ch, groups, cx, &p);
         return;
@@ -2952,14 +2958,18 @@ struct Persp<'a> {
     left: f64,
     right: f64,
     h: f64,
+    /// 가로 막대: 값이 상자 가로, 항목이 상자 세로
+    horizontal: bool,
 }
 
 /// 한셀 화면의 원근 3차원 상자 (c2_e4_line3d 15/20/30 과 c2_e4_bar3d_a 30/45/50/200 의 모서리 13개를 한 모형으로
 /// 맞춘 값 — 평균 오차 2.5px): 가로 1 × 높이 0.675 × 깊이 0.163 상자를 세로축으로 rotY, 가로축으로 rotX 돌리고 가로의
 /// 2.46 배 거리에서 원근으로 본다. 원근값·깊이 비율은 두 표본에서 상자를 바꾸지 않는다
 const BOX3D: (f64, f64, f64) = (0.675, 0.163, 2.458);
-/// 레거시(VtChart) 3차원 상자: 높이가 가로와 같다 (차트 종류 실험의 3차원 세로 막대)
-const LEGACY_BOX3D: (f64, f64, f64) = (1.0, 0.163, 2.458);
+/// 레거시(VtChart) 3차원 상자 (높이 0.9·깊이 0.107, 차트 종류 실험의 3차원 세로·가로 막대 6종을 한 모형으로 맞춘 값)
+const LEGACY_BOX3D: (f64, f64, f64) = (0.9, 0.1068, 2.458);
+/// 레거시 회전·높이에 더하는 각 (도, 높이·회전) — 차트 종류 실험의 3차원 세로·가로 막대 6종을 한 모형으로 맞춘 값
+const LEGACY_DROT: (f64, f64) = (-2.25, 3.75);
 
 struct View3 {
     /// 상자 (높이, 깊이, 보는 거리) — 가로 1 기준
@@ -3007,14 +3017,17 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
     let v3 = ch.view3d.as_ref();
     // 레거시: VtChart 회전은 정면이 90 (70 → 오른쪽에서 20도), 높이는 그대로
     let (rx, ry) = match &ch.legacy {
-        Some(l) => (l.elevation.to_radians(), (90.0 - l.rotation).to_radians()),
+        Some(l) => (
+            (l.elevation + LEGACY_DROT.0).to_radians(),
+            (90.0 - l.rotation + LEGACY_DROT.1).to_radians(),
+        ),
         None => (
             f64::from(v3.and_then(|v| v.rot_x).unwrap_or(15)).to_radians(),
             f64::from(v3.and_then(|v| v.rot_y).unwrap_or(20)).to_radians(),
         ),
     };
     let bx = if ch.legacy.is_some() {
-        LEGACY_BOX3D
+        (LEGACY_BOX3D.0, LEGACY_BOX3D.1, LEGACY_BOX3D.2)
     } else {
         BOX3D
     };
@@ -3054,23 +3067,30 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
     v.oy = top + v.k * y1;
     v.ox = (p.left + p.right) / 2.0 - v.k * (x0 + x1) / 2.0;
 
-    // 값 눈금: 앞 왼쪽 세로 모서리 길이로
-    let (_, a0) = v.p(0.0, 0.0, 0.0);
-    let (_, a1) = v.p(0.0, hh, 0.0);
+    // 값 눈금: 앞 왼쪽 세로 모서리 길이로 (가로 막대는 바닥 앞 모서리 길이로)
+    let hz = p.horizontal;
+    let (a0x, a0) = v.p(0.0, 0.0, 0.0);
+    let (a1x, a1) = if hz {
+        v.p(1.0, 0.0, 0.0)
+    } else {
+        v.p(0.0, hh, 0.0)
+    };
     let (vlo, vhi, percent) = p.range;
     let sc = make_scale(
         vlo,
         vhi,
         p.val_ax,
-        (a0 - a1).abs(),
+        (a0x - a1x).hypot(a0 - a1),
         true,
-        if ch.legacy.is_some() {
-            TickRule::Legacy { room: false }
-        } else {
-            TickRule::Xml { room: false }
+        match (ch.legacy.is_some(), hz) {
+            (true, true) => TickRule::LegacyH { room: false },
+            (true, false) => TickRule::Legacy { room: false },
+            _ => TickRule::Xml { room: false },
         },
     );
-    let yv = |val: f64| sc.t(val).clamp(0.0, 1.0) * hh;
+    // 값 → 상자 좌표 (세로: y 0..높이, 가로 막대: x 0..1)
+    let vext = if hz { 1.0 } else { hh };
+    let yv = |val: f64| sc.t(val).clamp(0.0, 1.0) * vext;
     let gray = |sp: Option<&ChartShapeProps>| cx.line_of(sp, Some((AXIS_GRAY, 1.0)));
     let line3 = |out: &mut Svg, a: (f64, f64, f64), b: (f64, f64, f64), st: &Stroke| {
         let (x0, y0) = v.p(a.0, a.1, a.2);
@@ -3083,8 +3103,14 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
     {
         for t in sc.ticks() {
             let y = yv(t);
-            line3(out, (0.0, y, 0.0), (0.0, y, dd), &st);
-            line3(out, (0.0, y, dd), (1.0, y, dd), &st);
+            if hz {
+                // 가로 막대: 바닥의 깊이 선과 뒷벽의 세로 선
+                line3(out, (y, 0.0, 0.0), (y, 0.0, dd), &st);
+                line3(out, (y, 0.0, dd), (y, hh, dd), &st);
+            } else {
+                line3(out, (0.0, y, 0.0), (0.0, y, dd), &st);
+                line3(out, (0.0, y, dd), (1.0, y, dd), &st);
+            }
         }
     }
     let axis_st = Stroke::new(AXIS_GRAY, 1.0);
@@ -3094,7 +3120,7 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
     // 레거시: 옆벽·바닥은 두꺼운 회색 판 (999999, 테두리 808080) — 앞에서 보이는 두께 옆벽 14px·바닥 9px
     // (차트 종류 실험의 3차원 세로 막대)
     let slab = if ch.legacy.is_some() {
-        (14.0, 9.0)
+        (8.4, 5.25)
     } else {
         (0.0, 0.0)
     };
@@ -3169,7 +3195,8 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
                         let color = series_color(s, g.offset + i, cx);
                         let st = point_style(s, i, k, cx, &color);
                         let front = st.fill.as_ref().map_or(color.as_str(), |f| f.0.as_str());
-                        let (bx0, ya, yb) = if stacked {
+                        // 항목 방향 시작 (가로 0..1 비율), 값 방향 [va, vb]
+                        let (c0, va, vb) = if stacked {
                             let d = if g.grouping == "percentStacked" && total > 0.0 {
                                 val / total
                             } else {
@@ -3185,7 +3212,12 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
                                 yv(val),
                             )
                         };
-                        let bx1 = bx0 + slot;
+                        // 상자 좌표: 세로 막대는 항목이 x·값이 y, 가로 막대는 값이 x·항목이 y
+                        let (bx0, bx1, ya, yb) = if hz {
+                            (va, vb, c0 * hh, (c0 + slot) * hh)
+                        } else {
+                            (c0, c0 + slot, va, vb)
+                        };
                         let sx = if v.sb >= 0.0 { bx1 } else { bx0 };
                         out.path(
                             &v.path(&[(sx, ya, z0), (sx, yb, z0), (sx, yb, z1), (sx, ya, z1)]),
@@ -3265,45 +3297,83 @@ fn draw_perspective(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, p: &P
         }
     }
 
-    // 값 축: 앞 왼쪽 세로 모서리, 눈금은 앞쪽으로, 레이블은 그 왼쪽
+    // 값 축: 앞 왼쪽 세로 모서리, 눈금은 앞쪽으로, 레이블은 그 왼쪽 (가로 막대는 바닥 앞 모서리, 레이블은 그 아래)
     if axis_visible(p.val_ax) {
         let st = gray(p.val_ax.and_then(|a| a.sp_pr.as_ref())).unwrap_or(axis_st.clone());
-        line3(out, (0.0, 0.0, 0.0), (0.0, hh, 0.0), &st);
+        if hz {
+            line3(out, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), &st);
+        } else {
+            line3(out, (0.0, 0.0, 0.0), (0.0, hh, 0.0), &st);
+        }
         for t in sc.ticks() {
             let y = yv(t);
-            line3(out, (0.0, y, 0.0), (0.0, y, -dd * 0.18), &st);
+            let (from, to) = if hz {
+                ((y, 0.0, 0.0), (y, 0.0, -dd * 0.18))
+            } else {
+                ((0.0, y, 0.0), (0.0, y, -dd * 0.18))
+            };
+            line3(out, from, to, &st);
             if labels_on(p.val_ax) {
-                let (a, b) = v.p(0.0, y, 0.0);
+                let (a, b) = if hz {
+                    v.p(y, 0.0, 0.0)
+                } else {
+                    v.p(0.0, y, 0.0)
+                };
                 let label = tick_label(t, p.val_ax, p.val_fmt, percent);
-                out.text(
-                    a - 9.0,
-                    b + p.val_font.px() * 0.35,
-                    &label,
-                    p.val_font,
-                    "end",
-                );
+                if hz {
+                    out.text(
+                        a + 25.0,
+                        b + slab.1 + 1.5 + p.val_font.px() * 0.35,
+                        &label,
+                        p.val_font,
+                        "end",
+                    );
+                } else {
+                    out.text(
+                        a - 9.0,
+                        b + p.val_font.px() * 0.35,
+                        &label,
+                        p.val_font,
+                        "end",
+                    );
+                }
             }
         }
     }
     // 항목 축: 바닥 앞 모서리, 눈금은 띠 경계에서 앞쪽으로, 레이블은 띠 가운데의 왼쪽 아래
+    // (가로 막대는 앞 왼쪽 세로 모서리, 레이블은 띠 가운데의 왼쪽)
     if axis_visible(p.cat_ax) {
         let st = gray(p.cat_ax.and_then(|a| a.sp_pr.as_ref())).unwrap_or(axis_st.clone());
-        line3(out, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), &st);
+        if hz {
+            line3(out, (0.0, 0.0, 0.0), (0.0, hh, 0.0), &st);
+        } else {
+            line3(out, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), &st);
+        }
         for k in 0..=n {
             let x = k as f64 / n as f64;
-            line3(out, (x, 0.0, 0.0), (x, 0.0, -dd * 0.18), &st);
+            let (from, to) = if hz {
+                ((0.0, x * hh, 0.0), (0.0, x * hh, -dd * 0.18))
+            } else {
+                ((x, 0.0, 0.0), (x, 0.0, -dd * 0.18))
+            };
+            line3(out, from, to, &st);
         }
         if labels_on(p.cat_ax) {
             for (k, c) in p.cats.iter().enumerate().take(n) {
-                let (a, b) = v.p((k as f64 + 0.5) / n as f64, 0.0, 0.0);
                 let t = cat_text(c, p.cat_fmt);
-                out.text(
-                    a - 9.0,
-                    b + if slab.1 > 0.0 { slab.1 + 9.0 } else { 21.0 } + p.cat_font.px() * 0.35,
-                    &t,
-                    p.cat_font,
-                    "middle",
-                );
+                if hz {
+                    let (a, b) = v.p(0.0, (k as f64 + 0.5) / n as f64 * hh, 0.0);
+                    out.text(a - 9.0, b + p.cat_font.px() * 0.35, &t, p.cat_font, "end");
+                } else {
+                    let (a, b) = v.p((k as f64 + 0.5) / n as f64, 0.0, 0.0);
+                    out.text(
+                        a - 9.0,
+                        b + if slab.1 > 0.0 { slab.1 + 9.0 } else { 21.0 } + p.cat_font.px() * 0.35,
+                        &t,
+                        p.cat_font,
+                        "middle",
+                    );
+                }
             }
         }
     }
