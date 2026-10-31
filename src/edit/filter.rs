@@ -109,6 +109,8 @@ fn column_test(
         .iter()
         .filter_map(|&r| Some((r, number(sheet, CellRef { row: r, col })?)))
         .collect();
+    // 데이터 칸에 값이 하나도 없는 열의 조건은 행을 숨기지 않는다 (한셀 — 서식만 있는 빈 열에 조건을 걸어도 모든 행이 보인다, corpus 대조)
+    let empty_col = texts.values().all(|t| t.is_empty());
     // 값 목록·빈 칸
     let values: Option<Vec<String>> = (!fc.values.is_empty() || fc.blank)
         .then(|| fc.values.iter().map(|v| v.to_lowercase()).collect());
@@ -125,6 +127,9 @@ fn column_test(
         _ => None,
     };
     Box::new(move |r: u32| {
+        if empty_col {
+            return true;
+        }
         let text = texts.get(&r).cloned().unwrap_or_default();
         let num = numbers.get(&r).copied();
         if let Some(vals) = &values {
@@ -259,4 +264,265 @@ pub(crate) fn reapply(wb: &mut Workbook, si: usize) {
     sheet.rows.sort_by_key(|r| r.index);
     sheet.auto_filter = Some(af);
     sheet.filter_mode = true;
+}
+
+/// 조건 글 하나 → (연산자, 값). `>=5`·`<>x`·`=x`·`x` (연산자가 없으면 같음)
+fn parse_criterion(s: &str) -> (&'static str, String) {
+    for (p, op) in [
+        ("<>", "notEqual"),
+        ("<=", "lessThanOrEqual"),
+        (">=", "greaterThanOrEqual"),
+        ("<", "lessThan"),
+        (">", "greaterThan"),
+        ("=", "equal"),
+    ] {
+        if let Some(rest) = s.strip_prefix(p) {
+            // `<>` 만이면 빈 칸이 아닌 것 (한셀은 값 한 칸 공백으로 둔다)
+            if op == "notEqual" && rest.is_empty() {
+                return (op, " ".into());
+            }
+            return (op, rest.to_string());
+        }
+    }
+    ("equal", s.to_string())
+}
+
+/// 자동 필터 켜기·끄기·조건 걸기 (한셀 `Range.AutoFilter` 대조 실험 af4·af5 — docs/editing.md 22절).
+/// `field` 가 없으면 켜고(이미 켜져 있으면 끈다), 있으면(1부터, 범위 안 열) 그 열에 조건을 건다: 조건 없이 `field` 만 주면 그
+/// 열의 조건을 지운다. `operator` 는 `and`(기본)·`or`(두 조건 결합)·`top`·`bottom`·`topPercent`·`bottomPercent`(상위/하위 개수·백분율).
+/// 같음 조건은 그 열의 보이는 값 중에 있으면 값 목록 필터로, 없거나 `*`·`?` 가 있으면 사용자 지정 조건으로 둔다.
+pub fn auto_filter(
+    wb: &mut Workbook,
+    si: usize,
+    range: crate::model::CellRange,
+    field: Option<u32>,
+    criteria1: Option<&str>,
+    operator: Option<&str>,
+    criteria2: Option<&str>,
+) -> crate::Result<()> {
+    use super::err;
+    if si >= wb.sheets.len() {
+        return Err(err("시트가 없습니다"));
+    }
+    // 이미 켜진 필터가 있으면 그 범위, 없으면 준 범위에서 값이 든 칸을 모두 품는 가장 작은 직사각형(한 칸이면 그 칸의 현재 영역).
+    // 빈 범위는 오류 (한셀 — 대조 실험 af6·af7)
+    let range = match wb.sheets[si]
+        .auto_filter
+        .as_ref()
+        .and_then(|af| refs::parse_area(&af.range))
+    {
+        Some(a) => {
+            let (r0, c0, r1, c1) = a.bounds();
+            crate::model::CellRange {
+                start: CellRef { row: r0, col: c0 },
+                end: CellRef { row: r1, col: c1 },
+            }
+        }
+        None => data_extent(&wb.sheets[si], range)
+            .ok_or_else(|| err("자동 필터를 걸 범위에 값이 없습니다"))?,
+    };
+    let name = wb.sheets[si].name.clone();
+    let text = refs::Area::rect(
+        range.start.row,
+        range.start.col,
+        range.end.row,
+        range.end.col,
+    )
+    .text();
+    let abs = format!(
+        "{}{}",
+        refs::prefix_text(&name, None),
+        abs_range(range.start, range.end)
+    );
+    let set_db_name = |wb: &mut Workbook, on: bool| {
+        let lid = Some(si as u32);
+        let pos = wb
+            .defined_names
+            .iter()
+            .position(|d| d.local_sheet_id == lid && d.name == "_xlnm._FilterDatabase");
+        match (pos, on) {
+            (Some(i), true) => wb.defined_names[i].formula = abs.clone(),
+            (Some(i), false) => {
+                wb.defined_names.remove(i);
+            }
+            (None, true) => wb.defined_names.push(crate::model::DefinedName {
+                name: "_xlnm._FilterDatabase".into(),
+                local_sheet_id: lid,
+                hidden: true,
+                formula: abs.clone(),
+                comment: None,
+            }),
+            (None, false) => {}
+        }
+    };
+    let show_rows = |wb: &mut Workbook, r0: u32, r1: u32| {
+        for r in &mut wb.sheets[si].rows {
+            if r.index > r0 + 1 && r.index <= r1 + 1 {
+                r.hidden = false;
+            }
+        }
+    };
+    let Some(field) = field else {
+        // 켜기·끄기
+        if wb.sheets[si].auto_filter.is_some() {
+            if has_criteria(&wb.sheets[si]) {
+                show_rows(wb, range.start.row, range.end.row);
+            }
+            wb.sheets[si].auto_filter = None;
+            wb.sheets[si].filter_mode = false;
+            set_db_name(wb, false);
+        } else {
+            wb.sheets[si].auto_filter = Some(crate::model::AutoFilter {
+                range: text,
+                columns: Vec::new(),
+                sort_state: None,
+            });
+            wb.sheets[si].filter_mode = true;
+            set_db_name(wb, true);
+        }
+        return Ok(());
+    };
+    // 필터는 먼저 켜지고 열 번호가 범위 밖이면 그다음에 오류가 난다 (한셀 — af5 g6)
+    if wb.sheets[si].auto_filter.is_none() {
+        wb.sheets[si].auto_filter = Some(crate::model::AutoFilter {
+            range: text,
+            columns: Vec::new(),
+            sort_state: None,
+        });
+        wb.sheets[si].filter_mode = true;
+        set_db_name(wb, true);
+    }
+    let width = range.end.col - range.start.col + 1;
+    if field < 1 || field > width {
+        return Err(err("필터 열이 범위를 벗어났습니다"));
+    }
+    let col_id = field - 1;
+    let col = range.start.col + col_id;
+    let (r0, r1) = (range.start.row, range.end.row);
+    let mut fc = FilterColumn {
+        col_id,
+        ..Default::default()
+    };
+    match (criteria1, operator) {
+        (None, _) => {}
+        (Some(c1), Some(op @ ("top" | "bottom" | "topPercent" | "bottomPercent"))) => {
+            let n: f64 = c1
+                .trim()
+                .parse()
+                .map_err(|_| err("상위/하위 값이 숫자가 아닙니다"))?;
+            fc.top10 = Some((op.starts_with("top"), op.ends_with("Percent"), n));
+        }
+        (Some(c1), op) => {
+            let (o1, v1) = parse_criterion(c1);
+            match criteria2 {
+                Some(c2) => {
+                    let (o2, v2) = parse_criterion(c2);
+                    fc.custom = vec![(o1.to_string(), v1), (o2.to_string(), v2)];
+                    fc.custom_and = op != Some("or");
+                }
+                None => {
+                    // 같음: 보이는 값 중에 있으면 값 목록
+                    let sheet = &wb.sheets[si];
+                    let hidden: std::collections::HashSet<u32> = sheet
+                        .rows
+                        .iter()
+                        .filter(|r| r.hidden)
+                        .map(|r| r.index - 1)
+                        .collect();
+                    let found = (r0 + 1..=r1)
+                        .filter(|r| !hidden.contains(r))
+                        .map(|r| shown(wb, sheet, CellRef { row: r, col }))
+                        .find(|t| t.to_lowercase() == v1.to_lowercase());
+                    let wildcard = v1.contains(['*', '?']);
+                    match found {
+                        Some(t) if o1 == "equal" && !wildcard && !v1.is_empty() => {
+                            fc.values = vec![t]
+                        }
+                        _ => {
+                            fc.custom = vec![(o1.to_string(), v1)];
+                            fc.custom_and = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let af = wb.sheets[si].auto_filter.as_mut().unwrap();
+    af.columns.retain(|c| c.col_id != col_id);
+    let cleared = fc.values.is_empty()
+        && !fc.blank
+        && fc.custom.is_empty()
+        && fc.top10.is_none()
+        && fc.dynamic.is_none();
+    if !cleared {
+        af.columns.push(fc);
+        af.columns.sort_by_key(|c| c.col_id);
+    }
+    if has_criteria(&wb.sheets[si]) {
+        reapply(wb, si);
+    } else {
+        show_rows(wb, r0, r1);
+    }
+    wb.sheets[si].filter_mode = true;
+    Ok(())
+}
+
+/// 준 범위와 시트의 사용 범위의 겹침 (한셀 `UsedRange` — 행은 행 기록이 있는 처음~끝 행, 열은 칸 기록(빈 서식 칸 포함)이 있는 처음~끝 열.
+/// 대조 실험 af6·af7 과 corpus: 서식만 있는 칸·행 높이만 있는 행도 쓴다). 범위가 한 칸이면 그 칸이 든 현재 영역
+fn data_extent(sheet: &Sheet, range: crate::model::CellRange) -> Option<crate::model::CellRange> {
+    if range.start == range.end {
+        let r = super::data::current_region(sheet, range.start);
+        let filled = sheet
+            .cells
+            .iter()
+            .any(|c| !c.value.is_empty() && c.r.row >= r.start.row && c.r.row <= r.end.row);
+        return filled.then_some(r);
+    }
+    let rows = sheet
+        .rows
+        .iter()
+        .map(|r| r.index - 1)
+        .chain(sheet.cells.iter().map(|c| c.r.row));
+    let (ur0, ur1) = rows.fold((u32::MAX, 0u32), |(a, b), r| (a.min(r), b.max(r)));
+    let (uc0, uc1) = sheet
+        .cells
+        .iter()
+        .map(|c| c.r.col)
+        .fold((u32::MAX, 0u32), |(a, b), c| (a.min(c), b.max(c)));
+    if ur0 == u32::MAX || uc0 == u32::MAX {
+        return None;
+    }
+    let (r0, r1) = (range.start.row.max(ur0), range.end.row.min(ur1));
+    let (c0, c1) = (range.start.col.max(uc0), range.end.col.min(uc1));
+    (r0 <= r1 && c0 <= c1).then_some(crate::model::CellRange {
+        start: CellRef { row: r0, col: c0 },
+        end: CellRef { row: r1, col: c1 },
+    })
+}
+
+/// 모든 필터 조건을 지우고 숨긴 행을 보인다 (`ShowAllData` — 자동 필터는 켜 둔다)
+pub fn show_all_data(wb: &mut Workbook, si: usize) -> crate::Result<()> {
+    let sheet = wb
+        .sheets
+        .get_mut(si)
+        .ok_or_else(|| super::err("시트가 없습니다"))?;
+    let Some(af) = &mut sheet.auto_filter else {
+        return Ok(());
+    };
+    af.columns.clear();
+    if let Some(area) = refs::parse_area(&af.range) {
+        let (r0, _, r1, _) = area.bounds();
+        for r in &mut sheet.rows {
+            if r.index > r0 + 1 && r.index <= r1 + 1 {
+                r.hidden = false;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `$A$1:$E$12` 꼴
+fn abs_range(a: CellRef, b: CellRef) -> String {
+    let c = CellRef::col_name;
+    format!("${}${}:${}${}", c(a.col), a.row + 1, c(b.col), b.row + 1)
 }

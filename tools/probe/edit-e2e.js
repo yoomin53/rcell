@@ -125,6 +125,38 @@ const SCRIPTS = {
     { op: "removeDuplicates", sheet: 0, range: "B2:F40", columns: [1, 2], header: true },
     { op: "textToColumns", sheet: 0, range: "C3:C30", dest: "AK3", comma: true, space: true },
   ],
+  filter: [
+    { op: "autoFilter", sheet: 0, range: "A1:F30", field: 3, criteria1: ">=1" },
+    { op: "autoFilter", sheet: 0, range: "A1:F30", field: 2, criteria1: "항목 2" },
+    { op: "autoFilter", sheet: 0, range: "A1:F30", field: 1, criteria1: "3", operator: "top" },
+  ],
+  copysheet: [
+    { op: "copySheet", sheet: 0 },
+    { op: "copySheet", sheet: 0, to: 0, name: "사본 A" },
+  ],
+  view: [
+    { op: "setView", sheet: 0, zoom: 130, gridlines: false, headings: false },
+    { op: "setView", sheet: 0, view: "pageBreakPreview", zoom: 90 },
+  ],
+  page: [
+    { op: "pageSetup", sheet: 0, marginLeft: 30, marginTop: 50, orientation: "landscape", printArea: "A1:C10,E1:F5", printTitleRows: "1:2", centerH: true, gridLines: true },
+    { op: "pageSetup", sheet: 0, headerCenter: "&A 쪽 &P", footerRight: "&P/&N", comments: "atEnd", errors: "blank" },
+    { op: "pageSetup", sheet: 0, fitWide: 1, fitTall: 0 },
+  ],
+  protect: [
+    { op: "protectSheet", sheet: 0, password: "pw", formattingCells: true, sorting: true },
+    { op: "unprotectSheet", sheet: 0, password: "bad" },
+    { op: "protectWorkbook", password: "pw" },
+  ],
+  addshape: [
+    { op: "addShape", sheet: 0, kind: "rect", left: 300, top: 300, width: 100, height: 60 },
+    { op: "addShape", sheet: 0, kind: "ellipse", left: 50.5, top: 70.25, width: 90.5, height: 45.75 },
+    { op: "addShape", sheet: 0, kind: "textbox", left: 200, top: 20, width: 90, height: 30 },
+  ],
+  table: [
+    { op: "addTable", sheet: 0, range: "A1:D12" },
+    { op: "addTable", sheet: 0, range: "F1:G6", name: "내표", style: "TableStyleLight9", firstColumn: true },
+  ],
   shapes: [
     { op: "moveShape", sheet: 0, shape: 1, left: 100.5, top: 60, width: 300 },
     { op: "moveShape", sheet: 0, shape: 2, left: 20, top: 200 },
@@ -207,7 +239,13 @@ for (const j of jobs) {
     continue;
   }
   // 편집 시간(app.xml TotalTime)은 한셀 자동화가 편집에 쓴 분 수라 편집 결과가 아니다 — 그것만 다르면 같다고 본다
-  const diffs = out ? out.split(/\n(?=\S)/).filter((d) => !d.startsWith("… 외") && !d.startsWith("차이 ") && !d.startsWith("편집 시간")) : [];
+  // 보기 설정 대본은 한셀 창을 보이게 해 한셀이 저장한 문서의 창 크기(windowWidth·windowHeight)가 채워진다 — 편집 결과가 아니라 같다고 본다
+  const ignoreWindow = sname === "view";
+  const diffs = out
+    ? out
+        .split(/\n(?=\S)/)
+        .filter((d) => !d.startsWith("… 외") && !d.startsWith("차이 ") && !d.startsWith("편집 시간") && !(ignoreWindow && d.startsWith("통합 문서 보기")))
+    : [];
   if (!diffs.length) {
     same++;
     bySCRIPT[sname].same++;

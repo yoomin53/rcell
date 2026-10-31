@@ -462,6 +462,7 @@
         showMenu(e.clientX, e.clientY, [
           ["시트 추가", function () { addSheet(); }],
           ["이름 바꾸기", function () { renameSheet(s.index); }],
+          ["시트 복사", function () { edit({ op: "copySheet", sheet: s.index }); }],
           ["삭제", function () { deleteSheet(s.index); }],
           null,
           ["왼쪽으로 옮기기", function () { moveSheet(s.index, -1); }],
@@ -1221,6 +1222,56 @@
     edit(o, true);
   }
 
+  // 자동 필터: 범위를 고르고 실행하면 켜거나 끈다, "열 번호,조건" (예: 2,>=50 · 3,10,top) 을 적으면 그 열에 조건을 건다
+  function autoFilterDialog() {
+    var g = range();
+    var t = window.prompt("자동 필터 — 비우면 켜기/끄기, 열 번호,조건[,top|bottom|topPercent|bottomPercent] 이면 조건 (예: 2,>=50)", "");
+    if (t == null) return;
+    var o = { op: "autoFilter", sheet: sheet, range: rangeText(g) };
+    var p = t.split(",").map(function (x) { return x.trim(); });
+    if (t.trim()) {
+      o.field = parseInt(p[0], 10);
+      if (p[1]) o.criteria1 = p[1];
+      if (p[2]) o.operator = p[2];
+    }
+    edit(o, true);
+  }
+
+  function tableDialog() {
+    var g = range();
+    edit({ op: "addTable", sheet: sheet, range: rangeText(g) }, true);
+  }
+
+  function viewDialog() {
+    var t = window.prompt("보기 — 확대율 (12–400), 눈금선 켬/끔 (예: 150 또는 100,끔)", "100");
+    if (t == null) return;
+    var p = t.split(",").map(function (x) { return x.trim(); });
+    var o = { op: "setView", sheet: sheet };
+    if (parseInt(p[0], 10) > 0) o.zoom = parseInt(p[0], 10);
+    if (p[1]) o.gridlines = p[1] !== "끔";
+    edit(o, true);
+  }
+
+  function pageSetupDialog() {
+    var t = window.prompt("쪽 설정 — 방향(세로/가로), 확대율 또는 맞춤(예: 가로,80 · 세로,맞춤), 인쇄 영역(예: A1:F20)", "세로,100");
+    if (t == null) return;
+    var p = t.split(",").map(function (x) { return x.trim(); });
+    var o = { op: "pageSetup", sheet: sheet };
+    if (p[0]) o.orientation = p[0] === "가로" ? "landscape" : "portrait";
+    if (p[1] === "맞춤") { o.fitWide = 1; o.fitTall = 0; } else if (parseInt(p[1], 10) > 0) o.zoom = parseInt(p[1], 10);
+    if (p[2]) o.printArea = p[2];
+    edit(o, true);
+  }
+
+  function protectSheetDialog() {
+    var pw = window.prompt("시트 보호 — 암호 (비우면 암호 없이). 이미 보호돼 있으면 같은 암호로 풉니다", "");
+    if (pw == null) return;
+    var protectedNow = !!(view && view.prot);
+    var o = { op: protectedNow ? "unprotectSheet" : "protectSheet", sheet: sheet };
+    if (pw) o.password = pw;
+    edit(o, true);
+  }
+
   function subtotalDialog() {
     var g = range();
     var t = window.prompt("부분합 — 기준 열 번호, 함수, 합계 열 번호들 (예: 1,sum,3,4). 함수: sum count average max min product", "1,sum,2");
@@ -1516,6 +1567,11 @@
       ["중복 항목 제거…", removeDupDialog],
       ["텍스트 나누기…", textToColumnsDialog],
       ["부분합…", subtotalDialog],
+      ["자동 필터…", autoFilterDialog],
+      ["표 만들기", tableDialog],
+      ["보기 설정…", viewDialog],
+      ["쪽 설정…", pageSetupDialog],
+      ["시트 보호…", protectSheetDialog],
       ["찾기 (Ctrl+F)", findNext],
       ["바꾸기 (Ctrl+H)", replaceDialog],
       null,

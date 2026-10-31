@@ -467,6 +467,10 @@ const TRIG_MAX: f64 = 134217728.0;
 
 /// sin x
 pub fn sin(x: f64) -> f64 {
+    // ±0 은 그대로 (C 런타임: sin(-0.0) = -0.0)
+    if x == 0.0 {
+        return x;
+    }
     if !x.is_finite() {
         return f64::NAN;
     }
@@ -492,6 +496,10 @@ pub fn cos(x: f64) -> f64 {
 
 /// tan x
 pub fn tan(x: f64) -> f64 {
+    // ±0 은 그대로 (C 런타임: tan(-0.0) = -0.0)
+    if x == 0.0 {
+        return x;
+    }
     if !x.is_finite() {
         return f64::NAN;
     }
@@ -545,6 +553,10 @@ fn atan_pos(q: Dd) -> Dd {
 
 /// atan x
 pub fn atan(x: f64) -> f64 {
+    // ±0 은 그대로 (C 런타임: atan(-0.0) = -0.0)
+    if x == 0.0 {
+        return x;
+    }
     if x.is_nan() {
         return x;
     }
@@ -560,6 +572,10 @@ pub fn atan(x: f64) -> f64 {
 
 /// asin x (|x| ≤ 1)
 pub fn asin(x: f64) -> f64 {
+    // ±0 은 그대로 (C 런타임: asin(-0.0) = -0.0)
+    if x == 0.0 {
+        return x;
+    }
     if x.is_nan() || x.abs() > 1.0 {
         return f64::NAN;
     }
