@@ -21,7 +21,7 @@ use crate::calc::value::{self, Array, ErrorKind, Value, num};
 const RVR: &[Arg] = &[Arg::R, Arg::V, Arg::R];
 const RRV: &[Arg] = &[Arg::R, Arg::R, Arg::V];
 const RV: &[Arg] = &[Arg::R, Arg::V];
-const AV: &[Arg] = &[Arg::A, Arg::V];
+const RAR: &[Arg] = &[Arg::RA, Arg::R];
 const VRV: &[Arg] = &[Arg::V, Arg::R, Arg::V];
 const AAV: &[Arg] = &[Arg::A, Arg::A, Arg::V];
 const VAA: &[Arg] = &[Arg::V, Arg::A, Arg::A];
@@ -49,15 +49,18 @@ pub const FNS: &[FnSpec] = &[
     f("VARA", 1, MANY, R, |c, a| agg(c, a, Agg::NumbersA, 10)),
     f("VARPA", 1, MANY, R, |c, a| agg(c, a, Agg::NumbersA, 11)),
     f("MEDIAN", 1, MANY, R, |c, a| {
-        median(&try_v!(collect_numbers(c, a, Agg::Numbers)))
+        let v = try_v!(ordered_numbers(c, a));
+        median(&v)
     }),
-    f("MODE", 1, MANY, R, |c, a| {
-        mode_sngl(&try_v!(collect_numbers(c, a, Agg::Numbers)))
+    f("MODE", 1, MANY, RAR, |c, a| {
+        let v = try_v!(ordered_numbers(c, a));
+        mode_sngl(&v)
     }),
-    f("MODE.SNGL", 1, MANY, R, |c, a| {
-        mode_sngl(&try_v!(collect_numbers(c, a, Agg::Numbers)))
+    f("MODE.SNGL", 1, MANY, RAR, |c, a| {
+        let v = try_v!(ordered_numbers(c, a));
+        mode_sngl(&v)
     }),
-    f("MODE.MULT", 1, MANY, R, mode_mult),
+    f("MODE.MULT", 1, MANY, RAR, mode_mult),
     f("DEVSQ", 1, MANY, R, |c, a| {
         let v = try_v!(collect_numbers(c, a, Agg::Numbers));
         if v.is_empty() {
@@ -105,27 +108,27 @@ pub const FNS: &[FnSpec] = &[
         let k = try_v!(num_arg(c, a, 1));
         large_small(&v, k, false)
     }),
-    f("PERCENTILE", 2, 2, AV, |c, a| pct(c, a, percentile_inc)),
-    f("PERCENTILE.INC", 2, 2, AV, |c, a| pct(c, a, percentile_inc)),
-    f("PERCENTILE.EXC", 2, 2, AV, |c, a| pct(c, a, percentile_exc)),
-    f("QUARTILE", 2, 2, AV, |c, a| {
+    f("PERCENTILE", 2, 2, RV, |c, a| pct(c, a, percentile_inc)),
+    f("PERCENTILE.INC", 2, 2, RV, |c, a| pct(c, a, percentile_inc)),
+    f("PERCENTILE.EXC", 2, 2, RV, |c, a| pct(c, a, percentile_exc)),
+    f("QUARTILE", 2, 2, RV, |c, a| {
         pct(c, a, |v, q| quartile(v, q, true))
     }),
-    f("QUARTILE.INC", 2, 2, AV, |c, a| {
+    f("QUARTILE.INC", 2, 2, RV, |c, a| {
         pct(c, a, |v, q| quartile(v, q, true))
     }),
-    f("QUARTILE.EXC", 2, 2, AV, |c, a| {
+    f("QUARTILE.EXC", 2, 2, RV, |c, a| {
         pct(c, a, |v, q| quartile(v, q, false))
     }),
-    f("PERCENTRANK", 2, 3, AV, |c, a| percentrank(c, a, true)),
-    f("PERCENTRANK.INC", 2, 3, AV, |c, a| percentrank(c, a, true)),
-    f("PERCENTRANK.EXC", 2, 3, AV, |c, a| percentrank(c, a, false)),
+    f("PERCENTRANK", 2, 3, RV, |c, a| percentrank(c, a, true)),
+    f("PERCENTRANK.INC", 2, 3, RV, |c, a| percentrank(c, a, true)),
+    f("PERCENTRANK.EXC", 2, 3, RV, |c, a| percentrank(c, a, false)),
     f("RANK", 2, 3, VRV, |c, a| rank(c, a, false)),
     f("RANK.EQ", 2, 3, VRV, |c, a| rank(c, a, false)),
     f("RANK.AVG", 2, 3, VRV, |c, a| rank(c, a, true)),
     f("RANKEQ", 2, 3, VRV, |c, a| rank(c, a, false)),
     f("RANKAVG", 2, 3, VRV, |c, a| rank(c, a, true)),
-    f("TRIMMEAN", 2, 2, AV, trimmean),
+    f("TRIMMEAN", 2, 2, RV, trimmean),
     f("STANDARDIZE", 3, 3, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
         let m = try_v!(num_arg(c, a, 1));
@@ -146,7 +149,7 @@ pub const FNS: &[FnSpec] = &[
     f("RSQ", 2, 2, A, |c, a| correl(c, a, true)),
     f("COVAR", 2, 2, A, |c, a| covar(c, a, false)),
     f("COVARIANCE.P", 2, 2, A, |c, a| covar(c, a, false)),
-    f("COVARIANCE.S", 2, 2, A, |c, a| covar(c, a, true)),
+    f("COVARIANCE.S", 2, 2, R, |c, a| covar(c, a, true)),
     f("SLOPE", 2, 2, A, |c, a| regression(c, &a[0], &a[1], 0, 0.0)),
     f("INTERCEPT", 2, 2, A, |c, a| {
         regression(c, &a[0], &a[1], 1, 0.0)
@@ -172,7 +175,7 @@ pub const FNS: &[FnSpec] = &[
     f("GROWTH", 1, 4, &[Arg::A, Arg::A, Arg::A, Arg::V], |c, a| {
         trend(c, a, true)
     }),
-    f("FREQUENCY", 2, 2, A, frequency),
+    f("FREQUENCY", 2, 2, R, frequency),
     f("PROB", 3, 4, AAV, prob),
     f("FISHER", 1, 1, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
@@ -181,34 +184,56 @@ pub const FNS: &[FnSpec] = &[
         }
         num(0.5 * ((1.0 + x) / (1.0 - x)).mln())
     }),
+    // (e^{2x} − 1)/(e^{2x} + 1) — 작은 x 에서 자리를 잃는다 (FISHERINV(1E-8) = 9.999999950247594E-9, 대조 실험 conv8)
     f("FISHERINV", 1, 1, V, |c, a| {
-        num(try_v!(num_arg(c, a, 0)).mtanh())
+        let e2 = (2.0 * try_v!(num_arg(c, a, 0))).mexp();
+        num(if e2.is_infinite() {
+            1.0
+        } else {
+            (e2 - 1.0) / (e2 + 1.0)
+        })
     }),
     f("PERMUT", 2, 2, V, |c, a| {
-        let n = try_v!(num_arg(c, a, 0)).trunc();
-        let k = try_v!(num_arg(c, a, 1)).trunc();
-        if n <= 0.0 && !(n == 0.0 && k == 0.0) || k < 0.0 || k > n {
+        let (nr, kr) = (try_v!(num_arg(c, a, 0)), try_v!(num_arg(c, a, 1)));
+        let (n, k) = (nr.trunc(), kr.trunc());
+        // 소수를 버리기 전에 0 보다 작으면 #NUM! (PERMUT(10,-0.5), 대조 실험 rand)
+        if nr < 0.0
+            || kr < 0.0
+            || n <= 0.0 && !(n == 0.0 && k == 0.0)
+            || (nr > 0.0 && n == 0.0)
+            || k > n
+            || n >= 2_147_483_647.0
+        {
             return Value::Error(ErrorKind::Num);
         }
-        let mut r = 1.0;
-        let mut i = 0.0;
-        while i < k {
-            r *= n - i;
-            i += 1.0;
-        }
-        num(r)
+        // e^{GAMMALN(n+1) − GAMMALN(n−k+1)} — 정수 곱이 아니다 (PERMUT(100,1) = 99.9999999999981,
+        // PERMUT(45598,1) = 45597.99999943975, 대조 실험 misc4)
+        use crate::calc::hcmath::lgamma;
+        num((lgamma(n + 1.0) - lgamma(n - k + 1.0)).mexp())
     }),
     f("PERMUTATIONA", 2, 2, V, |c, a| {
-        let n = try_v!(num_arg(c, a, 0)).trunc();
-        let k = try_v!(num_arg(c, a, 1)).trunc();
-        if n < 0.0 || k < 0.0 {
+        let (nr, kr) = (try_v!(num_arg(c, a, 0)), try_v!(num_arg(c, a, 1)));
+        let (n, k) = (nr.trunc(), kr.trunc());
+        if nr < 0.0 || kr < 0.0 {
             return Value::Error(ErrorKind::Num);
         }
         // PERMUTATIONA(0,0) = 0 (대조 실험 stat)
         if n == 0.0 {
             return Value::Number(0.0);
         }
-        num(n.mpow(k))
+        if k == 0.0 {
+            return Value::Number(1.0);
+        }
+        // 한셀은 n^k 가 아니라 n!/(n−k)! + n 을 낸다 (PERMUTATIONA(10,3) = 730, PERMUTATIONA(100,1) = 200,
+        // k > n 이나 n > 170 은 #NUM!, 대조 실험 conv6·conv7)
+        if k > n || n > 170.0 {
+            return Value::Error(ErrorKind::Num);
+        }
+        let (nf, df) = (
+            try_v!(super::math::fact(n)),
+            try_v!(super::math::fact(n - k)),
+        );
+        num(nf / df + n)
     }),
     // GAMMA: 171 이상은 #NUM!, 결과는 소수 9자리 반올림 (GAMMA(2.5) = 1.329340388, 대조 실험 stat)
     f("GAMMA", 1, 1, V, |c, a| {
@@ -555,6 +580,8 @@ fn counta(ctx: &mut Ctx, a: &[Value]) -> Value {
                 }
             }
             Value::Array(arr) => n += arr.data.iter().filter(|v| !v.is_empty()).count(),
+            // 비워 둔 인수는 세지 않는다 (COUNTA("a",1,) = 2, 대조 실험 typing)
+            Value::Empty => {}
             _ => n += 1,
         }
     }
@@ -563,6 +590,8 @@ fn counta(ctx: &mut Ctx, a: &[Value]) -> Value {
 
 fn countblank(ctx: &mut Ctx, a: &[Value]) -> Value {
     match &a[0] {
+        // 여러 시트에 걸친 참조도 #NAME? (COUNTBLANK('S1:S3'!A1), 대조 실험 rand)
+        Value::Ref(r) if r.iter().any(|x| x.sheet != x.sheet_last) => Value::Error(ErrorKind::Name),
         Value::Ref(r) => {
             let mut total = 0f64;
             let mut filled = 0f64;
@@ -578,16 +607,8 @@ fn countblank(ctx: &mut Ctx, a: &[Value]) -> Value {
             }
             Value::Number(total - filled)
         }
-        Value::Array(arr) => Value::Number(
-            arr.data
-                .iter()
-                .filter(|v| v.is_empty() || matches!(v, Value::Text(t) if t.is_empty()))
-                .count() as f64,
-        ),
-        Value::Error(e) => Value::Error(*e),
-        Value::Empty => Value::Number(1.0),
-        Value::Text(t) if t.is_empty() => Value::Number(1.0),
-        _ => Value::Number(0.0),
+        // 참조가 아니면 #NAME? (오류 값도 그렇다, 대조 실험 refargs)
+        _ => Value::Error(ErrorKind::Name),
     }
 }
 
@@ -625,6 +646,10 @@ pub fn mode_sngl(v: &[f64]) -> Value {
 /// (MODE.MULT(1,2,2,3,3) = 3, 배열 수식이어도 {3;3;3}, 대조 실험 arrays·newer).
 fn mode_mult(ctx: &mut Ctx, a: &[Value]) -> Value {
     let v = try_v!(collect_numbers(ctx, a, Agg::Numbers));
+    // 숫자가 하나도 없으면 #NUM!, 있는데 겹치는 값이 없으면 #N/A (대조 실험 conv8)
+    if v.is_empty() {
+        return Value::Error(ErrorKind::Num);
+    }
     let mut best: Option<(f64, usize)> = None;
     for x in &v {
         let c = v.iter().filter(|y| *y == x).count();
@@ -687,7 +712,15 @@ fn skew(ctx: &mut Ctx, a: &[Value], population: bool) -> Value {
     if s == 0.0 {
         return Value::Error(ErrorKind::Div0);
     }
-    let sum3: f64 = v.iter().map(|x| ((x - m) / s).mpowi(3)).sum();
+    // 세제곱은 곱셈 두 번 (z·z·z) — 정확히 반올림한 거듭제곱과 끝자리가 다르다 (SKEW(1E7+0.1,1E7+0.2,1E7+0.3) =
+    // 2.7874334090904895E-8, 대조 실험 variance)
+    let sum3: f64 = v
+        .iter()
+        .map(|x| {
+            let z = (x - m) / s;
+            z * z * z
+        })
+        .sum();
     num(n / ((n - 1.0) * (n - 2.0)) * sum3)
 }
 
@@ -728,6 +761,13 @@ pub fn large_small(v: &[f64], k: f64, large: bool) -> Value {
 }
 
 fn pct(ctx: &mut Ctx, a: &[Value], f: fn(&[f64], f64) -> Value) -> Value {
+    // 낱 글 (숫자로 읽히지 않는) 은 #VALUE! (PERCENTILE.INC(글,…), 대조 실험 rand)
+    // (오류 값 이름의 글은 그 오류: QUARTILE.EXC("#N/A",1.5) = #N/A)
+    if let Value::Text(s) = &a[0]
+        && value::parse_number(s, ctx.date1904()).is_none()
+    {
+        return Value::Error(ErrorKind::parse(s).unwrap_or(ErrorKind::Value));
+    }
     let v = try_v!(array_numbers(ctx, &a[0]));
     let k = try_v!(num_arg(ctx, a, 1));
     f(&v, k)
@@ -777,6 +817,10 @@ pub fn percentile_exc(v: &[f64], k: f64) -> Value {
 }
 
 pub fn quartile(v: &[f64], q: f64, inclusive: bool) -> Value {
+    // 소수를 버리기 전에 0 보다 작으면 #NUM! (QUARTILE.INC(범위,-0.1), 대조 실험 typing)
+    if q < 0.0 {
+        return Value::Error(ErrorKind::Num);
+    }
     let q = q.trunc();
     if inclusive {
         if !(0.0..=4.0).contains(&q) {
@@ -791,9 +835,13 @@ pub fn quartile(v: &[f64], q: f64, inclusive: bool) -> Value {
         if q != 2.0 {
             let mut s = v.to_vec();
             s.sort_by(f64::total_cmp);
-            let r = (q * (s.len() as f64 + 1.0) / 4.0).floor();
-            if r < 1.0 || r > s.len() as f64 {
+            if s.is_empty() {
                 return Value::Error(ErrorKind::Num);
+            }
+            let r = (q * (s.len() as f64 + 1.0) / 4.0).floor();
+            // 순위가 범위 밖이면 0 (QUARTILE.EXC(칸 하나,1) = 0, PERCENTILE.EXC 와 같다, 대조 실험 conv3)
+            if r < 1.0 || r > s.len() as f64 {
+                return num(0.0);
             }
             return num(s[r as usize - 1]);
         }
@@ -805,7 +853,15 @@ fn percentrank(ctx: &mut Ctx, a: &[Value], inclusive: bool) -> Value {
     let v = try_v!(array_numbers(ctx, &a[0]));
     let x = try_v!(num_arg(ctx, a, 1));
     let sig = try_v!(num_or(ctx, a, 2, 3.0)).trunc();
-    if sig < 1.0 || v.is_empty() {
+    // 숫자가 하나도 없으면 PERCENTRANK(.INC) 는 #NUM!, .EXC 는 #N/A — 유효 숫자 자리 검사보다 먼저 (대조 실험 conv8·conv10)
+    if v.is_empty() {
+        return Value::Error(if inclusive {
+            ErrorKind::Num
+        } else {
+            ErrorKind::NA
+        });
+    }
+    if sig < 1.0 {
         return Value::Error(ErrorKind::Num);
     }
     let mut s = v;
@@ -847,28 +903,65 @@ fn percentrank(ctx: &mut Ctx, a: &[Value], inclusive: bool) -> Value {
     num(k * 10f64.mpowi(-(sig as i32)))
 }
 
+/// MEDIAN·MODE·MODE.SNGL 은 첫 인수가 아닌 자리의 배열 상수를 #VALUE! 로 본다 (MEDIAN(범위,{1,2}), MODE({1,2},{1,2}); 첫
+/// 자리의 배열은 된다, 대조 실험 misc6). 인수를 차례로 읽어 앞 인수의 오류가 뒤 인수의 #VALUE! 보다 먼저
+/// (MEDIAN(오류,{1,2}) = 그 오류, MODE(범위,{"a","b"},오류) = #VALUE!, 대조 실험 conv8)
+fn ordered_numbers(ctx: &mut Ctx, a: &[Value]) -> Result<Vec<f64>, ErrorKind> {
+    let mut out = Vec::new();
+    for (i, v) in a.iter().enumerate() {
+        if i > 0 && matches!(v, Value::Array(_)) {
+            return Err(ErrorKind::Value);
+        }
+        out.extend(collect_numbers(ctx, std::slice::from_ref(v), Agg::Numbers)?);
+    }
+    Ok(out)
+}
+
 fn rank(ctx: &mut Ctx, a: &[Value], average: bool) -> Value {
+    // 순위를 구할 값이 오류면 그 오류, 다음이 범위 인수의 오류, 값이 글이면 그다음 (RANK(1/0,NA()) = #DIV/0!,
+    // RANK("x",NA()) = #N/A, 대조 실험 conv3·conv5)
+    if let Value::Error(e) = &a[0] {
+        return Value::Error(*e);
+    }
+    if let Value::Error(e) = &a[1] {
+        return Value::Error(*e);
+    }
     let x = try_v!(num_arg(ctx, a, 0));
     let mut v = Vec::new();
+    // 범위 안의 오류는 첫 번째 것이 그대로 나온다 (RANK(1,Data!H1:H3) = #N/A, RANK(5,Data!H5:H7) = #VALUE!, 대조 실험 misc6)
+    let mut first_err: Option<ErrorKind> = None;
     match &a[1] {
         Value::Ref(r) => {
             for area in r.iter() {
-                ctx.for_each_in_area(area, |_, _, c| {
-                    if let Value::Number(n) = c {
-                        v.push(*n);
-                    }
+                ctx.for_each_in_area(area, |_, _, c| match c {
+                    Value::Number(n) => v.push(*n),
+                    Value::Error(e) if first_err.is_none() => first_err = Some(*e),
+                    _ => {}
                 });
             }
         }
         Value::Array(arr) => {
             for c in &arr.data {
-                if let Value::Number(n) = c {
-                    v.push(*n);
+                match c {
+                    Value::Number(n) => v.push(*n),
+                    Value::Error(e) if first_err.is_none() => first_err = Some(*e),
+                    _ => {}
                 }
             }
         }
         Value::Error(e) => return Value::Error(*e),
-        _ => return Value::Error(ErrorKind::Value),
+        // 참조도 배열도 아닌 낱값은 #N/A, 숫자로 읽히지 않는 글이면 #VALUE! (RANK(5,5), RANK(3.14159,-255),
+        // RANK(1,"50%") = #N/A, RANK(3,"a") = #VALUE!, 대조 실험 typing·refargs·rand)
+        Value::Text(_) => {
+            return match value::to_number(&a[1], ctx.date1904()) {
+                Ok(_) => Value::Error(ErrorKind::NA),
+                Err(e) => Value::Error(e),
+            };
+        }
+        _ => return Value::Error(ErrorKind::NA),
+    }
+    if let Some(e) = first_err {
+        return Value::Error(e);
     }
     let asc = match opt(a, 2) {
         None => false,
@@ -927,7 +1020,9 @@ fn countif(ctx: &mut Ctx, a: &[Value]) -> Value {
     let c = crate::calc::criteria::Criterion::parse(&crit, ctx.date1904());
     match &a[0] {
         // 여러 영역 참조는 #VALUE! (대조 실험 stat)
-        Value::Ref(r) if r.len() > 1 => Value::Error(ErrorKind::Value),
+        Value::Ref(r) if r.len() > 1 || r.iter().any(|x| x.sheet != x.sheet_last) => {
+            Value::Error(ErrorKind::Value)
+        }
         Value::Ref(r) => {
             let mut n = 0f64;
             let mut total = 0f64;
@@ -948,9 +1043,8 @@ fn countif(ctx: &mut Ctx, a: &[Value]) -> Value {
             }
             Value::Number(n)
         }
-        Value::Array(arr) => Value::Number(arr.data.iter().filter(|v| c.matches(v)).count() as f64),
-        Value::Error(e) => Value::Error(*e),
-        other => Value::Number(c.matches(other) as u8 as f64),
+        // 범위 인수가 참조가 아니면 오류 값도 #VALUE! (COUNTIF({1,2,3},">1"), COUNTIF(5,5), COUNTIF(IRR(…),…), 대조 실험 refargs)
+        _ => Value::Error(ErrorKind::Value),
     }
 }
 
@@ -967,8 +1061,11 @@ fn countifs(ctx: &mut Ctx, a: &[Value]) -> Value {
 }
 
 fn averageif(ctx: &mut Ctx, a: &[Value]) -> Value {
-    // 범위가 참조가 아니면 #VALUE! (AVERAGEIF(1,1), 말뭉치 probe3)
-    if !matches!(a[0], Value::Ref(_)) {
+    // 범위가 참조가 아니면 #VALUE! (AVERAGEIF(1,1), 말뭉치 probe3). 평균 범위도 참조여야 한다 (AVERAGEIF(…,{""}))
+    if !matches!(a[0], Value::Ref(_))
+        || a.get(2)
+            .is_some_and(|t| !matches!(t, Value::Ref(_) | Value::Empty))
+    {
         return Value::Error(ErrorKind::Value);
     }
     let target = match opt(a, 2) {
@@ -1383,6 +1480,10 @@ fn trend(ctx: &mut Ctx, a: &[Value], log: bool) -> Value {
 }
 
 fn frequency(ctx: &mut Ctx, a: &[Value]) -> Value {
+    // 구간 인수가 오류면 그 오류, 자료 인수가 오류면 자료가 없는 셈 (FREQUENCY(범위*2,{2,4}) = 0, 대조 실험 conv5)
+    if let Value::Error(e) = &a[1] {
+        return Value::Error(*e);
+    }
     let data: Vec<f64> = flatten(ctx, &a[0])
         .into_iter()
         .filter_map(|v| {
@@ -1393,6 +1494,13 @@ fn frequency(ctx: &mut Ctx, a: &[Value]) -> Value {
             }
         })
         .collect();
+    // 구간 범위 안의 오류는 첫 번째가 그대로 (FREQUENCY(자료,Data!H1:H5) = #N/A)
+    if let Some(Value::Error(e)) = flatten(ctx, &a[1])
+        .into_iter()
+        .find(|v| matches!(v, Value::Error(_)))
+    {
+        return Value::Error(e);
+    }
     let bins: Vec<f64> = flatten(ctx, &a[1])
         .into_iter()
         .filter_map(|v| {
@@ -1593,15 +1701,13 @@ fn weibull(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x < 0.0 || al <= 0.0 || be <= 0.0 {
         return Value::Error(ErrorKind::Num);
     }
-    // 밀도의 x = 0 은 #NUM! (WEIBULL(0,1,1,FALSE), 대조 실험 dist)
-    if x == 0.0 && !cum {
-        return Value::Error(ErrorKind::Num);
-    }
     let t = (x / be).mpow(al);
     num(if cum {
         1.0 - (-t).mexp()
     } else {
-        al / be.mpow(al) * x.mpow(al - 1.0) * (-t).mexp()
+        // 로그 꼴 e^{ln α − α ln β + (α−1) ln x − t}: 넘치면 0, x = 0 은 α > 1 이면 0 (WEIBULL(0,2,1,FALSE) = 0),
+        // WEIBULL(65535,36526.5,10,FALSE) = 0, 끝자리가 이 꼴과 같다 (대조 실험 misc2·rand)
+        (al.mln() - al * be.mln() + (al - 1.0) * x.mln() - t).mexp()
     })
 }
 
@@ -1617,8 +1723,10 @@ fn gamma_dist(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x == 0.0 && !cum {
         return Value::Number(0.0);
     }
+    // 누적은 불완전 감마의 근사 (CHISQ.DIST 와 같은 것) — 작은 값이 넘쳐 0 이 되면 #NUM! (GAMMA.DIST(10,1000,1,TRUE),
+    // 끝자리가 정확한 값과 다르다: GAMMA.DIST(10000,10000,1,TRUE) = 0.5013298083352052, 대조 실험 misc6)
     num(if cum {
-        sp::gamma_p(al, x / be)
+        sp::gamma_p_hc(al, x / be)
     } else {
         sp::gamma_pdf(x, al, be)
     })
@@ -1734,10 +1842,21 @@ fn binom_inv(ctx: &mut Ctx, a: &[Value], strict: bool) -> Value {
     }
     let mut s = 0.0;
     let mut k = 0.0;
+    // 누적에 쓰는 확률은 점화식 (정확한 값 — CRITBINOM(4,0.5,0.3125) = 2: 1 까지 누적이 정확히 0.3125 라 초과가
+    // 아니다). (1−p)^n 이 0 으로 사라지면 e^{GAMMALN} 꼴
+    let q0 = (1.0 - p).mpow(n);
+    let mut pm = q0;
     while k <= n {
-        s += sp::binom_pmf(k, n, p);
+        let pk = if q0 > 1e-300 {
+            pm
+        } else {
+            sp::binom_pmf(k, n, p)
+        };
+        s += pk;
+        pm *= (n - k) / (k + 1.0) * (p / (1.0 - p));
+        // CRITBINOM 은 1 부터 찾는다 (CRITBINOM(2,0.3,0.3) = 1, BINOM.INV 는 0, 대조 실험 conv8)
         if if strict {
-            s > alpha
+            k >= 1.0 && s > alpha
         } else {
             s >= alpha * (1.0 - 1e-15)
         } {
@@ -1783,6 +1902,10 @@ fn negbinom(ctx: &mut Ctx, a: &[Value], new: bool) -> Value {
     };
     // 누적은 확률 1 도 받는다 (NEGBINOM.DIST(10,5,1,TRUE) = 1, 대조 실험 dist), 확률 질량은 #NUM!
     // (NEGBINOMDIST(0,1,1)·NEGBINOM.DIST(0,3,1,FALSE), 대조 실험 cmisc)
+    // 확률 0 의 누적은 0 (NEGBINOM.DIST(10,6,0,TRUE) = 0, 대조 실험 conv10)
+    if p == 0.0 && cum && fl >= 0.0 && s >= 1.0 {
+        return Value::Number(0.0);
+    }
     if fl < 0.0 || s < 1.0 || p <= 0.0 || p > 1.0 || (p == 1.0 && !cum) {
         return Value::Error(ErrorKind::Num);
     }
@@ -1836,7 +1959,8 @@ fn poisson(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(num_arg(ctx, a, 0)).trunc();
     let m = try_v!(num_arg(ctx, a, 1));
     let cum = try_v!(bool_or(ctx, a, 2, true));
-    if x < 0.0 || m < 0.0 {
+    // x 는 32비트 정수 안 (POISSON.DIST(1E12,100,TRUE) = #NUM!, 한셀은 그 앞에서 멈춘다 — 대조 실험 conv9)
+    if x < 0.0 || m < 0.0 || x >= 2_147_483_648.0 {
         return Value::Error(ErrorKind::Num);
     }
     // 확률 질량은 e^{k·ln m − m − Σ_{j=2}^{k} ln j}, 누적은 그것을 0 부터 차례로 더한 값 (ln Γ 를 쓰지 않는다 —
@@ -1871,15 +1995,17 @@ fn poisson(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn chi_rt(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
     let df = try_v!(num_arg(ctx, a, 1));
-    if x < 0.0 || !(1.0..=1e10).contains(&df) {
+    // x 는 1E10 까지 (CHIDIST(1E10,3) = 0, CHIDIST(2E10,3) = #NUM!, 대조 실험 conv9)
+    if !(0.0..=1e10).contains(&x) || !(1.0..=1e10).contains(&df) {
         return Value::Error(ErrorKind::Num);
     }
-    num(sp::gamma_q(df / 2.0, x / 2.0))
+    num(sp::gamma_q_hc(df / 2.0, x / 2.0))
 }
 
 fn chi_inv_rt(ctx: &mut Ctx, a: &[Value]) -> Value {
     let p = try_v!(num_arg(ctx, a, 0));
-    let df = try_v!(num_arg(ctx, a, 1)).trunc();
+    // 자유도의 소수 부분을 버리지 않는다 (CHIINV(0.5,2.9) = 2.2673045350780208, 대조 실험 misc4)
+    let df = try_v!(num_arg(ctx, a, 1));
     if !(0.0..=1.0).contains(&p) || p == 0.0 || !(1.0..=1e10).contains(&df) {
         return Value::Error(ErrorKind::Num);
     }
@@ -1923,7 +2049,8 @@ fn f_rt(ctx: &mut Ctx, a: &[Value]) -> Value {
     if x < 0.0 || d1 < 1.0 || d2 < 1.0 {
         return Value::Error(ErrorKind::Num);
     }
-    num(1.0 - sp::f_cdf(x, d1, d2))
+    // 오른쪽 꼬리의 불완전 베타를 그대로 (1 에서 빼지 않는다 — FDIST(1E10,3,4) = 3.333333332296296E-20)
+    num(sp::beta_i(d2 / (d2 + d1 * x), d2 / 2.0, d1 / 2.0))
 }
 
 fn f_inv_rt(ctx: &mut Ctx, a: &[Value]) -> Value {
@@ -1956,7 +2083,8 @@ fn ftest(ctx: &mut Ctx, a: &[Value]) -> Value {
 
 fn t_inv_2t(ctx: &mut Ctx, a: &[Value]) -> Value {
     let p = try_v!(num_arg(ctx, a, 0));
-    let df = try_v!(num_arg(ctx, a, 1)).trunc();
+    // 자유도의 소수 부분을 버리지 않는다 (TINV(0.05,2.5) = 3.5746548420036817, 대조 실험 misc4)
+    let df = try_v!(num_arg(ctx, a, 1));
     if p <= 0.0 || p > 1.0 || df < 1.0 {
         return Value::Error(ErrorKind::Num);
     }

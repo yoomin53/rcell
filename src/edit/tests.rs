@@ -1999,3 +1999,15 @@ fn add_table_like_hcell() {
     apply(&mut wb, &e(r#"{"op":"addTable","range":"D1","name":"둘"}"#)).ok();
     assert!(apply(&mut wb, &e(r#"{"op":"addTable","range":"A2:B3"}"#)).is_err());
 }
+
+#[test]
+fn formula_local_names_like_hcell() {
+    assert_eq!(
+        formula_local("DBCS(A1)&DOLLAR(1)&USDOLLAR(2)"),
+        "JUNJA(A1)&WON(1)&DOLLAR(2)"
+    );
+    assert_eq!(
+        formula_local("SUM(\"DOLLAR(\")+DOLLARDE(1,2)"),
+        "SUM(\"DOLLAR(\")+DOLLARDE(1,2)"
+    );
+}

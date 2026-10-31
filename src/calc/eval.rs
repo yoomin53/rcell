@@ -114,9 +114,11 @@ impl<'a> Ctx<'a> {
     pub fn deref(&mut self, v: Value) -> Value {
         match v {
             Value::Ref(r) => {
-                if self.array_mode {
+                if self.array_mode && !(r.len() == 1 && r[0].is_cell()) {
                     self.ref_to_array(&r)
                 } else {
+                    // 식 안의 한 칸 참조는 배열 문맥에서도 낱값이다 (XOR(255<=Data!C3,Data!B1&"") 의 글은 낱값이라
+                    // #VALUE!, 대조 실험 rand)
                     self.intersect_ref(&r)
                 }
             }
@@ -264,6 +266,8 @@ impl<'a> Ctx<'a> {
         if areas.len() != 1 {
             return Value::Error(ErrorKind::Value);
         }
+        // 여러 시트에 걸친 영역을 배열로 읽으면 #VALUE! ('S1:S3'!A1&"x", SUMPRODUCT('S1:S3'!A1), TEXT 대조 실험).
+        // 참조를 받는 함수(SUM·LARGE·TRIMMEAN 등)는 `flatten` 이 시트마다 읽는다.
         match self.area_to_array(&areas[0]) {
             Ok(a) => Value::Array(Rc::new(a)),
             Err(e) => Value::Error(e),
@@ -368,11 +372,17 @@ impl<'a> Ctx<'a> {
     // -----------------------------------------------------------------------
 
     fn unary(&mut self, op: UnaryOp, x: &Expr) -> Value {
+        // 단항 + 는 아무것도 하지 않는다: 참조는 참조로 남는다 (MAX(+'S1:S2'!A1,1) 이 3차원 참조를 읽는다,
+        // COLUMN(+nm) = 1 — 대조 실험 syntax)
+        if op == UnaryOp::Plus {
+            return self.eval(x);
+        }
         let v = self.eval_value(x);
         match op {
             UnaryOp::Plus => v,
+            // 0 − x 꼴이라 영의 부호가 뒤집히지 않는다 (-(1-1) = 0, 0*-1 은 -0 — 한셀 대조 실험 negzero)
             UnaryOp::Neg => self.map1(v, |ctx, s| match ctx.num(&s) {
-                Ok(n) => Value::Number(-n),
+                Ok(n) => Value::Number(0.0 - n),
                 Err(e) => Value::Error(e),
             }),
             UnaryOp::Percent => self.map1(v, |ctx, s| match ctx.num(&s) {
@@ -496,6 +506,10 @@ impl<'a> Ctx<'a> {
         }
         let n = c.args.len();
         if n < spec.min as usize || (spec.max != super::functions::MANY && n > spec.max as usize) {
+            // 한셀은 FILTER·SORT 의 인수 개수가 틀리면 #NAME? (FILTER(1), SORT(1,2,3,4,5), 대조 실험 arity)
+            if matches!(spec.name, "FILTER" | "SORT") {
+                return Value::Error(ErrorKind::Name);
+            }
             return Value::Error(ErrorKind::Value);
         }
         match spec.imp {
@@ -526,6 +540,32 @@ impl<'a> Ctx<'a> {
         f: fn(&mut Ctx, &[Value]) -> Value,
         vals: Vec<Value>,
     ) -> Value {
+        // 배열 수식(배열 문맥)이 아니면 원소마다 부르지 않고 첫 원소로 한 번 (TYPE(TRIM({"a","b"})) = 2, 대조 실험 conv7)
+        if !self.array_mode {
+            let args: Vec<Value> = vals
+                .iter()
+                .enumerate()
+                .map(|(i, v)| match v {
+                    Value::Array(a) if spec.class(i) == Arg::V => {
+                        a.data.first().cloned().unwrap_or(Value::Empty)
+                    }
+                    other => other.clone(),
+                })
+                .collect();
+            return f(self, &args);
+        }
+        // 배열 앞의 낱값 인수가 오류면 펼치지 않고 그 오류 하나 (NUMBERVALUE(#NULL!, 배열) 는 모든 칸이 #NULL!,
+        // 대조 실험 rand)
+        let first_array = vals
+            .iter()
+            .position(|v| matches!(v, Value::Array(_)))
+            .unwrap_or(vals.len());
+        if let Some(Value::Error(e)) = vals[..first_array]
+            .iter()
+            .find(|v| matches!(v, Value::Error(_)))
+        {
+            return Value::Error(*e);
+        }
         let mut rows = 1;
         let mut cols = 1;
         let mut first = true;
@@ -544,7 +584,7 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        let mut data = Vec::with_capacity(rows * cols);
+        let mut data: Vec<Value> = Vec::with_capacity(rows * cols);
         let mut args = vals.clone();
         for r in 0..rows {
             for c in 0..cols {
@@ -557,6 +597,8 @@ impl<'a> Ctx<'a> {
                 }
                 let out = f(self, &args);
                 data.push(match out {
+                    // 배열을 돌려주는 함수를 여러 칸에 펼치면 전체가 낱값 #VALUE! (MUNIT(범위), 대조 실험 rand)
+                    Value::Array(_) if rows * cols > 1 => return Value::Error(ErrorKind::Value),
                     Value::Array(a) => a
                         .data
                         .first()
@@ -566,6 +608,11 @@ impl<'a> Ctx<'a> {
                     o => o,
                 });
             }
+        }
+        // 한 칸짜리 결과는 낱값이다 (배열 수식의 SUM(범위, IMCSC(칸)) 에서 글이 인수로 보인다: 한셀은 #VALUE!,
+        // 대조 실험 prec)
+        if rows * cols == 1 {
+            return data.pop().unwrap_or(Value::Empty);
         }
         Value::Array(Rc::new(Array::new(rows, cols, data)))
     }

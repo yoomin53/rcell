@@ -63,6 +63,28 @@ impl Area {
         }
     }
 
+    /// 끝이 앞보다 작은 범위를 바로잡는다: 열·행을 따로 작은 쪽이 앞으로, `$` 는 그 열·행을 따라간다
+    /// (`$B$2:$A$1` → `$A$1:$B$2`, `B$2:$A1` → `$A1:B$2`, `3:1` → `1:3` — 한셀이 입력에서 한다)
+    pub fn ordered(self) -> Area {
+        let sw = |a: Ax, b: Ax| if a.n <= b.n { (a, b) } else { (b, a) };
+        match self {
+            Area::Rect { c0, r0, c1, r1 } => {
+                let (c0, c1) = sw(c0, c1);
+                let (r0, r1) = sw(r0, r1);
+                Area::Rect { c0, r0, c1, r1 }
+            }
+            Area::Cols { c0, c1 } => {
+                let (c0, c1) = sw(c0, c1);
+                Area::Cols { c0, c1 }
+            }
+            Area::Rows { r0, r1 } => {
+                let (r0, r1) = sw(r0, r1);
+                Area::Rows { r0, r1 }
+            }
+            cell => cell,
+        }
+    }
+
     pub fn text(&self) -> String {
         match *self {
             Area::Cell { col, row } => format!("{}{}", col_text(col), row_text(row)),
@@ -967,8 +989,29 @@ pub struct Normalized {
     pub invalid: bool,
 }
 
+/// 함수 이름 앞의 `_xlfn.`·`_xlws.`·`_xll.` 접두사를 뗀다
+fn strip_fn_prefix(w: &str) -> &str {
+    let l = w.to_ascii_lowercase();
+    for p in ["_xlfn._xlws.", "_xlfn.", "_xlws.", "_xll."] {
+        if l.starts_with(p) {
+            return &w[p.len()..];
+        }
+    }
+    w
+}
+
 /// [`normalize`] + 문법 검사
 pub fn normalize_checked(input: &str, canon: &dyn Fn(&str) -> Option<String>) -> Normalized {
+    normalize_scoped(input, canon, &|_, _| false)
+}
+
+/// [`normalize_checked`] + 시트 범위 이름: `local(시트, 이름)` 이 참이면 `시트!이름` 의 시트를 남기고, 아니면 뗀다
+/// (한셀: `Data!nm` → `nm`, 그 시트에 같은 이름이 따로 있을 때만 `S1!nm` 을 남긴다)
+pub fn normalize_scoped(
+    input: &str,
+    canon: &dyn Fn(&str) -> Option<String>,
+    local: &dyn Fn(&str, &str) -> bool,
+) -> Normalized {
     #[derive(Debug, Clone, PartialEq)]
     enum T {
         /// 그대로 쓸 글 (문자열·구조적 참조·연산자)
@@ -983,7 +1026,29 @@ pub fn normalize_checked(input: &str, canon: &dyn Fn(&str) -> Option<String>) ->
     for seg in segments(input) {
         match seg {
             Seg::Ref(r) => {
+                // 이름 앞의 시트는 그 시트에 같은 이름이 따로 없으면 뗀다
+                let drop_sheet = match (&r.prefix, &r.body) {
+                    (Some(p), Body::Name(n)) if p.book.is_none() && p.last.is_none() => {
+                        let sh = canon(&p.first).unwrap_or_else(|| p.first.clone());
+                        let nm = canon(n).unwrap_or_else(|| n.clone());
+                        !local(&sh, &nm)
+                    }
+                    _ => false,
+                };
                 let prefix = match &r.prefix {
+                    _ if drop_sheet => String::new(),
+                    // 이름 앞의 시트는 셀 주소처럼 보여도 따옴표를 붙이지 않는다 (`S1!nm`, 참조는 `'S1'!A1`)
+                    Some(p)
+                        if matches!(r.body, Body::Name(_))
+                            && p.book.is_none()
+                            && p.last.is_none()
+                            && canon(&p.first)
+                                .unwrap_or_else(|| p.first.clone())
+                                .chars()
+                                .all(|c| c.is_alphanumeric() || c == '_') =>
+                    {
+                        format!("{}!", canon(&p.first).unwrap_or_else(|| p.first.clone()))
+                    }
                     Some(p) if p.book.is_none() => {
                         let f = canon(&p.first).unwrap_or_else(|| p.first.clone());
                         let l = p
@@ -996,7 +1061,7 @@ pub fn normalize_checked(input: &str, canon: &dyn Fn(&str) -> Option<String>) ->
                     None => String::new(),
                 };
                 let body = match &r.body {
-                    Body::Area(a) => a.text(),
+                    Body::Area(a) => a.ordered().text(),
                     Body::RefError => "#REF!".into(),
                     Body::Name(n) => canon(n).unwrap_or_else(|| n.clone()),
                 };
@@ -1061,7 +1126,16 @@ pub fn normalize_checked(input: &str, canon: &dyn Fn(&str) -> Option<String>) ->
                                 break;
                             }
                         }
-                        toks.push(T::Operand(s.to_ascii_uppercase(), false));
+                        // 한셀이 받는 오류 글자는 일곱 가지뿐 (#GETTING_DATA·#SPILL!·#CALC! 은 입력 거부)
+                        let up = s.to_ascii_uppercase();
+                        if ![
+                            "#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A",
+                        ]
+                        .contains(&up.as_str())
+                        {
+                            invalid = true;
+                        }
+                        toks.push(T::Operand(up, false));
                     } else if c.is_whitespace() {
                         while i < ch.len() && ch[i].is_whitespace() {
                             i += 1;
@@ -1085,7 +1159,9 @@ pub fn normalize_checked(input: &str, canon: &dyn Fn(&str) -> Option<String>) ->
                             k += 1;
                         }
                         if ch.get(k) == Some(&'(') {
-                            toks.push(T::Open(format!("{}(", w.to_uppercase())));
+                            // `_xlfn.`·`_xlws.`·`_xll.` 접두사는 한셀이 입력에서 뗀다 (`_xlfn.STDEV.S(1)` → `STDEV.S(1)`)
+                            let name = strip_fn_prefix(&w);
+                            toks.push(T::Open(format!("{}(", name.to_uppercase())));
                             i = k + 1;
                             continue;
                         }
@@ -1098,9 +1174,36 @@ pub fn normalize_checked(input: &str, canon: &dyn Fn(&str) -> Option<String>) ->
                             {
                                 invalid = true;
                             }
-                            match w.parse::<f64>() {
+                            match crate::calc::value::parse_decimal15(&w).ok_or(()) {
+                                // 한셀은 숫자 글자를 15자리로 읽어 일반 서식 글로 다시 쓴다 (`1E-10` → `0.0000000001`,
+                                // `1E+15` → `1000000000000000`, `12345678901234567` → `12345678901234500`,
+                                // `1E+20` 은 그대로 — 수식 글 대조 실험)
                                 Ok(v) if v.is_finite() => {
-                                    T::Operand(crate::legacy::formula::number_text(v), false)
+                                    // 단항 `-` 바로 뒤의 숫자는 부호를 숫자에 접는다 (한셀: `-0` → `0`, `--0` → `-0`,
+                                    // `-123456789012345678` → `-123456789012345000` — 큰 수의 글은 부호 있는 값으로
+                                    // 내림해서 부호에 따라 다르다). `-(0)` 은 그대로
+                                    let unary_minus = matches!(toks.last(), Some(T::Raw(m)) if m == "-")
+                                        && match toks[..toks.len() - 1]
+                                            .iter()
+                                            .rev()
+                                            .find(|x| **x != T::Space)
+                                        {
+                                            None | Some(T::Open(_)) => true,
+                                            Some(T::Raw(p)) => p != "%",
+                                            _ => false,
+                                        };
+                                    if unary_minus {
+                                        toks.pop();
+                                        // 앞의 `+` 는 접힌 숫자 앞이라 버리지 않는다 (`+-0` → `+0`)
+                                        if matches!(toks.last(), Some(T::Raw(p)) if p == "+") {
+                                            toks.push(T::Raw(String::new()));
+                                        }
+                                        // 영은 부호 없이 (-0 → 0)
+                                        let nv = if v == 0.0 { 0.0 } else { -v };
+                                        T::Operand(crate::calc::value::number_to_text(nv), false)
+                                    } else {
+                                        T::Operand(crate::calc::value::number_to_text(v), false)
+                                    }
                                 }
                                 _ => T::Operand(w.clone(), false),
                             }
@@ -1129,7 +1232,8 @@ pub fn normalize_checked(input: &str, canon: &dyn Fn(&str) -> Option<String>) ->
     // 앞이 없거나 여는 괄호·연산자(`%` 제외)이고 뒤가 숫자인 `+`
     let unary_before_number = |before: &[T], after: &[T]| {
         let prev = before.iter().rev().find(|x| **x != T::Space);
-        let next = after.iter().find(|x| **x != T::Space);
+        // 숫자가 바로 붙어야 한다 (`+ 0.5` 는 그대로, 한셀 대조 실험)
+        let next = after.first();
         let unary = match prev {
             None | Some(T::Open(_)) => true,
             Some(T::Raw(p)) => p != "%",
@@ -1166,6 +1270,45 @@ pub fn normalize_checked(input: &str, canon: &dyn Fn(&str) -> Option<String>) ->
                 invalid = true;
             }
         }
+    }
+    // 비교 연산자 철자: `!=` → `<>`, `==` → `=`, `=>` → `>=`, `=<` → `<=`, 그 밖의 `<>=!` 이어짐 (`><`, `<<`, `=!`,
+    // 세 글자)은 오류 — 한셀 대조 실험
+    {
+        let is_op = |t: &T| matches!(t, T::Raw(r) if r.len() == 1 && "<>=!".contains(r.as_str()));
+        let mut k = 0;
+        let mut merged: Vec<T> = Vec::with_capacity(toks.len());
+        while k < toks.len() {
+            if is_op(&toks[k]) {
+                let mut j = k;
+                let mut run = String::new();
+                while j < toks.len() && is_op(&toks[j]) {
+                    if let T::Raw(r) = &toks[j] {
+                        run.push_str(r);
+                    }
+                    j += 1;
+                }
+                let fixed = match run.as_str() {
+                    "<" | ">" | "=" | "<>" | "<=" | ">=" | "!" => Some(run.clone()),
+                    "!=" => Some("<>".to_string()),
+                    "==" => Some("=".to_string()),
+                    "=>" => Some(">=".to_string()),
+                    "=<" => Some("<=".to_string()),
+                    _ => None,
+                };
+                match fixed {
+                    Some(t) => merged.push(T::Raw(t)),
+                    None => {
+                        invalid = true;
+                        merged.push(T::Raw(run));
+                    }
+                }
+                k = j;
+            } else {
+                merged.push(toks[k].clone());
+                k += 1;
+            }
+        }
+        toks = merged;
     }
     let mut out = String::with_capacity(input.len());
     let mut depth: i32 = 0;
@@ -1211,6 +1354,41 @@ pub fn normalize_checked(input: &str, canon: &dyn Fn(&str) -> Option<String>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 한셀에 입력해 돌려받은 글 (tools/probe/formula-probe.ps1, 수식 글 대조 실험)
+    #[test]
+    fn normalize_like_hcell_typed_input() {
+        let none = |_: &str| None;
+        let n = |s: &str| normalize_checked(s, &none);
+        // 숫자 글자: 15자리, 일반 서식 글, 단항 -·+ 와 함께
+        assert_eq!(
+            n("1E-10+1E+15+1E+20").text,
+            "0.0000000001+1000000000000000+1E+20"
+        );
+        assert_eq!(n("123456789012345678").text, "123456789012344000");
+        assert_eq!(n("-123456789012345678").text, "-123456789012345000");
+        assert_eq!(n("--0").text, "-0");
+        assert_eq!(n("1--0").text, "1-0");
+        assert_eq!(n("+-0").text, "+0");
+        assert_eq!(n("+ 0.5").text, "+0.5");
+        assert_eq!(n("+1").text, "1");
+        // 비교 연산자 철자
+        assert_eq!(n("A1!=B1").text, "A1<>B1");
+        assert_eq!(n("A1==B1").text, "A1=B1");
+        assert_eq!(n("A1=>B1").text, "A1>=B1");
+        assert_eq!(n("A1=<B1").text, "A1<=B1");
+        for bad in [
+            "A1><B1", "A1<<B1", "A1=!B1", "A1<>=B1", "A1===B1", "#CALC!", "#SPILL!",
+        ] {
+            assert!(n(bad).invalid, "{bad}");
+        }
+        // 거꾸로 된 범위, 접두사
+        assert_eq!(n("$B$2:$A$1").text, "$A$1:$B$2");
+        assert_eq!(n("B$2:$A1").text, "$A1:B$2");
+        assert_eq!(n("3:1").text, "1:3");
+        assert_eq!(n("C:A").text, "A:C");
+        assert_eq!(n("_xlfn.STDEV.S(1)").text, "STDEV.S(1)");
+    }
 
     #[test]
     fn normalize_checks() {

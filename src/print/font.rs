@@ -392,8 +392,10 @@ impl LoadedFace {
         let ps_name = face
             .names()
             .into_iter()
-            .find(|n| n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
-            .and_then(|n| n.to_string())
+            // 첫 기록(매킨토시)은 읽지 못하는 글꼴이 있어 (맑은 고딕) 읽히는 영문 기록을 찾는다
+            .filter(|n| n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
+            .filter_map(|n| n.to_string())
+            .find(|s| s.is_ascii())
             .unwrap_or_else(|| "Font".into())
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
@@ -426,6 +428,41 @@ impl LoadedFace {
         })
     }
 
+    /// VDMX 표의 (오름, 내림) — 글꼴 높이 `ppem`(장치 px) 에서 GDI 가 쓰는 맞춘 값 (1:1 비율 묶음). 표나 그 크기가 없으면 None
+    pub fn vdmx(&self, ppem: u32) -> Option<(f64, f64)> {
+        let face = ttf_parser::Face::parse(&self.data, self.index).ok()?;
+        let t = face
+            .raw_face()
+            .table(ttf_parser::Tag::from_bytes(b"VDMX"))?;
+        let u16at = |o: usize| t.get(o..o + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+        let i16at = |o: usize| u16at(o).map(|v| v as i16);
+        let n_ratios = u16at(4)? as usize;
+        // 1:1 비율 (xRatio·yStartRatio·yEndRatio 가 1) 묶음, 없으면 모든 비율(0)을 받는 묶음
+        let mut pick = None;
+        for i in 0..n_ratios {
+            let r = t.get(6 + i * 4..10 + i * 4)?;
+            if r[1] == 1 && r[2] == 1 && r[3] == 1 {
+                pick = Some(i);
+                break;
+            }
+            if r[1] == 0 && pick.is_none() {
+                pick = Some(i);
+            }
+        }
+        let group = u16at(6 + n_ratios * 4 + pick? * 2)? as usize;
+        // 묶음: 항목 수(u16), 가장 작은 크기(u8), 가장 큰 크기(u8), 항목 (크기 u16, 오름 i16, 내림 i16)
+        let recs = u16at(group)? as usize;
+        let (first, last) = (*t.get(group + 2)? as u32, *t.get(group + 3)? as u32);
+        if ppem < first || ppem > last {
+            return None;
+        }
+        (0..recs).find_map(|k| {
+            let o = group + 4 + k * 6;
+            (u16at(o)? as u32 == ppem)
+                .then(|| Some((i16at(o + 2)? as f64, -(i16at(o + 4)? as f64))))?
+        })
+    }
+
     /// 글자의 (글리프, 폭 1/1000 em). 글꼴에 없으면 None
     pub fn glyph(&mut self, ch: char) -> Option<(u16, f64)> {
         if let Some(g) = self.cmap.get(&ch) {
@@ -440,5 +477,23 @@ impl LoadedFace {
         });
         self.cmap.insert(ch, g);
         g
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// VDMX 표: Windows 의 Arial 이 있으면 한셀 WMF 글자 실험에서 읽은 값과 맞는지 (없으면 건너뜀)
+    #[test]
+    fn vdmx_ascent_descent_of_arial() {
+        let Ok(data) = std::fs::read("C:/Windows/Fonts/arial.ttf") else {
+            return;
+        };
+        let f = LoadedFace::load(Arc::new(data), 0).unwrap();
+        assert_eq!(f.vdmx(48), Some((45.0, 10.0)));
+        assert_eq!(f.vdmx(91), Some((81.0, 20.0)));
+        assert_eq!(f.vdmx(103), Some((92.0, 23.0)));
+        assert_eq!(f.vdmx(7), None);
     }
 }

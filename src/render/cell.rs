@@ -248,8 +248,39 @@ pub(super) fn ratio_of(f: Option<&Font>) -> Option<f64> {
 }
 
 /// 글 (서식 있는 글이면 조각마다 글꼴)
-fn rich_html(v: &CellView, text: &str, theme: &Theme) -> String {
+/// 글 덩이의 HTML: 한셀의 정수 글자 폭이 되도록 글자마다(같은 자간끼리 묶어) 자간을 붙인다 (advance.rs). `.rc-t>span` 의
+/// 절대 위치 규칙에 걸리지 않게 서식 없는 인라인 요소 `<data>` 를 쓴다
+fn spaced_html(name: Option<&str>, size_pt: f64, bold: bool, text: &str) -> String {
+    match super::advance::segments(name, size_pt, bold, text) {
+        Some(segs) => {
+            let mut s = String::new();
+            for (ls, t) in segs {
+                if ls == 0.0 {
+                    s.push_str(&esc(&t));
+                } else {
+                    let _ = write!(
+                        s,
+                        "<data style=\"letter-spacing:{ls:.3}px\">{}</data>",
+                        esc(&t)
+                    );
+                }
+            }
+            s
+        }
+        None => esc(text),
+    }
+}
+
+fn rich_html(v: &CellView, text: &str, theme: &Theme, cf_bold: bool) -> String {
     let mut s = String::new();
+    // 돌린 글은 정수 폭에 맞추지 않는다
+    let spaced = |name: Option<&str>, size: f64, bold: bool, t: &str| {
+        if v.rotation == 0 {
+            spaced_html(name, size, bold, t)
+        } else {
+            esc(t)
+        }
+    };
     match v.rich {
         Some(rt) if text == rt.text => {
             for run in &rt.runs {
@@ -258,6 +289,30 @@ fn rich_html(v: &CellView, text: &str, theme: &Theme) -> String {
                     .as_ref()
                     .map(|f| font_css(Some(f), theme, None))
                     .unwrap_or_default();
+                // 글자 폭: 조각마다 한셀의 정수 폭에 맞춘 자간 (advance.rs)
+                let html = {
+                    let f = run.font.as_ref();
+                    let has_sp = f
+                        .and_then(|f| f.hancom.as_ref())
+                        .and_then(|h| h.spacing)
+                        .is_some_and(|s| s != 0);
+                    let name = f
+                        .and_then(|f| f.name.as_deref())
+                        .or_else(|| v.font.and_then(|c| c.name.as_deref()));
+                    let size = f.and_then(|f| f.size).unwrap_or_else(|| v.m.size_pt());
+                    let bold = f.map_or_else(|| v.font.is_some_and(|c| c.bold), |f| f.bold);
+                    // 줄 높이는 조각 글꼴의 한 줄 높이 — 크기가 다른 조각이 섞인 줄은 가장 큰 조각의 높이가 줄 높이가 된다
+                    // (한셀 화면: 20pt 조각이 낀 칸의 글 기준선이 가운데 맞춤에서 행 아래 − 글꼴 아래 폭)
+                    if f.is_some() {
+                        let m = metrics::FontMetrics::new(name, Some(size), bold);
+                        let _ = write!(css, "line-height:{:.2}px;", m.row_pt * 4.0 / 3.0);
+                    }
+                    if has_sp || f.is_some_and(|f| f.vert_align.is_some()) {
+                        esc(&run.text)
+                    } else {
+                        spaced(name, size, bold, &run.text)
+                    }
+                };
                 // 조각의 위·아래 첨자도 칸 전체와 같게: 60% 글꼴을 기준선에서 올리거나 내린다
                 if let Some(f) = run.font.as_ref()
                     && let Some(va) = f.vert_align.as_deref()
@@ -285,20 +340,62 @@ fn rich_html(v: &CellView, text: &str, theme: &Theme) -> String {
                     }
                 }
                 if css.is_empty() {
-                    s.push_str(&esc(&run.text));
+                    s.push_str(&html);
                 } else {
-                    let _ = write!(s, "<span style=\"{css}\">{}</span>", esc(&run.text));
+                    let _ = write!(s, "<span style=\"{css}\">{html}</span>");
                 }
             }
         }
-        _ => s.push_str(&esc(text)),
+        _ => {
+            let has_sp = v
+                .font
+                .and_then(|f| f.hancom.as_ref())
+                .and_then(|h| h.spacing)
+                .is_some_and(|s| s != 0);
+            if has_sp {
+                s.push_str(&esc(text));
+            } else {
+                let bold = v.font.is_some_and(|f| f.bold);
+                s.push_str(&spaced(
+                    v.font.and_then(|f| f.name.as_deref()),
+                    v.m.size_pt(),
+                    bold || cf_bold,
+                    text,
+                ));
+            }
+        }
     }
     s
 }
 
 /// 칸 안 글자 (`.rc-t` 상자). `w`×`h` 는 칸(병합이면 병합 영역)의 크기(px, 오른쪽·아래 격자선 포함),
 /// `overflow` 는 글자가 넘쳐 쓰는 왼쪽·오른쪽 이웃 폭(px)
+///
+/// `rtl` (오른쪽에서 왼쪽 시트): 표를 통째로 뒤집었으니 데이터 막대는 뒤집힌 채 두고 (한셀 화면: 막대가 오른쪽에서 왼쪽으로
+/// 자라고 세로 변이 오른쪽) 글·아이콘은 `.rc-flip` 으로 한 번 더 뒤집어 바로 세운다 (아이콘은 칸 왼쪽 그대로)
 pub(super) fn cell_content(
+    v: &CellView,
+    cf: Option<&crate::cf_eval::CfStyle>,
+    theme: &Theme,
+    w: u32,
+    h: u32,
+    overflow: (u32, u32),
+    rtl: bool,
+) -> String {
+    // 데이터 막대 (조건부 서식): 글자 뒤 칸 안쪽
+    let bar = cf
+        .and_then(|c| c.bar.as_ref())
+        .map(|b| data_bar_svg(b, w, h))
+        .unwrap_or_default();
+    let rest = cell_content_inner(v, cf, theme, w, h, overflow);
+    if rtl && !rest.is_empty() {
+        format!("{bar}<div class=\"rc-flip\">{rest}</div>")
+    } else {
+        format!("{bar}{rest}")
+    }
+}
+
+fn cell_content_inner(
     v: &CellView,
     cf: Option<&crate::cf_eval::CfStyle>,
     theme: &Theme,
@@ -307,10 +404,6 @@ pub(super) fn cell_content(
     overflow: (u32, u32),
 ) -> String {
     let mut out = String::new();
-    // 데이터 막대 (조건부 서식): 글자 뒤 칸 안쪽
-    if let Some(b) = cf.and_then(|c| c.bar.as_ref()) {
-        out.push_str(&data_bar_svg(b, w, h));
-    }
     let mut text = v.text.clone();
     if cf.is_some_and(|c| c.hide_value) {
         text.clear();
@@ -390,7 +483,7 @@ pub(super) fn cell_content(
         VAlign::Bottom => "bottom:0".to_string(),
     };
     let vshift = if v.v == VAlign::Center { "-50%" } else { "0" };
-    let mut body = rich_html(v, &text, theme);
+    let mut body = rich_html(v, &text, theme, cf.is_some_and(|c| c.bold == Some(true)));
     // 칸 전체 위·아래 첨자: 60% 글꼴을 기준선에서 올리거나 내린다 (한셀 화면 — 글꼴 실험의 11pt: 위 첨자 잉크
     // 1–9px, 아래 첨자 10–17px, 보통 글 3–16px)
     if let Some(va) = v.font.and_then(|f| f.vert_align.as_deref()) {
@@ -459,13 +552,39 @@ pub(super) fn cell_content(
             VAlign::Center => "center",
             VAlign::Bottom => "flex-end",
         };
-        let mut css = fcss;
+        // 줄 높이가 정수에 가까우면 (11pt 맑은 고딕 21.87px) 가운데·아래 맞춤은 정수 px 줄 간격 (한셀 화면: 22px —
+        // 줄 바꿈 묶음 2.91 → 1.85%). 위 맞춤과 다른 크기는 소수 줄 높이가 더 가깝다 (줄 바꿈 실험 2 — 글꼴 4종 × 8–20pt)
+        let mut css = if v.v != VAlign::Top && (line.round() - line).abs() <= 0.15 {
+            fcss.replace(
+                &format!("line-height:{line:.2}px;"),
+                &format!("line-height:{:.0}px;", line.round()),
+            )
+        } else {
+            fcss
+        };
         let _ = write!(
             css,
             "width:{bw:.0}px;height:{bh:.0}px;justify-content:{jc};text-align:{ta};white-space:pre-wrap;overflow-wrap:anywhere;"
         );
         if v.h == HAlign::Distributed {
             css.push_str("text-align-last:justify;");
+        }
+        // 맑은 고딕 위 맞춤 줄 바꿈 글은 11pt 가 아니면 한셀이 1px 위 (줄 바꿈 실험 2: 10·12–20pt 첫·끝 줄 −1px, 11pt 0)
+        if v.v == VAlign::Top {
+            let (name, size) = v
+                .font
+                .map_or((metrics::DEFAULT_FONT, metrics::DEFAULT_SIZE), |f| {
+                    (
+                        f.name.as_deref().unwrap_or(metrics::DEFAULT_FONT),
+                        f.size.unwrap_or(metrics::DEFAULT_SIZE),
+                    )
+                });
+            if matches!(name, "맑은 고딕" | "Malgun Gothic")
+                && size >= 10.0
+                && (size - 11.0).abs() > 0.01
+            {
+                css.push_str("top:-1px;");
+            }
         }
         match v.h {
             HAlign::Right if indent > 0.0 => {
@@ -478,7 +597,7 @@ pub(super) fn cell_content(
         }
         let _ = write!(
             out,
-            "<div class=\"rc-t rc-w\" style=\"{css}\">{}</div>",
+            "<div class=\"rc-t rc-w\" style=\"{css}\"><span style=\"white-space:inherit\">{}</span></div>",
             scaled(body, "left")
         );
         return out;
@@ -599,6 +718,36 @@ fn with_pads(text: &str, pads: &[(usize, char)]) -> String {
     s
 }
 
+/// 세로 쓰기 글자 간격 (px) — 한셀 화면에서 글자 크기 8–28pt 마다 잰 값 (세로 쓰기 간격 실험: 글꼴 8종 × 크기 21).
+/// 간격은 글꼴이 아니라 계열만 따른다 — 맑은 고딕과 라틴 글꼴(Arial·Calibri·Times New Roman)은 같은 표, 바탕·굴림·돋움·궁서는
+/// 같은 표. 글자 종류(한글·라틴)와도 상관없다. 16pt 맑은 고딕 35.2px 는 줄 높이(31.2px)보다 크고 17pt(33.2px)보다도 크다
+const VERT_PITCH: [f64; 21] = [
+    16.2, 16.8, 18.4, 21.8, 25.4, 26.6, 28.6, 30.8, 35.2, 33.2, 35.2, 37.0, 38.8, 40.8, 42.8, 44.6,
+    46.4, 48.2, 50.4, 52.25, 54.0,
+];
+const VERT_PITCH_KR: [f64; 21] = [
+    14.6, 15.6, 16.6, 18.2, 19.2, 24.0, 25.6, 26.0, 27.6, 30.2, 30.2, 31.8, 33.4, 35.0, 36.6, 38.4,
+    39.8, 41.6, 43.0, 44.8, 46.2,
+];
+
+/// 글꼴·크기(pt)의 세로 쓰기 글자 간격 — 표 사이 크기는 선형 보간, 밖은 비례
+fn vert_pitch(font: &str, size: f64) -> f64 {
+    let kr = matches!(
+        font.trim_end_matches('체'),
+        "바탕" | "굴림" | "돋움" | "궁서" | "Batang" | "Gulim" | "Dotum" | "Gungsuh"
+    ) || matches!(font, "BatangChe" | "GulimChe" | "DotumChe" | "GungsuhChe");
+    let t = if kr { &VERT_PITCH_KR } else { &VERT_PITCH };
+    if size <= 8.0 {
+        return t[0] * size / 8.0;
+    }
+    if size >= 28.0 {
+        return t[20] * size / 28.0;
+    }
+    let i = (size - 8.0).floor() as usize;
+    let f = size - 8.0 - i as f64;
+    t[i] + (t[i + 1] - t[i]) * f
+}
+
 /// 돌린 글자의 여백 (px): 왼쪽, 오른쪽, 위, 아래 (회전 실험 — 10 각도 × 맞춤 12가지)
 const ROT_PAD: (f64, f64, f64, f64) = (2.0, 2.0, 2.0, 2.0);
 /// 세로 쓰기 여백 (px): 왼쪽, 오른쪽, 위, 아래
@@ -617,24 +766,37 @@ fn rotated(v: &CellView, fcss: &str, body: &str, bw: f64, bh: f64, line: f64) ->
         };
         let n = chars.len().max(1) as f64;
         let col_w = line;
+        // 글자 사이 간격은 글자 크기의 표 값 (줄 높이와 다르다 — 16pt 맑은 고딕 35.2px, 줄 높이 31.2px)
+        let pitch = v
+            .font
+            .map(|f| {
+                vert_pitch(
+                    f.name.as_deref().unwrap_or(metrics::DEFAULT_FONT),
+                    f.size.unwrap_or(metrics::DEFAULT_SIZE),
+                )
+            })
+            .unwrap_or(line);
         let x = match v.h {
             HAlign::Right => bw - pr - col_w,
             HAlign::Center | HAlign::CenterContinuous | HAlign::Distributed | HAlign::Justify => {
-                (bw - col_w) / 2.0
+                (bw - col_w) / 2.0 + 1.0
             }
             _ => pl,
         };
-        let y = match v.v {
-            VAlign::Top => pt,
-            VAlign::Center => (bh - n * line) / 2.0 + 3.0,
-            VAlign::Bottom => bh - pb - n * line,
-        };
+        // 간격이 줄 높이보다 큰 만큼은 글자 위에 얹힌다 (16pt: 글자가 한셀에서 2px 아래)
+        let extra = (pitch - line).max(0.0) / 2.0;
+        let y = extra
+            + match v.v {
+                VAlign::Top => pt,
+                VAlign::Center => (bh - n * pitch) / 2.0 + 3.0,
+                VAlign::Bottom => bh - pb - n * pitch,
+            };
         let mut s = String::new();
         for ch in chars {
             let _ = write!(s, "<span>{}</span>", esc(&ch.to_string()));
         }
         return format!(
-            "<div class=\"rc-t\" style=\"{frame}\"><span class=\"rc-vert\" style=\"left:{x:.1}px;top:{y:.1}px;width:{col_w:.1}px;line-height:{line:.2}px\">{s}</span></div>"
+            "<div class=\"rc-t\" style=\"{frame}\"><span class=\"rc-vert\" style=\"left:{x:.1}px;top:{y:.1}px;width:{col_w:.1}px;line-height:{pitch:.2}px\">{s}</span></div>"
         );
     }
     let deg = if v.rotation > 90 {
@@ -647,23 +809,57 @@ fn rotated(v: &CellView, fcss: &str, body: &str, bw: f64, bh: f64, line: f64) ->
     let th = deg.to_radians();
     let (c, s) = (th.cos().abs(), th.sin().abs());
     let (bbw, bbh) = (w * c + line * s, w * s + line * c);
-    // 상자가 칸보다 크면 글의 시작이 보이게 붙인다: 가로는 왼쪽, 세로는 반시계면 아래·시계면 위
+    // 가로: 상자가 칸보다 넓어도 맞춤대로 놓고 (오른쪽은 칸 오른쪽 끝에 맞춰 왼쪽으로 삐져나간다) 가로로는 자르지 않는다
+    // (이웃 칸이 비었으면 글이 그쪽으로 보인다 — 한셀 화면, 칸 폭 86px 에 상자 178px)
     let x0 = match v.h {
-        _ if bbw > bw - pl - pr => pl,
         HAlign::Right => bw - pr - bbw,
         HAlign::Center | HAlign::CenterContinuous | HAlign::Distributed | HAlign::Justify => {
             (bw - bbw) / 2.0
         }
         _ => pl,
     };
-    let va = if bbh > bh - pt - pb {
-        if deg > 0.0 {
-            VAlign::Bottom
-        } else {
-            VAlign::Top
-        }
+    // 세로: 상자가 칸보다 크면 칸 높이만큼만 보인다 (위·아래로 자른다). 보이는 쪽은 한셀 화면에서 잰 값 (회전 실험 — 글 11 개,
+    // 칸 높이 27–96px, 각도 ±30·45·60·90). 글이 시작하는 쪽(반시계는 아래, 시계는 위)에 맞춘 글은 그 끝에 붙는다.
+    // 반대쪽에 맞춘 글과 가운데 맞춘 글은 가운데에서 시작 쪽으로 t 만큼 간다 — 각도 30·45·60·90 에서
+    // 반대쪽 0·.4·.8·1, 가운데 .6(시계 .5)·.9(.7)·1(.85)·1
+    let tall = bbh > bh - pt - pb;
+    let ccw = deg > 0.0;
+    let at_start = if ccw {
+        v.v == VAlign::Bottom
     } else {
+        v.v == VAlign::Top
+    };
+    let t = if !tall {
+        0.0
+    } else if at_start {
+        1.0
+    } else {
+        let table = if v.v == VAlign::Center {
+            if ccw {
+                [0.6, 0.9, 1.0, 1.0]
+            } else {
+                [0.5, 0.7, 0.85, 1.0]
+            }
+        } else {
+            [0.0, 0.4, 0.8, 1.0]
+        };
+        let d = deg.abs().clamp(30.0, 90.0);
+        let (i, f) = if d <= 45.0 {
+            (0, (d - 30.0) / 15.0)
+        } else if d <= 60.0 {
+            (1, (d - 45.0) / 15.0)
+        } else {
+            (2, (d - 60.0) / 30.0)
+        };
+        table[i] + (table[i + 1] - table[i]) * f
+    };
+    // 한셀 글자 자리와의 차이를 줄 때 쓸 세로 맞춤
+    let va = if !tall {
         v.v
+    } else if t > 0.5 {
+        if ccw { VAlign::Bottom } else { VAlign::Top }
+    } else {
+        VAlign::Center
     };
     // 한셀 글자 자리와의 차이 (회전 실험의 잉크 상자 — 맑은 고딕 9·11pt, 바탕·Arial 11pt): 90도가 아닌 각도는
     // 경계 상자보다 위쪽, 시계 방향은 더 위
@@ -681,13 +877,25 @@ fn rotated(v: &CellView, fcss: &str, body: &str, bw: f64, bh: f64, line: f64) ->
         (_, VAlign::Center) => -2.0,
         (_, VAlign::Bottom) => -1.5,
     };
+    let (yc, yb) = ((bh - bbh) / 2.0, bh - pb - bbh);
     let y0 = dy
-        + match va {
-            VAlign::Top => pt,
-            VAlign::Center => (bh - bbh) / 2.0,
-            VAlign::Bottom => bh - pb - bbh,
+        + if tall {
+            // 가운데에서 시작 쪽 끝(반시계 아래, 시계 위)으로 t 만큼
+            yc + t * (if ccw { yb } else { pt } - yc)
+        } else {
+            match va {
+                VAlign::Top => pt,
+                VAlign::Center => yc,
+                VAlign::Bottom => yb,
+            }
         };
     let (cx, cy) = (x0 + bbw / 2.0, y0 + bbh / 2.0);
+    // 칸보다 넓은 상자는 위·아래로만 자른다 (옆 칸으로 삐져나간다)
+    let frame = if bbw > bw - pl - pr {
+        format!("{frame}overflow:visible;clip-path:inset(0 -3000px);")
+    } else {
+        frame
+    };
     format!(
         "<div class=\"rc-t\" style=\"{frame}\"><span class=\"rc-rot\" style=\"left:{cx:.2}px;top:{cy:.2}px;line-height:{line:.2}px;transform:translate(-50%,-50%) rotate({}deg)\">{body}</span></div>",
         -deg

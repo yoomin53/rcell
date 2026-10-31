@@ -31,6 +31,10 @@ pub const FNS: &[FnSpec] = &[
     f("BITRSHIFT", 2, 2, V, |c, a| shift(c, a, false)),
     f("DELTA", 1, 2, V, |c, a| {
         let x = try_v!(num_arg(c, a, 0));
+        // 둘째 인수가 오류면 #VALUE! (DELTA(1,1/0) = #VALUE!, 대조 실험 prec)
+        if matches!(a.get(1), Some(Value::Error(_))) {
+            return Value::Error(ErrorKind::Value);
+        }
         let y = try_v!(num_or(c, a, 1, 0.0));
         Value::Number((x == y) as u8 as f64)
     }),
@@ -74,7 +78,11 @@ pub const FNS: &[FnSpec] = &[
         let re = try_v!(num_arg(c, a, 0));
         let im = try_v!(num_arg(c, a, 1));
         let suf = match opt(a, 2) {
-            Some(v) => try_v!(c.text(v)).to_string(),
+            // 빈 접미사는 "i" (COMPLEX(1,2,"") = "1+2i", 대조 실험 misc5)
+            Some(v) => match try_v!(c.text(v)).to_string() {
+                s if s.is_empty() => "i".into(),
+                s => s,
+            },
             None => "i".into(),
         };
         if suf != "i" && suf != "j" {
@@ -250,6 +258,13 @@ fn fmt_radix(v: i64, radix: u32, places: Option<f64>) -> Result<String, ErrorKin
     if v < lo || v > hi {
         return Err(ErrorKind::Num);
     }
+    // 자릿수는 음수에서도 1–10 이어야 한다 (DEC2BIN(-3,0)·BIN2OCT("1111111111",12) = #NUM!, 대조 실험 numstr)
+    if let Some(p) = places {
+        let p = p.trunc();
+        if !(1.0..=10.0).contains(&p) {
+            return Err(ErrorKind::Num);
+        }
+    }
     if v < 0 {
         let u = (v + (1i64 << bits)) as u64;
         return Ok(super::math::to_radix(u, radix));
@@ -259,7 +274,7 @@ fn fmt_radix(v: i64, radix: u32, places: Option<f64>) -> Result<String, ErrorKin
         None => Ok(s),
         Some(p) => {
             let p = p.trunc();
-            if p < 0.0 || p > 10.0 || (s.len() as f64) > p {
+            if (s.len() as f64) > p {
                 return Err(ErrorKind::Num);
             }
             Ok(format!("{:0>width$}", s, width = p as usize))
@@ -290,13 +305,31 @@ fn dec2(ctx: &mut Ctx, a: &[Value], radix: u32) -> Value {
     if matches!(a[0], Value::Empty) {
         return Value::Error(ErrorKind::NA);
     }
-    let x = try_v!(num_arg(ctx, a, 0)).trunc();
+    let raw = try_v!(num_arg(ctx, a, 0));
+    let x = raw.trunc();
     let places = match opt(a, 1) {
         Some(p) => Some(try_v!(ctx.num(p))),
         None => None,
     };
     if x.abs() > 1e15 {
         return Value::Error(ErrorKind::Num);
+    }
+    // 범위는 소수를 버리기 전의 값으로 잰다 (DEC2BIN(511.5) = #NUM!, 대조 실험 bitops)
+    let (lo, hi) = match radix {
+        2 => (-512.0, 511.0),
+        8 => (-536_870_912.0, 536_870_911.0),
+        _ => (-549_755_813_888.0, 549_755_813_887.0),
+    };
+    if raw > hi || raw < lo {
+        return Value::Error(ErrorKind::Num);
+    }
+    // 음수 소수가 0 이 되면 자릿수를 채우지 않는다 (DEC2OCT(-0.5,5) = "0", 자릿수는 1–10 이어야 한다:
+    // DEC2HEX(-0.5,0) = #NUM!, 대조 실험 rand)
+    if raw < 0.0 && x == 0.0 {
+        if places.is_some_and(|p| !(1.0..=10.0).contains(&p.trunc())) {
+            return Value::Error(ErrorKind::Num);
+        }
+        return Value::from("0");
     }
     match fmt_radix(x as i64, radix, places) {
         Ok(s) => Value::from(s),
@@ -307,16 +340,11 @@ fn dec2(ctx: &mut Ctx, a: &[Value], radix: u32) -> Value {
 /// 비트 함수 인수: 소수점 아래를 버린다. BITAND 만 양의 소수 부분이 있으면 #NUM! (BITAND(0.5,1),
 /// BITAND(-0.5,1) = 0, BITOR(1.5,1) = 1, BITXOR(3.5,1) = 2). 버린 값은 0 이상 2^48 이하 (자리 이동
 /// 함수는 2^48 미만) — 대조 실험 engineering·misc3·misc4
-fn bit_arg(
-    ctx: &mut Ctx,
-    a: &[Value],
-    i: usize,
-    strict: bool,
-    limit: f64,
-) -> Result<u64, ErrorKind> {
-    let x = num_arg(ctx, a, i)?;
+fn bit_check(x: f64, strict: bool, limit: f64) -> Result<u64, ErrorKind> {
     let n = x.trunc();
-    if (strict && x - n > 0.0) || n < 0.0 || n > limit {
+    // BITAND 만 (−1, 0) 의 음수 소수를 0 으로 받는다; 나머지는 0 보다 작으면 모두 #NUM!
+    // (BITXOR(1023,-0.69)·BITRSHIFT(-0.5,6) = #NUM!, 대조 실험 bitops·rand)
+    if (strict && x - n > 0.0) || n < 0.0 || (!strict && x < 0.0) || n > limit {
         return Err(ErrorKind::Num);
     }
     Ok(n as u64)
@@ -326,8 +354,10 @@ const BIT_MAX: f64 = 281_474_976_710_656.0;
 
 /// 결과가 2^48 을 넘으면 #NUM! (BITOR(2^48,1); BITAND(2^48,2^48) = 2^48 은 된다)
 fn bit(ctx: &mut Ctx, a: &[Value], f: fn(u64, u64) -> u64, strict: bool) -> Value {
-    let x = try_v!(bit_arg(ctx, a, 0, strict, BIT_MAX));
-    let y = try_v!(bit_arg(ctx, a, 1, strict, BIT_MAX));
+    // 두 인수의 오류·글을 먼저 보고 범위는 그다음 (BITXOR(-0.5,#VALUE!) = #VALUE!, 대조 실험 rand)
+    let (xr, yr) = (try_v!(num_arg(ctx, a, 0)), try_v!(num_arg(ctx, a, 1)));
+    let x = try_v!(bit_check(xr, strict, BIT_MAX));
+    let y = try_v!(bit_check(yr, strict, BIT_MAX));
     let r = f(x, y);
     if r > 281_474_976_710_656 {
         return Value::Error(ErrorKind::Num);
@@ -336,8 +366,9 @@ fn bit(ctx: &mut Ctx, a: &[Value], f: fn(u64, u64) -> u64, strict: bool) -> Valu
 }
 
 fn shift(ctx: &mut Ctx, a: &[Value], left: bool) -> Value {
-    let x = try_v!(bit_arg(ctx, a, 0, false, BIT_MAX - 1.0));
+    let xr = try_v!(num_arg(ctx, a, 0));
     let s = try_v!(num_arg(ctx, a, 1)).trunc();
+    let x = try_v!(bit_check(xr, false, BIT_MAX - 1.0));
     if s.abs() > 53.0 {
         return Value::Error(ErrorKind::Num);
     }

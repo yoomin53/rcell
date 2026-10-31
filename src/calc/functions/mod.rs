@@ -487,9 +487,15 @@ pub fn flatten(ctx: &mut Ctx, v: &Value) -> Vec<Value> {
         Value::Ref(r) => {
             let mut out = Vec::new();
             for area in r.iter() {
-                match ctx.area_to_array(area) {
-                    Ok(a) => out.extend(a.data.iter().cloned()),
-                    Err(e) => out.push(Value::Error(e)),
+                // 여러 시트에 걸친 영역은 시트마다 (TRIMMEAN('S1:S3'!A1,0.5) = 37, LARGE('S1:S3'!A1,1) = 100)
+                for s in area.sheet..=area.sheet_last {
+                    let mut one = *area;
+                    one.sheet = s;
+                    one.sheet_last = s;
+                    match ctx.area_to_array(&one) {
+                        Ok(a) => out.extend(a.data.iter().cloned()),
+                        Err(e) => out.push(Value::Error(e)),
+                    }
                 }
             }
             out
@@ -564,6 +570,10 @@ pub fn paired_numbers(
     }
     if let Value::Error(e) = b {
         return Err(*e);
+    }
+    // 낱 글 인수는 #VALUE! (CORREL("a","b"), 대조 실험 typing)
+    if matches!(a, Value::Text(_)) || matches!(b, Value::Text(_)) {
+        return Err(ErrorKind::Value);
     }
     let xa = flatten(ctx, a);
     let xb = flatten(ctx, b);

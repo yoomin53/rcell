@@ -17,6 +17,9 @@
 //! - 조건부 서식: 데이터 막대는 한셀처럼 삼각형([`cell`]), 아이콘은 16px SVG ([`icons`]). 보이는 메모는 상자와
 //!   화살표 ([`note`]).
 
+mod advance;
+mod advance_data;
+mod advance_hint;
 mod cell;
 mod draw;
 mod icons;
@@ -28,6 +31,7 @@ mod numfit;
 pub mod page;
 mod paint;
 mod shape;
+mod shape_trace;
 mod sparkline;
 mod svgops;
 mod table;
@@ -145,7 +149,7 @@ pub fn overflow_end_col(wb: &Workbook, sheet: &Sheet, max_r: u32) -> Option<u32>
             || views.get(&(r, c)).is_some_and(|v| v.has_value())
             || ctx.cells.get(&(r, c)).is_some_and(|x| x.formula.is_some())
     };
-    let ov = overflow_spans(lay, &views, &blocked, lay_c);
+    let ov = overflow_spans(lay, &views, &blocked, lay_c, sheet.view.right_to_left);
     (!ov.span.is_empty()).then_some(ov.max_col)
 }
 
@@ -266,20 +270,27 @@ struct Overflow {
     max_col: u32,
 }
 
+/// 열 하나의 이웃 열 (너비 0 인 숨긴 열은 건너뛴다)
+type NeighborFn<'a> = dyn Fn(u32) -> Option<u32> + 'a;
+
 /// 넘치는 글자의 범위를 정한다 (값이 있는 칸·병합·스파크라인에서 멈춘다)
 fn overflow_spans(
     lay: &layout::Layout,
     views: &HashMap<(u32, u32), CellView>,
     blocked: &dyn Fn(u32, u32) -> bool,
     ncols: u32,
+    rtl: bool,
 ) -> Overflow {
     let mut out = Overflow {
         span: HashMap::new(),
         no_vline: HashSet::new(),
         max_col: 0,
     };
-    let next = |c: u32| ((c + 1)..ncols).find(|&k| lay.col_w(k) > 0);
-    let prev = |c: u32| (0..c).rev().find(|&k| lay.col_w(k) > 0);
+    let up = |c: u32| ((c + 1)..ncols).find(|&k| lay.col_w(k) > 0);
+    let down = |c: u32| (0..c).rev().find(|&k| lay.col_w(k) > 0);
+    // 오른쪽에서 왼쪽 시트: 화면의 오른쪽 이웃은 앞 열, 왼쪽 이웃은 다음 열 (한셀 화면 — 맞춤은 화면 방향 그대로)
+    let (next, prev): (&NeighborFn<'_>, &NeighborFn<'_>) =
+        if rtl { (&down, &up) } else { (&up, &down) };
     for (&(r, c), v) in views {
         if !v.may_overflow() || lay.span.contains_key(&(r, c)) {
             continue;
@@ -296,12 +307,12 @@ fn overflow_spans(
                     break;
                 }
                 right += lay.col_w(n);
-                out.no_vline.insert((r, k));
+                out.no_vline.insert(if rtl { (r, n) } else { (r, k) });
                 k = n;
             }
             if right > 0 {
                 out.span.insert((r, c), (0, right));
-                out.max_col = out.max_col.max(k);
+                out.max_col = out.max_col.max(if rtl { c } else { k });
             }
             // 이어진 범위보다 넓으면 그 바깥으로도 넘친다 (아래에서 다시 보지 않는다)
             continue;
@@ -333,11 +344,13 @@ fn overflow_spans(
                 if blocked(r, n) || got as f64 >= want {
                     break;
                 }
-                out.no_vline.insert(if forward { (r, k) } else { (r, n) });
+                // 지울 세로 경계는 칸의 오른쪽 (화면 왼쪽 시트) 또는 칸의 왼쪽 (오른쪽에서 왼쪽 시트 — 격자선이 칸의 왼쪽)
+                out.no_vline
+                    .insert(if forward != rtl { (r, k) } else { (r, n) });
                 got += lay.col_w(n);
                 k = n;
             }
-            if forward {
+            if forward != rtl {
                 out.max_col = out.max_col.max(k);
             }
             got
@@ -512,6 +525,7 @@ impl<'a> Views<'a> {
                 css: format!("background:{c};"),
                 color: Some(c),
                 tiled: false,
+                pat: None,
             })
             .or(fill)
             .or_else(|| {
@@ -519,6 +533,7 @@ impl<'a> Views<'a> {
                     css: format!("background:{c};"),
                     color: Some(c),
                     tiled: false,
+                    pat: None,
                 })
             });
         // 표 스타일 테두리는 칸 자체의 테두리가 없는 변에만
@@ -660,7 +675,8 @@ pub fn sheet_table_grid(
             || cells.get(&(r, c)).is_some_and(|x| x.formula.is_some())
             || sparks.contains_key(&(r, c))
     };
-    let ov = overflow_spans(lay, &views, &blocked, lay_c);
+    let rtl = view.right_to_left;
+    let ov = overflow_spans(lay, &views, &blocked, lay_c, rtl);
 
     // ---- 3. 그릴 범위: 쓰는 범위 + 넘친 글자 + 최소 크기
     let mut ncols = used_c.max(ov.max_col + 1).min(lay_c);
@@ -846,9 +862,10 @@ pub fn sheet_table_grid(
     }
     let _ = write!(
         s,
-        "<table class=\"rc-sheet{}{}{}\">",
+        "<table class=\"rc-sheet{}{}{}{}\">",
         if grid { " rc-grid" } else { "" },
         if grid_color.is_some() { " rc-gc" } else { "" },
+        if rtl { " rc-rtl" } else { "" },
         if zoom_pct != 100 {
             format!(" rc-z{zoom_pct}")
         } else {
@@ -956,7 +973,9 @@ pub fn sheet_table_grid(
                         m
                     });
                 let span = ov.span.get(&(r, c)).copied().unwrap_or((0, 0));
-                inner = cell::cell_content(v, merged.as_ref().or(cf), theme, w, h, span);
+                // 오른쪽에서 왼쪽 시트: 표를 통째로 뒤집었으니 칸 안 글·아이콘은 한 번 더 뒤집어 바로 세운다 (데이터 막대는
+                // 뒤집힌 채, 테두리도 — 왼쪽 테두리가 물리적 오른쪽에 그려진다)
+                inner = cell::cell_content(v, merged.as_ref().or(cf), theme, w, h, span, rtl);
             }
             if tlooks.get(&(r, c)).is_some_and(|t| t.handle) {
                 inner.push_str(&table::handle_svg(w, h));
@@ -1029,14 +1048,20 @@ pub fn sheet_table_grid(
                 && let Some(g) = spark_groups.get(*gi)
             {
                 let lohi = sparkline::group_range(&sparks, *gi);
-                inner.push_str(&sparkline::svg(
+                let sp = sparkline::svg(
                     g,
                     vals,
                     lohi,
                     w.saturating_sub(1) as f64,
                     h.saturating_sub(1) as f64,
                     theme,
-                ));
+                );
+                // 오른쪽에서 왼쪽 시트의 스파크라인은 칸 자리만 거울이고 자료 방향은 그대로다 (한셀 화면)
+                if rtl {
+                    let _ = write!(inner, "<div class=\"rc-flip\">{sp}</div>");
+                } else {
+                    inner.push_str(&sp);
+                }
             }
             if css.is_empty() {
                 let _ = write!(s, "<td{attrs}>{inner}</td>");
@@ -1047,9 +1072,13 @@ pub fn sheet_table_grid(
         s.push_str("</tr>");
     }
     s.push_str("</tbody></table>");
-    s.push_str(&draw::shapes_html(
-        wb, sheet, lay, header_w, header_h, theme,
-    ));
+    // 한셀 화면은 오른쪽에서 왼쪽 시트의 그리기 개체(도형·차트)를 그리지 않는다 (거울 자리에도 없다 — 화면 복사·PrintWindow 둘 다,
+    // 가로 스크롤해도 없다)
+    if !rtl {
+        s.push_str(&draw::shapes_html(
+            wb, sheet, lay, header_w, header_h, theme,
+        ));
+    }
     s.push_str(&note::notes_html(sheet, lay, header_w, header_h, theme));
     s.push_str("</div>");
     (s, info)
@@ -1065,10 +1094,13 @@ pub const CSS: &str = "\
 table.rc-sheet{border-collapse:separate;border-spacing:0;table-layout:fixed;background:#fff;width:max-content}\
 table.rc-sheet td{position:relative;box-sizing:border-box;padding:0;border:0 solid transparent;border-right-width:1px;border-bottom-width:1px;font-size:11pt;vertical-align:top;background-clip:border-box;overflow:visible}\
 table.rc-grid td{border-right-color:#D9D9D9;border-bottom-color:#D9D9D9}\
+table.rc-rtl{transform:scaleX(-1)}\
+table.rc-rtl th{transform:scaleX(-1)}\
+.rc-flip{position:absolute;left:1px;top:0;width:100%;height:100%;transform:scaleX(-1)}\
 table.rc-sheet th{box-sizing:border-box;background:#F5F5F5;border:0 solid #CCCCCC;border-right-width:1px;border-bottom-width:1px;padding:0;font-weight:normal;font-size:9pt;color:#333;position:sticky;top:0;z-index:3;overflow:hidden;white-space:nowrap}\
 table.rc-sheet thead th.rc-corner{left:0;z-index:5}\
 table.rc-sheet tbody th{position:sticky;left:0;text-align:center}\
-.rc-t{position:absolute;left:0;top:0;overflow:hidden;box-sizing:border-box;white-space:pre;z-index:1}\
+.rc-t{position:absolute;left:0;top:0;overflow:hidden;box-sizing:border-box;white-space:pre;z-index:1;font-kerning:none}\
 .rc-t>span{position:absolute;white-space:pre;text-decoration:inherit}\
 .rc-w,.rc-flex{display:flex;flex-direction:column;padding:0 2px}\
 .rc-w>span,.rc-flex>span{position:static}\
@@ -1154,4 +1186,19 @@ pub fn workbook_html_with(wb: &Workbook, title: &str, opts: Options, extras: &Ex
         esc(title),
         workbook_fragment_with(wb, opts, extras)
     )
+}
+
+/// 차트 글자의 자간 보정 (px) — 한셀의 정수 글자 폭에 맞춘다 (advance.rs)
+pub(crate) fn chart_spacing(
+    name: Option<&str>,
+    size_pt: f64,
+    bold: bool,
+    text: &str,
+) -> Option<f64> {
+    // 차트 글자는 식이 모든 표본과 같은 글꼴만 (COM 차트의 Calibri 는 보정하면 오히려 어긋난다)
+    if advance::is_exact(name) {
+        advance::spacing(name, size_pt, bold, text)
+    } else {
+        None
+    }
 }

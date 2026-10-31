@@ -16,26 +16,33 @@ use crate::calc::value::{self, Area, Array, ErrorKind, MAX_COLS, MAX_ROWS, Value
 
 const RAV: &[Arg] = &[Arg::RA, Arg::V, Arg::V, Arg::V];
 const VRAV: &[Arg] = &[Arg::V, Arg::RA, Arg::V, Arg::V];
+const RA1: &[Arg] = &[Arg::RA];
+const VRV: &[Arg] = &[Arg::V, Arg::R, Arg::V];
 const VRARA: &[Arg] = &[Arg::V, Arg::RA, Arg::RA];
-const VRARAV: &[Arg] = &[Arg::RA, Arg::RA, Arg::RA, Arg::V, Arg::V, Arg::V];
+// MATCH·XLOOKUP 의 찾을 범위·돌려줄 범위는 식을 배열로 계산하지 않는다 (MATCH(2,범위*2,0) = #VALUE!, 대조 실험 conv5)
+const VRRV: &[Arg] = &[Arg::V, Arg::R, Arg::R, Arg::V, Arg::V, Arg::V];
 const RVVVV: &[Arg] = &[Arg::R, Arg::V, Arg::V, Arg::V, Arg::V];
 
 pub const FNS: &[FnSpec] = &[
     f("INDEX", 2, 4, RAV, index),
-    f("MATCH", 2, 3, VRAV, match_fn),
+    f("MATCH", 2, 3, VRV, match_fn),
     f("XMATCH", 2, 4, VRAV, xmatch),
     f("VLOOKUP", 3, 4, VRAV, |c, a| vh_lookup(c, a, true)),
     f("HLOOKUP", 3, 4, VRAV, |c, a| vh_lookup(c, a, false)),
     f("LOOKUP", 2, 3, VRARA, lookup),
-    f("XLOOKUP", 3, 6, VRARAV, xlookup),
+    f("XLOOKUP", 3, 6, VRRV, xlookup),
     lazy("CHOOSE", 2, MANY, choose),
     super::volatile(f("OFFSET", 3, 5, RVVVV, offset)),
     super::volatile(f("INDIRECT", 1, 2, V, indirect)),
     f("ROW", 0, 1, R, |c, a| row_col(c, a, true)),
     f("COLUMN", 0, 1, R, |c, a| row_col(c, a, false)),
-    f("ROWS", 1, 1, R, |c, a| dims(c, a, true)),
-    f("COLUMNS", 1, 1, R, |c, a| dims(c, a, false)),
+    f("ROWS", 1, 1, RA1, |c, a| dims(c, a, true)),
+    f("COLUMNS", 1, 1, RA1, |c, a| dims(c, a, false)),
     f("AREAS", 1, 1, R, |_, a| match &a[0] {
+        // 여러 시트에 걸친 참조는 #VALUE!
+        Value::Ref(r) if r.iter().any(|x| x.sheet != x.sheet_last) => {
+            Value::Error(ErrorKind::Value)
+        }
         Value::Ref(r) => Value::Number(r.len() as f64),
         Value::Error(e) => Value::Error(*e),
         _ => Value::Error(ErrorKind::Value),
@@ -173,6 +180,10 @@ fn index(ctx: &mut Ctx, a: &[Value]) -> Value {
                 return Value::Error(ErrorKind::Ref);
             }
             let area = r[n as usize - 1];
+            // 3차원 참조는 번호 범위를 재기 전에 #VALUE! (INDEX('S1:S3'!A1,"2",5) = #VALUE!, 대조 실험 rand)
+            if area.is_3d() {
+                return Value::Error(ErrorKind::Value);
+            }
             let (h, w) = (area.rows() as f64, area.cols() as f64);
             // 한 행짜리에 인수 하나면 열 번호로 본다
             let (row, col) = match col {
@@ -202,6 +213,9 @@ fn index(ctx: &mut Ctx, a: &[Value]) -> Value {
             }]))
         }
         Value::Error(e) => Value::Error(*e),
+        // 글·논리·빈 인수는 배열로 보지 않는다 (INDEX("a",1), INDEX(TRUE,1), INDEX(,1) = #VALUE!, 숫자 낱값은
+        // 한 칸 배열: INDEX(5,1) = 5 — 대조 실험 dyn)
+        Value::Text(_) | Value::Bool(_) | Value::Empty => Value::Error(ErrorKind::Value),
         other => {
             let arr = try_v!(to_array(ctx, other));
             let (h, w) = (arr.rows as f64, arr.cols as f64);
@@ -242,7 +256,20 @@ fn vector(arr: &Array) -> Result<Vec<Value>, ErrorKind> {
 
 fn match_fn(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(scalar_key(ctx, &a[0]));
-    let arr = try_v!(lookup_array(ctx, &a[1]));
+    // 찾을 범위가 참조도 배열도 아닌 낱값이면 #N/A (MATCH(5,5,0), 대조 실험 refargs)
+    if matches!(a[1], Value::Number(_) | Value::Text(_) | Value::Bool(_)) {
+        return Value::Error(ErrorKind::NA);
+    }
+    // 찾을 범위가 3차원 참조면 시트마다 읽어 한 열로 (MATCH("",'S1:S3'!A1) = #N/A, 대조 실험 rand)
+    let arr = if let Value::Ref(r) = &a[1]
+        && r.len() == 1
+        && r[0].is_3d()
+    {
+        let data = super::flatten(ctx, &a[1]);
+        Rc::new(Array::new(data.len(), 1, data))
+    } else {
+        try_v!(lookup_array(ctx, &a[1]))
+    };
     let vals = try_v!(vector(&arr));
     let mt = try_v!(num_or(ctx, a, 2, 1.0));
     let found = if mt == 0.0 {
@@ -375,7 +402,16 @@ fn vh_lookup(ctx: &mut Ctx, a: &[Value], vertical: bool) -> Value {
 
 fn lookup(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(scalar_key(ctx, &a[0]));
-    let arr = try_v!(lookup_array(ctx, &a[1]));
+    // 찾을 범위가 3차원 참조면 시트마다 읽어 한 열로 (LOOKUP("",'S1:S3'!A1,…) = #N/A, 대조 실험 rand)
+    let arr = if let Value::Ref(r) = &a[1]
+        && r.len() == 1
+        && r[0].is_3d()
+    {
+        let data = super::flatten(ctx, &a[1]);
+        Rc::new(Array::new(data.len(), 1, data))
+    } else {
+        try_v!(lookup_array(ctx, &a[1]))
+    };
     let (keys, results): (Vec<Value>, Vec<Value>) = match opt(a, 2) {
         None => {
             if arr.cols > arr.rows {
@@ -396,6 +432,10 @@ fn lookup(ctx: &mut Ctx, a: &[Value]) -> Value {
         }
         Some(rv) => {
             let keys = try_v!(vector(&arr));
+            // 못 찾으면 결과 범위는 읽지 않는다 (LOOKUP(없는 값,범위,3차원 참조) = #N/A, 대조 실험 rand)
+            if approx_index(&keys, &x).is_none() {
+                return Value::Error(ErrorKind::NA);
+            }
             let res = try_v!(lookup_array(ctx, rv));
             // 결과 범위는 찾는 범위와 같은 방향으로 읽는다: 세로 찾기에 가로 한 줄 결과면 둘째 칸부터 #REF!
             // (LOOKUP(35,Data!F1:F10,Data!A12:E12), 대조 실험 lookup)
@@ -429,6 +469,10 @@ fn xlookup(ctx: &mut Ctx, a: &[Value]) -> Value {
     {
         return Value::Error(ErrorKind::Value);
     }
+    // 찾을 값이 오류면 #VALUE! (XLOOKUP(NA(),…), XLOOKUP(#NULL!,…) — 한셀은 오류 값을 찾지 않는다)
+    if let Value::Error(_) = &a[0] {
+        return Value::Error(ErrorKind::Value);
+    }
     let x = try_v!(scalar_key(ctx, &a[0]));
     let la = try_v!(lookup_array(ctx, &a[1]));
     let vals = try_v!(vector(&la));
@@ -448,9 +492,10 @@ fn xlookup(ctx: &mut Ctx, a: &[Value]) -> Value {
     match &a[2] {
         Value::Ref(r) if r.len() == 1 => {
             let ar = r[0];
+            // 찾은 자리가 돌려줄 범위를 벗어나면 #REF! (대조 실험 conv3)
             let sub = if vertical {
                 if i as u32 > ar.r1 - ar.r0 {
-                    return Value::Error(ErrorKind::Value);
+                    return Value::Error(ErrorKind::Ref);
                 }
                 Area {
                     r0: ar.r0 + i as u32,
@@ -459,7 +504,7 @@ fn xlookup(ctx: &mut Ctx, a: &[Value]) -> Value {
                 }
             } else {
                 if i as u32 > ar.c1 - ar.c0 {
-                    return Value::Error(ErrorKind::Value);
+                    return Value::Error(ErrorKind::Ref);
                 }
                 Area {
                     c0: ar.c0 + i as u32,
@@ -667,13 +712,14 @@ fn row_col(ctx: &mut Ctx, a: &[Value], row: bool) -> Value {
             return Value::Number(if row { ctx.row } else { ctx.col } as f64 + 1.0);
         }
         Some(Value::Ref(r)) => {
-            if r.len() != 1 {
+            // 여러 영역·여러 시트에 걸친 참조는 #REF! (ROW('S1:S3'!A1), 대조 실험 rand)
+            if r.len() != 1 || r[0].sheet != r[0].sheet_last {
                 return Value::Error(ErrorKind::Ref);
             }
             r[0]
         }
-        Some(Value::Error(e)) => return Value::Error(*e),
-        Some(_) => return Value::Error(ErrorKind::Value),
+        // 참조가 아니면 오류 값이라도 #REF! (ROW({1,2}), ROW(5), ROW("a"), COLUMN(#NAME?), 대조 실험 refargs·syntax)
+        Some(_) => return Value::Error(ErrorKind::Ref),
     };
     let (lo, hi) = if row {
         (area.r0, area.r1)
@@ -699,12 +745,15 @@ fn dims(_ctx: &mut Ctx, a: &[Value], rows: bool) -> Value {
         // 여러 영역·오류(빈 교차 포함)는 #VALUE! (ROWS((A1:A3,B1:B5)), ROWS(#N/A), 대조 실험 lookup·misc4)
         Value::Error(_) => Value::Error(ErrorKind::Value),
         Value::Ref(r) => {
-            if r.len() != 1 {
+            // 여러 영역·여러 시트에 걸친 참조는 #VALUE!
+            if r.len() != 1 || r[0].sheet != r[0].sheet_last {
                 return Value::Error(ErrorKind::Value);
             }
             Value::Number(if rows { r[0].rows() } else { r[0].cols() } as f64)
         }
         Value::Array(arr) => Value::Number(if rows { arr.rows } else { arr.cols } as f64),
+        // 글·논리는 #VALUE! (ROWS("a"), COLUMNS(TRUE)), 숫자는 1 (ROWS(5), 대조 실험 refargs·rand)
+        Value::Text(_) | Value::Bool(_) => Value::Error(ErrorKind::Value),
         _ => Value::Number(1.0),
     }
 }
@@ -750,6 +799,13 @@ fn address(ctx: &mut Ctx, a: &[Value]) -> Value {
             row as u32
         )
     } else {
+        // R1C1 에서도 절대 위치는 범위 안이어야 한다 (ADDRESS(-1,1,1,FALSE), ADDRESS(1,16385,1,FALSE) = #VALUE!,
+        // 상대 위치 R[-1] 은 된다, 대조 실험 misc3)
+        if (ra && (row < 1.0 || row > MAX_ROWS as f64))
+            || (ca && (col < 1.0 || col > MAX_COLS as f64))
+        {
+            return Value::Error(ErrorKind::Value);
+        }
         let r = if ra {
             format!("R{}", row)
         } else {

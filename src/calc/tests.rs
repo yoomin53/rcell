@@ -276,6 +276,182 @@ fn binom_pmf_uses_gammaln() {
     );
 }
 
+/// 무작위 수식 차분 시험(rand)에서 찾은 한셀의 규칙들 (대조 실험 rand1xx·typing·refargs·misc3–6)
+#[test]
+fn rules_from_random_differential_tests() {
+    // 참조가 필요한 인수에 값·배열을 주면
+    assert_eq!(one("COUNTIF({1,2,3},\">1\")"), e("#VALUE!"));
+    assert_eq!(one("SUMIF({1,2,3},\">1\")"), e("#VALUE!"));
+    assert_eq!(one("COUNTBLANK({1,2;3,4})"), e("#NAME?"));
+    assert_eq!(one("ROW({1,2})"), e("#REF!"));
+    assert_eq!(one("SHEETS(5)"), e("#N/A"));
+    assert_eq!(one("MATCH(5,5,0)"), e("#N/A"));
+    assert_eq!(one("RANK(3.14159,-255)"), e("#N/A"));
+    // 숫자로 읽히는 글은 논리로도 읽힌다
+    assert_eq!(one("IF(\"0\",1,2)"), n(2.0));
+    assert_eq!(one("NOT(\"5\")"), CellValue::Bool(false));
+    // SWITCH 는 같은 오류끼리 맞는다
+    assert_eq!(one("SWITCH(#N/A,#N/A,1,2)"), n(1.0));
+    // 비트 함수·DEC2BIN 은 소수를 버리기 전에 범위를 잰다
+    assert_eq!(one("BITXOR(1023,-0.69)"), e("#NUM!"));
+    assert_eq!(one("BITAND(-0.5,1)"), n(0.0));
+    assert_eq!(one("DEC2BIN(511.5)"), e("#NUM!"));
+    // TEXTJOIN: 구분자가 오류면 빈 글, 배열 상수 안의 오류는 그 오류
+    assert_eq!(one("TEXTJOIN(#N/A,1,\"a\",\"b\")"), t(""));
+    assert_eq!(one("TEXTJOIN(\"/\",1,{\"a\",#N/A})"), e("#N/A"));
+    // 달 수는 16비트로 잘린다, 1899-12-31 이하는 #NUM!
+    assert_eq!(one("EDATE(36923,65535)"), n(36892.0));
+    assert_eq!(one("EOMONTH(31,-1)"), e("#NUM!"));
+    // 자릿수는 32비트
+    assert_eq!(one("ROUND(1234.5678,2147483648)"), e("#NUM!"));
+    assert_eq!(one("TRUNC(1234.5678,306)"), n(0.0));
+    // 와이블 밀도는 넘치면 0
+    assert_eq!(one("WEIBULL(65535,36526.5,10,FALSE)"), n(0.0));
+    // CHAR 의 두 바이트 코드
+    assert_eq!(one("CHAR(45217)"), t("가"));
+    assert_eq!(one("CHAR(1000)"), t("�"));
+    assert_eq!(one("CHAR(256)"), e("#VALUE!"));
+    // TEXT: 논리에 색 서식은 #VALUE!, 빈 서식은 글 그대로·음수는 "-"
+    assert_eq!(one("TEXT(TRUE,\"[Red]0.0\")"), e("#VALUE!"));
+    assert_eq!(one("TEXT(-5,\"\")"), t("-"));
+    assert_eq!(one("TEXT(\"abc\",\"\")"), t("abc"));
+    // 조합 수는 e^{GAMMALN 차이}
+    assert_eq!(one("COMBIN(1030,2)"), n(529935.0));
+    assert_eq!(one("COMBIN(1030,515)"), e("#NUM!"));
+    match one("PERMUT(45598,1)") {
+        CellValue::Number(x) => assert!((x - 45597.99999943975).abs() < 1e-9),
+        other => panic!("{other:?}"),
+    }
+    // 오류 값 이름의 글은 그 오류 (대소문자·뒤 공백 무시)
+    assert_eq!(one("NOT(\"#N/A\")"), e("#N/A"));
+    assert_eq!(one("\"#div/0!\"+1"), e("#DIV/0!"));
+    assert_eq!(one("VALUE(\"#NUM! \")"), e("#NUM!"));
+    // MULTINOMIAL·GCD: 글·논리는 #VALUE!, 1 보다 작은 값은 0, 짝이 0 이면 소수째
+    assert_eq!(one("MULTINOMIAL(3,\"2\")"), e("#VALUE!"));
+    assert_eq!(one("GCD(2.9)"), n(2.9));
+    assert_eq!(one("GCD(0.99)"), n(0.0));
+    assert_eq!(one("GCD(2.9,4)"), n(2.0));
+    assert_eq!(one("GCD(1E20)"), n(0.0));
+    assert_eq!(one("LCM(2.9,0)"), n(0.0));
+    // UNICHAR 의 U+10FFFE·U+10FFFF 는 #N/A
+    assert_eq!(one("UNICHAR(1114111)"), e("#N/A"));
+    assert_eq!(one("LEN(UNICHAR(65535))"), n(1.0));
+    // DB: 첫 해가 열두 달이면 기간은 수명까지, 아니면 수명 + 1 까지, 수명을 넘는 해는 남은 달수만큼
+    assert_eq!(one("DB(1000,100,3,4)"), e("#NUM!"));
+    match one("DB(1000,100,2.5,3,6)") {
+        CellValue::Number(x) => assert!((x - 83.738802).abs() < 1e-6),
+        other => panic!("{other:?}"),
+    }
+    // TRUNC 은 10^자리가 0 이 되면 #NUM!, FLOOR.PRECISE 는 배수 0 이면 첫 인수를 보지 않는다
+    assert_eq!(one("TRUNC(1023,-323)"), n(0.0));
+    assert_eq!(one("TRUNC(1023,-324)"), e("#NUM!"));
+    assert_eq!(one("FLOOR.PRECISE(NA(),0)"), n(0.0));
+    assert_eq!(one("CEILING.PRECISE(NA(),0)"), e("#N/A"));
+    // COMBIN·PERMUT 은 n 이 2^31 − 2 까지
+    assert_eq!(one("COMBIN(2147483647,1)"), e("#NUM!"));
+    // RANK: 값의 오류가 먼저, 다음이 범위의 오류, 숫자로 읽히는 글 범위는 #N/A
+    assert_eq!(one("RANK(1/0,NA())"), e("#DIV/0!"));
+    assert_eq!(one("RANK(\"x\",NA())"), e("#N/A"));
+    assert_eq!(one("RANK(1,\"50%\")"), e("#N/A"));
+    // QUARTILE.EXC 의 순위가 범위 밖이면 0
+    assert_eq!(one("QUARTILE.EXC({3},1)"), n(0.0));
+    // 음수 큰 수의 글: 15자리 아래는 올림 (양수는 버림)
+    assert_eq!(one("(-(2^50))&\"\""), t("-1125899906842630"));
+    assert_eq!(one("(2^50)&\"\""), t("1125899906842620"));
+    // PERMUTATIONA 는 n!/(n−k)! + n
+    assert_eq!(one("PERMUTATIONA(10,3)"), n(730.0));
+    assert_eq!(one("PERMUTATIONA(5,5)"), n(125.0));
+    assert_eq!(one("PERMUTATIONA(2,0)"), n(1.0));
+    assert_eq!(one("PERMUTATIONA(171,1)"), e("#NUM!"));
+    assert_eq!(one("PERMUTATIONA(1,2)"), e("#NUM!"));
+    // 보통 칸에서 낱값 인수의 배열은 첫 원소, MUNIT(배열) 은 낱값 #VALUE!
+    assert_eq!(one("TYPE(TRIM({\"a\",\"b\"}))"), n(2.0));
+    assert_eq!(one("TYPE({1,2}*2)"), n(64.0));
+    // 오류 낱값은 한 칸 배열: 크기가 다르면 #VALUE!, 같으면 그 오류
+    assert_eq!(one("SUMPRODUCT({1,2},NA())"), e("#VALUE!"));
+    assert_eq!(one("SUMPRODUCT(NA())"), e("#N/A"));
+    // BIT 함수는 인수의 오류를 범위보다 먼저
+    assert_eq!(one("BITXOR(-0.5,#VALUE!)"), e("#VALUE!"));
+    assert_eq!(one("BITXOR(-0.5,1)"), e("#NUM!"));
+    // 수식 안 XOR: 식을 배열로 계산한다
+    assert_eq!(one("XOR({1,2,3}>2)"), CellValue::Bool(true));
+    assert_eq!(one("XOR({1,1,0})"), CellValue::Bool(false));
+    // GCD·MULTINOMIAL 은 인수 순서대로 음수를 먼저
+    assert_eq!(one("GCD(-1,\"3\")"), e("#NUM!"));
+    assert_eq!(one("GCD(\"3\",-1)"), e("#VALUE!"));
+    // COUP*·DISC 는 글·논리·오류 인수를 읽지 않는다 (날짜 글도), 날짜는 1 이상
+    assert_eq!(one("COUPNCD(\"2024-03-15\",46000,2,0)"), e("#VALUE!"));
+    assert_eq!(one("COUPNCD(NA(),46000,2,0)"), e("#VALUE!"));
+    assert_eq!(one("COUPNCD(0,46000,2,0)"), e("#NUM!"));
+    assert_eq!(one("DISC(TRUE,46000,95,100,0)"), e("#VALUE!"));
+    // CRITBINOM 은 1 부터 찾고 누적이 기준과 같으면 다음 수
+    assert_eq!(one("CRITBINOM(2,0.3,0.3)"), n(1.0));
+    assert_eq!(one("CRITBINOM(4,0.5,0.3125)"), n(2.0));
+    assert_eq!(one("BINOM.INV(2,0.3,0.3)"), n(0.0));
+    // 낱값 N 만 배열 상수를 원소마다 (SUM(N({1,2})) = 3), 오른쪽 꼬리는 1 에서 빼지 않는다
+    assert_eq!(one("SUM(N({1,2}))"), n(3.0));
+    match one("FDIST(1E10,3,4)") {
+        CellValue::Number(x) => assert!((x / 3.333333332296296e-20 - 1.0).abs() < 1e-9),
+        other => panic!("{other:?}"),
+    }
+    // FISHERINV 는 e^{2x} 꼴이라 작은 x 에서 자리를 잃는다
+    match one("FISHERINV(1E-8)") {
+        CellValue::Number(x) => assert!((x / 9.999999950247594e-9 - 1.0).abs() < 1e-12),
+        other => panic!("{other:?}"),
+    }
+    // CHIDIST 의 x 는 1E10 까지, POISSON.DIST 의 x 는 32비트 안
+    assert_eq!(one("CHIDIST(2E10,3)"), e("#NUM!"));
+    assert_eq!(one("POISSON.DIST(1E12,100,TRUE)"), e("#NUM!"));
+}
+
+/// 데이터베이스 함수: 데이터베이스에 없는 조건 머리글은 어느 행도 맞지 않는다 (대조 실험 conv8)
+#[test]
+fn database_unknown_criteria_header_matches_nothing() {
+    let w = wb(vec![sheet(
+        "S",
+        &[
+            ("A1", "Age"),
+            ("A2", "10"),
+            ("A3", "20"),
+            ("C1", "Age"),
+            ("C2", ">5"),
+            ("D1", "Score"),
+            ("D2", ">5"),
+            ("F1", "Score"),
+            ("F2", ">5"),
+            ("B5", "=DSUM(A1:A3,\"Age\",C1:C2)"),
+            ("B6", "=DSUM(A1:A3,\"Age\",F1:F2)"),
+            ("B7", "=DCOUNT(A1:A3,\"Age\",F1:F2)"),
+            ("B8", "=DAVERAGE(A1:A3,\"Age\",F1:F2)"),
+        ],
+    )]);
+    assert_eq!(calc(&w, "B5"), n(30.0));
+    assert_eq!(calc(&w, "B6"), n(0.0));
+    assert_eq!(calc(&w, "B7"), n(0.0));
+    assert_eq!(calc(&w, "B8"), e("#DIV/0!"));
+}
+
+/// 영의 부호와 문법 대조 실험(syntax·negzero·dyn)에서 찾은 몇 가지
+#[test]
+fn zero_sign_and_syntax_rules() {
+    // 곱셈·반올림의 -0 은 글로 "-0", 단항 - 와 MOD 는 +0
+    assert_eq!(one("(0*-1)&\"\""), t("-0"));
+    assert_eq!(one("ROUND(-0.4,0)&\"\""), t("-0"));
+    assert_eq!(one("CEILING(-4,2^53)&\"\""), t("-0"));
+    assert_eq!(one("-ABS(0)&\"\""), t("0"));
+    assert_eq!(one("-(1-1)&\"\""), t("0"));
+    assert_eq!(one("MOD(-4,2)&\"\""), t("0"));
+    // ROW·COLUMN 의 인수가 참조가 아니면 오류 값이라도 #REF!
+    assert_eq!(one("ROW(#NAME?)"), e("#REF!"));
+    assert_eq!(one("COLUMN(1/0)"), e("#REF!"));
+    // INDEX 의 글·논리·빈 첫 인수는 #VALUE!, 숫자 낱값은 한 칸
+    assert_eq!(one("INDEX(\"a\",1)"), e("#VALUE!"));
+    assert_eq!(one("INDEX(TRUE,1)"), e("#VALUE!"));
+    assert_eq!(one("INDEX(5,1)"), n(5.0));
+    // 큰 수의 글: 자릿수는 부동소수점 log10 으로 센다
+    assert_eq!(one("99999999999999999&\"\""), t("99999999999999000"));
+}
+
 /// 반복 계산 (calcPr iterate): 파일 값에서 시작해 2×iterateCount 번, 행 차례로 (대조 실험 circ)
 #[test]
 fn iterative_calculation() {
@@ -337,7 +513,9 @@ fn cycle_cells_keep_their_value_without_iteration() {
 #[test]
 fn array_formula_and_lifting() {
     assert_eq!(one("SUM(1/{1,2,4})"), n(1.75));
-    assert_eq!(one("SUM(LEN({\"a\",\"bb\"}))"), n(3.0));
+    // 보통 칸에서는 낱값 인수의 배열 상수가 첫 원소 (한셀 SUM(LEN({"a","bb"})) = 1), 배열 안에서는 원소마다
+    assert_eq!(one("SUM(LEN({\"a\",\"bb\"}))"), n(1.0));
+    assert_eq!(one("SUMPRODUCT(LEN({\"a\",\"bb\"}))"), n(3.0));
     assert_eq!(one("INDEX({1,2;3,4},2,1)"), n(3.0));
     assert_eq!(one("MMULT({1,2},{3;4})"), n(11.0));
     assert_eq!(one("SUMPRODUCT(LEN(B1:B2))"), n(6.0));

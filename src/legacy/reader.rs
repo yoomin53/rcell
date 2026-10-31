@@ -2271,6 +2271,7 @@ fn read_sheet(
                 v.show_formulas = grbit & 0x0001 != 0;
                 v.show_row_col_headers = grbit & 0x0004 != 0;
                 v.show_zeros = grbit & 0x0010 != 0;
+                v.right_to_left = grbit & 0x0040 != 0;
                 v.tab_selected = grbit & 0x0200 != 0;
                 if grbit & 0x0800 != 0 {
                     v.view = Some("pageBreakPreview".into());
@@ -3863,7 +3864,17 @@ fn legacy_shape(
         name: e.string(0x0380).unwrap_or_default(),
         descr: e.string(0x0381),
         hidden,
-        xfrm: None,
+        // 묶음 안 도형은 자식 앵커(묶음 안 좌표), 묶음은 자식 좌표 범위를 위치·크기로 (한셀 .xls 는 묶음 안 도형에 이것만 둔다)
+        xfrm: e
+            .child_anchor
+            .or(if e.is_group() { e.group_rect } else { None })
+            .map(|a| crate::model::Xfrm {
+                x: a[0] as i64,
+                y: a[1] as i64,
+                cx: (a[2] - a[0]) as i64,
+                cy: (a[3] - a[1]) as i64,
+                ..Default::default()
+            }),
         // 사용자 정의 모양(0)은 꼭짓점(0x0145)이 있을 때만. 없으면 한셀처럼 모양 없음
         geometry: (kind != ShapeKind::Group
             && kind != ShapeKind::Chart

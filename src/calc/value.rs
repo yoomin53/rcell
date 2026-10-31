@@ -271,7 +271,7 @@ impl<T: Into<Value>> From<Result<T, ErrorKind>> for Value {
 /// 숫자 결과: NaN·무한대는 #NUM!
 pub fn num(v: f64) -> Value {
     if v.is_finite() {
-        Value::Number(if v == 0.0 { 0.0 } else { v })
+        Value::Number(v)
     } else {
         Value::Error(ErrorKind::Num)
     }
@@ -387,6 +387,10 @@ pub fn number_to_text_rounded(v: f64) -> String {
 }
 
 fn format_general(v: f64, round_large: bool) -> String {
+    // 음의 영(-0.0) 은 "-0" 으로 나온다 (CONCATENATE(CEILING(-4,2^53)) = "-0", 대조 실험 syntax)
+    if v == 0.0 && v.is_sign_negative() && v.is_finite() {
+        return "-0".into();
+    }
     if v == 0.0 || !v.is_finite() {
         return "0".into();
     }
@@ -404,7 +408,16 @@ fn format_general(v: f64, round_large: bool) -> String {
     };
     let (r_digits, r_exp) = split(format!("{a:.14e}"), 15);
     let (digits, exp) = if a >= 1e15 && !round_large {
-        split(format!("{a:.15e}"), 15)
+        // 큰 수: 자릿수 n = ⌊log10 a⌋ + 1 (부동소수점 log10 이라 99999999999999904 는 17 로 반올림되어 한 자리 크게 센다),
+        // 앞 15자리 = ⌊v / 10^(n−15)⌋ (부호 있는 값의 내림 — 음수는 크기가 올라간다), 나머지는 0. 두 부호와
+        // 99999999999999999 → 99999999999999000, (-(2^50)) → -1125899906842630 이 모두 이 식이다 (대조 실험 conv5·fp2)
+        let n = a.mlog10().floor() as i32 + 1;
+        let shift = 10f64.mpowi(n - 15);
+        let q = (v / shift).floor().abs();
+        let qs = format!("{q:.0}");
+        let exp = qs.len() as i32 - 1 + (n - 15);
+        let d = qs.trim_end_matches('0').to_string();
+        (if d.is_empty() { "0".to_string() } else { d }, exp)
     } else {
         (r_digits.clone(), r_exp)
     };
@@ -720,9 +733,13 @@ pub fn to_number(v: &Value, date1904: bool) -> Result<f64, ErrorKind> {
         Value::Empty => Ok(0.0),
         Value::Number(n) => Ok(*n),
         Value::Bool(b) => Ok(*b as u8 as f64),
+        // 오류 값 이름의 글은 그 오류 (NOT("#N/A") = #N/A, "#DIV/0!"+1 = #DIV/0! — 대조 실험 conv2)
         Value::Text(s) => match parse_bool_text(s) {
             Some(b) => Ok(b as u8 as f64),
-            None => parse_number(s, date1904).ok_or(ErrorKind::Value),
+            None => match parse_number(s, date1904) {
+                Some(n) => Ok(n),
+                None => Err(ErrorKind::parse(s).unwrap_or(ErrorKind::Value)),
+            },
         },
         Value::Error(e) => Err(*e),
         Value::Array(a) => to_number(a.data.first().unwrap_or(&Value::Empty), date1904),
@@ -743,7 +760,8 @@ pub fn to_text(v: &Value) -> Result<Rc<str>, ErrorKind> {
     }
 }
 
-/// 논리로 (IF 조건, AND·OR 인수). 글은 "TRUE"/"FALSE" 만.
+/// 논리로 (IF 조건, NOT 인수). 글은 "TRUE"/"FALSE", 숫자로 읽히는 글은 0 이 아닌가
+/// (IF("0",1,2) = 2, NOT("5") = FALSE, IF("12:00",1,2) = 1 — 대조 실험 misc5·misc6), 그 밖의 글은 #VALUE!.
 pub fn to_bool(v: &Value) -> Result<bool, ErrorKind> {
     match v {
         Value::Empty => Ok(false),
@@ -754,13 +772,24 @@ pub fn to_bool(v: &Value) -> Result<bool, ErrorKind> {
                 Ok(true)
             } else if s.eq_ignore_ascii_case("FALSE") {
                 Ok(false)
+            } else if let Some(n) = parse_number(s, false) {
+                Ok(n != 0.0)
             } else {
-                Err(ErrorKind::Value)
+                Err(ErrorKind::parse(s).unwrap_or(ErrorKind::Value))
             }
         }
         Value::Error(e) => Err(*e),
         Value::Array(a) => to_bool(a.data.first().unwrap_or(&Value::Empty)),
         Value::Ref(_) => Err(ErrorKind::Value),
+    }
+}
+
+/// 같은 종류·같은 값의 숫자·논리 (XOR 이 이웃 칸을 한 칸으로 세는지 가릴 때)
+pub fn same_constant(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        _ => false,
     }
 }
 

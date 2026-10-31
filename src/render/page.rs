@@ -34,6 +34,12 @@ pub trait TextMeasure {
     fn ascent_descent(&self, _font: &FontKey) -> (f64, f64) {
         (0.88, 0.12)
     }
+    /// 글꼴 높이 `ppem`(장치 px) 에서 GDI 가 돌려주는 오름·내림 (장치 px, 내림은 양수) — 글꼴에 VDMX 표가 있으면 그 값,
+    /// 없으면 비율을 반올림
+    fn device_ascent_descent(&self, font: &FontKey, ppem: u32) -> (f64, f64) {
+        let (a, d) = self.ascent_descent(font);
+        ((a * ppem as f64).round(), (d * ppem as f64).round())
+    }
 }
 
 /// 경로 조각 (장치 단위)
@@ -54,6 +60,10 @@ pub enum Op {
         fill: Option<[u8; 3]>,
         stroke: Option<(f64, [u8; 3], Vec<f64>)>,
         even_odd: bool,
+        /// 선 끝·꺾임 (PDF 의 J·j). 없으면 PDF 기본 (평평·뾰족)
+        caps: Option<(u8, u8)>,
+        /// 빗금 채우기: (무늬, 빗금 색, 바탕색) — PDF 는 페이지에 맞춘 8×8 Tiling 무늬. 이때 `fill` 은 None
+        hatch: Option<super::metafile::Hatch>,
     },
     /// 그림 (PNG·JPEG 바이트)
     Image {
@@ -94,6 +104,17 @@ pub enum Op {
         stretch: f64,
         /// 기준선 왼쪽 끝을 중심으로 돌린 각도 (도, 시계 방향 — 장치 좌표는 아래가 +)
         angle: f64,
+    },
+    /// 상자 안을 장치 해상도 그림으로 그릴 묶음 (차트 — 한셀 PDF 는 차트를 비트맵으로 인쇄한다). PDF 가 그림으로 못 그리면
+    /// 안의 ops 를 벡터로 그린다
+    Raster {
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        /// 그림의 픽셀 크기 — 없으면 상자 크기 (장치 단위 = 픽셀). 있으면 상자에 늘여 찍는다 (조건부 서식 아이콘 20×20)
+        px: Option<(u32, u32)>,
+        ops: Vec<Op>,
     },
     /// 사각형으로 자르기 시작 / 끝
     Clip {
@@ -245,6 +266,14 @@ pub(crate) fn aligned_px(right: bool, cell_w: f64, text_w: f64, indent: f64, zoo
     } else {
         (x * zoom as f64 / 100.0 - k).round()
     }
+}
+
+/// 칸 무늬 채우기의 `Hatch` 번호 바닥: 0–5 는 GDI 빗금, 이 번호부터는 [`paint::PATTERNS`] 의 무늬
+pub const PATTERN_BASE: u8 = 16;
+
+/// 칸 무늬의 8×8 칸 (전경이 true) — 인쇄 PDF 가 무늬 칸을 그릴 때
+pub fn pattern_rows(index: usize) -> Option<[[bool; 8]; 8]> {
+    paint::pattern_rows(index)
 }
 
 /// 칸 상자가 경계에서 들어가는 거리 (장치 단위): 화면에서 칸의 마지막 픽셀이 격자선 자리인 것과 같다
@@ -482,7 +511,7 @@ fn page_body(
             || views.get(&(r, c)).is_some_and(|v| v.has_value())
             || ctx.cells.get(&(r, c)).is_some_and(|x| x.formula.is_some())
     };
-    let ov = overflow_spans(lay, &views, &blocked, lay_c);
+    let ov = overflow_spans(lay, &views, &blocked, lay_c, false);
 
     // 그릴 칸: 페이지의 (행, 열) 중 병합에 덮이지 않은 것 + 페이지에 걸친 병합의 시작 칸
     let mut draw: Vec<(u32, u32)> = Vec::new();
@@ -544,15 +573,37 @@ fn page_body(
             let Some(v) = views.get(&(r, c)) else {
                 continue;
             };
+            let Some((x0, y0, x1, y1)) = cell_rect(r, c) else {
+                continue;
+            };
+            // 무늬 채우기: 한셀은 8×8 무늬 칸(가로 4pt, 페이지 원점 기준)을 되풀이해 칠한다
+            if let Some((name, fg, bg)) = v.fill.as_ref().and_then(|f| f.pat.as_ref())
+                && let Some(i) = paint::PATTERNS.iter().position(|n| n == name)
+                && let (Some(fg), Some(bg)) = (rgb(fg), rgb(bg))
+            {
+                let (a, b, cc, d) = (x0 - SHIFT, y0 - SHIFT, x1 - SHIFT, y1 - SHIFT);
+                ops.push(Op::Path {
+                    segs: vec![
+                        Seg::Move(a, b),
+                        Seg::Line(cc, b),
+                        Seg::Line(cc, d),
+                        Seg::Line(a, d),
+                        Seg::Close,
+                    ],
+                    fill: None,
+                    stroke: None,
+                    even_odd: false,
+                    caps: None,
+                    hatch: Some((PATTERN_BASE + i as u8, fg, Some(bg))),
+                });
+                continue;
+            }
             let Some(color) = v
                 .fill
                 .as_ref()
                 .and_then(|f| f.color.as_deref())
                 .and_then(rgb)
             else {
-                continue;
-            };
-            let Some((x0, y0, x1, y1)) = cell_rect(r, c) else {
                 continue;
             };
             ops.push(Op::Rect {
@@ -562,6 +613,27 @@ fn page_body(
                 y1: y1 - SHIFT,
                 color,
             });
+        }
+    }
+    // 1b. 조건부 서식의 데이터 막대·아이콘 (초안 인쇄·흑백 인쇄는 그리지 않는다)
+    if !frame.draft && !mono {
+        for &(r, c) in &draw {
+            let Some(cf) = ctx.cfx.get(&(r, c)) else {
+                continue;
+            };
+            if cf.bar.is_none() && cf.icon.is_none() {
+                continue;
+            }
+            let Some((x0, y0, x1, y1)) = cell_rect(r, c) else {
+                continue;
+            };
+            let rect = (x0 - SHIFT, y0 - SHIFT, x1 - SHIFT, y1 - SHIFT);
+            if let Some(b) = &cf.bar {
+                data_bar_ops(b, rect, &mut ops);
+            }
+            if let (Some((set, idx, _)), Some(v)) = (&cf.icon, views.get(&(r, c))) {
+                cf_icon_ops(set, *idx, v.v, rect, frame.px, &mut ops);
+            }
         }
     }
     // 2. 격자선 (인쇄 옵션): 그린 행·열의 모든 경계
@@ -1403,6 +1475,8 @@ fn metafile_ops(
                 fill,
                 stroke,
                 even_odd,
+                caps,
+                hatch,
             } => {
                 let segs = segs
                     .iter()
@@ -1429,6 +1503,8 @@ fn metafile_ops(
                         .as_ref()
                         .map(|(w, c, d)| (w * sx, *c, d.iter().map(|v| v * sx).collect())),
                     even_odd: *even_odd,
+                    caps: Some(*caps),
+                    hatch: *hatch,
                 });
             }
             Item::Text {
@@ -1452,11 +1528,24 @@ fn metafile_ops(
                     italic: *italic,
                 };
                 let (asc, desc) = measure.ascent_descent(&key);
-                // 기준선까지: 위 맞춤은 오름(반올림), 아래 맞춤은 내림만큼
-                let off = match valign {
-                    0 => (asc * em).round(),
-                    2 => -(desc * em).round(),
-                    _ => 0.0,
+                // 기준선까지: 위 맞춤은 오름, 아래 맞춤은 내림만큼. 한셀은 장치 글꼴 크기(em × 장치 배율)에서 GDI 가 돌려주는
+                // 오름·셀 높이를 각각 논리 단위로 반올림하고 내림 = 높이 − 오름 (Arial 15px: 장치 91 → 오름 81, 높이 101 →
+                // 13, 17 → 내림 4. 비율 반올림은 14·3). WMF 도 한셀이 EMF 로 바꿔 넣으므로 같다
+                let off = if *valign != 1 && sy > 0.0 {
+                    let ppem = (em * sy).round().max(1.0) as u32;
+                    let (ad, dd) = measure.device_ascent_descent(&key, ppem);
+                    let a = (ad / sy).round();
+                    if *valign == 0 {
+                        a
+                    } else {
+                        -(((ad + dd) / sy).round() - a)
+                    }
+                } else {
+                    match *valign {
+                        0 => (asc * em).round(),
+                        2 => -(desc * em).round(),
+                        _ => 0.0,
+                    }
                 };
                 let (gs, gc) = angle.to_radians().sin_cos();
                 let (bx, by) = (x - off * gs, y + off * gc);
@@ -1484,6 +1573,16 @@ fn metafile_ops(
                     angle: th.to_degrees(),
                 });
             }
+            Item::Clip { x0, y0, x1, y1 } => {
+                let (a, b) = (f(*x0, *y0), f(*x1, *y1));
+                ops.push(Op::Clip {
+                    x0: a.0.min(b.0),
+                    y0: a.1.min(b.1),
+                    x1: a.0.max(b.0),
+                    y1: a.1.max(b.1),
+                });
+            }
+            Item::Unclip => ops.push(Op::Unclip),
             Item::Image { x, y, w, h, bmp } => {
                 let (a, b) = (f(*x, *y), f(x + w, y + h));
                 ops.push(Op::Image {
@@ -1605,7 +1704,22 @@ fn object_ops(
                     super::draw::draw_color(c, theme)
                 });
                 let m = box_matrix(x, y, w, h, 6.25, rot, fh, fv);
-                super::svgops::svg_ops(&svg, m, &mw, ops);
+                // 한셀은 레거시 차트(VtChart 에서 읽은 것)는 벡터로, 새 차트만 비트맵으로 찍는다 (레거시 판 PDF 에 글자 `Tf` 가 있다)
+                if rot == 0.0 && !fh && !fv && ch.legacy.is_none() {
+                    let mut sub = Vec::new();
+                    super::svgops::svg_ops(&svg, m, &mw, &mut sub);
+                    // 한셀 차트 그림은 상자보다 아래로 두 줄 더 높고 (칠하지 않는 줄 — 마스크가 가린다), 위·왼쪽·너비는 상자와 같다
+                    ops.push(Op::Raster {
+                        x0: x,
+                        y0: y,
+                        x1: x + w,
+                        y1: y + h + 2.0,
+                        px: None,
+                        ops: sub,
+                    });
+                } else {
+                    super::svgops::svg_ops(&svg, m, &mw, ops);
+                }
             }
         }
         _ => {
@@ -1630,6 +1744,286 @@ fn object_ops(
             }
         }
     }
+}
+
+/// 개체 하나를 (0, 0) 에서 시작하는 w × h (px) 상자 안에 그린 목록 (웹 페이지의 도형·차트 그림용). 장치 단위는 1px = 6.25.
+pub fn shape_ops(
+    wb: &Workbook,
+    sh: &crate::model::Shape,
+    w: f64,
+    h: f64,
+    measure: &dyn TextMeasure,
+) -> Vec<Op> {
+    let frame = PageFrame {
+        px: 6.25,
+        zoom: 100,
+        ..Default::default()
+    };
+    let theme = wb.theme.clone().unwrap_or_default();
+    let obj = sh.raw.as_deref().and_then(super::shape::object_element);
+    let mut ops = Vec::new();
+    object_ops(
+        wb,
+        sh,
+        obj.as_ref(),
+        (0.0, 0.0, w * 6.25, h * 6.25),
+        &frame,
+        &theme,
+        measure,
+        &mut ops,
+    );
+    ops
+}
+
+/// 바깥 그림자: (가로, 세로 이동 px — 정수로 반올림, 색). 흐림 없는 그림자만 (웹 페이지 그림용)
+pub fn shape_shadow(wb: &Workbook, sh: &crate::model::Shape) -> Option<(i32, i32, [u8; 3])> {
+    let s = sh.shadow.as_ref()?;
+    let theme = wb.theme.clone().unwrap_or_default();
+    let (r, g, b) = super::draw::draw_rgb(&s.color, &theme).unwrap_or((0, 0, 0));
+    let dist = s.dist as f64 / 9525.0;
+    let ang = (s.dir as f64 / 60000.0).to_radians();
+    let (dx, dy) = (
+        (dist * ang.cos()).trunc() as i32,
+        (dist * ang.sin()).trunc() as i32,
+    );
+    Some((dx, dy, [r, g, b]))
+}
+
+/// 조건부 서식 데이터 막대 (한셀 PDF: 계단 모양 직각삼각형 — 세로 변이 시작 쪽, 아래가 넓다). 칸 안 자리는 화면과 같은 규칙
+/// (`cell.rs` data_bar_svg: 영역 [1, 1 + (폭 − 4)), 위 3px, 아래 높이 − 3px) 을 인쇄 px (6.25 장치 단위) 로
+fn data_bar_ops(
+    b: &crate::cf_eval::BarDraw,
+    (x0, y0, x1, y1): (f64, f64, f64, f64),
+    ops: &mut Vec<Op>,
+) {
+    const S: f64 = 6.25;
+    let (w, h) = ((x1 - x0) / S + 1.0, (y1 - y0) / S + 1.0);
+    let iw = w - 1.0;
+    let area = (w - 4.0).max(1.0);
+    let (top, bot) = (3.0, (h - 3.0).max(4.0));
+    let ax = b.axis.as_ref().map(|(a, _)| (1.0 + area * a).floor());
+    let (xs, xe) = match ax {
+        Some(ax) => {
+            let xs = ax + 1.0;
+            if b.leftward {
+                (xs, xs - (xs - 1.0) * b.len)
+            } else {
+                (xs, xs + (1.0 + area - xs) * b.len)
+            }
+        }
+        None => (1.0, 1.0 + area * b.len),
+    };
+    let flip = |x: f64| if b.rtl { iw - x } else { x };
+    if (xe - xs).abs() < 0.5 {
+        return;
+    }
+    let (p, q) = (flip(xs).min(flip(xe)), flip(xs).max(flip(xe)));
+    let (v, t) = if b.leftward { (q, p) } else { (p, q) };
+    let Some(color) = rgb(&b.fill) else {
+        return;
+    };
+    // 한셀 PDF 의 막대는 화면 규칙보다 1px 오른쪽 (칸 D1 막대: 한셀 왼쪽 214.265pt, 화면 규칙 213.515)
+    let pt = |x: f64, y: f64| (x0 + (x + 1.0) * S, y0 + y * S);
+    let tri = |c: [u8; 3], a: (f64, f64), bb: (f64, f64), cc: (f64, f64)| Op::Path {
+        segs: vec![
+            Seg::Move(a.0, a.1),
+            Seg::Line(bb.0, bb.1),
+            Seg::Line(cc.0, cc.1),
+            Seg::Close,
+        ],
+        fill: Some(c),
+        stroke: None,
+        even_odd: false,
+        caps: None,
+        hatch: None,
+    };
+    if b.gradient {
+        // 세로 변의 색에서 끝의 흰색까지: 한 픽셀 폭 조각마다 그 자리의 색 (삼각형을 세로로 자른 사다리꼴)
+        let n = ((t - v).abs().ceil() as usize).max(1);
+        let dir = if t >= v { 1.0 } else { -1.0 };
+        for i in 0..n {
+            let (a, bb) = (v + dir * i as f64, v + dir * (i + 1) as f64);
+            let bb = if dir > 0.0 { bb.min(t) } else { bb.max(t) };
+            let mid = ((a + bb) / 2.0 - v) / (t - v);
+            let c = [
+                (color[0] as f64 + (255.0 - color[0] as f64) * mid).round() as u8,
+                (color[1] as f64 + (255.0 - color[1] as f64) * mid).round() as u8,
+                (color[2] as f64 + (255.0 - color[2] as f64) * mid).round() as u8,
+            ];
+            // 위 변: 삼각형 빗변 위의 높이
+            let ya = top + (bot - top) * (1.0 - (a - v) / (t - v));
+            let yb = top + (bot - top) * (1.0 - (bb - v) / (t - v));
+            let (p0, p1, p2, p3) = (pt(a, ya), pt(bb, yb), pt(bb, bot), pt(a, bot));
+            ops.push(Op::Path {
+                segs: vec![
+                    Seg::Move(p0.0, p0.1),
+                    Seg::Line(p1.0, p1.1),
+                    Seg::Line(p2.0, p2.1),
+                    Seg::Line(p3.0, p3.1),
+                    Seg::Close,
+                ],
+                fill: Some(c),
+                stroke: None,
+                even_odd: false,
+                caps: None,
+                hatch: None,
+            });
+        }
+    } else {
+        ops.push(tri(color, pt(v, top), pt(v, bot), pt(t, bot)));
+    }
+}
+
+/// 조건부 서식 아이콘: 화면 아이콘(16px SVG)을 20×20 비트맵으로 찍는다 (한셀 PDF — 아이콘마다 20×20 그림 + 1비트 마스크를
+/// 칸 왼쪽에 놓는다). 상자는 20.35 인쇄 px, 칸 안 자리는 세로 맞춤대로
+fn cf_icon_ops(
+    set: &str,
+    idx: usize,
+    valign: VAlign,
+    (x0, y0, _x1, y1): (f64, f64, f64, f64),
+    k: f64,
+    ops: &mut Vec<Op>,
+) {
+    let size = 20.365 * k;
+    let h = y1 - y0;
+    let top = match valign {
+        VAlign::Top => y0 + 2.0 * k,
+        VAlign::Center => y0 + (h - size) / 2.0 + 6.5,
+        VAlign::Bottom => y1 - size - 2.0 * k,
+    };
+    let left = x0 + 12.0;
+    let svg = super::icons::icon_svg(set, idx, 0.0);
+    // 한셀 아이콘 그림은 20×20 칸 가운데쯤 15×15 에 그림 (왼쪽 2·위 3 칸 띄움) — 화면 16px 아이콘을 그만큼 줄여 놓는다
+    let sc = size / 20.0 * 15.0 / 16.0;
+    let mut sub = Vec::new();
+    let nomeasure = |_: &FontKey, size: f64, text: &str| size * text.chars().count() as f64 * 0.5;
+    super::svgops::svg_ops(
+        &svg,
+        [
+            sc,
+            0.0,
+            0.0,
+            sc,
+            left + size * 2.0 / 20.0,
+            top + size * 3.0 / 20.0,
+        ],
+        &nomeasure,
+        &mut sub,
+    );
+    if !sub.is_empty() {
+        ops.push(Op::Raster {
+            x0: left,
+            y0: top,
+            x1: left + size,
+            y1: top + size,
+            px: Some((20, 20)),
+            ops: sub,
+        });
+    }
+}
+
+/// 바깥 그림자 비트맵 (한셀 PDF 실험 — 효과 있는 도형을 여러 가지로 만들어 인쇄): 도형의 채운 모양과 선을 그림자 색 한 가지로,
+/// 거리·방향만큼 옮겨 장치 해상도 비트맵 하나로 그린다 (도형 자체는 벡터로 그 위에). 옮기는 거리 = 거리(px) × 배율 × (cos, sin) 에
+/// 장치 1.2 쯤 더 (8 가지 시험에서 한셀과의 오차 ±1.4). 투명도가 있으면 흰 바탕에 섞은 색으로, 흐림은 아직 따르지 않는다.
+/// 한셀은 1비트 마스크(알파 없음)를 쓰기 때문이다
+fn shadow_raster(
+    body: &[Op],
+    sd: &crate::model::ShapeShadow,
+    theme: &crate::theme::Theme,
+    k: f64,
+) -> Option<Op> {
+    let (r, g, b) = super::draw::draw_rgb(&sd.color, theme).unwrap_or((0, 0, 0));
+    let alpha = sd
+        .color
+        .mods
+        .iter()
+        .find(|(n, _)| n == "alpha")
+        .map_or(1.0, |(_, v)| (*v as f64 / 100_000.0).clamp(0.0, 1.0));
+    let mix = |c: u8| (255.0 - (255.0 - c as f64) * alpha).round() as u8;
+    let color = [mix(r), mix(g), mix(b)];
+    let dist = sd.dist as f64 / 9525.0 * k;
+    let ang = (sd.dir as f64 / 60000.0).to_radians();
+    let (dx, dy) = (dist * ang.cos() + 1.2, dist * ang.sin() + 1.2);
+    let mv = |segs: &[Seg]| -> Vec<Seg> {
+        segs.iter()
+            .map(|s| match *s {
+                Seg::Move(x, y) => Seg::Move(x + dx, y + dy),
+                Seg::Line(x, y) => Seg::Line(x + dx, y + dy),
+                Seg::Cubic(a, b, c, d, e, f) => {
+                    Seg::Cubic(a + dx, b + dy, c + dx, d + dy, e + dx, f + dy)
+                }
+                Seg::Close => Seg::Close,
+            })
+            .collect()
+    };
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    let mut grow = |x: f64, y: f64, pad: f64| {
+        x0 = x0.min(x - pad);
+        y0 = y0.min(y - pad);
+        x1 = x1.max(x + pad);
+        y1 = y1.max(y + pad);
+    };
+    let mut sil = Vec::new();
+    for op in body {
+        match op {
+            Op::Path {
+                segs,
+                fill,
+                stroke,
+                even_odd,
+                caps,
+                ..
+            } if fill.is_some() || stroke.is_some() => {
+                let segs = mv(segs);
+                let pad = stroke.as_ref().map_or(0.0, |s| s.0 / 2.0);
+                for sg in &segs {
+                    match *sg {
+                        Seg::Move(x, y) | Seg::Line(x, y) => grow(x, y, pad),
+                        Seg::Cubic(a, b, c, d, e, f) => {
+                            grow(a, b, pad);
+                            grow(c, d, pad);
+                            grow(e, f, pad);
+                        }
+                        Seg::Close => {}
+                    }
+                }
+                sil.push(Op::Path {
+                    segs,
+                    fill: fill.map(|_| color),
+                    stroke: stroke.as_ref().map(|(w, _, d)| (*w, color, d.clone())),
+                    even_odd: *even_odd,
+                    caps: *caps,
+                    hatch: None,
+                });
+            }
+            Op::Rect {
+                x0: a,
+                y0: b,
+                x1: c,
+                y1: d,
+                ..
+            } => {
+                grow(a + dx, b + dy, 0.0);
+                grow(c + dx, d + dy, 0.0);
+                sil.push(Op::Rect {
+                    x0: a + dx,
+                    y0: b + dy,
+                    x1: c + dx,
+                    y1: d + dy,
+                    color,
+                });
+            }
+            _ => {}
+        }
+    }
+    (!sil.is_empty() && x1 > x0 && y1 > y0).then(|| Op::Raster {
+        x0: x0.floor(),
+        y0: y0.floor(),
+        x1: x1.ceil(),
+        y1: y1.ceil(),
+        px: None,
+        ops: sil,
+    })
 }
 
 /// 페이지에 걸친 그리기 개체들을 그린다 (페이지 영역으로 자른다)
@@ -1662,9 +2056,18 @@ pub fn objects_ops(
             v.last().copied().unwrap_or(0.0) + (i as usize - n) as f64 * dflt
         })
     };
+    // 페이지 첫 열·행의 자리: 앞 페이지들에 찍힌 열·행의 인쇄 크기(장치 단위)의 합 (한셀 PDF: 둘째 쪽 차트 자리 — 개체가 쪽을 넘을 때
+    // 절대 px × 배율이 아니라 인쇄 열 너비(정수 px × 6.25)를 쌓는다). 인쇄 크기를 모르면 절대 px
+    let page0 = |dev: &[f64], first: u32, abs: &[f64], dflt: f64| -> f64 {
+        if (first as usize) <= dev.len() && !dev.is_empty() && k > 0.0 {
+            dev[..first as usize].iter().sum::<f64>() / k
+        } else {
+            start(abs, first, dflt)
+        }
+    };
     let (x_page0, y_page0) = (
-        start(&frame.col_abs, fc.0, 64.0),
-        start(&frame.row_abs, fr.0, 20.0),
+        page0(&frame.col_dev, fc.0, &frame.col_abs, 64.0),
+        page0(&frame.row_dev, fr.0, &frame.row_abs, 20.0),
     );
     let at = |m: &crate::model::Marker| -> Option<(f64, f64)> {
         Some((
@@ -1710,6 +2113,7 @@ pub fn objects_ops(
             continue;
         }
         let obj = sh.raw.as_deref().and_then(super::shape::object_element);
+        let mut body = Vec::new();
         object_ops(
             wb,
             sh,
@@ -1718,8 +2122,16 @@ pub fn objects_ops(
             frame,
             &theme,
             measure,
-            &mut inner,
+            &mut body,
         );
+        // 바깥 그림자가 있는 도형: 한셀은 그림자를 비트맵으로 먼저 깔고 도형은 벡터로 그 위에 그린다
+        if sh.kind == crate::model::ShapeKind::Shape
+            && let Some(sd) = &sh.shadow
+            && let Some(r) = shadow_raster(&body, sd, &theme, k)
+        {
+            inner.push(r);
+        }
+        inner.extend(body);
     }
     if !inner.is_empty() {
         ops.push(Op::Clip {
@@ -1744,6 +2156,91 @@ mod tests {
         assert_eq!(wrap_text("가나다라마바", 35.0, &w), ["가나다", "라마바"]);
         assert_eq!(wrap_text("abc def", 45.0, &w), ["abc", "def"]);
         assert_eq!(wrap_text("가\n나", 100.0, &w), ["가", "나"]);
+    }
+
+    /// 메타파일 글자의 기준선: 한셀은 장치 글꼴 크기의 GDI 오름·셀 높이를 논리 단위로 반올림한다. Arial 15px (장치 배율 6.049 →
+    /// 장치 91px): 오름 81·내림 20 → 오름 13, 높이 101 → 17, 내림 4 (비율 반올림이면 14·3)
+    #[test]
+    fn metafile_text_baseline_uses_device_metrics() {
+        use super::super::metafile::{Item, Metafile};
+        struct Arial;
+        impl TextMeasure for Arial {
+            fn width(&self, _: &FontKey, size: f64, text: &str) -> f64 {
+                size * text.chars().count() as f64
+            }
+            fn ascent_descent(&self, _: &FontKey) -> (f64, f64) {
+                (0.9053, 0.2119)
+            }
+            fn device_ascent_descent(&self, _: &FontKey, ppem: u32) -> (f64, f64) {
+                if ppem == 91 {
+                    (81.0, 20.0)
+                } else {
+                    (0.9053 * ppem as f64, 0.2119 * ppem as f64)
+                }
+            }
+        }
+        let text = |valign: u8| Item::Text {
+            x: 20.0,
+            y: 100.0,
+            halign: 0,
+            valign,
+            em: 15.0,
+            name: "Arial".into(),
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            color: [0, 0, 0],
+            text: "H".into(),
+            angle: 0.0,
+        };
+        let mf = Metafile {
+            width: 400.0,
+            height: 1000.0,
+            items: vec![text(0), text(1), text(2)],
+        };
+        let s = 6.049;
+        let mut ops = Vec::new();
+        metafile_ops(
+            &mf,
+            [s, 0.0, 0.0, s, 0.0, 0.0],
+            (400.0, 1000.0),
+            0.0,
+            &Arial,
+            &mut ops,
+        );
+        let ys: Vec<f64> = ops
+            .iter()
+            .filter_map(|o| match o {
+                Op::Text { y, .. } => Some((y / s).round()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ys, [113.0, 100.0, 96.0]);
+    }
+
+    /// 조건부 서식 데이터 막대: 직각삼각형 (세로 변이 시작 쪽, 아래가 넓다), 화면 규칙 + 오른쪽으로 1px (한셀 PDF 대조)
+    #[test]
+    fn data_bar_is_a_right_triangle() {
+        let b = crate::cf_eval::BarDraw {
+            axis: None,
+            len: 1.0,
+            leftward: false,
+            fill: "#638EC6".into(),
+            border: None,
+            gradient: false,
+            rtl: false,
+        };
+        let mut ops = Vec::new();
+        data_bar_ops(&b, (0.0, 0.0, 443.75, 137.5), &mut ops);
+        let [Op::Path { segs, fill, .. }] = &ops[..] else {
+            panic!("{ops:?}")
+        };
+        assert_eq!(*fill, Some([0x63, 0x8E, 0xC6]));
+        // (세로 변 위) (세로 변 아래) (꼭짓점 아래): 칸 22px → 높이 23px (격자선 포함), 위 3px · 아래 3px; 폭 72px → 영역 68px, 왼쪽 1px + 1px
+        assert_eq!(segs[0], Seg::Move(12.5, 18.75));
+        assert_eq!(segs[1], Seg::Line(12.5, 125.0));
+        assert_eq!(segs[2], Seg::Line(437.5, 125.0));
     }
 
     /// 한셀 PDF 에서 잰 그림·도형 상자 (원점 449·591, 배율 99 = k 6.1875): 그림 off (133, 200) ext (200, 400) → 왼쪽 1264,

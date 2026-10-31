@@ -454,6 +454,10 @@ fn hc_solve(
         if !x.is_finite() {
             return x;
         }
+        // 시작 값이 0 이하여도 오류 (윌슨-힐퍼티가 음수: CHISQ.INV(0.0001,3) = #NUM!)
+        if positive && x <= 0.0 {
+            return f64::NAN;
+        }
         let r = super::stat::round9(cdf(x)) - p;
         if r.abs() < 1e-6 {
             return x;
@@ -464,8 +468,9 @@ fn hc_solve(
         }
         let s = r / f;
         x -= s / (1.0 - s * c);
+        // 걸음이 0 이하로 떨어지면 한셀은 #NUM! (CHISQ.INV(0.00001,3) = #NUM!, 대조 실험 tail)
         if positive && x <= 0.0 {
-            x = 1e-10;
+            return f64::NAN;
         }
     }
     x
@@ -533,7 +538,8 @@ pub fn chisq_inv(p: f64, df: f64) -> f64 {
         return x0;
     }
     let a = df / 2.0;
-    let lg = gammln(a);
+    // 밀도의 ln Γ 는 한셀 GAMMALN (C 런타임 lgamma) — 근사식 gammln 이 아니다 (대조 실험 tail)
+    let lg = crate::calc::hcmath::lgamma(a);
     hc_solve(
         p,
         x0,

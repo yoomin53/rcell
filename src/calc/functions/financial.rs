@@ -191,6 +191,7 @@ pub const FNS: &[FnSpec] = &[
         num(365.0 * d / (360.0 - d * dsm))
     }),
     f("DISC", 4, 5, V, |c, a| {
+        try_v!(numbers_only(a));
         let (s, m) = try_v!(sm(c, a));
         let pr = try_v!(num_arg(c, a, 2));
         let red = try_v!(num_arg(c, a, 3));
@@ -316,7 +317,8 @@ pub fn fv(r: f64, n: f64, p: f64, pv: f64, t: f64) -> f64 {
         return -(pv + p * n);
     }
     let g = (1.0 + r).mpow(n);
-    -(pv * g + p * (1.0 + r * t) * (g - 1.0) / r)
+    // 지급 항의 괄호: ((g−1)/r) 를 먼저 — 이 차례로 FV 8 경우가 끝자리까지 같다 (대조 실험 financial·cfin)
+    -(pv * g + p * (1.0 + r * t) * ((g - 1.0) / r))
 }
 
 /// 정기 지급액: −(pv + fv/g)·r / ((1 + rt)(1 − 1/g)), g = (1+r)^n — 아주 작은 이율에서 한셀과 같은 끝자리
@@ -673,7 +675,9 @@ fn db(ctx: &mut Ctx, a: &[Value]) -> Value {
         || life <= 0.0
         || per <= 0.0
         || !(1.0..=12.0).contains(&month)
-        || per > life + 1.0
+        // 기간은 수명을 넘을 수 없다. 첫 해가 열두 달이 아니면 (month < 12) 수명 + 1 까지
+        // (DB(1000,100,3,4) = #NUM!, DB(1000,100,3,4,6) = 42.2, 대조 실험 conv3·conv4)
+        || per > life + if month < 12.0 { 1.0 } else { 0.0 }
     {
         return Value::Error(ErrorKind::Num);
     }
@@ -693,7 +697,8 @@ fn db(ctx: &mut Ctx, a: &[Value]) -> Value {
     total += dep;
     let mut p = 2.0;
     while p <= per {
-        if p == life + 1.0 {
+        // 수명을 넘는 마지막 해는 남은 달수만큼 (DB(1000,100,2.5,3,6) = 83.7, 수명이 소수여도)
+        if p > life {
             dep = (cost - total) * rate * (12.0 - month) / 12.0;
         } else {
             dep = (cost - total) * rate;
@@ -851,6 +856,10 @@ fn date_arg(ctx: &mut Ctx, a: &[Value], i: usize) -> Result<f64, ErrorKind> {
 
 /// (결제일, 만기일): 결제일 ≥ 만기일이면 #NUM!
 fn sm(ctx: &mut Ctx, a: &[Value]) -> Result<(f64, f64), ErrorKind> {
+    // 인수의 오류 값이 날짜 검사(결제일 ≥ 만기일 = #NUM!)보다 먼저 (PRICE(366,1,NA(),…) = #N/A, 대조 실험 conv10)
+    if let Some(Value::Error(e)) = a.iter().find(|v| matches!(v, Value::Error(_))) {
+        return Err(*e);
+    }
     let s = date_arg(ctx, a, 0)?;
     let m = date_arg(ctx, a, 1)?;
     if s >= m {
@@ -930,8 +939,27 @@ fn coupon_dates(s: f64, m: f64, fr: f64, date1904: bool) -> (f64, f64, f64) {
     }
 }
 
+/// 숫자만 받는 인수 확인: 글·논리·오류 값은 (오류 값도) #VALUE! — COUP* 와 DISC 는 날짜 글도 읽지 않는다
+/// (COUPNCD("2024-03-15",…) = #VALUE!, COUPNCD(NA(),…) = #VALUE!, 대조 실험 conv8·conv9)
+fn numbers_only(a: &[Value]) -> Result<(), ErrorKind> {
+    if a.iter()
+        .any(|v| matches!(v, Value::Text(_) | Value::Bool(_) | Value::Error(_)))
+    {
+        return Err(ErrorKind::Value);
+    }
+    Ok(())
+}
+
 fn coup(ctx: &mut Ctx, a: &[Value], what: u8) -> Value {
+    try_v!(numbers_only(a));
+    // 날짜는 1 이상 2958465 이하: 0 이하·결제일 ≥ 만기일은 #NUM!, 그다음 넘으면 #VALUE!
     let (s, m) = try_v!(sm(ctx, a));
+    if s < 1.0 || m < 1.0 {
+        return Value::Error(ErrorKind::Num);
+    }
+    if s >= 2_958_466.0 || m >= 2_958_466.0 {
+        return Value::Error(ErrorKind::Value);
+    }
     let fr = try_v!(freq(ctx, a, 2));
     let b = try_v!(basis(ctx, a, 3));
     let d1904 = ctx.date1904();
