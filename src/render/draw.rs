@@ -83,17 +83,19 @@ pub(super) fn shapes_html(
         // (선 가운데를 −0.5px 에), 그림은 1px 왼쪽·위, 차트 틀은 왼쪽 2px·위 1px 바깥에서 오른쪽·아래
         // 경계의 1px 안쪽까지 (틀 크기 +1)
         let r = match sh.kind {
-            crate::model::ShapeKind::Chart => (
-                x1.round() - 2.0
-                    + if sh.chart.as_ref().is_some_and(|c| c.legacy.is_none()) {
-                        chart_dx(a.from.col_off)
-                    } else {
-                        0.0
-                    },
-                y1.round() - 1.0,
-                w.round() + 1.0,
-                h.round() + 1.0,
-            ),
+            crate::model::ShapeKind::Chart => {
+                let xml = sh.chart.as_ref().is_some_and(|c| c.legacy.is_none());
+                let ox = x1.round() - 2.0 + if xml { chart_dx(a.from.col_off) } else { 0.0 };
+                let oy = y1.round() - 1.0;
+                // 시트 맨 위(y 0)에 붙은 XML 차트는 아래 선 가운데가 경계에서 1px 안 (눈금 높이 실험: 경계 310 에 틀 가운데
+                // 309.0). 그 밖의 차트는 틀 크기 +1, 가운데가 경계 − 0.5 (차트 종류 실험: 경계 499 에 498.5)
+                let aligned = xml && y1 == 0.0;
+                if aligned {
+                    (ox, oy, w.round() + 1.0, y2 - oy - 0.5)
+                } else {
+                    (ox, oy, w.round() + 1.0, h.round() + 1.0)
+                }
+            }
             crate::model::ShapeKind::Picture => (x1 - 1.0, y1 - 1.0, w, h),
             // 도형: 상자는 경계 1px 앞 정수 픽셀 (선은 shape_body 가 반 픽셀 안쪽에 — 브라우저가 SVG 상자를 정수
             // 픽셀에 맞추므로 상자를 반 픽셀에 두면 선이 두 픽셀에 번진다)
@@ -752,9 +754,14 @@ pub(super) fn shape_body(
     let id = format!("s{}x{}", sh.id, (w * 7.0 + h * 13.0) as u64);
     match sh.kind {
         ShapeKind::Chart => match &sh.chart {
-            Some(ch) => inner.push_str(&crate::chart_svg::chart_svg(ch, w, h, theme, &|c| {
-                draw_color(c, theme)
-            })),
+            Some(ch) => inner.push_str(&crate::chart_svg::chart_svg_at(
+                ch,
+                w,
+                h,
+                theme,
+                &|c| draw_color(c, theme),
+                sh.anchor.from.row == 0 && sh.anchor.from.row_off == 0,
+            )),
             None => inner.push_str("<div class=\"rc-chart\">차트</div>"),
         },
         ShapeKind::Picture => {
