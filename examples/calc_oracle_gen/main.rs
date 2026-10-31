@@ -19,6 +19,7 @@
 //! 자료는 모두 이 파일이 지어낸 값이다.
 
 mod cases;
+mod rand;
 
 use std::path::PathBuf;
 
@@ -431,7 +432,7 @@ fn build(cases: &[Case], date1904: bool) -> Workbook {
     }
 }
 
-/// 사용: `<출력 폴더> [--only 분류] [--chunk N] [--list 파일]` — `--chunk` 는 한 문서에 경우 N개씩 나눠 쓴다
+/// 사용: `<출력 폴더> [--only 분류] [--chunk N] [--list 파일] [--random N --seed S [--emit 파일]]` — `--chunk` 는 한 문서에 경우 N개씩 나눠 쓴다
 /// (한셀을 죽이는 경우를 좁힐 때). `--list` 파일은 한 줄에 수식 하나 (`@행x열 수식` 은 배열 수식, `#1904` 줄은 1904 날짜 체계).
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -453,34 +454,61 @@ fn main() {
         .unwrap_or(usize::MAX);
     std::fs::create_dir_all(&out).expect("출력 폴더");
     // --list <파일>: 목록 대신 파일의 수식(한 줄에 하나, `=` 없이)으로 문서 하나 (이름은 파일 이름)
-    let catalog = match opt("--list") {
-        Some(path) => {
-            let path = PathBuf::from(path);
-            let text = std::fs::read_to_string(&path).expect("수식 목록 파일");
-            // 줄마다 수식 하나. `@3x2 수식` 은 3행 2열 배열 수식, `#1904` 줄은 1904 날짜 체계
-            let mut date1904 = false;
-            let mut cases = Vec::new();
-            for l in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-                if l == "#1904" {
-                    date1904 = true;
-                    continue;
-                }
-                let (array, f) = match l.strip_prefix('@').and_then(|r| r.split_once(' ')) {
-                    Some((dim, f)) => {
-                        let (h, w) = dim.split_once('x').expect("@행x열");
-                        (Some((h.parse().expect("행"), w.parse().expect("열"))), f)
-                    }
-                    None => (None, l),
-                };
-                cases.push(Case {
-                    f: f.trim_start_matches('=').to_string(),
-                    array,
-                });
-            }
-            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
-            vec![(&*Box::leak(name.into_boxed_str()), cases, date1904)]
+    // --random N --seed S: 무작위 수식 N 개 (rand.rs), --emit 파일 이면 수식 목록을 글로도 남긴다
+    let random: Option<usize> = opt("--random").and_then(|n| n.parse().ok());
+    let seed: u64 = opt("--seed").and_then(|n| n.parse().ok()).unwrap_or(1);
+    let catalog = if let Some(n) = random {
+        let cases = rand::cases(n, seed);
+        if let Some(p) = opt("--emit") {
+            let text: String = cases
+                .iter()
+                .map(|c| match c.array {
+                    Some((h, w)) => format!(
+                        "@{h}x{w} {}
+",
+                        c.f
+                    ),
+                    None => format!(
+                        "{}
+",
+                        c.f
+                    ),
+                })
+                .collect();
+            std::fs::write(p, text).expect("--emit 쓰기");
         }
-        None => cases::catalog(),
+        let name = format!("rand{seed}");
+        vec![(&*Box::leak(name.into_boxed_str()), cases, false)]
+    } else {
+        match opt("--list") {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                let text = std::fs::read_to_string(&path).expect("수식 목록 파일");
+                // 줄마다 수식 하나. `@3x2 수식` 은 3행 2열 배열 수식, `#1904` 줄은 1904 날짜 체계
+                let mut date1904 = false;
+                let mut cases = Vec::new();
+                for l in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    if l == "#1904" {
+                        date1904 = true;
+                        continue;
+                    }
+                    let (array, f) = match l.strip_prefix('@').and_then(|r| r.split_once(' ')) {
+                        Some((dim, f)) => {
+                            let (h, w) = dim.split_once('x').expect("@행x열");
+                            (Some((h.parse().expect("행"), w.parse().expect("열"))), f)
+                        }
+                        None => (None, l),
+                    };
+                    cases.push(Case {
+                        f: f.trim_start_matches('=').to_string(),
+                        array,
+                    });
+                }
+                let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+                vec![(&*Box::leak(name.into_boxed_str()), cases, date1904)]
+            }
+            None => cases::catalog(),
+        }
     };
     let mut total = 0;
     for (name, cases, date1904) in catalog {

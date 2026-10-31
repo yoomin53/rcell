@@ -66,8 +66,10 @@ pub const FNS: &[FnSpec] = &[
     }),
     f("REPT", 2, 2, V, |c, a| {
         let t = try_v!(text_arg(c, a, 0));
-        let n = try_v!(num_arg(c, a, 1)).trunc();
-        if n < 0.0 || t.chars().count() as f64 * n > 32_767.0 {
+        let raw = try_v!(num_arg(c, a, 1));
+        let n = raw.trunc();
+        // 소수를 버리기 전에 0 보다 작으면 #VALUE! (REPT("a",-0.5), 대조 실험 rand)
+        if raw < 0.0 || t.chars().count() as f64 * n > 32_767.0 {
             return Value::Error(ErrorKind::Value);
         }
         Value::from(t.repeat(n as usize))
@@ -111,7 +113,8 @@ pub const FNS: &[FnSpec] = &[
             .or_else(|| value::parse_number(s, c.date1904()))
         {
             Some(n) => Value::Number(n),
-            None => Value::Error(ErrorKind::Value),
+            // 오류 값 이름의 글은 그 오류 (VALUE("#N/A") = #N/A)
+            None => Value::Error(ErrorKind::parse(s).unwrap_or(ErrorKind::Value)),
         },
         Value::Bool(_) => Value::Error(ErrorKind::Value),
         v => value::num_r(c.num(v)),
@@ -126,14 +129,35 @@ pub const FNS: &[FnSpec] = &[
     // (대조 실험 text·misc4)
     f("CHAR", 1, 1, V, |c, a| {
         let n = try_v!(num_arg(c, a, 0)).trunc();
-        if !(1.0..=255.0).contains(&n) {
+        if !(1.0..=65535.0).contains(&n) {
             return Value::Error(ErrorKind::Value);
         }
-        let ch = match n as u32 {
-            k @ 1..=159 => char::from_u32(k).unwrap_or('\u{FFFD}'),
-            _ => '\u{FFFD}',
+        let single = |k: u32| match k {
+            1..=159 => char::from_u32(k).unwrap_or('�'),
+            _ => '�',
         };
-        Value::from(ch.to_string())
+        let n = n as u32;
+        if n <= 255 {
+            return Value::from(single(n).to_string());
+        }
+        // 256 이상은 두 바이트 (앞 바이트가 높은 쪽): 앞이 949 의 앞 바이트(0x81–0xFE)면 두 바이트 글자 하나(표에 없는 짝은
+        // #VALUE!), 앞이 ASCII 이고 뒤가 0x81–0xFE 면 "앞 글자 + 뒤 한 바이트 글자", 그 밖은 #VALUE!
+        // (CHAR(45217) = "가", CHAR(1000) = "�", CHAR(256)·CHAR(1152) = #VALUE!, 대조 실험 chars·misc6)
+        let (hi, lo) = ((n >> 8) as u8, (n & 255) as u8);
+        if (0x81..=0xFE).contains(&hi) {
+            let d = crate::calc::cp949::decode(&[hi, lo]);
+            if d.chars().count() == 1 && d != "?" {
+                return Value::from(d);
+            }
+            return Value::Error(ErrorKind::Value);
+        }
+        if hi < 0x80 && (0x81..=0xFE).contains(&lo) {
+            let mut s = String::new();
+            s.push(char::from_u32(u32::from(hi)).unwrap_or('�'));
+            s.push(single(u32::from(lo)));
+            return Value::from(s);
+        }
+        Value::Error(ErrorKind::Value)
     }),
     // CODE 는 첫 글자의 949 코드 (CODE("한") = 51153, 949 에 없으면 63, 대조 실험 text)
     f("CODE", 1, 1, V, |c, a| {
@@ -147,6 +171,10 @@ pub const FNS: &[FnSpec] = &[
         let n = try_v!(num_arg(c, a, 0)).trunc();
         if n < 1.0 || n > 0x10FFFF as f64 {
             return Value::Error(ErrorKind::Value);
+        }
+        // U+10FFFE·U+10FFFF 는 #N/A (U+FFFE·U+1FFFE… 는 글자로 나온다, 대조 실험 conv2·conv4)
+        if n >= 1_114_110.0 {
+            return Value::Error(ErrorKind::NA);
         }
         // 대리 쌍 반쪽은 반쪽 그대로 (UNICODE(UNICHAR(55357)) = 55357, 파일에는 U+FFFD, 대조 실험 text·cmisc)
         match char::from_u32(n as u32) {
@@ -238,8 +266,9 @@ fn map_case(s: &str, upper: bool) -> String {
 
 fn left_right(ctx: &mut Ctx, a: &[Value], left: bool, bytes: bool) -> Value {
     let t = try_v!(text_arg(ctx, a, 0));
-    let n = try_v!(num_or(ctx, a, 1, 1.0)).trunc();
-    if n < 0.0 {
+    let raw = try_v!(num_or(ctx, a, 1, 1.0));
+    let n = raw.trunc();
+    if raw < 0.0 {
         return Value::Error(ErrorKind::Value);
     }
     let chars: Vec<char> = value::utf16_chars(&t);
@@ -264,8 +293,10 @@ fn left_right(ctx: &mut Ctx, a: &[Value], left: bool, bytes: bool) -> Value {
 fn mid(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
     let t = try_v!(text_arg(ctx, a, 0));
     let start = try_v!(num_arg(ctx, a, 1)).trunc();
-    let n = try_v!(num_arg(ctx, a, 2)).trunc();
-    if start < 1.0 || n < 0.0 {
+    let n_raw = try_v!(num_arg(ctx, a, 2));
+    let n = n_raw.trunc();
+    // 길이도 소수를 버리기 전에 0 보다 작으면 #VALUE! (MID("abc",2,-0.5), 대조 실험 rand)
+    if start < 1.0 || n_raw < 0.0 {
         return Value::Error(ErrorKind::Value);
     }
     let chars: Vec<char> = value::utf16_chars(&t);
@@ -316,11 +347,18 @@ fn textjoin(ctx: &mut Ctx, a: &[Value]) -> Value {
         Value::Ref(_) | Value::Array(_) => {
             let mut d = Vec::new();
             for x in flatten(ctx, &a[0]) {
-                d.push(try_v!(ctx.text(&x)).to_string());
+                // 구분자가 오류면 결과는 빈 글 (TEXTJOIN(#N/A,1,"a","b") = "", 대조 실험 textjoin)
+                match ctx.text(&x) {
+                    Ok(t) => d.push(t.to_string()),
+                    Err(_) => return Value::from(""),
+                }
             }
             d
         }
-        v => vec![try_v!(ctx.text(v)).to_string()],
+        v => match ctx.text(v) {
+            Ok(t) => vec![t.to_string()],
+            Err(_) => return Value::from(""),
+        },
     };
     let ignore = ctx.boolean(&a[1]).unwrap_or(false);
     let mut parts: Vec<String> = Vec::new();
@@ -330,7 +368,12 @@ fn textjoin(ctx: &mut Ctx, a: &[Value]) -> Value {
             if from_ref && matches!(x, Value::Empty) {
                 continue;
             }
-            if matches!(x, Value::Error(_)) {
+            // 오류 낱값·참조 안의 오류는 거기서 멈추고, 배열 상수 안의 오류는 그 오류가 나온다
+            // (TEXTJOIN("/",1,{"a",#N/A}) = #N/A, 대조 실험 textjoin)
+            if let Value::Error(e) = x {
+                if matches!(v, Value::Array(_)) {
+                    return Value::Error(e);
+                }
                 break 'outer;
             }
             let s = try_v!(ctx.text(&x));
@@ -389,11 +432,13 @@ fn substitute(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn replace(ctx: &mut Ctx, a: &[Value], bytes: bool) -> Value {
     let t = try_v!(text_arg(ctx, a, 0));
     let start = try_v!(num_arg(ctx, a, 1)).trunc();
-    let n = try_v!(num_arg(ctx, a, 2)).trunc();
-    let new = try_v!(text_arg(ctx, a, 3));
-    if start < 1.0 || n < 0.0 {
+    let n_raw = try_v!(num_arg(ctx, a, 2));
+    let n = n_raw.trunc();
+    // 시작·길이가 틀리면 새 글 인수의 오류는 보지 않는다 (REPLACE("abc",-1,1,NA()) = #VALUE!, 대조 실험 prec)
+    if start < 1.0 || n_raw < 0.0 {
         return Value::Error(ErrorKind::Value);
     }
+    let new = try_v!(text_arg(ctx, a, 3));
     let chars: Vec<char> = value::utf16_chars(&t);
     if bytes {
         // 앞쪽·뒤쪽 바이트 조각 사이에 새 글 (걸친 반쪽은 공백: REPLACEB("한글나라",2,2,"X") = " X 나라")
@@ -532,8 +577,34 @@ fn numbervalue(ctx: &mut Ctx, a: &[Value]) -> Value {
     }
     match value::parse_plain_number(&s) {
         Some(v) => value::num_r(Ok(v / 100f64.mpowi(pct))),
+        // 날짜·시각 글도 읽는다 (NUMBERVALUE("2024-03-15") = 45366, 대조 실험 rand)
+        None if a.len() == 1 => match value::parse_number(&t, ctx.date1904()) {
+            Some(v) => Value::Number(v),
+            None => Value::Error(ErrorKind::Value),
+        },
         None => Value::Error(ErrorKind::Value),
     }
+}
+
+/// 서식에 색 지정(`[Red]`·`[Color3]` …)이 있는가
+fn has_color_bracket(code: &str) -> bool {
+    let lower = code.to_lowercase();
+    let mut rest = lower.as_str();
+    while let Some(i) = rest.find('[') {
+        let Some(j) = rest[i..].find(']') else { break };
+        let inner = &rest[i + 1..i + j];
+        if matches!(
+            inner,
+            "black" | "blue" | "cyan" | "green" | "magenta" | "red" | "white" | "yellow"
+        ) || inner
+            .strip_prefix("color")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return true;
+        }
+        rest = &rest[i + j + 1..];
+    }
+    false
 }
 
 /// TEXT. 한셀의 TEXT 는 셀 표시와 몇 가지가 다르다 (대조 실험 text·misc3):
@@ -544,6 +615,10 @@ fn numbervalue(ctx: &mut Ctx, a: &[Value]) -> Value {
 /// - `오전/오후` 는 AM/PM 으로, `@` 는 처음 하나만 값으로 바뀐다
 fn text(ctx: &mut Ctx, a: &[Value]) -> Value {
     let code = try_v!(text_arg(ctx, a, 1));
+    // 논리·빈 값에 색 지정 서식을 주면 #VALUE! (TEXT(TRUE,"[Red]0.0"), TEXT(빈 칸,"[Red]@"), 대조 실험 textfmt·misc6)
+    if matches!(a[0], Value::Bool(_) | Value::Empty) && has_color_bracket(&code) {
+        return Value::Error(ErrorKind::Value);
+    }
     let v = match &a[0] {
         Value::Error(e) => return Value::Error(*e),
         Value::Bool(b) => return Value::from(if *b { "TRUE" } else { "FALSE" }),
@@ -556,7 +631,12 @@ fn text(ctx: &mut Ctx, a: &[Value]) -> Value {
         _ => return Value::Error(ErrorKind::Value),
     };
     if code.is_empty() {
-        return Value::from("");
+        // 서식이 비면 글은 그대로, 음수는 부호만 (TEXT("abc","") = "abc", TEXT(-5,"") = "-", 대조 실험 misc6)
+        return match &v {
+            CellValue::Text(s) => Value::from(s.clone()),
+            CellValue::Number(n) if *n < 0.0 => Value::from("-"),
+            _ => Value::from(""),
+        };
     }
     let Some((code, pads)) = text_code(&code) else {
         return Value::Error(ErrorKind::Value);
@@ -774,6 +854,10 @@ fn fixed(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
     let d = try_v!(num_or(ctx, a, 1, 2.0)).trunc();
     let no_commas = try_v!(bool_or(ctx, a, 2, false));
+    // 자릿수가 32비트 정수를 벗어나면 #NUM!, 127 을 넘으면 #VALUE! (FIXED(…,2^31) = #NUM!, 대조 실험 misc4·misc6)
+    if !(-2_147_483_648.0..=2_147_483_647.0).contains(&d.round()) {
+        return Value::Error(ErrorKind::Num);
+    }
     if d > 127.0 {
         return Value::Error(ErrorKind::Value);
     }
