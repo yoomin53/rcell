@@ -730,6 +730,8 @@ struct Group<'a> {
     offset: usize,
     /// 레거시 차트: 계열마다 자동 표식인가 (`LegacyChartView::auto_markers`, XML 차트는 비어 있다)
     legacy_auto: &'a [bool],
+    /// 레거시(VtChart) 차트인가
+    legacy: bool,
 }
 
 fn groups_of(ch: &Chart) -> Vec<Group<'_>> {
@@ -754,6 +756,7 @@ fn groups_of(ch: &Chart) -> Vec<Group<'_>> {
             series: &ch.series,
             offset: 0,
             legacy_auto,
+            legacy: ch.legacy.is_some(),
         });
     }
     let mut off = ch.series.len();
@@ -768,6 +771,7 @@ fn groups_of(ch: &Chart) -> Vec<Group<'_>> {
             series: &g.series,
             offset: off,
             legacy_auto,
+            legacy: ch.legacy.is_some(),
         });
         off += g.series.len();
     }
@@ -842,12 +846,19 @@ fn x_values(s: &ChartSeries) -> Vec<f64> {
 // 범례
 // ---------------------------------------------------------------------------
 
+/// 범례 표식: 모양, 크기(px), 채우기 없는 검은 테두리인가 (레거시 꺾은선)
+struct LegendMarker {
+    sym: String,
+    size: f64,
+    hollow: bool,
+}
+
 /// 범례 항목: (이름, 칠, 선, 표식)
 struct LegendItem {
     name: String,
     fill: Option<String>,
     stroke: Option<Stroke>,
-    marker: Option<String>,
+    marker: Option<LegendMarker>,
 }
 
 fn legend_items(ch: &Chart, groups: &[Group], cx: &Ctx, pie_like: bool) -> Vec<LegendItem> {
@@ -888,7 +899,11 @@ fn legend_items(ch: &Chart, groups: &[Group], cx: &Ctx, pie_like: bool) -> Vec<L
                 // 3차원 꺾은선의 범례 표지는 네모 (c2_e4_line3d 의 한셀 화면)
                 "line" | "scatter" | "radar" if !g.three_d => {
                     let st = series_stroke(s, &color, cx);
-                    let marker = marker_of(s, g, k).map(|(m, _)| m);
+                    let marker = marker_of(s, g, k).map(|(sym, size)| LegendMarker {
+                        sym,
+                        size: if marker_hollow(s, g) { size } else { 7.0 },
+                        hollow: marker_hollow(s, g),
+                    });
                     LegendItem {
                         name,
                         fill: None,
@@ -981,7 +996,19 @@ fn legacy_layout(
         let items = legend_items(ch, groups, cx, pie_like);
         if !items.is_empty() {
             let line = items.iter().any(|i| i.stroke.is_some() && i.fill.is_none());
-            let kw = if line { 28.0 } else { 16.0 };
+            // 레거시 꺾은선의 채우기 없는 표식 범례: 표지 20px, 표지 → 글 4.7px (차트 종류 실험의 3번 레거시 — 28px·8px 로
+            // 그리면 그림 영역이 10px 좁다)
+            let hollow = items
+                .iter()
+                .any(|i| i.marker.as_ref().is_some_and(|m| m.hollow));
+            let kw = if hollow {
+                20.0
+            } else if line {
+                28.0
+            } else {
+                16.0
+            };
+            let gap = if hollow { 4.7 } else { 8.0 };
             // 글 폭은 잉크 폭 (어림 폭 − 2.5: 9pt "10" 이 9.5px — chart_base 의 글 끝이 틀 − 20)
             let tw = items
                 .iter()
@@ -1003,19 +1030,19 @@ fn legacy_layout(
                 "l" => {
                     let y0 = first_top(top, fb);
                     keys.extend((0..items.len()).map(|k| (fl + 16.0, y0 + 23.0 * k as f64)));
-                    left = fl + 16.0 + kw + 8.0 + tw + 19.0;
+                    left = fl + 16.0 + kw + gap + tw + 19.0;
                 }
                 "t" | "b" => {
                     let total: f64 = items
                         .iter()
-                        .map(|i| kw + 8.0 + font.width(&i.name))
+                        .map(|i| kw + gap + font.width(&i.name))
                         .sum::<f64>()
                         + 16.0 * (n - 1.0);
                     let mut x = ((fl + fr) / 2.0 - total / 2.0).round();
                     let y = if pos == "t" { top + 16.0 } else { fb - 32.0 };
                     for it in &items {
                         keys.push((x, y));
-                        x += kw + 8.0 + font.width(&it.name) + 16.0;
+                        x += kw + gap + font.width(&it.name) + 16.0;
                     }
                     if pos == "t" {
                         plot_top += 35.0;
@@ -1025,7 +1052,7 @@ fn legacy_layout(
                     right = fr - 15.0;
                 }
                 _ => {
-                    let kx = (fr - 20.0 - tw - 8.0 - kw).round();
+                    let kx = (fr - 20.0 - tw - gap - kw).round();
                     let y0 = first_top(top, fb);
                     keys.extend((0..items.len()).map(|k| (kx, y0 + 23.0 * k as f64)));
                     right = kx - 18.0;
@@ -1038,10 +1065,15 @@ fn legacy_layout(
                     let y = ky + 8.0;
                     out.line(kx, y + 0.5, kx + kw, y + 0.5, st);
                     if let Some(m) = &it.marker {
-                        draw_marker(out, m, kx + kw / 2.0, y + 0.5, 7.0, &Style::fill(&st.color));
+                        let ms = if m.hollow {
+                            hollow_style()
+                        } else {
+                            Style::fill(&st.color)
+                        };
+                        draw_marker(out, &m.sym, kx + kw / 2.0, y + 0.5, m.size, &ms);
                     }
                 }
-                out.text(kx + kw + 8.0, ky + 9.5, &it.name, &font, "start");
+                out.text(kx + kw + gap, ky + 9.5, &it.name, &font, "start");
             }
         }
     }
@@ -1163,7 +1195,12 @@ fn draw_legend(
                 .stroke
                 .as_ref()
                 .map_or_else(|| "#000000".to_string(), |s| s.color.clone());
-            draw_marker(out, m, x + kw / 2.0, cy, 7.0, &Style::fill(&c));
+            let ms = if m.hollow {
+                hollow_style()
+            } else {
+                Style::fill(&c)
+            };
+            draw_marker(out, &m.sym, x + kw / 2.0, cy, m.size, &ms);
         }
         out.text(x + kw + key_gap, cy + fpx * 0.35, &it.name, font, "start");
         if vertical {
@@ -1187,7 +1224,9 @@ fn marker_of(s: &ChartSeries, g: &Group, k: usize) -> Option<(String, f64)> {
     ];
     let m: Option<&ChartMarker> = s.marker.as_ref();
     let sym = m.and_then(|m| m.symbol.as_deref());
-    let size = m.and_then(|m| m.size).unwrap_or(7) as f64 * 1.1;
+    // 레거시 꺾은선의 채우기 없는 표식은 크기가 pt (원 지름 7pt → 9.33px)
+    let size = m.and_then(|m| m.size).unwrap_or(7) as f64
+        * if marker_hollow(s, g) { 4.0 / 3.0 } else { 1.1 };
     // 레거시 2차원 꺾은선의 자동 표식: 모델에는 none 이지만 한셀 화면은 자동 표식을 그린다 (c2_e3_line_pct 등)
     if g.legacy_auto.get(k) == Some(&true) && g.kind == "line" && !g.three_d {
         return Some((AUTO[k % AUTO.len()].to_string(), size));
@@ -1205,6 +1244,24 @@ fn marker_of(s: &ChartSeries, g: &Group, k: usize) -> Option<(String, f64)> {
         ("line", None) if g.props.marker == Some(false) => None,
         (_, None) | (_, Some("auto")) => Some((AUTO[k % AUTO.len()].to_string(), size)),
         (_, Some(v)) => Some((v.to_string(), size)),
+    }
+}
+
+/// 레거시(VtChart) 꺾은선의 지정 표식 가운데 채우기 색이 없는 것 (표식 칠 pen5 가 검정 — 한셀 화면은 채우기 없이 검은 1px
+/// 테두리: 차트 종류 실험의 3번 레거시 꺾은선 원 표식 지름 9.3px)
+fn marker_hollow(s: &ChartSeries, g: &Group) -> bool {
+    g.legacy
+        && g.kind == "line"
+        && s.marker.as_ref().is_some_and(|m| {
+            m.sp_pr.is_none()
+                && matches!(m.symbol.as_deref(), Some(v) if v != "none" && v != "auto")
+        })
+}
+
+fn hollow_style() -> Style {
+    Style {
+        fill: None,
+        stroke: Some(Stroke::new("#000000", 1.0)),
     }
 }
 
@@ -1264,7 +1321,10 @@ fn draw_marker(out: &mut Svg, sym: &str, x: f64, y: f64, size: f64, st: &Style) 
 }
 
 /// 표식 칠: 표식 서식 → 계열 색
-fn marker_style(s: &ChartSeries, color: &str, cx: &Ctx) -> Style {
+fn marker_style(s: &ChartSeries, g: &Group, color: &str, cx: &Ctx) -> Style {
+    if marker_hollow(s, g) {
+        return hollow_style();
+    }
     let sp = s.marker.as_ref().and_then(|m| m.sp_pr.as_ref());
     cx.shape(sp, Some(color), Some((color, 1.0)))
 }
@@ -3326,7 +3386,7 @@ fn draw_lines(
             );
         }
         if let Some((sym, size)) = marker_of(s, g, k0) {
-            let ms = marker_style(s, &color, cx);
+            let ms = marker_style(s, g, &color, cx);
             for (k, p) in pts.iter().enumerate() {
                 if let Some((x, y)) = p {
                     let dpt = s.d_pts.iter().find(|d| d.idx as usize == k);
@@ -3938,7 +3998,7 @@ fn draw_xy(
             );
         }
         if let Some((sym, size)) = marker_of(s, g, k0) {
-            let ms = marker_style(s, &color, cx);
+            let ms = marker_style(s, g, &color, cx);
             for (x, y) in pts.iter().flatten() {
                 draw_marker(out, &sym, *x, *y, size, &ms);
             }
@@ -4457,7 +4517,7 @@ fn draw_radar(out: &mut Svg, ch: &Chart, groups: &[Group], cx: &Ctx, base: &Font
         };
         out.path(&d, &st);
         if !filled && let Some((sym, size)) = marker_of(s, g, g.offset + i) {
-            let ms = marker_style(s, &color, cx);
+            let ms = marker_style(s, g, &color, cx);
             for (x, y) in pts {
                 draw_marker(out, &sym, x, y, size, &ms);
             }
