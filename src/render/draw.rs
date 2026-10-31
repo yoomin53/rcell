@@ -898,7 +898,7 @@ pub(super) fn shape_body(
                     if !st.is_empty() {
                         let _ = write!(
                             body,
-                            "<path d=\"{}\" fill=\"none\"{st} transform=\"translate({so} {so})\"/>",
+                            "<path d=\"{}\" fill=\"none\"{st} data-hc=\"1\" transform=\"translate({so} {so})\"/>",
                             p.d
                         );
                     }
@@ -907,7 +907,7 @@ pub(super) fn shape_body(
                     {
                         let _ = write!(
                             body,
-                            "<path d=\"{}\" fill=\"none\"{stroke} mask=\"url(#{m})\" transform=\"translate({so} {so})\"/>",
+                            "<path d=\"{}\" fill=\"none\"{stroke} data-hc=\"1\" mask=\"url(#{m})\" transform=\"translate({so} {so})\"/>",
                             p.d
                         );
                     }

@@ -69,6 +69,18 @@ impl Hatches {
 /// 깔고, 1 굵기 둥근 선. 무늬 번호 0 가로·1 세로·2 \·3 /·4 +·5 x (선이 칸 밖으로 나가는 것은 이웃 칸과 이어지게)
 fn hatch_tile(h: &Hatch) -> String {
     let (style, fg, bg) = h;
+    // 점 찍기: 8×8 디더 마스크 한 장 (칠 색은 칸 안에서)
+    if crate::render::page::stipple_alpha(*style).is_some() {
+        return format!(
+            "q
+{} rg
+{STIPPLE_TILE} 0 0 {STIPPLE_TILE} 0 0 cm
+/Im1 Do
+Q
+",
+            color(*fg)
+        );
+    }
     // 칸 무늬 채우기: 8×8 픽셀 그림 한 장을 가로·세로 4pt 로 (한셀 PDF 의 무늬 칸 — 그림이 보는 쪽에서 부드럽게 보정된다)
     if *style >= crate::render::page::PATTERN_BASE {
         return "q\n4 0 0 4 0 0 cm\n/Im1 Do\nQ\n".to_string();
@@ -91,6 +103,34 @@ fn hatch_tile(h: &Hatch) -> String {
         color(*fg)
     );
     s
+}
+
+/// 점 찍기 한 칸의 크기 (pt): 300 dpi 8 픽셀
+const STIPPLE_TILE: f64 = 1.92;
+
+/// 8×8 베이어 순서 디더의 문턱 값 (한셀 PDF 의 점 찍기 마스크는 이 행렬의 창이다)
+const BAYER8: [[u8; 8]; 8] = [
+    [0, 32, 8, 40, 2, 34, 10, 42],
+    [48, 16, 56, 24, 50, 18, 58, 26],
+    [12, 44, 4, 36, 14, 46, 6, 38],
+    [60, 28, 52, 20, 62, 30, 54, 22],
+    [3, 35, 11, 43, 1, 33, 9, 41],
+    [51, 19, 59, 27, 49, 17, 57, 25],
+    [15, 47, 7, 39, 13, 45, 5, 37],
+    [63, 31, 55, 23, 61, 29, 53, 21],
+];
+
+/// 점 `count` 개 (64 칸 중) 의 1비트 마스크 8 바이트: 칠할 칸은 0, 안 칠할 칸은 1 (`/ImageMask` 의 기본 Decode)
+fn stipple_mask(count: u8) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    for (y, row) in BAYER8.iter().enumerate() {
+        for (x, t) in row.iter().enumerate() {
+            if *t >= count {
+                out[y] |= 0x80 >> x;
+            }
+        }
+    }
+    out
 }
 
 /// 칸 무늬 채우기의 8×8 RGB 픽셀 (전경·배경 색을 구워 둔다)
@@ -923,7 +963,10 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
         let z = deflate(hatch_tile(h).as_bytes());
         let mut t = pdf.tiling_pattern(*r, &z);
         // 빗금 칸은 8pt, 칸 무늬 채우기는 4pt
-        let size = if h.0 >= crate::render::page::PATTERN_BASE {
+        let stipple = crate::render::page::stipple_alpha(h.0);
+        let size: f32 = if stipple.is_some() {
+            STIPPLE_TILE as f32
+        } else if h.0 >= crate::render::page::PATTERN_BASE {
             4.0
         } else {
             8.0
@@ -941,7 +984,16 @@ pub fn write_pdf(pages: &[(PageSize, Vec<Op>)], fonts: &FontSet, title: &str) ->
         }
         res.finish();
         t.finish();
-        if let Some(im) = img {
+        if let (Some(im), Some(a)) = (img, stipple) {
+            let z = deflate(&stipple_mask((a * 64.0).round() as u8));
+            let mut x = pdf.image_xobject(*im, &z);
+            x.filter(Filter::FlateDecode);
+            x.width(8);
+            x.height(8);
+            x.bits_per_component(1);
+            x.image_mask(true);
+            x.finish();
+        } else if let Some(im) = img {
             let z = deflate(&pattern_pixels(h));
             let mut x = pdf.image_xobject(*im, &z);
             x.filter(Filter::FlateDecode);

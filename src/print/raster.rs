@@ -177,11 +177,14 @@ pub fn render(
                 caps,
                 hatch,
             } => {
-                if hatch.is_some() {
-                    return None;
+                // 점 찍기(반투명 채우기)는 흰 바탕과 섞은 한 가지 색으로, 빗금·무늬 붓은 못 그린다
+                let mut flat = None;
+                if let Some((style, fg, _)) = hatch {
+                    let a = crate::render::page::stipple_alpha(*style)?;
+                    flat = Some(fg.map(|c| (f64::from(c) * a + 255.0 * (1.0 - a)).round() as u8));
                 }
                 let cmds = commands(segs, to);
-                if let Some(c) = fill {
+                if let Some(c) = fill.as_ref().or(flat.as_ref()) {
                     cv.fill(&cmds, *c, *even_odd);
                 }
                 if let Some((sw, c, dash)) = stroke {

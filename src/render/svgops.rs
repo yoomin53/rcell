@@ -531,30 +531,46 @@ fn node(cx: &Ctx, e: &Element, m: Mat, st: &Style, ops: &mut Vec<Op>) {
             .unwrap_or(0.0)
     };
     let shape = |segs: Vec<Seg>, ops: &mut Vec<Op>, closed_fill: bool| {
+        // 반투명 채우기: 한셀 PDF 는 점 찍기 (밑에 있는 것이 비쳐 보인다) — 흰 바탕과 섞어 칠하지 않는다
+        let alpha = st.opacity * st.fill_opacity;
+        let mut stipple = None;
         let fill = if closed_fill {
-            css_color(&st.fill, st.opacity * st.fill_opacity, &cx.grads)
+            match css_color(&st.fill, 1.0, &cx.grads) {
+                Some(base) if alpha > 0.001 && alpha < 0.992 => {
+                    let n = (alpha * 64.0).round().clamp(1.0, 63.0) as u8;
+                    stipple = Some((super::page::STIPPLE_BASE + n, base, None));
+                    None
+                }
+                _ => css_color(&st.fill, alpha, &cx.grads),
+            }
         } else {
             None
         };
         let stroke = css_color(&st.stroke, st.opacity * st.stroke_opacity, &cx.grads);
-        if fill.is_none() && stroke.is_none() {
+        if fill.is_none() && stroke.is_none() && stipple.is_none() {
             return;
         }
-        // 선 굵기는 변환의 크기만큼
+        // 선 굵기는 변환의 크기만큼. 도형 선(data-hc)은 한셀 PDF 가 선을 굵기만큼 넓힌 다각형으로 채우고 그 가장자리를 0.75pt(6.25 장치) 선으로
+        // 한 번 더 긋는다 — 보이는 굵기가 그만큼 굵다
         let scale = (m[0] * m[3] - m[1] * m[2]).abs().sqrt();
+        let extra = if e.attr("data-hc").is_some() {
+            6.25
+        } else {
+            0.0
+        };
         ops.push(Op::Path {
             segs: map_segs(&segs, m),
             fill,
             stroke: stroke.map(|c| {
                 (
-                    st.stroke_width * scale,
+                    st.stroke_width * scale + extra,
                     c,
                     st.dash.iter().map(|d| d * scale).collect(),
                 )
             }),
             even_odd: st.even_odd,
             caps: None,
-            hatch: None,
+            hatch: stipple,
         });
         let _ = cx.unit;
     };

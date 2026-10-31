@@ -272,6 +272,16 @@ pub(crate) fn aligned_px(right: bool, cell_w: f64, text_w: f64, indent: f64, zoo
 /// 칸 무늬 채우기의 `Hatch` 번호 바닥: 0–5 는 GDI 빗금, 이 번호부터는 [`paint::PATTERNS`] 의 무늬
 pub const PATTERN_BASE: u8 = 16;
 
+/// 반투명 채우기(점 찍기)의 `Hatch` 번호: `STIPPLE_BASE` + 점 수 (1–63, 8×8 칸 64 점 가운데). 한셀 PDF 는 알파를 쓰지 않고
+/// 8×8 베이어 디더 마스크(`/ImageMask`)를 되풀이해 반투명을 점 찍기로 그린다 (어둡게 25% = 16 점, 50% = 32 점, 밝게 30% = 19 점, 15% = 10 점)
+pub const STIPPLE_BASE: u8 = 128;
+
+/// 점 찍기 번호의 투명도 (점 수 / 64). 점 찍기가 아니면 None
+pub fn stipple_alpha(style: u8) -> Option<f64> {
+    (style > STIPPLE_BASE && style < STIPPLE_BASE + 64)
+        .then(|| f64::from(style - STIPPLE_BASE) / 64.0)
+}
+
 /// 칸 무늬의 8×8 칸 (전경이 true) — 인쇄 PDF 가 무늬 칸을 그릴 때
 pub fn pattern_rows(index: usize) -> Option<[[bool; 8]; 8]> {
     paint::pattern_rows(index)
