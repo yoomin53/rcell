@@ -369,3 +369,84 @@ fn corpus_web_pages_are_well_formed() {
     }
     eprintln!("웹 페이지: {checked}개");
 }
+
+/// 암호 저장: 한셀처럼 표준 암호화로 감싼다 — 맞는 암호로만 열리고 값이 같다. 암호를 받아들이지 않는 형식은 거절한다
+#[test]
+fn encrypted_save_round_trip() {
+    let wb = sample();
+    let dir = std::env::temp_dir().join(format!("rcell-enc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, fmt) in [
+        ("a.cell", rcell::SaveFormat::Cell),
+        ("a.xlsx", rcell::SaveFormat::Xlsx),
+        ("a.bin.cell", rcell::SaveFormat::Binary),
+        ("a.legacy.cell", rcell::SaveFormat::Legacy),
+        ("a.nxl", rcell::SaveFormat::Nxl),
+    ] {
+        let p = dir.join(name);
+        rcell::save_as_encrypted(&wb, &p, fmt, "비밀 1234").unwrap();
+        assert!(rcell::open(&p).is_err(), "{name}: 암호 없이 열렸다");
+        assert!(
+            rcell::open_with_password(&p, "틀림").is_err(),
+            "{name}: 틀린 암호로 열렸다"
+        );
+        let back = rcell::open_with_password(&p, "비밀 1234").unwrap();
+        assert_eq!(back.sheets.len(), wb.sheets.len(), "{name}");
+        assert_eq!(at(&back, "A1"), at(&wb, "A1"), "{name}");
+    }
+    assert!(rcell::save_as_encrypted(&wb, dir.join("a.xls"), rcell::SaveFormat::Xls, "x").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 서식 파일 이름(`.xltx`·`.xltm`)은 통합 문서 콘텐츠 형식만 서식 파일 것으로 바꾼 패키지로 저장하고, 다시 열면 같은 값이다
+#[test]
+fn template_names_write_template_content_types() {
+    let wb = sample();
+    let dir = std::env::temp_dir().join(format!("rcell-tpl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, want) in [
+        ("a.xltx", "spreadsheetml.template.main+xml"),
+        ("a.xltm", "ms-excel.template.macroEnabled.main+xml"),
+    ] {
+        let p = dir.join(name);
+        rcell::save(&wb, &p).unwrap();
+        let types =
+            rcell::container::read_entry(&std::fs::read(&p).unwrap(), "[Content_Types].xml")
+                .unwrap();
+        let types = String::from_utf8(types).unwrap();
+        assert!(types.contains(want), "{name}: {types}");
+        assert!(!types.contains("spreadsheetml.sheet.main+xml"), "{name}");
+        let back = rcell::open(&p).unwrap();
+        assert_eq!(at(&back, "A1"), at(&wb, "A1"), "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 도형·차트·그림은 PNG 그림으로 쓴다 (한셀 웹 저장 대조): 서식 문서의 사각형 네 개는 그림 크기 681×389, 624×33 …
+/// 이고 그림자가 있는 첫 사각형은 바탕색 픽셀 수가 한셀과 같다 (Basic_Invoice 의 449,480 와 같은 꼴 — 여기서는 크기와 투명 바탕만)
+#[test]
+fn web_page_shapes_become_png() {
+    let Some(root) = std::env::var_os("RCELL_CORPUS").map(PathBuf::from) else {
+        eprintln!("RCELL_CORPUS 미설정 — 건너뜀");
+        return;
+    };
+    let path = root.join("templates").join("Basic_Invoice.cell");
+    if !path.exists() {
+        return;
+    }
+    let wb = rcell::open(&path).expect("열기");
+    let files = rcell::webpage::write_htm(&wb, "x");
+    let mut dims: Vec<(u32, u32)> = files
+        .iter()
+        .filter(|f| f.path.ends_with(".png"))
+        .map(|f| {
+            assert_eq!(&f.data[..8], b"\x89PNG\r\n\x1a\n");
+            (
+                u32::from_be_bytes(f.data[16..20].try_into().unwrap()),
+                u32::from_be_bytes(f.data[20..24].try_into().unwrap()),
+            )
+        })
+        .collect();
+    dims.sort();
+    assert_eq!(dims, vec![(624, 23), (624, 33), (624, 176), (681, 389)]);
+}

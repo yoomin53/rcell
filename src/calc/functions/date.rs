@@ -286,6 +286,12 @@ fn add_months(ctx: &mut Ctx, a: &[Value], eom: bool) -> Value {
 fn add_months_abs(ctx: &mut Ctx, a: &[Value], eom: bool) -> Value {
     let s = try_v!(serial_arg(ctx, a, 0)).floor();
     let m = try_v!(num_arg(ctx, a, 1)).trunc();
+    // 달 수는 16비트 정수로 잘린다: EDATE(36923,65535) = EDATE(36923,-1), 32767 은 #NUM! (대조 실험 misc3·misc6)
+    let m16 = (m as i64) as i16;
+    if m16 == i16::MAX {
+        return Value::Error(ErrorKind::Num);
+    }
+    let m = f64::from(m16);
     let d1904 = ctx.date1904();
     let Some((y, mo, d)) = ymd_for_months(s, d1904) else {
         return Value::Error(ErrorKind::Num);
@@ -301,12 +307,12 @@ fn add_months_abs(ctx: &mut Ctx, a: &[Value], eom: bool) -> Value {
         days_in_month(ny, nm)
     };
     let nd = if eom { dim } else { d.min(dim).max(1) };
-    // 1899-12-31 은 0 (EOMONTH(0,0) = EDATE(0,0) = 0)
-    if !d1904 && (ny, nm, nd) == (1899, 12, 31) {
+    // 1899-12-31 은 달을 옮기지 않을 때만 0 (EOMONTH(0,0) = EDATE(0,0) = 0; EOMONTH(31,-1) = #NUM!)
+    if !d1904 && (ny, nm, nd) == (1899, 12, 31) && m == 0.0 {
         return Value::Number(0.0);
     }
     match serial_from_ymd(ny, nm as i64, nd as i64, d1904) {
-        Some(v) if v >= 0.0 => num(v),
+        Some(v) if v >= 1.0 || (d1904 && v >= 0.0) => num(v),
         _ => Value::Error(ErrorKind::Num),
     }
 }

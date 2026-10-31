@@ -417,6 +417,24 @@ fn cases() -> Vec<Case> {
     setup(&mut wb).page_order = Some("overThenDown".into());
     add("order", wb, 15, "45,89,133,177", "10,19", 0);
 
+    // 병합한 제목 행 (A1:F1, A2:C2) 을 반복 — 첫 페이지 44 행, 다음부터 제목 2 행을 뺀 42 행
+    let mut wb = base();
+    fill(&mut wb, "A1:F150");
+    for (a, b) in [("A1", "F1"), ("A2", "C2")] {
+        wb.sheets[0].merges.push(rcell::model::CellRange {
+            start: CellRef::parse(a).unwrap(),
+            end: CellRef::parse(b).unwrap(),
+        });
+    }
+    name(&mut wb, "_xlnm.Print_Titles", "Sheet1!$1:$2");
+    add("titles_merge", wb, 4, "45,87,129", "", 0);
+
+    // 가로 먼저 (100 행 × 24 열)
+    let mut wb = base();
+    fill(&mut wb, "A1:X100");
+    setup(&mut wb).page_order = Some("overThenDown".into());
+    add("order_over", wb, 9, "45,89", "10,19", 0);
+
     // 페이지에 맞추기 (열 A 300px, 행 15pt): 95 부터 줄여 찾고, 25 밑이면 12
     for (n, wide, tall, pages, h, z) in [
         (20, 1, 1, 1, "", 95),
@@ -665,6 +683,17 @@ fn open_recalc_rules() {
     wb.hancom.calc_id = Some(904);
     assert_eq!(mode(&wb, "c.cell"), OpenRecalc::None);
     assert_eq!(mode(&wb, "c.legacy.cell"), OpenRecalc::Volatile);
+    // 바이너리 (한셀은 .xlsb 이름으로 연다): rcell 이 쓰는 BrtCalcProp 의 recalcID 는 0 → 모두 (2 이상이면 휘발성만)
+    assert_eq!(mode(&wb, "c.bin.cell"), OpenRecalc::Full);
+    // 엔진 번호 없이 Excel 의 calcId 만 있는 XML (값 100 도) 은 저장된 값 그대로
+    let mut x = wb.clone();
+    x.hancom.calc_id = None;
+    x.calc_attrs = vec![("calcId".into(), "100".into())];
+    assert_eq!(mode(&x, "d.cell"), OpenRecalc::None);
+    // 레거시는 903 도 모두
+    wb.hancom.calc_id = Some(903);
+    assert_eq!(mode(&wb, "e.legacy.cell"), OpenRecalc::Full);
+    wb.hancom.calc_id = Some(904);
     let _ = std::fs::remove_dir_all(&dir);
     let value = |wb: &Workbook, r: &str| {
         let r = CellRef::parse(r).unwrap();

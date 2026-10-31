@@ -1186,6 +1186,125 @@ fn cf_to8(d: &[u8]) -> Option<Vec<u8>> {
     Some(o)
 }
 
+/// 레거시 차등 서식 (0x088D) 의 글꼴 색 속성 (종류 0x05) 값의 끝 4바이트 (R, G, B, 0 — 자동은 `FF FF FF DF`)
+fn dxf_font_color(rec: &[u8]) -> Option<[u8; 4]> {
+    let n = u16::from_le_bytes([*rec.get(16)?, *rec.get(17)?]) as usize;
+    let mut p = 18;
+    for _ in 0..n {
+        let ty = u16::from_le_bytes([*rec.get(p)?, *rec.get(p + 1)?]);
+        let cb = u16::from_le_bytes([*rec.get(p + 2)?, *rec.get(p + 3)?]) as usize;
+        if cb < 4 {
+            return None;
+        }
+        if ty == 0x05 {
+            let v = rec.get(p + 4..p + cb)?;
+            return v.get(4..8)?.try_into().ok();
+        }
+        p += cb;
+    }
+    None
+}
+
+/// 넥셀 조건부 서식 (CF 0x01B1): 머리 6바이트 + 플래그 6바이트(0) + 차등 서식에 있는 블록만 (글꼴 118, 테두리 8,
+/// 무늬 4 — 표시 형식·맞춤·보호는 담지 않는다) + 수식. 한셀 -2003 저장을 BIFF8 쪽과 바이트 대조해 얻은 규칙
+/// (docs/format/other-formats.md 6절). `d` 는 레거시 CF, `dxfs` 는 레거시 차등 서식 표
+fn cf_to_nexcel(d: &[u8], dxfs: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let b8 = cf_to8(d)?;
+    // 레거시 CF 의 차등 서식 번호: 수식 앞 u32 (테두리 블록이 있으면 안쪽 선 확장 2바이트가 그 뒤)
+    let c1 = u16::from_le_bytes([*d.get(2)?, *d.get(3)?]) as usize;
+    let c2 = u16::from_le_bytes([*d.get(4)?, *d.get(5)?]) as usize;
+    let lflags = u32::from_le_bytes([*d.get(6)?, *d.get(7)?, *d.get(8)?, *d.get(9)?]);
+    let fstart = d.len().checked_sub(c1 + c2)?;
+    let id_at = fstart.checked_sub(4 + if lflags & 0x1000_0000 != 0 { 2 } else { 0 })?;
+    let id = u32::from_le_bytes(d.get(id_at..id_at + 4)?.try_into().ok()?) as usize;
+    let color = dxfs.get(id).and_then(|r| dxf_font_color(r));
+    // BIFF8 CF 의 DXFN 블록
+    let e1 = u16::from_le_bytes([b8[2], b8[3]]) as usize;
+    let e2 = u16::from_le_bytes([b8[4], b8[5]]) as usize;
+    let f8 = b8.len().checked_sub(e1 + e2)?;
+    let dxfn = b8.get(6..f8)?;
+    let flags = u32::from_le_bytes([*dxfn.first()?, *dxfn.get(1)?, *dxfn.get(2)?, *dxfn.get(3)?]);
+    let mut at = 6 + numfmt_block_len(dxfn, flags)?;
+    let mut out = b8[..6].to_vec();
+    // 블록이 하나도 없으면 플래그 6바이트도 없다
+    if flags & 0x3400_0000 != 0 {
+        out.extend_from_slice(&[0; 6]);
+    }
+    if flags & 0x0400_0000 != 0 {
+        let f = dxfn.get(at..at + 118)?;
+        out.extend_from_slice(&nexcel_cf_font(f, color));
+        at += 118;
+    }
+    if flags & 0x0800_0000 != 0 {
+        at += 8;
+    }
+    if flags & 0x1000_0000 != 0 {
+        out.extend_from_slice(&nexcel_cf_border(dxfn.get(at..at + 8)?));
+        at += 8;
+    }
+    if flags & 0x2000_0000 != 0 {
+        let mut p = dxfn.get(at..at + 4)?.to_vec();
+        // 무늬 없이 배경색만 있는 채우기는 첫 바이트에 0x13 이 선다 (한셀 -2003 저장 대조)
+        if p[1] >> 2 == 0 {
+            p[0] = 0x13;
+        }
+        out.extend_from_slice(&p);
+    }
+    out.extend_from_slice(&b8[f8..]);
+    Some(out)
+}
+
+/// 넥셀 CF 의 글꼴 블록 118바이트: 이름·크기는 담지 않고, 굵기·기울임·밑줄·취소선·색만 (BIFF8 의 "바꾸지 않음" 표시는 0)
+fn nexcel_cf_font(f: &[u8], color: Option<[u8; 4]>) -> [u8; 118] {
+    let mut a = [0u8; 118];
+    a[71] = 0x08;
+    a[72..74].copy_from_slice(&f[72..74]);
+    a[68] = f[68] & 0x02;
+    a[88] = if f[68] & 0x80 != 0 { 0x02 } else { 0x82 };
+    let uls = f[76];
+    if uls != 0 {
+        a[74] |= 1;
+        a[76] = uls;
+        a[77] = u8::from(matches!(uls, 1 | 2));
+        a[78] = match uls {
+            1 => 1,
+            2 => 8,
+            _ => 0,
+        };
+    }
+    a[96] = u8::from(matches!(uls, 0 | 2));
+    let icv = u32::from_le_bytes([f[80], f[81], f[82], f[83]]);
+    if icv == u32::MAX {
+        a[80] = 0x40;
+    } else {
+        a[80..84].copy_from_slice(&f[80..84]);
+    }
+    match color {
+        Some(c) => {
+            a[74] |= 4;
+            a[84..88].copy_from_slice(&c);
+        }
+        None => a[84..88].copy_from_slice(&[0xFF; 4]),
+    }
+    a
+}
+
+/// 넥셀 CF 의 테두리 블록 8바이트: 선 종류는 그대로, 자동 색(0x40)은 한셀 기본 테두리 색으로 — 왼쪽·오른쪽·아래는 검정(8),
+/// 위는 자동 그대로, 대각선 색은 0
+fn nexcel_cf_border(b: &[u8]) -> [u8; 8] {
+    let a = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    let c = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+    let black = |v: u32| if v == 0x40 { 8 } else { v };
+    let (left, right) = (black((a >> 16) & 0x7F), black((a >> 23) & 0x7F));
+    let (top, bottom) = (c & 0x7F, black((c >> 7) & 0x7F));
+    let a2 = (a & 0x0000_FFFF) | (left << 16) | (right << 23);
+    let c2 = top | (bottom << 7);
+    let mut o = [0u8; 8];
+    o[..4].copy_from_slice(&a2.to_le_bytes());
+    o[4..].copy_from_slice(&c2.to_le_bytes());
+    o
+}
+
 /// 레거시 DXFN 의 표준 부분 → BIFF8: flags2 의 높은 바이트는 0, 글꼴 블록의 이름 플래그(cchFont 다음 바이트) 1
 fn dxfn_std_to8(d: &[u8]) -> Option<Vec<u8>> {
     let std = dxfn_std_len(d)?;
@@ -2355,12 +2474,22 @@ fn string_at(d: &[u8], cch: usize) -> String {
 /// 하이퍼링크의 도구 설명 (범위의 왼쪽 위 칸 (행, 열) → 글) — 한셀의 .xls 저장은 HLINK 의 표시 이름 자리에 쓴다
 pub type LinkTips = Vec<((u32, u32), String)>;
 
+/// 넥셀 조건부 서식 묶음 하나: (규칙 수 — CF 로 쓰지 않는 색 막대·데이터 막대·아이콘 집합도 센다,
+/// CF 로 쓰는 규칙마다 우선순위 차례로 "상위·하위 규칙인가")
+pub type CfGroup = (u16, Vec<bool>);
+
 fn sheet_to8(
     recs: &[Rec],
     hints: Option<&SheetHints>,
     tips: Option<&LinkTips>,
     nxl: bool,
+    dxfs: &[Vec<u8>],
+    cf_groups: &[CfGroup],
 ) -> Vec<OutRec> {
+    // 넥셀 CONDFMT 묶음 차례 (CF 로 쓰는 규칙이 있는 묶음마다)
+    let mut cf_groups = cf_groups.iter();
+    let mut top10: Vec<bool> = Vec::new();
+    let mut cf_nth = 0usize;
     let mut out: Vec<OutRec> = Vec::new();
     // 셀 표: ROW 와 셀 묶음을 모았다가 32 행 묶음마다 ROW, 셀 차례로 쓴다
     let mut rows: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -2501,17 +2630,42 @@ fn sheet_to8(
                 }
             }
             0x01B0 => {
-                if let Some(b) = condfmt(d, true, false) {
+                if let Some(mut b) = condfmt(d, true, false) {
+                    // 넥셀은 CONDFMT 의 nID 칸이 늘 1 이고, 규칙 수(ccf)는 CF 로 쓰지 않는 규칙 (색 막대·데이터 막대·
+                    // 아이콘 집합 — 레거시의 CONDFMT12 쪽)까지 센다 (한셀 -2003 저장 대조)
+                    if nxl && b.len() >= 4 {
+                        let ccf = u16::from_le_bytes([b[0], b[1]]);
+                        let g = cf_groups.next();
+                        let total = g.map_or(ccf, |g| g.0).max(ccf);
+                        top10 = g.map(|g| g.1.clone()).unwrap_or_default();
+                        cf_nth = 0;
+                        b[0..2].copy_from_slice(&total.to_le_bytes());
+                        b[2..4].copy_from_slice(&1u16.to_le_bytes());
+                    }
                     out.push((rt, b, Vec::new()));
                 }
             }
+            // 넥셀은 CONDFMT12 를 쓰지 않는다
+            0x0879 if nxl => {}
             0x0879 => {
                 if let Some(b) = condfmt(d, true, true) {
                     out.push((rt, b, Vec::new()));
                 }
             }
             0x01B1 => {
-                if let Some(b) = cf_to8(d) {
+                let b = if nxl {
+                    cf_to_nexcel(d, dxfs).map(|mut b| {
+                        // 상위·하위 규칙은 넥셀 CF 의 종류 5 (한셀 -2003 저장 대조 — 한셀도 다시 열면 잃는다)
+                        if top10.get(cf_nth) == Some(&true) {
+                            b[0] = 5;
+                        }
+                        b
+                    })
+                } else {
+                    cf_to8(d)
+                };
+                cf_nth += 1;
+                if let Some(b) = b {
                     out.push((rt, b, Vec::new()));
                 }
             }
@@ -2634,6 +2788,22 @@ fn sheet_to8(
     if let Some(at) = table_at {
         out.splice(at..at, table);
     }
+    // 넥셀은 한 CONDFMT 의 규칙(CF) 차례를 거꾸로 쓴다 (한셀 -2003 저장 대조 — 규칙이 둘 이상인 문서)
+    if nxl {
+        let mut i = 0;
+        while i < out.len() {
+            if out[i].0 == 0x01B1 {
+                let mut j = i;
+                while j < out.len() && out[j].0 == 0x01B1 {
+                    j += 1;
+                }
+                out[i..j].reverse();
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+    }
     out
 }
 
@@ -2644,17 +2814,23 @@ pub fn to_biff8(stream: &[u8]) -> Result<Vec<u8>> {
 
 /// [`to_biff8`] 에 시트마다 레거시에 없는 정보를 더해서
 pub fn to_biff8_with(stream: &[u8], hints: &[SheetHints], tips: &[LinkTips]) -> Result<Vec<u8>> {
-    transcode(stream, hints, tips, false)
+    transcode(stream, hints, tips, false, &[])
 }
 
 /// 레거시 `/Workbook` → 넥셀(.nxl, 한셀 -2003) 꼴: BIFF8 틀(16비트 행, 플래그가 있는 문자열, CONTINUE)에 한컴
 /// 글꼴·셀 서식 확장, 문단 모양, 한컴 차트(0x7EF0)를 그대로 두고 표 스타일·차등 서식 표·XFCRC·PLV·CF12·CFEX 는
 /// 쓰지 않는다 (한셀이 문서 61개를 .nxl 로 저장한 것 — docs/format/other-formats.md 6절)
-pub fn to_nxl(stream: &[u8], tips: &[LinkTips]) -> Result<Vec<u8>> {
-    transcode(stream, &[], tips, true)
+pub fn to_nxl(stream: &[u8], tips: &[LinkTips], cf_groups: &[Vec<CfGroup>]) -> Result<Vec<u8>> {
+    transcode(stream, &[], tips, true, cf_groups)
 }
 
-fn transcode(stream: &[u8], hints: &[SheetHints], tips: &[LinkTips], nxl: bool) -> Result<Vec<u8>> {
+fn transcode(
+    stream: &[u8],
+    hints: &[SheetHints],
+    tips: &[LinkTips],
+    nxl: bool,
+    cf_groups: &[Vec<CfGroup>],
+) -> Result<Vec<u8>> {
     let recs: Vec<Rec> = biff::records(stream)
         .into_iter()
         .map(|r| Rec::new(r.rtype, r.data.to_vec()))
@@ -2671,10 +2847,19 @@ fn transcode(stream: &[u8], hints: &[SheetHints], tips: &[LinkTips], nxl: bool) 
         subs.last_mut().unwrap().push(r);
     }
     let globals = subs.remove(0);
+    // 레거시 차등 서식 표 (0x088D) — 넥셀 CF 의 글꼴 색이 여기서 온다
+    let dxf_recs: Vec<Vec<u8>> = globals
+        .iter()
+        .filter(|r| r.rt == 0x088D)
+        .map(|r| r.data.clone())
+        .collect();
     let sheets: Vec<Vec<OutRec>> = subs
         .iter()
         .enumerate()
-        .map(|(i, s)| sheet_to8(s, hints.get(i), tips.get(i), nxl))
+        .map(|(i, s)| {
+            let groups = cf_groups.get(i).map_or(&[][..], |v| v.as_slice());
+            sheet_to8(s, hints.get(i), tips.get(i), nxl, &dxf_recs, groups)
+        })
         .collect();
 
     // 전역: 레코드를 바꾸고, XF 뒤에 XFCRC, SST 는 CONTINUE 로 나누고 EXTSST
@@ -3921,5 +4106,40 @@ mod tests {
         assert_eq!(&o[..6], &[0xFF, 0xFF, 0x1F, 0x80, 0x00, 0x00]);
         assert_eq!(&o[6..], &x);
         assert_eq!(xfext_props(&x), vec![(0x0D, x[12..28].to_vec())]);
+    }
+
+    #[test]
+    fn nexcel_cf_blocks() {
+        // 넥셀 CF 글꼴: 아무것도 정하지 않은 BIFF8 블록 → 기본 (굵기 400, 색 번호 0x40, RGB 없음, 취소선 아님 0x82)
+        let mut f = [0u8; 118];
+        f[64..68].copy_from_slice(&[0xFF; 4]);
+        f[72..74].copy_from_slice(&400u16.to_le_bytes());
+        f[80..84].copy_from_slice(&[0xFF; 4]);
+        let a = nexcel_cf_font(&f, None);
+        assert_eq!(
+            (a[71], a[72], a[73], a[80], a[88], a[96]),
+            (0x08, 0x90, 0x01, 0x40, 0x82, 1)
+        );
+        assert_eq!(&a[84..88], &[0xFF; 4]);
+        assert_eq!(&a[64..68], &[0; 4]);
+        // 한 줄 밑줄 + 색: 플래그 |= 1|4, 밑줄 종류 1, 밑줄 모양 1, @96 은 0, RGB 는 그대로
+        f[76] = 1;
+        let a = nexcel_cf_font(&f, Some([0x2C, 0x2D, 0x63, 0]));
+        assert_eq!((a[74], a[76], a[77], a[78], a[96]), (5, 1, 1, 1, 0));
+        assert_eq!(&a[84..88], &[0x2C, 0x2D, 0x63, 0]);
+        // 두 줄은 모양 8, 취소선은 @88 = 0x02
+        f[76] = 2;
+        f[68] = 0x80;
+        let a = nexcel_cf_font(&f, None);
+        assert_eq!((a[78], a[88], a[68]), (8, 0x02, 0));
+        // 테두리: 자동(0x40)은 왼쪽·오른쪽·아래가 검정(8), 위는 그대로
+        let a = 0x0001u32 | (0x0A << 16) | (0x40 << 23);
+        let c = 0x40u32 | (0x40 << 7) | (0x40 << 14);
+        let mut b = a.to_le_bytes().to_vec();
+        b.extend_from_slice(&c.to_le_bytes());
+        assert_eq!(
+            nexcel_cf_border(&b),
+            [0x01, 0x00, 0x0A, 0x04, 0x40, 0x04, 0x00, 0x00]
+        );
     }
 }
