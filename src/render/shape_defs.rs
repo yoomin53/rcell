@@ -56,6 +56,27 @@ pub fn def(prst: &str) -> Option<Def> {
             xf: [0.0, 1.0, 1.0, 0.0],
             reverse: false,
         },
+        "squareTabs" => plain(SQUARE_TABS),
+        "mathEqual" => plain(MATH_EQUAL),
+        "bevel" => plain(BEVEL),
+        "flowChartMagneticDrum" => plain(MAGNETIC_DRUM),
+        "leftBracket" => plain(LEFT_BRACKET),
+        "rightBracket" => Def {
+            text: LEFT_BRACKET,
+            xf: [-1.0, 0.0, 0.0, 1.0],
+            reverse: false,
+        },
+        "leftBrace" => plain(LEFT_BRACE),
+        "rightBrace" => Def {
+            text: LEFT_BRACE,
+            xf: [-1.0, 0.0, 0.0, 1.0],
+            reverse: false,
+        },
+        "bracketPair" => plain(BRACKET_PAIR),
+        "bracePair" => plain(BRACE_PAIR),
+        "wedgeRectCallout" => plain(WEDGE_RECT_CALLOUT),
+        "wedgeRoundRectCallout" => plain(WEDGE_ROUND_RECT_CALLOUT),
+        "wedgeEllipseCallout" => plain(WEDGE_ELLIPSE_CALLOUT),
         "sun" => plain(SUN),
         "noSmoking" => plain(NO_SMOKING),
         "mathNotEqual" => plain(MATH_NOT_EQUAL),
@@ -162,6 +183,360 @@ L x1 y3
 L xl3 y3
 L xl2 y2
 L x1 y2
+Z
+";
+
+/// 네 모서리 정사각형 표식: 한 변 dx = 대각선 길이/20
+const SQUARE_TABS: &str = "
+gd md mod w h 0
+gd dx */ md 1 20
+gd y1 +- b 0 dx
+gd x1 +- r 0 dx
+path
+M l t
+L dx t
+L dx dx
+L l dx
+Z
+M l y1
+L dx y1
+L dx b
+L l b
+Z
+M x1 y1
+L r y1
+L r b
+L x1 b
+Z
+M x1 t
+L r t
+L r dx
+L x1 dx
+Z
+";
+
+/// 같음 기호: 위아래 두 막대 (두께 dy1 = h·조정값1, 간격 2·dy2, 길이 = 너비 × 0.3675 × 2)
+const MATH_EQUAL: &str = "
+av adj1 23520
+av adj2 11760
+gd a1 pin 0 adj1 36745
+gd a2x */ a1 2 1
+gd mAdj2 +- 100000 0 a2x
+gd a2 pin 0 adj2 mAdj2
+gd dy1 */ h a1 100000
+gd dy2 */ h a2 200000
+gd dx1 */ w 73490 200000
+gd y2 +- vc 0 dy2
+gd y3 +- vc dy2 0
+gd y1 +- y2 0 dy1
+gd y4 +- y3 dy1 0
+gd x1 +- hc 0 dx1
+gd x2 +- hc dx1 0
+path
+M x1 y1
+L x2 y1
+L x2 y2
+L x1 y2
+Z
+M x1 y3
+L x2 y3
+L x2 y4
+L x1 y4
+Z
+";
+
+/// 입체 사각형: 둘레 테두리 폭 x1 = ss·조정값, 위(밝게) 왼쪽(더 밝게) 오른쪽(어둡게) 아래(조금 어둡게) 면
+const BEVEL: &str = "
+av adj 12500
+gd a pin 0 adj 50000
+gd x1 */ ss a 100000
+gd x2 +- r 0 x1
+gd y2 +- b 0 x1
+path norm nostroke
+M l t
+L r t
+L r b
+L l b
+Z
+path lightenLess nostroke
+M l t
+L r t
+L x2 x1
+L x1 x1
+Z
+path lighten nostroke
+M l t
+L x1 x1
+L x1 y2
+L l b
+Z
+path darken nostroke
+M r t
+L r b
+L x2 y2
+L x2 x1
+Z
+path darkenLess nostroke
+M l b
+L x1 y2
+L x2 y2
+L r b
+Z
+path none
+M l t
+L r t
+L r b
+L l b
+Z
+M x1 x1
+L x2 x1
+L x2 y2
+L x1 y2
+Z
+M l t
+L x1 x1
+M r t
+L x2 x1
+M r b
+L x2 y2
+M l b
+L x1 y2
+";
+
+/// 자기 드럼 (가로로 누운 원통): 양 끝 타원 반지름 = 너비/6 (오른쪽 타원 가운데 = 너비 5/6)
+const MAGNETIC_DRUM: &str = "
+gd rx */ w 1 6
+gd xr +- r 0 rx
+path
+M rx t
+L xr t
+A rx vc 3cd4 cd2
+L rx b
+A rx vc cd4 cd2
+Z
+path none
+M xr t
+A rx vc 3cd4 -10800000
+";
+
+/// 왼쪽 대괄호: 위아래 모서리 호의 가로 반지름 = 너비, 세로 반지름 y1 = ss·조정값
+const LEFT_BRACKET: &str = "
+av adj 8333
+gd maxAdj */ 50000 h ss
+gd a pin 0 adj maxAdj
+gd y1 */ ss a 100000
+gd y2 +- b 0 y1
+path none
+M r b
+A w y1 cd4 cd4
+L l y1
+A w y1 cd2 cd4
+";
+
+/// 왼쪽 중괄호: 가로 반지름 너비/2, 세로 반지름 y1, 뾰족한 가운데 위치 = 높이 × 조정값2
+const LEFT_BRACE: &str = "
+av adj1 8333
+av adj2 50000
+gd a2 pin 0 adj2 100000
+gd q1 +- 100000 0 a2
+gd q2 min q1 a2
+gd q3 */ q2 1 2
+gd maxAdj1 */ q3 h ss
+gd a1 pin 0 adj1 maxAdj1
+gd y1 */ ss a1 100000
+gd y3 */ h a2 100000
+gd y4 +- y3 y1 0
+path none
+M r b
+A wd2 y1 cd4 cd4
+L hc y4
+A wd2 y1 0 -5400000
+A wd2 y1 cd4 -5400000
+L hc y1
+A wd2 y1 cd2 cd4
+";
+
+/// 둥근 대괄호 한 쌍: 모서리 반지름 x1 = ss·조정값 (선만 있다)
+const BRACKET_PAIR: &str = "
+av adj 16667
+gd a pin 0 adj 50000
+gd x1 */ ss a 100000
+gd x2 +- r 0 x1
+gd y2 +- b 0 x1
+path none
+M x1 t
+A x1 x1 3cd4 -5400000
+L l y2
+A x1 x1 cd2 -5400000
+M x2 b
+A x1 x1 cd4 -5400000
+L r x1
+A x1 x1 0 -5400000
+";
+
+/// 중괄호 한 쌍: 호 반지름 x1 = ss·조정값, 한쪽 폭 2·x1 (선만 있다)
+const BRACE_PAIR: &str = "
+av adj 8333
+gd a pin 0 adj 25000
+gd x1 */ ss a 100000
+gd x2 */ ss a 50000
+gd x3 +- r 0 x2
+gd x4 +- r 0 x1
+gd y2 +- b 0 x1
+gd yA +- vc 0 x1
+gd yB +- vc x1 0
+path none
+M x2 b
+A x1 x1 cd4 cd4
+L x1 yB
+A x1 x1 0 -5400000
+A x1 x1 cd4 -5400000
+L x1 x1
+A x1 x1 cd2 cd4
+M x3 t
+A x1 x1 3cd4 cd4
+L x4 yA
+A x1 x1 cd2 -5400000
+A x1 x1 3cd4 -5400000
+L x4 y2
+A x1 x1 0 cd4
+";
+
+/// 말풍선 꼬리 위치 수식 (사각형·둥근 사각형 말풍선 공통): 꼬리 끝 (xPos, yPos) 가 어느 변 쪽인지에 따라 꼬리 밑변을 그 변의
+/// 1/12 쪽 또는 7/12~10/12 쪽에 둔다
+macro_rules! callout_tail {
+    () => {
+        "
+gd dxPos */ w adj1 100000
+gd dyPos */ h adj2 100000
+gd xPos +- hc dxPos 0
+gd yPos +- vc dyPos 0
+gd dq */ dxPos h w
+gd ady abs dyPos
+gd adq abs dq
+gd dz +- ady 0 adq
+gd xg1 ?: dxPos 7 2
+gd xg2 ?: dxPos 10 5
+gd x1 */ w xg1 12
+gd x2 */ w xg2 12
+gd yg1 ?: dyPos 7 2
+gd yg2 ?: dyPos 10 5
+gd y1 */ h yg1 12
+gd y2 */ h yg2 12
+gd t1 ?: dxPos l xPos
+gd xl ?: dz l t1
+gd t2 ?: dyPos x1 xPos
+gd xt ?: dz t2 x1
+gd t3 ?: dxPos xPos r
+gd xr ?: dz r t3
+gd t4 ?: dyPos xPos x1
+gd xb ?: dz t4 x1
+gd t5 ?: dxPos y1 yPos
+gd yl ?: dz y1 t5
+gd t6 ?: dyPos t yPos
+gd yt ?: dz t6 t
+gd t7 ?: dxPos yPos y1
+gd yr ?: dz y1 t7
+gd t8 ?: dyPos yPos b
+gd yb ?: dz t8 b
+"
+    };
+}
+
+/// 사각형 말풍선
+const WEDGE_RECT_CALLOUT: &str = concat!(
+    "
+av adj1 -20833
+av adj2 62500
+",
+    callout_tail!(),
+    "
+path
+M l t
+L x1 t
+L xt yt
+L x2 t
+L r t
+L r y1
+L xr yr
+L r y2
+L r b
+L x2 b
+L xb yb
+L x1 b
+L l b
+L l y2
+L xl yl
+L l y1
+Z
+"
+);
+
+/// 둥근 사각형 말풍선: 모서리 반지름 u1 = ss·조정값3
+const WEDGE_ROUND_RECT_CALLOUT: &str = concat!(
+    "
+av adj1 -20833
+av adj2 62500
+av adj3 16667
+",
+    callout_tail!(),
+    "
+gd u1 */ ss adj3 100000
+gd u2 +- r 0 u1
+gd v2 +- b 0 u1
+path
+M l u1
+A u1 u1 cd2 cd4
+L x1 t
+L xt yt
+L x2 t
+L u2 t
+A u1 u1 3cd4 cd4
+L r y1
+L xr yr
+L r y2
+L r v2
+A u1 u1 0 cd4
+L x2 b
+L xb yb
+L x1 b
+L u1 b
+A u1 u1 cd4 cd4
+L l y2
+L xl yl
+L l y1
+Z
+"
+);
+
+/// 타원 말풍선: 꼬리 끝 방향 ± 11도 사이만 열어 두고 타원을 돌아 꼬리 끝으로 간다
+const WEDGE_ELLIPSE_CALLOUT: &str = "
+av adj1 -20833
+av adj2 62500
+gd dxPos */ w adj1 100000
+gd dyPos */ h adj2 100000
+gd xPos +- hc dxPos 0
+gd yPos +- vc dyPos 0
+gd sdx */ dxPos h 1
+gd sdy */ dyPos w 1
+gd pang at2 sdx sdy
+gd stAng +- pang 660000 0
+gd enAng +- pang 0 660000
+gd dx1 cos wd2 stAng
+gd dy1 sin hd2 stAng
+gd x1 +- hc dx1 0
+gd y1 +- vc dy1 0
+gd dx2 cos wd2 enAng
+gd dy2 sin hd2 enAng
+gd stAng1 at2 dx1 dy1
+gd enAng1 at2 dx2 dy2
+gd swAng1 +- enAng1 0 stAng1
+gd swAng2 +- swAng1 21600000 0
+gd swAng ?: swAng1 swAng1 swAng2
+path
+M x1 y1
+A wd2 hd2 stAng1 swAng
+L xPos yPos
 Z
 ";
 
