@@ -300,6 +300,27 @@ fn cases() -> Vec<Case> {
     setup(&mut wb).fit_to_width = Some(1);
     setup(&mut wb).fit_to_height = Some(0);
     add("fit_manual_wide", wb, 6, "20m,64,108,152,196", "", 0);
+    // 한 칸 앵커 도형이 쓰는 범위 밖(열 E, 너비 1000px)까지 닿으면 쪽에 맞춤 배율이 줄어든다 — 인쇄 범위는 도형 끝이 닿는 칸까지
+    let mut wb = base();
+    fill(&mut wb, "A1:C10");
+    wb.sheets[0].page.fit_to_page = Some(true);
+    setup(&mut wb).fit_to_width = Some(1);
+    setup(&mut wb).fit_to_height = Some(1);
+    wb.sheets[0].shapes.push(rcell::model::Shape {
+        anchor: rcell::model::Anchor {
+            kind: rcell::model::AnchorKind::OneCell,
+            from: rcell::model::Marker {
+                col: 4,
+                col_off: 0,
+                row: 2,
+                row_off: 0,
+            },
+            ext: Some((1000 * 9525, 100 * 9525)),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    add("shape_onecell_extent", wb, 1, "", "", 50);
     // 행·열 머리글은 나누기를 바꾸지 않는다
     let mut wb = base();
     fill(&mut wb, "A1:Z200");
