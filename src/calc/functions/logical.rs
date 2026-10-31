@@ -8,6 +8,8 @@
 use std::rc::Rc;
 
 use super::{Arg, FnSpec, MANY, R, V, f, lazy};
+
+const RA: &[Arg] = &[Arg::RA];
 use crate::calc::ast::Expr;
 use crate::calc::eval::{Ctx, broadcast_dim};
 use crate::calc::value::{self, Array, ErrorKind, Value};
@@ -18,7 +20,7 @@ pub const FNS: &[FnSpec] = &[
     f("NOT", 1, 1, V, not),
     f("AND", 1, MANY, R, and),
     f("OR", 1, MANY, R, or),
-    f("XOR", 1, MANY, R, xor),
+    f("XOR", 1, MANY, RA, xor),
     lazy("IF", 2, 3, if_),
     lazy("IFERROR", 2, 2, iferror),
     lazy("IFNA", 2, 2, ifna),
@@ -38,19 +40,31 @@ fn not(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn logicals(ctx: &mut Ctx, args: &[Value], xor: bool) -> Result<Vec<bool>, ErrorKind> {
     let mut out = Vec::new();
     let date1904 = ctx.date1904();
+    let collapse = xor && ctx.engine().hcell_bugs;
     for a in args {
         match a {
             Value::Ref(r) => {
                 for area in r.iter() {
-                    let mut err = None;
-                    ctx.for_each_in_area(area, |_, _, v| {
-                        if err.is_some() {
-                            return;
+                    let mut cells: Vec<(u32, u32, Value)> = Vec::new();
+                    ctx.for_each_in_area(area, |r, c, v| cells.push((r, c, v.clone())));
+                    // 한셀의 오류: XOR 는 한 행에서 이웃한 같은 값의 상수 칸(수식이 아닌 칸)을 한 칸으로 센다
+                    // (N1 = O1 = 1 이면 XOR(Data!N1:O1) = TRUE, 대조 실험 conv4·xorh. 세로 이웃과 수식 칸은
+                    // 따로 센다). `CalcOptions::hcell_bugs` 일 때만 따른다
+                    let mut prev: Option<(u32, u32, Value)> = None;
+                    for (row, col, v) in cells {
+                        let is_const = ctx.eng.formula_at(area.sheet, row, col).is_none();
+                        let same_run = collapse
+                            && is_const
+                            && matches!(&prev, Some((pr, pc, pv))
+                                if *pr == row && *pc + 1 == col && value::same_constant(pv, &v));
+                        prev = is_const.then(|| (row, col, v.clone()));
+                        if same_run {
+                            continue;
                         }
-                        match v {
+                        match &v {
                             Value::Bool(b) => out.push(*b),
                             Value::Number(n) => out.push(*n != 0.0),
-                            Value::Error(e) => err = Some(*e),
+                            Value::Error(e) => return Err(*e),
                             Value::Text(t) => {
                                 if let Some(b) = text_logical(t, date1904) {
                                     out.push(b);
@@ -58,9 +72,6 @@ fn logicals(ctx: &mut Ctx, args: &[Value], xor: bool) -> Result<Vec<bool>, Error
                             }
                             _ => {}
                         }
-                    });
-                    if let Some(e) = err {
-                        return Err(e);
                     }
                 }
             }
@@ -241,16 +252,27 @@ fn ifs(ctx: &mut Ctx, args: &[Expr]) -> Value {
 fn switch(ctx: &mut Ctx, args: &[Expr]) -> Value {
     let x = ctx.eval_value(&args[0]);
     let x = ctx.scalar(x);
-    if let Value::Error(e) = x {
-        return Value::Error(e);
-    }
+    // 식이 오류여도 멈추지 않는다: 같은 오류인 값과만 같고 (SWITCH(#N/A,#N/A,1,2) = 1), 맞는 값이 없으면 기본값
+    // (SWITCH(범위,10,"x","d") 의 암묵 교차 #VALUE! → "d", 대조 실험 misc5)
+    let x_err = if let Value::Error(e) = x {
+        Some(e)
+    } else {
+        None
+    };
     let rest = &args[1..];
     let mut i = 0;
     while i + 1 < rest.len() {
         let v = ctx.eval_value(&rest[i]);
         let v = ctx.scalar(v);
-        // 오류인 경우 값은 건너뛴다 (SWITCH(1,#N/A,2,1,3) = 3, 대조 실험 logical)
-        if matches!(v, Value::Error(_)) {
+        // 값이 오류면 식이 같은 오류일 때만 맞는다 (SWITCH(1,#N/A,2,1,3) = 3, 대조 실험 logical)
+        if let Value::Error(ve) = v {
+            if x_err == Some(ve) {
+                return branch(ctx, &rest[i + 1]);
+            }
+            i += 2;
+            continue;
+        }
+        if x_err.is_some() {
             i += 2;
             continue;
         }

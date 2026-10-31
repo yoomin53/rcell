@@ -240,6 +240,9 @@ fn visible_style(wb: &Workbook, style: u32) -> bool {
     fill || border
 }
 
+/// 1 px = 9525 EMU
+const EMU_PX: f64 = 9525.0;
+
 /// 인쇄 범위의 끝 (행, 열 — 0부터): 값이 있거나 테두리·채우기가 있는 칸, 그리기 개체, 넘친 글자. 없으면 None.
 /// 한셀의 인쇄 범위는 늘 A1 에서 시작하고, 보이지 않는 서식(글꼴·표시 형식만)의 빈 칸은 넣지 않는다
 /// (서식 파일 Basic_Invoice 의 P15 — 쓰는 범위 B2:P49 이지만 인쇄는 A:I)
@@ -256,9 +259,34 @@ pub fn used_end(wb: &Workbook, sheet: &Sheet) -> Option<(u32, u32)> {
             add(c.r.row, c.r.col);
         }
     }
+    // 그리기 개체: 두 칸 앵커는 끝 칸, 한 칸·절대 앵커는 크기(ext)가 닿는 칸 (한셀은 개체가 닿는 칸까지 인쇄 범위에 넣는다 —
+    // 한 칸 앵커 도형이 쓰는 범위 밖으로 나가면 쪽에 맞춤 배율이 줄어든다)
+    let mut geo: Option<render::Geometry> = None;
     for s in sheet.shapes.iter().filter(|s| !s.hidden) {
-        let to = s.anchor.to.unwrap_or(s.anchor.from);
-        add(to.row, to.col);
+        let an = &s.anchor;
+        if let (None, Some((cx, cy))) = (an.to, an.ext) {
+            let g = geo.get_or_insert_with(|| render::sheet_geometry(wb, sheet, 2000, 300));
+            let (x0, y0) = match (an.kind, an.pos) {
+                (crate::model::AnchorKind::Absolute, Some((px, py))) => {
+                    (px as f64 / EMU_PX, py as f64 / EMU_PX)
+                }
+                _ => (
+                    g.cols.get(an.from.col as usize).map_or(0.0, |c| c.0 as f64)
+                        + an.from.col_off as f64 / EMU_PX,
+                    g.rows.get(an.from.row as usize).map_or(0.0, |r| r.0 as f64)
+                        + an.from.row_off as f64 / EMU_PX,
+                ),
+            };
+            let (x1, y1) = (x0 + cx as f64 / EMU_PX, y0 + cy as f64 / EMU_PX);
+            // 오른쪽·아래 끝이 들어 있는 칸 (경계에 딱 맞으면 앞 칸)
+            let last = |v: &[(u32, u32)], edge: f64| {
+                v.iter().rposition(|c| (c.0 as f64) < edge).unwrap_or(0) as u32
+            };
+            add(last(&g.rows, y1), last(&g.cols, x1));
+        } else {
+            let to = an.to.unwrap_or(an.from);
+            add(to.row, to.col);
+        }
     }
     // 넘친 글자가 닿는 열까지
     let (r, c) = end?;

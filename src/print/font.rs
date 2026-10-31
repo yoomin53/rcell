@@ -392,8 +392,10 @@ impl LoadedFace {
         let ps_name = face
             .names()
             .into_iter()
-            .find(|n| n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
-            .and_then(|n| n.to_string())
+            // 첫 기록(매킨토시)은 읽지 못하는 글꼴이 있어 (맑은 고딕) 읽히는 영문 기록을 찾는다
+            .filter(|n| n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
+            .filter_map(|n| n.to_string())
+            .find(|s| s.is_ascii())
             .unwrap_or_else(|| "Font".into())
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-')

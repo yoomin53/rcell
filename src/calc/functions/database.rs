@@ -64,10 +64,13 @@ fn matching_rows(ctx: &mut Ctx, db: &Array, crit: &Array) -> Result<Vec<usize>, 
         match crit.get(0, c) {
             Value::Text(h) => {
                 let f = value::fold(h);
-                cols.push(
+                // 데이터베이스에 없는 머리글 아래의 조건은 어느 행도 맞지 않는다 (무시하지 않는다 —
+                // DSUM(Data!Q1:S11,3,Data!Y1:Y2) = 0, 대조 실험 conv8)
+                cols.push(Some(
                     (0..db.cols)
-                        .find(|&k| matches!(db.get(0, k), Value::Text(x) if value::fold(x) == f)),
-                );
+                        .find(|&k| matches!(db.get(0, k), Value::Text(x) if value::fold(x) == f))
+                        .unwrap_or(usize::MAX),
+                ));
             }
             Value::Empty => cols.push(None),
             _ => cols.push(None),
@@ -93,9 +96,10 @@ fn matching_rows(ctx: &mut Ctx, db: &Array, crit: &Array) -> Result<Vec<usize>, 
     let mut out = Vec::new();
     for r in 1..db.rows {
         let hit = conds.is_empty()
-            || conds
-                .iter()
-                .any(|row| row.iter().all(|(k, c)| c.matches(db.get(r, *k))));
+            || conds.iter().any(|row| {
+                row.iter()
+                    .all(|(k, c)| *k != usize::MAX && c.matches(db.get(r, *k)))
+            });
         if hit {
             out.push(r);
         }

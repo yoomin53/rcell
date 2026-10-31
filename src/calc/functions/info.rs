@@ -8,7 +8,7 @@
 use super::{Arg, FnSpec, MANY, R, V, f, first_area};
 use crate::calc::ast::SheetSpec;
 use crate::calc::eval::Ctx;
-use crate::calc::value::{ErrorKind, Value};
+use crate::calc::value::{Array, ErrorKind, Value};
 
 const VR: &[Arg] = &[Arg::V, Arg::R];
 
@@ -34,7 +34,8 @@ pub const FNS: &[FnSpec] = &[
         Value::Bool(!matches!(a[0], Value::Text(_)))
     }),
     f("ISREF", 1, 1, R, |_, a| {
-        Value::Bool(matches!(a[0], Value::Ref(_)))
+        // 여러 시트에 걸친 참조는 FALSE (ISREF('S1:S3'!A1), 대조 실험 rand)
+        Value::Bool(matches!(&a[0], Value::Ref(r) if r.iter().all(|x| x.sheet == x.sheet_last)))
     }),
     f("ISFORMULA", 1, 1, R, |c, a| match first_area(&a[0]) {
         Some(ar) if ar.book == 0 => {
@@ -47,20 +48,27 @@ pub const FNS: &[FnSpec] = &[
     f("ISEVEN", 1, 1, V, |c, a| even_odd(c, a, true)),
     f("ISODD", 1, 1, V, |c, a| even_odd(c, a, false)),
     // 범위는 왼쪽 위 칸 (배열 수식에서도 원소마다가 아니다: N(Data!A1:A3) = 3, 대조 실험 info·arrays)
+    // 배열 상수는 원소마다 (SUM(N({1,2})) = 3, 보통 칸의 N({1,2}) 는 첫 원소 1, 대조 실험 lift2)
     f("N", 1, 1, R, |c, a| {
-        let v = match &a[0] {
+        fn one(v: &Value) -> Value {
+            match v {
+                Value::Number(n) => Value::Number(*n),
+                Value::Bool(b) => Value::Number(*b as u8 as f64),
+                Value::Error(e) => Value::Error(*e),
+                _ => Value::Number(0.0),
+            }
+        }
+        match &a[0] {
             Value::Ref(r) => {
                 let ar = r[0];
-                c.engine().cell_value(ar.book, ar.sheet, ar.r0, ar.c0)
+                one(&c.engine().cell_value(ar.book, ar.sheet, ar.r0, ar.c0))
             }
-            Value::Array(arr) => arr.data.first().cloned().unwrap_or(Value::Empty),
-            v => v.clone(),
-        };
-        match v {
-            Value::Number(n) => Value::Number(n),
-            Value::Bool(b) => Value::Number(b as u8 as f64),
-            Value::Error(e) => Value::Error(e),
-            _ => Value::Number(0.0),
+            Value::Array(arr) => Value::from(Array::new(
+                arr.rows,
+                arr.cols,
+                arr.data.iter().map(one).collect(),
+            )),
+            v => one(v),
         }
     }),
     f("NA", 0, 0, V, |_, _| Value::Error(ErrorKind::NA)),
@@ -90,7 +98,8 @@ pub const FNS: &[FnSpec] = &[
             Value::Number(r.iter().map(|x| (x.sheet_last - x.sheet + 1) as f64).sum())
         }
         Some(Value::Error(e)) => Value::Error(*e),
-        Some(_) => Value::Error(ErrorKind::Value),
+        // 참조가 아니면 #N/A (SHEETS(5)·SHEETS({1}), 대조 실험 refargs)
+        Some(_) => Value::Error(ErrorKind::NA),
     }),
     f("CELL", 1, 2, VR, cell),
     f("INFO", 1, 1, V, |c, a| {
@@ -189,7 +198,8 @@ fn cell(ctx: &mut Ctx, a: &[Value]) -> Value {
         Some(Value::Ref(r)) => r[0],
         Some(Value::Error(e)) => return Value::Error(*e),
         Some(Value::Empty) | None => return Value::Error(ErrorKind::Ref),
-        Some(_) => return Value::Error(ErrorKind::Value),
+        // 참조가 아니면 #N/A (CELL("row",5), 대조 실험 refargs)
+        Some(_) => return Value::Error(ErrorKind::NA),
     };
     let (sheet, row, col) = (area.sheet, area.r0, area.c0);
     match what.as_str() {

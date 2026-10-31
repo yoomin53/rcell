@@ -301,7 +301,7 @@ pub fn draw(ops: &[Op], w: u32, h: u32, fonts: &FontSet) -> Vec<u8> {
     let mut px = Vec::new();
     let mut images = Vec::new();
     scaled(ops, K, fonts, &mut px, &mut images);
-    let mut buf = match raster::render(&px, (0.0, 0.0, w as f64, h as f64), fonts) {
+    let mut buf = match raster::render(&px, (0.0, 0.0, w as f64, h as f64), None, fonts) {
         Some(img) if img.width == w && img.height == h => rgba(&img),
         _ => vec![0; (w as usize) * (h as usize) * 4],
     };

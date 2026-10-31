@@ -240,18 +240,19 @@ pub const FNS: &[FnSpec] = &[
         })
     }),
     f("COMBIN", 2, 2, V, |c, a| {
-        let n = try_v!(num_arg(c, a, 0)).trunc();
-        let k = try_v!(num_arg(c, a, 1)).trunc();
-        if n < 0.0 || k < 0.0 || k > n {
+        let (nr, kr) = (try_v!(num_arg(c, a, 0)), try_v!(num_arg(c, a, 1)));
+        let (n, k) = (nr.trunc(), kr.trunc());
+        // n·k 는 2^31 − 2 까지 (COMBIN(2147483647,1) = #NUM!, 대조 실험 conv4)
+        if nr < 0.0 || kr < 0.0 || k > n || n >= 2_147_483_647.0 {
             return Value::Error(ErrorKind::Num);
         }
         num(super::special::binom_coef(n, k))
     }),
     f("COMBINA", 2, 2, V, |c, a| {
-        let n = try_v!(num_arg(c, a, 0)).trunc();
-        let k = try_v!(num_arg(c, a, 1)).trunc();
+        let (nr, kr) = (try_v!(num_arg(c, a, 0)), try_v!(num_arg(c, a, 1)));
+        let (n, k) = (nr.trunc(), kr.trunc());
         // COMBINA(0,0) 은 #NUM! (대조 실험 math)
-        if n < 0.0 || k < 0.0 || n == 0.0 {
+        if nr < 0.0 || kr < 0.0 || n == 0.0 || n >= 2_147_483_647.0 || k >= 2_147_483_647.0 {
             return Value::Error(ErrorKind::Num);
         }
         num(super::special::binom_coef(n + k - 1.0, k))
@@ -392,15 +393,47 @@ pub fn round_digits(x: f64, digits: f64, mode: Rounding) -> f64 {
     }
 }
 
+/// 자릿수는 32비트 정수로 받는다: 반올림한 값이 범위 밖이면 #NUM!, 2147483647 은 0 (대조 실험 misc4·misc6)
+fn digits_limit(d: f64) -> Option<Value> {
+    let n = d.round();
+    if !(-2_147_483_648.0..=2_147_483_647.0).contains(&n) {
+        Some(Value::Error(ErrorKind::Num))
+    } else if n == 2_147_483_647.0 {
+        Some(Value::Number(0.0))
+    } else {
+        None
+    }
+}
+
 fn round_fn(ctx: &mut Ctx, a: &[Value], mode: Rounding) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
     let d = try_v!(num_arg(ctx, a, 1));
+    if let Some(v) = digits_limit(d) {
+        return v;
+    }
+    // ROUND·ROUNDUP·ROUNDDOWN(x,−2147483648) = 0
+    if d.round() == -2_147_483_648.0 {
+        return Value::Number(0.0);
+    }
     num(round_digits(x, d, mode))
 }
 
 fn trunc(ctx: &mut Ctx, a: &[Value]) -> Value {
     let x = try_v!(num_arg(ctx, a, 0));
     let d = try_v!(num_or(ctx, a, 1, 0.0));
+    if let Some(v) = digits_limit(d) {
+        return v;
+    }
+    // TRUNC 는 x·10^d 가 넘치면 0 (TRUNC(1234.5678,306) = 0; ROUNDDOWN 은 x 그대로, 대조 실험 misc6)
+    if d.trunc() >= 0.0 {
+        let f = 10f64.mpowi(d.trunc().min(400.0) as i32);
+        if !f.is_finite() || !(x * f).is_finite() {
+            return Value::Number(0.0);
+        }
+    } else if d.trunc() <= -324.0 {
+        // 10^d 가 0 이 되는 자리 (TRUNC(1023,-323) = 0, TRUNC(1023,-324) = #NUM!, 대조 실험 conv4)
+        return Value::Error(ErrorKind::Num);
+    }
     num(round_digits(x, d, Rounding::Down))
 }
 
@@ -472,6 +505,11 @@ fn math_round(ctx: &mut Ctx, a: &[Value], up: bool) -> Value {
 }
 
 fn precise(ctx: &mut Ctx, a: &[Value], up: bool) -> Value {
+    // FLOOR.PRECISE 는 배수가 0 이면 첫 인수의 오류·글을 보지 않고 0 (FLOOR.PRECISE(NA(),0) = 0, CEILING.PRECISE 는
+    // #N/A — 대조 실험 conv3)
+    if !up && matches!(num_or(ctx, a, 1, 1.0), Ok(s) if s == 0.0) {
+        return Value::Number(0.0);
+    }
     let x = try_v!(num_arg(ctx, a, 0));
     let s = try_v!(num_or(ctx, a, 1, 1.0)).abs();
     if s == 0.0 || x == 0.0 {
@@ -528,12 +566,13 @@ pub fn fact(x: f64) -> Result<f64, ErrorKind> {
 }
 
 fn multinomial(ctx: &mut Ctx, a: &[Value]) -> Value {
-    let v = try_v!(collect_numbers(ctx, a, Agg::Numbers));
+    // 글·논리 인수는 (범위 안의 것도) #VALUE! — GCD 와 같다 (MULTINOMIAL(3,"2"), 대조 실험 conv2)
+    let v = try_v!(strict_numbers(ctx, a));
     let mut total = 0.0;
     let mut denom = 1.0;
     for x in v {
         let n = x.trunc();
-        if n < 0.0 {
+        if x < 0.0 {
             return Value::Error(ErrorKind::Num);
         }
         total += n;
@@ -542,43 +581,55 @@ fn multinomial(ctx: &mut Ctx, a: &[Value]) -> Value {
     num(try_v!(fact(total)) / denom)
 }
 
-/// GCD·LCM: 글·논리 인수(범위 안의 것도)는 #VALUE! (GCD("12",18), 대조 실험 math). 최대공약수는 버린 정수로,
-/// 최소공배수는 원래 값의 곱 / 버린 값들의 최대공약수 (LCM(2.5,5) = 12.5).
+/// GCD·LCM: 글·논리 인수(범위 안의 것도)는 #VALUE! (GCD("12",18), 대조 실험 math). 소수를 버리기 전에 0 보다 작으면
+/// #NUM! (GCD(-0.5,4)). 1 보다 작거나 2^63 이상인 값은 0 으로 보고 (GCD(0.99) = 0, GCD(1E20) = 0, GCD(1E20,2) = 2),
+/// 두 값 가운데 하나가 0 이면 다른 값을 소수째로 돌려주고 (GCD(2.9) = 2.9, GCD(2.9,0) = 2.9), 둘 다 있으면 버린
+/// 정수의 최대공약수 (GCD(2.9,2.9) = 2). 최소공배수는 원래 값의 곱 / 버린 값들의 최대공약수 (LCM(2.5,5) = 12.5,
+/// LCM(2.9,0) = 0, 대조 실험 misc4·conv3·conv4).
 fn gcd_lcm(ctx: &mut Ctx, a: &[Value], gcd: bool) -> Value {
+    let v = try_v!(strict_numbers(ctx, a));
+    let mut acc: Option<f64> = None;
+    for x in v {
+        if x < 0.0 || !x.is_finite() {
+            return Value::Error(ErrorKind::Num);
+        }
+        let x = if !(1.0..9_223_372_036_854_775_808.0).contains(&x) {
+            0.0
+        } else {
+            x
+        };
+        acc = Some(match acc {
+            None => x,
+            Some(m) if gcd && m == 0.0 => x,
+            Some(m) if gcd && x == 0.0 => m,
+            Some(m) if !gcd && (m == 0.0 || x == 0.0) => 0.0,
+            Some(m) => {
+                let g = gcd2(m.trunc(), x.trunc());
+                if gcd { g } else { m * x / g }
+            }
+        });
+    }
+    num(acc.unwrap_or(0.0))
+}
+
+/// 숫자만 받는 인수 모으기: 글·논리는 #VALUE!, 참조 안의 빈 칸은 건너뛰고 직접 준 빈 값은 0
+fn strict_numbers(ctx: &mut Ctx, a: &[Value]) -> Result<Vec<f64>, ErrorKind> {
     let mut v = Vec::new();
     for x in a {
         for y in super::flatten(ctx, x) {
             match y {
+                // 인수 순서대로 하나씩: 앞의 음수가 뒤의 글·오류보다 먼저 #NUM! (GCD(-1,"3") = #NUM!,
+                // GCD("3",-1) = #VALUE!, 대조 실험 conv8)
+                Value::Number(n) if n < 0.0 => return Err(ErrorKind::Num),
                 Value::Number(n) => v.push(n),
                 Value::Empty if matches!(x, Value::Ref(_)) => {}
                 Value::Empty => v.push(0.0),
-                Value::Error(e) => return Value::Error(e),
-                _ => return Value::Error(ErrorKind::Value),
+                Value::Error(e) => return Err(e),
+                _ => return Err(ErrorKind::Value),
             }
         }
     }
-    let mut acc: Option<(f64, f64)> = None;
-    for x in v {
-        let n = x.trunc();
-        if n < 0.0 || n >= 9.007_199_254_740_992e15 {
-            return Value::Error(ErrorKind::Num);
-        }
-        acc = Some(match acc {
-            None => (n, x),
-            Some((m, mx)) => {
-                let g = gcd2(m, n);
-                if gcd {
-                    (g, g)
-                } else if m == 0.0 || n == 0.0 {
-                    (0.0, 0.0)
-                } else {
-                    let l = mx * x / g;
-                    (l.trunc(), l)
-                }
-            }
-        });
-    }
-    num(acc.map(|(m, mx)| if gcd { m } else { mx }).unwrap_or(0.0))
+    Ok(v)
 }
 
 fn gcd2(mut a: f64, mut b: f64) -> f64 {
@@ -651,6 +702,10 @@ pub fn ifs_mask(
     let mut dims: Option<(usize, usize)> = None;
     let mut mask: Vec<bool> = Vec::new();
     for (range, crit) in pairs {
+        // 범위 인수는 참조여야 한다 (배열 상수·값은 #VALUE!, 대조 실험 refargs)
+        if !matches!(range, Value::Ref(_)) {
+            return Err(ErrorKind::Value);
+        }
         let g = grid(ctx, range)?;
         match dims {
             None => {
@@ -680,6 +735,12 @@ pub fn ifs_mask(
 }
 
 fn sumif(ctx: &mut Ctx, a: &[Value]) -> Value {
+    // 합 범위도 참조여야 한다 (SUMIF(…,{4,5,6}) = #VALUE!, 대조 실험 refargs)
+    if a.get(2)
+        .is_some_and(|t| !matches!(t, Value::Ref(_) | Value::Empty))
+    {
+        return Value::Error(ErrorKind::Value);
+    }
     let target = match opt(a, 2) {
         Some(t) => resized(&a[0], t),
         None => a[0].clone(),
@@ -705,6 +766,9 @@ fn sumifs(ctx: &mut Ctx, a: &[Value]) -> Value {
         return Value::Error(ErrorKind::Value);
     }
     let pairs: Vec<(&Value, &Value)> = a[1..].chunks(2).map(|p| (&p[0], &p[1])).collect();
+    if !matches!(a[0], Value::Ref(_)) {
+        return Value::Error(ErrorKind::Value);
+    }
     let (r, c, mask) = try_v!(ifs_mask(ctx, &pairs));
     let vals = try_v!(grid(ctx, &a[0]));
     if (vals.rows, vals.cols) != (r, c) {
@@ -725,6 +789,12 @@ fn sumproduct(ctx: &mut Ctx, a: &[Value]) -> Value {
         // 글·논리 스칼라 인수는 #VALUE! (SUMPRODUCT("3"), 대조 실험 math)
         if matches!(v, Value::Text(_) | Value::Bool(_)) {
             return Value::Error(ErrorKind::Value);
+        }
+        // 오류 낱값도 한 칸 배열 — 크기가 안 맞으면 오류보다 #VALUE! 가 먼저
+        // (SUMPRODUCT(범위, IMPOWER("","-i")) = #VALUE!, 대조 실험 rand)
+        if let Value::Error(_) = v {
+            arrays.push(Rc::new(Array::new(1, 1, vec![v.clone()])));
+            continue;
         }
         arrays.push(try_v!(to_array(ctx, v)));
     }
@@ -1185,15 +1255,17 @@ fn arabic(ctx: &mut Ctx, a: &[Value]) -> Value {
 fn base(ctx: &mut Ctx, a: &[Value]) -> Value {
     let n = try_v!(num_arg(ctx, a, 0)).trunc();
     let radix = try_v!(num_arg(ctx, a, 1)).trunc();
+    // 앞 인수가 틀리면 자릿수 인수의 오류는 보지 않는다 (BASE(1,1,NA()) = #NUM!, 대조 실험 prec)
+    if !(0.0..9.007_199_254_740_992e15).contains(&n) || !(2.0..=36.0).contains(&radix) {
+        return Value::Error(ErrorKind::Num);
+    }
     let min_len = try_v!(num_or(ctx, a, 2, 0.0)).trunc();
-    if !(0.0..9.007_199_254_740_992e15).contains(&n)
-        || !(2.0..=36.0).contains(&radix)
-        || !(0.0..=255.0).contains(&min_len)
-    {
+    if !(0.0..=255.0).contains(&min_len) {
         return Value::Error(ErrorKind::Num);
     }
     let mut s = to_radix(n as u64, radix as u32);
-    while s.len() < min_len as usize {
+    // 0 은 자릿수를 채우지 않는다 (BASE(0,2,5) = "0", 대조 실험 rand)
+    while n != 0.0 && s.len() < min_len as usize {
         s.insert(0, '0');
     }
     Value::from(s)
@@ -1221,6 +1293,12 @@ fn decimal(ctx: &mut Ctx, a: &[Value]) -> Value {
     if !(2.0..=36.0).contains(&radix) || t.chars().count() > 255 {
         return Value::Error(ErrorKind::Num);
     }
+    // 10진은 앞 공백을 건너뛴다 (DECIMAL(" 12",10) = 12; DECIMAL(" FF ",16) = #NUM!, 대조 실험 textjoin)
+    let t = if radix == 10.0 {
+        t.trim_start().into()
+    } else {
+        t
+    };
     let mut v = 0.0f64;
     // 공백은 숫자가 아니다 (DECIMAL(" FF ",16) = #NUM!, 대조 실험 math)
     for ch in t.chars() {

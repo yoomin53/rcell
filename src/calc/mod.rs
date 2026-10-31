@@ -58,8 +58,8 @@ pub struct CalcOptions {
     pub utc_offset_minutes: i32,
     /// 한셀이 모르는 Excel 함수(AGGREGATE, XMATCH …)도 계산한다. 기본은 한셀처럼 #NAME?.
     pub excel_functions: bool,
-    /// 한셀의 잘못된 계산(버그)도 그대로 흉내 낸다. 기본은 끔 — 지금은 특이 행렬의 MINVERSE 가
-    /// #NUM! 대신 소거 도중의 행렬을 내는 것 하나 (docs/format/calc.md)
+    /// 한셀의 잘못된 계산(버그)도 그대로 흉내 낸다. 기본은 끔 — 특이 행렬의 MINVERSE 가 #NUM! 대신 소거 도중의
+    /// 행렬을 내는 것, XOR 가 한 행에서 이웃한 같은 값의 상수 칸을 한 칸으로 세는 것 (docs/format/calc.md)
     pub hcell_bugs: bool,
     /// 문서 파일 이름 (CELL("address") 가 다른 시트를 가리키면 한셀은 `[이름]시트!$A$1` 로 쓴다)
     pub file_name: Option<String>,
