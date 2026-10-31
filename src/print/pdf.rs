@@ -182,6 +182,14 @@ impl<'a> FontSet<'a> {
 }
 
 impl FontSet<'_> {
+    /// 넣은 글꼴 번호 → 글꼴 파일 바이트와 얼굴 번호 (글리프 윤곽을 그릴 때)
+    pub fn face_data(&self, font: usize) -> Option<(std::sync::Arc<Vec<u8>>, u32)> {
+        let st = self.state.borrow();
+        st.fonts
+            .get(font)
+            .map(|e| (e.face.data.clone(), e.face.index))
+    }
+
     /// 글꼴의 오름·내림 (1/1000 em, 내림은 양수) — 고른 얼굴, 없으면 대체 글꼴
     pub fn ascent_descent(&self, key: &FontKey) -> (f64, f64) {
         let mut st = self.state.borrow_mut();

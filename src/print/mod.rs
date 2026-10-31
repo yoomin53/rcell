@@ -18,13 +18,14 @@ mod paginate;
 pub mod paper;
 mod pdf;
 mod pdfimage;
+mod raster;
 
 pub use font::FontDb;
 pub use paginate::{Area, Page, Scaling, Settings, SheetPrint, settings, sheet_print, used_end};
 
 use crate::model::Workbook;
 use crate::render::page::{
-    ErrorPrint, FontKey, Op, PageFrame, SheetPainter, TextMeasure, objects_ops,
+    ErrorPrint, FontKey, Op, PageFrame, Seg, SheetPainter, TextMeasure, objects_ops,
 };
 use pdf::{FontSet, PageSize};
 
@@ -514,4 +515,84 @@ fn settings_default() -> Settings {
         col_breaks: Vec::new(),
         first_page_number: None,
     }
+}
+
+/// 개체 하나(도형·차트)를 PNG 그림으로 그린다 (웹 페이지 저장 — 한셀은 도형·차트를 RGBA PNG 로 넣는다). 개체 크기는
+/// `w × h`(px), 그림 크기는 `png_w × png_h`(그림자 몫 한 줄 더). 바탕은 투명이고 글꼴이 없으면 글자는 빠진다
+pub fn shape_png(
+    wb: &Workbook,
+    sh: &crate::model::Shape,
+    (w, h): (f64, f64),
+    (png_w, png_h): (u32, u32),
+    db: &FontDb,
+) -> Vec<u8> {
+    let fonts = FontSet::new(db);
+    let mut ops = crate::render::page::shape_ops(wb, sh, w, h, &fonts);
+    // 그림자: 같은 모양을 옮겨 그림자 색 한 가지로 먼저 깐다
+    if let Some((dx, dy, color)) = crate::render::page::shape_shadow(wb, sh) {
+        let (ox, oy) = (dx as f64 * 6.25, dy as f64 * 6.25);
+        let mut shadow: Vec<Op> = Vec::new();
+        for op in &ops {
+            match op {
+                Op::Rect { x0, y0, x1, y1, .. } => shadow.push(Op::Rect {
+                    x0: x0 + ox,
+                    y0: y0 + oy,
+                    x1: x1 + ox,
+                    y1: y1 + oy,
+                    color,
+                }),
+                Op::Path {
+                    segs,
+                    fill: Some(_),
+                    even_odd,
+                    ..
+                } => shadow.push(Op::Path {
+                    segs: segs
+                        .iter()
+                        .map(|s| match *s {
+                            Seg::Move(x, y) => Seg::Move(x + ox, y + oy),
+                            Seg::Line(x, y) => Seg::Line(x + ox, y + oy),
+                            Seg::Cubic(a, b, c, d, e, f) => {
+                                Seg::Cubic(a + ox, b + oy, c + ox, d + oy, e + ox, f + oy)
+                            }
+                            Seg::Close => Seg::Close,
+                        })
+                        .collect(),
+                    fill: Some(color),
+                    stroke: None,
+                    even_odd: *even_odd,
+                }),
+                _ => {}
+            }
+        }
+        shadow.extend(ops);
+        ops = shadow;
+    }
+    let bm = raster::draw(&ops, png_w, png_h, &fonts);
+    raster::encode_png(png_w, png_h, &bm.rgba())
+}
+
+/// 그림(PNG·BMP)을 `w × h` 크기 PNG 로 다시 그린다 (한셀 웹 저장은 그림도 크기에 맞춘 RGBA PNG 로 넣는다).
+/// 풀 수 없는 형식(JPEG 등)이면 None
+pub fn picture_png(data: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    let img = pdfimage::decode(data)?;
+    if img.dct {
+        return None;
+    }
+    let db = FontDb::new();
+    let fonts = FontSet::new(&db);
+    let ops = vec![Op::Image {
+        x0: 0.0,
+        y0: 0.0,
+        x1: w as f64 * 6.25,
+        y1: h as f64 * 6.25,
+        data: std::sync::Arc::new(data.to_vec()),
+    }];
+    let bm = raster::draw(&ops, w, h, &fonts);
+    Some(raster::encode_png(w, h, &bm.rgba()))
+}
+
+/// 투명한 `w × h` PNG
+pub fn transparent_png(w: u32, h: u32) -> Vec<u8> {
+    raster::encode_png(w, h, &vec![0u8; (w as usize) * (h as usize) * 4])
 }

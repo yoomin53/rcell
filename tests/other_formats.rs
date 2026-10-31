@@ -421,3 +421,32 @@ fn template_names_write_template_content_types() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 도형·차트·그림은 PNG 그림으로 쓴다 (한셀 웹 저장 대조): 서식 문서의 사각형 네 개는 그림 크기 681×389, 624×33 …
+/// 이고 그림자가 있는 첫 사각형은 바탕색 픽셀 수가 한셀과 같다 (Basic_Invoice 의 449,480 와 같은 꼴 — 여기서는 크기와 투명 바탕만)
+#[test]
+fn web_page_shapes_become_png() {
+    let Some(root) = std::env::var_os("RCELL_CORPUS").map(PathBuf::from) else {
+        eprintln!("RCELL_CORPUS 미설정 — 건너뜀");
+        return;
+    };
+    let path = root.join("templates").join("Basic_Invoice.cell");
+    if !path.exists() {
+        return;
+    }
+    let wb = rcell::open(&path).expect("열기");
+    let files = rcell::webpage::write_htm(&wb, "x");
+    let mut dims: Vec<(u32, u32)> = files
+        .iter()
+        .filter(|f| f.path.ends_with(".png"))
+        .map(|f| {
+            assert_eq!(&f.data[..8], b"\x89PNG\r\n\x1a\n");
+            (
+                u32::from_be_bytes(f.data[16..20].try_into().unwrap()),
+                u32::from_be_bytes(f.data[20..24].try_into().unwrap()),
+            )
+        })
+        .collect();
+    dims.sort();
+    assert_eq!(dims, vec![(624, 23), (624, 33), (624, 176), (681, 389)]);
+}

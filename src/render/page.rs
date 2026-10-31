@@ -1427,6 +1427,49 @@ fn object_ops(
     }
 }
 
+/// 개체 하나를 (0, 0) 에서 시작하는 w × h (px) 상자 안에 그린 목록 (웹 페이지의 도형·차트 그림용). 장치 단위는 1px = 6.25.
+pub fn shape_ops(
+    wb: &Workbook,
+    sh: &crate::model::Shape,
+    w: f64,
+    h: f64,
+    measure: &dyn TextMeasure,
+) -> Vec<Op> {
+    let frame = PageFrame {
+        px: 6.25,
+        zoom: 100,
+        ..Default::default()
+    };
+    let theme = wb.theme.clone().unwrap_or_default();
+    let obj = sh.raw.as_deref().and_then(super::shape::object_element);
+    let mut ops = Vec::new();
+    object_ops(
+        wb,
+        sh,
+        obj.as_ref(),
+        (0.0, 0.0, w * 6.25, h * 6.25),
+        &frame,
+        &theme,
+        measure,
+        &mut ops,
+    );
+    ops
+}
+
+/// 바깥 그림자: (가로, 세로 이동 px — 정수로 반올림, 색). 흐림 없는 그림자만 (웹 페이지 그림용)
+pub fn shape_shadow(wb: &Workbook, sh: &crate::model::Shape) -> Option<(i32, i32, [u8; 3])> {
+    let s = sh.shadow.as_ref()?;
+    let theme = wb.theme.clone().unwrap_or_default();
+    let (r, g, b) = super::draw::draw_rgb(&s.color, &theme).unwrap_or((0, 0, 0));
+    let dist = s.dist as f64 / 9525.0;
+    let ang = (s.dir as f64 / 60000.0).to_radians();
+    let (dx, dy) = (
+        (dist * ang.cos()).trunc() as i32,
+        (dist * ang.sin()).trunc() as i32,
+    );
+    Some((dx, dy, [r, g, b]))
+}
+
 /// 페이지에 걸친 그리기 개체들을 그린다 (페이지 영역으로 자른다)
 pub fn objects_ops(
     wb: &Workbook,
