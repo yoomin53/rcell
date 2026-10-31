@@ -141,6 +141,15 @@ function Invoke-Edit($wb, $e) {
                 else { $ws.Move($wb.Worksheets.Item($to + 1)) | Out-Null }
             }
         }
+        "copySheet" {
+            # 시트 복사 (Worksheet.Copy): to = 복사본이 놓일 자리(0부터, 원본 기준 목록에서)
+            $to = if ($null -ne $e.to) { [int]$e.to } else { $ws.Index }
+            $count = $wb.Worksheets.Count
+            if ($to -ge $count) { $ws.Copy([Type]::Missing, $wb.Worksheets.Item($count)) | Out-Null }
+            else { $ws.Copy($wb.Worksheets.Item($to + 1)) | Out-Null }
+            # 구조가 보호된 문서는 한셀이 복사하지 않는다 — 복사본이 생겼을 때만 이름을 바꾼다
+            if ($e.name -and $wb.Worksheets.Count -gt $count) { $wb.ActiveSheet.Name = [string]$e.name }
+        }
         "copy" {
             $dst = Get-Sheet $wb $(if ($e.toSheet) { $e.toSheet } else { $e.sheet })
             $ws.Range([string]$e.from).Copy($dst.Range([string]$e.to)) | Out-Null
@@ -314,6 +323,12 @@ function Invoke-Edit($wb, $e) {
             if ($null -ne $e.top) { $sh.Top = [double]$e.top }
             if ($null -ne $e.width) { $sh.Width = [double]$e.width }
             if ($null -ne $e.height) { $sh.Height = [double]$e.height }
+        }
+        "addShape" {
+            # 도형 더하기 (Shapes.AddShape / AddTextbox)
+            $k = [string]$e.kind
+            if ($k -eq "textbox") { [void]$ws.Shapes.AddTextbox(1, [double]$e.left, [double]$e.top, [double]$e.width, [double]$e.height) }
+            else { [void]$ws.Shapes.AddShape(@{ "rect" = 1; "diamond" = 4; "roundRect" = 5; "triangle" = 7; "ellipse" = 9 }[$k], [double]$e.left, [double]$e.top, [double]$e.width, [double]$e.height) }
         }
         "deleteShape" { $ws.Shapes.Item([int]$e.shape).Delete() }
         "consolidate" {

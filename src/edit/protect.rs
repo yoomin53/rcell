@@ -9,7 +9,8 @@
 //! - 암호는 16비트 레거시 해시(소문자 16진 4자리)로 둔다. 글자는 코드 페이지 949 바이트로 본다 (`abc` → `cc1a`, `한글` → `c4bd`).
 //! - 시트 보호: 내용(`sheet`)·개체(`objects`)·시나리오(`scenarios`)를 막고(기본 모두 막음) 서식·삽입·삭제·정렬·필터·피벗은 막되
 //!   `allow…` 로 허용한 것만 푼다. 잠긴 칸·잠기지 않은 칸 선택은 막지 않는다.
-//! - 풀 때 암호가 틀리면 오류이고 보호는 그대로. 암호가 없는 보호는 암호 없이도 풀린다.
+//! - 풀 때 암호가 틀리면 오류이고 보호는 그대로. 암호가 없는 보호는 암호 없이도 풀린다. 암호가 있는 보호가 걸린 시트에 다시 걸면 오류
+//!   (암호 없는 보호는 바뀐다). 통합 문서는 구조가 이미 보호돼 있으면 오류이고, 걸려 있던 창 보호는 그대로 둔다.
 //! - 통합 문서 보호는 구조(시트 추가·지우기·옮기기)만 저장한다 — 창 보호(`windows`)는 한셀이 저장하지 않는다.
 
 use super::err;
@@ -75,13 +76,17 @@ fn hashed(password: &Option<String>) -> Option<String> {
         .map(legacy_hash)
 }
 
-/// 시트 보호 걸기 (이미 보호된 시트는 오류)
+/// 시트 보호 걸기 (암호가 있는 보호가 이미 걸린 시트는 오류 — 암호 없는 보호는 새 보호로 바뀐다)
 pub fn protect_sheet(wb: &mut Workbook, si: usize, o: &ProtectOptions) -> crate::Result<()> {
     let sheet = wb
         .sheets
         .get_mut(si)
         .ok_or_else(|| err("시트가 없습니다"))?;
-    if sheet.protection.as_ref().is_some_and(|p| p.flag("sheet")) {
+    if sheet
+        .protection
+        .as_ref()
+        .is_some_and(|p| p.flag("sheet") && p.password.is_some())
+    {
         return Err(err("이미 보호된 시트입니다"));
     }
     // SHEET_PROTECTION_FLAGS 차례: 참 = 막힘
@@ -136,9 +141,11 @@ pub fn protect_workbook(
     if wb.protection.as_ref().is_some_and(|p| p.lock_structure) {
         return Err(err("이미 보호된 통합 문서입니다"));
     }
-    wb.protection = structure.then(|| WorkbookProtection {
-        lock_structure: true,
-        lock_windows: false,
+    // 창 보호는 한셀이 걸지 않지만 문서에 이미 걸려 있으면 그대로 둔다
+    let windows = wb.protection.as_ref().is_some_and(|p| p.lock_windows);
+    wb.protection = (structure || windows).then(|| WorkbookProtection {
+        lock_structure: structure,
+        lock_windows: windows,
         password: hashed(password),
     });
     Ok(())

@@ -162,3 +162,112 @@ pub fn move_shape(
     }
     Ok(())
 }
+
+/// 도형 더하기: 종류 → (미리 정의된 모양, 한셀의 이름, 모양 조정 값 `avLst` 안)
+fn shape_kind(kind: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    Some(match kind {
+        "rect" => ("rect", "직사각형", ""),
+        "diamond" => ("diamond", "다이아몬드", ""),
+        "roundRect" => (
+            "roundRect",
+            "모서리가 둥근 직사각형",
+            "<a:gd name=\"adj\" fmla=\"val 16667\"/>",
+        ),
+        "triangle" => (
+            "triangle",
+            "이등변 삼각형",
+            "<a:gd name=\"adj\" fmla=\"val 50000\"/>",
+        ),
+        "ellipse" => ("ellipse", "타원", ""),
+        "textbox" => ("rect", "", ""),
+        _ => return None,
+    })
+}
+
+/// 도형 더하기 (한셀 COM `Shapes.AddShape`·`AddTextbox` 대조 실험 shadd·sa1–sa3 — docs/editing.md 19절): 위치·크기(포인트)는
+/// ×96/72 를 반올림한 px 이고 (`Shape.Left` 같은 값 설정의 +0.5pt 규칙은 없다) 오른쪽 아래는 왼쪽 위 + 크기, 새 번호는 시트 도형 번호의 가장 큰 값 + 1
+/// (처음이면 2), 이름은 `<종류 이름> <번호 − 1>` (글상자는 빈 이름). 두 칸 앵커이고 `a:style`(채우기·선·효과 참조)은 한셀 기본이다.
+pub fn add_shape(
+    wb: &mut Workbook,
+    si: usize,
+    kind: &str,
+    left: f64,
+    top: f64,
+    width: f64,
+    height: f64,
+) -> crate::Result<()> {
+    super::guard_action(wb, si, "objects")?;
+    let (prst, kor, adj) =
+        shape_kind(kind).ok_or_else(|| err(format!("도형 종류가 아닙니다: {kind}")))?;
+    if width <= 0.0 || height <= 0.0 {
+        return Err(err("도형 너비·높이는 0 보다 커야 합니다"));
+    }
+    let id = wb
+        .sheets
+        .get(si)
+        .ok_or_else(|| err("시트가 없습니다"))?
+        .shapes
+        .iter()
+        .map(|s| s.id)
+        .max()
+        .unwrap_or(1)
+        .max(1)
+        + 1;
+    let name = if kind == "textbox" {
+        String::new()
+    } else {
+        format!("{kor} {}", id - 1)
+    };
+    let px = |pt: f64| (pt * 96.0 / 72.0).round() as i64;
+    let (x0, y0) = (px(left), px(top));
+    let (x1, y1) = (x0 + px(width), y0 + px(height));
+    let g = crate::render::sheet_geometry(
+        wb,
+        &wb.sheets[si],
+        (y1 / 4) as u32 + 200,
+        (x1 / 4) as u32 + 64,
+    );
+    let from = marker_at(&g, x0 * EMU, y0 * EMU);
+    let to = marker_at(&g, x1 * EMU, y1 * EMU);
+    // 변환 정보(`a:xfrm`)도 px 로 올린 값이다
+    let emu = |v: i64| v * EMU;
+    let (ex, ey, ew, eh) = (x0, y0, x1 - x0, y1 - y0);
+    let mk = |tag: &str, m: &Marker| {
+        format!(
+            "<xdr:{tag}><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:{tag}>",
+            m.col, m.col_off, m.row, m.row_off
+        )
+    };
+    let body = if kind == "textbox" {
+        format!(
+            "<xdr:sp fLocksText=\"1\" fPublished=\"0\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"\"/><xdr:cNvSpPr txBox=\"1\"><a:spLocks noRot=\"1\"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val=\"ffffff\"/></a:solidFill><a:ln w=\"5715\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:srgbClr val=\"000000\"/></a:solidFill><a:prstDash val=\"solid\"/><a:round/><a:headEnd w=\"med\" len=\"med\"/><a:tailEnd w=\"med\" len=\"med\"/></a:ln></xdr:spPr><xdr:txBody><a:bodyPr vertOverflow=\"clip\" horzOverflow=\"clip\" wrap=\"square\" lIns=\"3175\" tIns=\"3175\" rIns=\"3175\" bIns=\"3175\"/><a:p/></xdr:txBody></xdr:sp>",
+            emu(ex),
+            emu(ey),
+            emu(ew),
+            emu(eh)
+        )
+    } else {
+        format!(
+            "<xdr:sp fLocksText=\"1\" fPublished=\"0\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"{name}\"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"{prst}\"><a:avLst>{adj}</a:avLst></a:prstGeom></xdr:spPr><xdr:style><a:lnRef idx=\"2\"><a:schemeClr val=\"accent1\"><a:shade val=\"20000\"/></a:schemeClr></a:lnRef><a:fillRef idx=\"1\"><a:schemeClr val=\"accent1\"/></a:fillRef><a:effectRef idx=\"0\"><a:schemeClr val=\"accent1\"/></a:effectRef><a:fontRef idx=\"minor\"><a:schemeClr val=\"lt1\"/></a:fontRef></xdr:style><xdr:txBody><a:bodyPr vertOverflow=\"clip\" horzOverflow=\"clip\" wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:p/></xdr:txBody></xdr:sp>",
+            emu(ex),
+            emu(ey),
+            emu(ew),
+            emu(eh)
+        )
+    };
+    let anchor = format!(
+        "<xdr:twoCellAnchor>{}{}{body}<xdr:clientData fLocksWithSheet=\"1\" fPrintsWithSheet=\"1\"/></xdr:twoCellAnchor>",
+        mk("from", &from),
+        mk("to", &to)
+    );
+    let doc = format!(
+        "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">{anchor}</xdr:wsDr>"
+    );
+    let root = crate::xml::parse(&doc, "drawing")?;
+    let mut shapes = crate::parser::drawing::parse_drawing(&root, &[]);
+    let shape = shapes
+        .pop()
+        .ok_or_else(|| err("도형을 만들지 못했습니다"))?;
+    wb.sheets[si].shapes.push(shape);
+    Ok(())
+}

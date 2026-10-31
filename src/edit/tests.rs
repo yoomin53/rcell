@@ -1866,3 +1866,112 @@ fn set_view_like_hcell() {
     assert_eq!(wb.sheets[0].view.zoom_scale, Some(12));
     assert!(wb.sheets[0].view.view.is_none());
 }
+
+// 도형 더하기 대조 실험(sa1–sa3): 번호는 가장 큰 번호 + 1, 이름은 `<종류> <번호 − 1>`, 위치·크기는 px 반올림
+#[test]
+fn add_shape_like_hcell() {
+    let mut wb = hcell_book();
+    let add = |wb: &mut Workbook, j: &str| {
+        apply(wb, &serde_json::from_str::<Edit>(j).unwrap()).unwrap();
+    };
+    add(
+        &mut wb,
+        r#"{"op":"addShape","kind":"rect","left":300,"top":300,"width":100,"height":60}"#,
+    );
+    add(
+        &mut wb,
+        r#"{"op":"addShape","kind":"ellipse","left":50.5,"top":70.25,"width":90.5,"height":45.75}"#,
+    );
+    let s = &wb.sheets[0].shapes;
+    assert_eq!((s[0].id, s[0].name.as_str()), (2, "직사각형 1"));
+    assert_eq!((s[1].id, s[1].name.as_str()), (3, "타원 2"));
+    assert_eq!(s[1].geometry.as_deref(), Some("ellipse"));
+}
+
+// 시트 복사 대조 실험(cs1): 이름 `원본 (N)`, 선택되고, 복사본 안에서 원본을 이름으로 가리키는 수식은 복사본을 가리킨다
+#[test]
+fn copy_sheet_like_hcell() {
+    let mut wb = hcell_book();
+    let n = wb.sheets[0].name.clone();
+    set_input(&mut wb, 0, "A1".parse().unwrap(), "5").unwrap();
+    set_input(&mut wb, 0, "A2".parse().unwrap(), &format!("={n}!A1+1")).unwrap();
+    apply(
+        &mut wb,
+        &serde_json::from_str::<Edit>(r#"{"op":"copySheet"}"#).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(wb.sheets.len(), 2);
+    assert_eq!(wb.sheets[1].name, format!("{n} (2)"));
+    assert!(wb.sheets[1].view.tab_selected && !wb.sheets[0].view.tab_selected);
+    let f = |i: usize| {
+        wb.sheets[i]
+            .cell("A2".parse().unwrap())
+            .and_then(|c| c.formula.as_ref())
+            .map(|f| f.text.clone())
+    };
+    assert_eq!(f(0).unwrap(), format!("{n}!A1+1"));
+    assert!(f(1).unwrap().contains(" (2)'!A1+1"));
+}
+
+// 자동 필터 대조 실험(af4–af7): 값이 든 범위로 줄이고, 같음 조건은 보이는 값 중에 있으면 값 목록, 상위는 경계값
+#[test]
+fn auto_filter_like_hcell() {
+    let mut wb = hcell_book();
+    fill_rows(
+        &mut wb,
+        &[&["k", "v"], &["a", "10"], &["b", "20"], &["c", "30"]],
+    );
+    let e = |j: &str| serde_json::from_str::<Edit>(j).unwrap();
+    apply(
+        &mut wb,
+        &e(r#"{"op":"autoFilter","range":"A1:H20","field":1,"criteria1":"b"}"#),
+    )
+    .unwrap();
+    let af = wb.sheets[0].auto_filter.as_ref().unwrap();
+    assert_eq!(af.range, "A1:B4");
+    assert_eq!(af.columns[0].values, ["b"]);
+    let hidden = |wb: &Workbook| {
+        wb.sheets[0]
+            .rows
+            .iter()
+            .filter(|r| r.hidden)
+            .map(|r| r.index)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(hidden(&wb), [2, 4]);
+    apply(
+        &mut wb,
+        &e(r#"{"op":"autoFilter","range":"A1:B4","field":2,"criteria1":"2","operator":"top"}"#),
+    )
+    .unwrap();
+    let fc = &wb.sheets[0].auto_filter.as_ref().unwrap().columns[1];
+    assert_eq!(fc.top10, Some((true, false, 2.0)));
+    apply(&mut wb, &e(r#"{"op":"showAllData"}"#)).unwrap();
+    assert!(hidden(&wb).is_empty());
+}
+
+// 보호 대조 실험(pr1): 암호가 있는 보호에 다시 걸면 오류, 틀린 암호로 풀면 오류
+#[test]
+fn protect_like_hcell() {
+    let mut wb = hcell_book();
+    let e = |j: &str| serde_json::from_str::<Edit>(j).unwrap();
+    apply(
+        &mut wb,
+        &e(r#"{"op":"protectSheet","password":"pw","sorting":true}"#),
+    )
+    .unwrap();
+    assert_eq!(
+        wb.sheets[0]
+            .protection
+            .as_ref()
+            .unwrap()
+            .password
+            .as_deref(),
+        Some("cf75")
+    );
+    assert!(apply(&mut wb, &e(r#"{"op":"protectSheet","password":"x"}"#)).is_err());
+    assert!(apply(&mut wb, &e(r#"{"op":"unprotectSheet","password":"bad"}"#)).is_err());
+    assert!(wb.sheets[0].protection.is_some());
+    apply(&mut wb, &e(r#"{"op":"unprotectSheet","password":"pw"}"#)).unwrap();
+    assert!(wb.sheets[0].protection.is_none());
+}

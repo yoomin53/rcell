@@ -299,6 +299,23 @@ pub fn auto_filter(
     if si >= wb.sheets.len() {
         return Err(err("시트가 없습니다"));
     }
+    // 이미 켜진 필터가 있으면 그 범위, 없으면 준 범위에서 값이 든 칸을 모두 품는 가장 작은 직사각형(한 칸이면 그 칸의 현재 영역).
+    // 빈 범위는 오류 (한셀 — 대조 실험 af6·af7)
+    let range = match wb.sheets[si]
+        .auto_filter
+        .as_ref()
+        .and_then(|af| refs::parse_area(&af.range))
+    {
+        Some(a) => {
+            let (r0, c0, r1, c1) = a.bounds();
+            crate::model::CellRange {
+                start: CellRef { row: r0, col: c0 },
+                end: CellRef { row: r1, col: c1 },
+            }
+        }
+        None => data_extent(&wb.sheets[si], range)
+            .ok_or_else(|| err("자동 필터를 걸 범위에 값이 없습니다"))?,
+    };
     let name = wb.sheets[si].name.clone();
     let text = refs::Area::rect(
         range.start.row,
@@ -442,6 +459,36 @@ pub fn auto_filter(
     }
     wb.sheets[si].filter_mode = true;
     Ok(())
+}
+
+/// 범위 안에서 값이 든 칸을 모두 품는 가장 작은 범위 (범위가 한 칸이면 그 칸이 든 현재 영역)
+fn data_extent(sheet: &Sheet, range: crate::model::CellRange) -> Option<crate::model::CellRange> {
+    if range.start == range.end {
+        let r = super::data::current_region(sheet, range.start);
+        let filled = sheet
+            .cells
+            .iter()
+            .any(|c| !c.value.is_empty() && c.r.row >= r.start.row && c.r.row <= r.end.row);
+        return filled.then_some(r);
+    }
+    let (mut r0, mut r1, mut c0, mut c1) = (u32::MAX, 0, u32::MAX, 0);
+    for c in &sheet.cells {
+        if c.value.is_empty() && c.formula.is_none() {
+            continue;
+        }
+        let (r, k) = (c.r.row, c.r.col);
+        if r >= range.start.row && r <= range.end.row && k >= range.start.col && k <= range.end.col
+        {
+            r0 = r0.min(r);
+            r1 = r1.max(r);
+            c0 = c0.min(k);
+            c1 = c1.max(k);
+        }
+    }
+    (r0 != u32::MAX).then_some(crate::model::CellRange {
+        start: CellRef { row: r0, col: c0 },
+        end: CellRef { row: r1, col: c1 },
+    })
 }
 
 /// 모든 필터 조건을 지우고 숨긴 행을 보인다 (`ShowAllData` — 자동 필터는 켜 둔다)

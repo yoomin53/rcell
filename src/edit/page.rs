@@ -417,21 +417,31 @@ pub fn page_setup(wb: &mut Workbook, si: usize, p: &PageSetupEdit) -> crate::Res
         if let Some(n) = p.paper_size {
             s.paper_size = Some(n);
         }
-        if let Some(z) = p.zoom {
+        // 맞추기가 켜진 채 확대율 100 은 한셀이 받지 않는다 (대조 실험 ps6)
+        if let Some(z) = p.zoom
+            && !(z == 100 && page.fit_to_page == Some(true))
+        {
             s.scale = Some(z);
             if page.fit_to_page == Some(true) {
                 page.fit_to_page = Some(false);
             }
         }
         if p.fit_wide.is_some() || p.fit_tall.is_some() {
+            page.fit_to_page = Some(true);
+            page.auto_page_breaks.get_or_insert(true);
+            // 쪽 수가 정해진 뒤 `0`(자동)으로 되돌리는 것은 한셀이 오류로 막는다 — 앞서 한 것은 그대로 남는다 (ps6)
             if let Some(w) = p.fit_wide {
+                if w == 0 && s.fit_to_width.unwrap_or(0) != 0 {
+                    return Err(err("페이지 맞추기 쪽 수를 자동으로 되돌릴 수 없습니다"));
+                }
                 s.fit_to_width = Some(w);
             }
             if let Some(t) = p.fit_tall {
+                if t == 0 && s.fit_to_height.unwrap_or(0) != 0 {
+                    return Err(err("페이지 맞추기 쪽 수를 자동으로 되돌릴 수 없습니다"));
+                }
                 s.fit_to_height = Some(t);
             }
-            page.fit_to_page = Some(true);
-            page.auto_page_breaks.get_or_insert(true);
         }
         if let Some(b) = p.black_and_white {
             s.black_and_white = b;
@@ -515,7 +525,16 @@ pub fn page_setup(wb: &mut Workbook, si: usize, p: &PageSetupEdit) -> crate::Res
     if (p.fit_wide.is_some() || p.fit_tall.is_some())
         && wb.sheets[si].page.fit_to_page == Some(true)
     {
-        let z = crate::print::sheet_print(wb, si).page_scale;
+        let both_auto =
+            wb.sheets[si].page.setup.as_ref().is_some_and(|s| {
+                s.fit_to_width.unwrap_or(0) == 0 && s.fit_to_height.unwrap_or(0) == 0
+            });
+        // 가로·세로 모두 자동이면 배율 100
+        let z = if both_auto {
+            100
+        } else {
+            crate::print::sheet_print(wb, si).page_scale
+        };
         if let Some(s) = &mut wb.sheets[si].page.setup {
             s.scale = Some(z);
         }
