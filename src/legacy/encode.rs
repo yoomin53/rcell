@@ -1726,24 +1726,24 @@ impl Emitter<'_> {
     fn user_func(&mut self, name: &str, args: &[Node], ctx: Ctx) -> Result<(), EncodeError> {
         // 추가 기능 함수: PtgNameX (추가 기능 SUPBOOK 의 EXTERNNAME), 함수 토큰은 값 (한셀 레거시 저장 실험)
         let up = name.to_ascii_uppercase();
-        if ftab::is_addin(&up) {
-            if let Some((idx, _)) = ftab::by_name(&up) {
-                if ftab::is_volatile(idx) {
-                    self.volatile = true;
-                }
-                let (ixti, n) = self.res.addin_name(&up);
-                self.u8(0x39);
-                self.u16(ixti);
-                self.u32(n);
-                for (k, a) in args.iter().enumerate() {
-                    self.emit(a, ctx.arg(ftab::slot_kind(idx, k), false))?;
-                }
-                let tc = to_class(ctx.func_class(Ret::V));
-                self.u8(0x02 | tc.bits());
-                self.u8((args.len() + 1) as u8);
-                self.u16(0x00FF);
-                return Ok(());
+        if ftab::is_addin(&up)
+            && let Some((idx, _)) = ftab::by_name(&up)
+        {
+            if ftab::is_volatile(idx) {
+                self.volatile = true;
             }
+            let (ixti, n) = self.res.addin_name(&up);
+            self.u8(0x39);
+            self.u16(ixti);
+            self.u32(n);
+            for (k, a) in args.iter().enumerate() {
+                self.emit(a, ctx.arg(ftab::slot_kind(idx, k), false))?;
+            }
+            let tc = to_class(ctx.func_class(Ret::V));
+            self.u8(0x02 | tc.bits());
+            self.u8((args.len() + 1) as u8);
+            self.u16(0x00FF);
+            return Ok(());
         }
         let full = if name.contains('.') && name.to_ascii_lowercase().starts_with("_xlfn.") {
             name.to_string()
