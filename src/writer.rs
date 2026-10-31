@@ -2735,7 +2735,11 @@ fn next_chart_name(raw_parts: &[crate::model::RawPart], made: &[(String, String)
 }
 
 /// 칸 기준 앵커의 시트 안 절대 위치와 크기 (EMU): 앞 열·행의 픽셀 합 + 칸 안 오프셋
-fn anchor_rect(sheet: &Sheet, mdw: u32, a: &crate::model::Anchor) -> (i64, i64, i64, i64) {
+pub(crate) fn anchor_rect(
+    sheet: &Sheet,
+    mdw: u32,
+    a: &crate::model::Anchor,
+) -> (i64, i64, i64, i64) {
     use crate::units::{EMU_PER_PX, row_height_px, sheet_col_px};
     let col_x = |c: u32| {
         (0..c)

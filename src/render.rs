@@ -21,7 +21,7 @@ mod advance;
 mod advance_data;
 mod advance_hint;
 mod cell;
-mod draw;
+pub(crate) mod draw;
 mod icons;
 mod layout;
 pub mod metafile;

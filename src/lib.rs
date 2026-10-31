@@ -43,6 +43,8 @@ pub mod model;
 pub mod ns;
 pub mod numfmt;
 pub mod ods;
+mod ods_draw;
+mod ods_geom;
 pub mod package;
 pub mod parser;
 pub mod print;

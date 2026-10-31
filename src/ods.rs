@@ -43,7 +43,7 @@ fn entry(bytes: &[u8], name: &str) -> Result<String> {
 }
 
 /// 길이 (`1.94cm`, `0.45in`, `12pt`, `5mm`) → pt
-fn length_pt(v: &str) -> Option<f64> {
+pub(crate) fn length_pt(v: &str) -> Option<f64> {
     let v = v.trim();
     let (n, unit) = v.split_at(v.find(|c: char| c.is_ascii_alphabetic())?);
     let n: f64 = n.parse().ok()?;
@@ -1535,6 +1535,9 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
     });
     let template = wb.sheets[0].clone();
     wb.sheets.clear();
+    // 도형·그림·차트 (한셀 .ods 꼴 — ods_draw.rs)
+    let draw_styles = crate::ods_draw::Styles::new(&root);
+    let mut draw_parts: Vec<crate::model::RawPart> = Vec::new();
     for (ti, table) in spreadsheet
         .elements()
         .filter(|e| e.is(NS_TABLE, "table"))
@@ -1758,6 +1761,17 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
                             });
                         }
                     }
+                    if k == 0 {
+                        let mut dcx = crate::ods_draw::ReadCtx {
+                            bytes,
+                            sheet: &sheet.name.clone(),
+                            next_id: sheet.shapes.len() as u32 + 1,
+                            styles: &draw_styles,
+                        };
+                        let shapes =
+                            crate::ods_draw::read_frames(c, (ri, ci), &mut dcx, &mut draw_parts);
+                        sheet.shapes.extend(shapes);
+                    }
                     ci = ci.saturating_add(rep);
                 }
             }
@@ -1765,8 +1779,12 @@ pub fn read(bytes: &[u8]) -> Result<Workbook> {
         }
         sheet.cells.sort_by_key(|c| (c.r.row, c.r.col));
         crate::edit::structure::update_dimension(&mut sheet);
+        if !sheet.shapes.is_empty() {
+            crate::ods_draw::place(&mut sheet, crate::units::max_digit_width(&wb));
+        }
         wb.sheets.push(sheet);
     }
+    wb.raw_parts.extend(draw_parts);
     // 이름 정의: 범위 (`table:named-range`) 와 식 (`table:named-expression`)
     if let Some(names) = spreadsheet.child_ns(NS_TABLE, "named-expressions") {
         for n in names.elements() {
@@ -2292,11 +2310,13 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
     } else {
         wb
     };
-    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:tableooo="http://openoffice.org/2009/table" xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0""#;
+    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:tableooo="http://openoffice.org/2009/table" xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink""#;
     let mut auto = String::new();
     let mut body = String::new();
     let theme = wb.theme.clone().unwrap_or_default();
     let font_pt = wb.styles.font_of(0).and_then(|f| f.size).unwrap_or(11.0);
+    // 도형·그림·차트 (ods_draw.rs)
+    let mut draw = crate::ods_draw::Draw::new(theme.clone());
     // 셀 서식 → 자동 칸 스타일 이름 (기본 서식 0 은 열의 기본 칸 스타일 "Default")
     let mut cell_style_names: HashMap<u32, String> = HashMap::new();
     let mut data_styles: Vec<u32> = Vec::new();
@@ -2388,10 +2408,12 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
             ));
             c += rep;
         }
+        let frames = crate::ods_draw::frames(wb, si, &mut draw);
         let last_row = sheet
             .cells
             .iter()
             .map(|c| c.r.row)
+            .chain(frames.iter().map(|f| f.0))
             .chain(sheet.merges.iter().map(|m| m.end.row))
             .chain(
                 sheet
@@ -2439,6 +2461,11 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
             for m in sheet.merges.iter().filter(|m| m.start.row == r) {
                 if !entries.iter().any(|e| e.0 == m.start.col) {
                     entries.push((m.start.col, None));
+                }
+            }
+            for f in frames.iter().filter(|f| f.0 == r) {
+                if !entries.iter().any(|e| e.0 == f.1) {
+                    entries.push((f.1, None));
                 }
             }
             entries.sort_by_key(|e| e.0);
@@ -2544,6 +2571,9 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
                         body.push_str(&format!("<text:p>{}</text:p>", esc(line)));
                     }
                 }
+                for f in frames.iter().filter(|f| f.0 == r && f.1 == at) {
+                    body.push_str(&f.2);
+                }
                 body.push_str(&format!("</{tag}>"));
                 col = at + 1;
             }
@@ -2595,7 +2625,8 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
         })
         .collect();
     let content = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content {NS} office:version="1.2"><office:font-face-decls>{faces}</office:font-face-decls><office:automatic-styles>{auto}</office:automatic-styles><office:body><office:spreadsheet>{body}</office:spreadsheet></office:body></office:document-content>"#
+        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content {NS} office:version="1.2"><office:font-face-decls>{faces}</office:font-face-decls><office:automatic-styles>{auto}{}</office:automatic-styles><office:body><office:spreadsheet>{body}</office:spreadsheet></office:body></office:document-content>"#,
+        draw.auto
     );
     // 기본 칸 스타일 "Default" = 기본 셀 서식 0 (표시 형식·맞춤·테두리까지 — 한셀은 글자 속성만 쓴다)
     let default_data =
@@ -2611,8 +2642,9 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
     )
     .replace(r#" style:parent-style-name="Default""#, "");
     let styles = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS} office:version="1.2"><office:font-face-decls>{faces}</office:font-face-decls><office:styles>{}{default_style}</office:styles><office:automatic-styles>{layouts}{}</office:automatic-styles><office:master-styles>{masters}</office:master-styles></office:document-styles>"#,
+        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS} office:version="1.2"><office:font-face-decls>{faces}</office:font-face-decls><office:styles>{}{default_style}{}</office:styles><office:automatic-styles>{layouts}{}</office:automatic-styles><office:master-styles>{masters}</office:master-styles></office:document-styles>"#,
         default_data.unwrap_or_default(),
+        draw.dash_defs(),
         hf_styles
             .iter()
             .enumerate()
@@ -2650,7 +2682,20 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
         active.and_then(|s| s.view.zoom_scale).unwrap_or(100),
         active.is_none_or(|s| s.view.show_row_col_headers)
     );
-    let manifest = r#"<?xml version="1.0" encoding="UTF-8"?><manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.2"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="meta.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="settings.xml" manifest:media-type="text/xml"/></manifest:manifest>"#;
+    let mut manifest = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8"?><manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.2"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="meta.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="settings.xml" manifest:media-type="text/xml"/>"#,
+    );
+    for (path, _, mime) in &draw.media {
+        manifest.push_str(&format!(
+            r#"<manifest:file-entry manifest:full-path="{path}" manifest:media-type="{mime}"/>"#
+        ));
+    }
+    for (dir, _, _) in &draw.objects {
+        manifest.push_str(&format!(
+            r#"<manifest:file-entry manifest:full-path="{dir}/" manifest:media-type="application/vnd.oasis.opendocument.chart"/><manifest:file-entry manifest:full-path="{dir}/content.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="{dir}/styles.xml" manifest:media-type="text/xml"/>"#
+        ));
+    }
+    manifest.push_str("</manifest:manifest>");
     let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let stored =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -2664,7 +2709,7 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
     z.start_file("mimetype", stored).map_err(zerr)?;
     z.write_all(b"application/vnd.oasis.opendocument.spreadsheet")?;
     for (name, data) in [
-        ("META-INF/manifest.xml", manifest.to_string()),
+        ("META-INF/manifest.xml", manifest),
         ("content.xml", content),
         ("styles.xml", styles),
         ("meta.xml", meta),
@@ -2672,6 +2717,18 @@ pub fn write(wb: &Workbook) -> Result<Vec<u8>> {
     ] {
         z.start_file(name, deflated).map_err(zerr)?;
         z.write_all(data.as_bytes())?;
+    }
+    for (dir, content, styles) in &draw.objects {
+        z.start_file(format!("{dir}/content.xml"), deflated)
+            .map_err(zerr)?;
+        z.write_all(content.as_bytes())?;
+        z.start_file(format!("{dir}/styles.xml"), deflated)
+            .map_err(zerr)?;
+        z.write_all(styles.as_bytes())?;
+    }
+    for (path, data, _) in &draw.media {
+        z.start_file(path.as_str(), deflated).map_err(zerr)?;
+        z.write_all(data)?;
     }
     Ok(z.finish().map_err(zerr)?.into_inner())
 }

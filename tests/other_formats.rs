@@ -509,3 +509,98 @@ fn grouped_chart_survives_xls_and_legacy() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// .ods 의 도형·묶음·차트·그림 쓰기→읽기: 시작 칸 안의 `draw:frame`·`draw:g`, 차트 하위 문서, 그림 파일
+/// (한셀 .ods 와 같은 꼴 — docs/format/other-formats.md 17절)
+#[test]
+fn ods_shapes_charts_pictures_round_trip() {
+    use rcell::model::{
+        Anchor, AnchorKind, DrawColor, DrawingPara, DrawingRun, Marker, Outline, Paint, Shape,
+        ShapeKind, TextBody, Xfrm,
+    };
+    let mut wb = sample();
+    let anchor = |c, r, c2, r2| Anchor {
+        kind: AnchorKind::TwoCell,
+        from: Marker {
+            col: c,
+            col_off: 9525,
+            row: r,
+            row_off: 19050,
+        },
+        to: Some(Marker {
+            col: c2,
+            col_off: 0,
+            row: r2,
+            row_off: 28575,
+        }),
+        ..Default::default()
+    };
+    let rect = Shape {
+        kind: ShapeKind::Shape,
+        name: "사각형".into(),
+        id: 2,
+        anchor: anchor(2, 3, 4, 6),
+        geometry: Some("rect".into()),
+        xfrm: Some(Xfrm {
+            x: 0,
+            y: 0,
+            cx: 1_800_000,
+            cy: 540_000,
+            ..Default::default()
+        }),
+        fill: Some(Paint::Solid(DrawColor {
+            value: "srgb:FFCC00".into(),
+            mods: Vec::new(),
+        })),
+        line: Some(Outline {
+            width: Some(19050),
+            fill: Some(Paint::Solid(DrawColor {
+                value: "srgb:FF0000".into(),
+                mods: Vec::new(),
+            })),
+            ..Default::default()
+        }),
+        text: Some(TextBody {
+            paragraphs: vec![DrawingPara {
+                align: Some("ctr".into()),
+                runs: vec![DrawingRun {
+                    text: "안녕".into(),
+                    size: Some(1200),
+                    bold: Some(true),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let ellipse = Shape {
+        name: "타원".into(),
+        id: 3,
+        anchor: anchor(6, 8, 7, 10),
+        geometry: Some("ellipse".into()),
+        ..rect.clone()
+    };
+    wb.sheets[0].shapes.push(rect);
+    wb.sheets[0].shapes.push(ellipse);
+    let bytes = rcell::ods::write(&wb).unwrap();
+    let back = rcell::ods::read(&bytes).unwrap();
+    let s = &back.sheets[0].shapes;
+    assert_eq!(s.len(), 2);
+    assert_eq!(s[0].name, "사각형");
+    assert_eq!(s[0].anchor.from.col, 2);
+    assert_eq!(s[0].anchor.from.row, 3);
+    assert_eq!(s[0].anchor.to.map(|t| (t.col, t.row)), Some((4, 6)));
+    assert_eq!(s[0].plain_text(), "안녕");
+    let run = &s[0].text.as_ref().unwrap().paragraphs[0].runs[0];
+    assert_eq!((run.size, run.bold), (Some(1200), Some(true)));
+    assert_eq!(
+        s[0].text.as_ref().unwrap().paragraphs[0].align.as_deref(),
+        Some("ctr")
+    );
+    assert!(matches!(&s[0].fill, Some(Paint::Solid(c)) if c.value == "srgb:FFCC00"));
+    assert!(
+        matches!(&s[0].line.as_ref().unwrap().fill, Some(Paint::Solid(c)) if c.value == "srgb:FF0000")
+    );
+    assert_eq!(s[1].geometry.as_deref(), Some("ellipse"));
+}
