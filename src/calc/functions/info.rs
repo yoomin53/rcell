@@ -59,6 +59,8 @@ pub const FNS: &[FnSpec] = &[
             }
         }
         match &a[0] {
+            // 여러 시트에 걸친 참조는 0 (N('S1:S2'!A1) = 0, 대조 실험 syntax)
+            Value::Ref(r) if r[0].is_3d() => Value::Number(0.0),
             Value::Ref(r) => {
                 let ar = r[0];
                 one(&c.engine().cell_value(ar.book, ar.sheet, ar.r0, ar.c0))

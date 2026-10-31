@@ -206,7 +206,27 @@ impl Engine {
                     (None, None)
                 } else {
                     match parser::parse(&f.text) {
-                        Ok(e) => (Some(Rc::new(e)), None),
+                        Ok(e) => {
+                            // 외부 통합 문서를 가리키는데 그 링크가 없거나 값을 하나도 적어 두지 않았으면 (`[1]Sheet!A1` 을
+                            // 입력한 문서) 한셀은 수식을 계산하지 않고 파일 값을 그대로 둔다 (대조 실험 syntax)
+                            let mut missing_book = false;
+                            e.visit_refs(&mut |r| {
+                                if let crate::calc::ast::RefOrName::Ref(r) = r
+                                    && r.book.is_some_and(|b| {
+                                        wb.external_links
+                                            .get((b as usize).wrapping_sub(1))
+                                            .is_none_or(|l| l.sheet_data.is_empty())
+                                    })
+                                {
+                                    missing_book = true;
+                                }
+                            });
+                            if missing_book {
+                                (None, Some("외부 통합 문서가 없음".to_string()))
+                            } else {
+                                (Some(Rc::new(e)), None)
+                            }
+                        }
                         Err(e) => (None, Some(e.to_string())),
                     }
                 };

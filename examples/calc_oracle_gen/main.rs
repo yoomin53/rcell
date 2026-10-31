@@ -428,6 +428,8 @@ fn build(cases: &[Case], date1904: bool) -> Workbook {
             name("Local", "Data!$B$1", Some(0)),
             name("DataTop", "Data!$A$1", None),
             name("Both", "Data!$A$1:$B$3", None),
+            name("nm", "Data!$A$1:$A$3", None),
+            name("nm2", "S1!$B$2", None),
         ],
         ..Default::default()
     }

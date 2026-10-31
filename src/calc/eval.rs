@@ -372,6 +372,11 @@ impl<'a> Ctx<'a> {
     // -----------------------------------------------------------------------
 
     fn unary(&mut self, op: UnaryOp, x: &Expr) -> Value {
+        // 단항 + 는 아무것도 하지 않는다: 참조는 참조로 남는다 (MAX(+'S1:S2'!A1,1) 이 3차원 참조를 읽는다,
+        // COLUMN(+nm) = 1 — 대조 실험 syntax)
+        if op == UnaryOp::Plus {
+            return self.eval(x);
+        }
         let v = self.eval_value(x);
         match op {
             UnaryOp::Plus => v,

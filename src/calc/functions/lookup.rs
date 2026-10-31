@@ -702,8 +702,7 @@ fn row_col(ctx: &mut Ctx, a: &[Value], row: bool) -> Value {
             }
             r[0]
         }
-        Some(Value::Error(e)) => return Value::Error(*e),
-        // 참조가 아니면 #REF! (ROW({1,2}), ROW(5), ROW("a"), 대조 실험 refargs)
+        // 참조가 아니면 오류 값이라도 #REF! (ROW({1,2}), ROW(5), ROW("a"), COLUMN(#NAME?), 대조 실험 refargs·syntax)
         Some(_) => return Value::Error(ErrorKind::Ref),
     };
     let (lo, hi) = if row {
