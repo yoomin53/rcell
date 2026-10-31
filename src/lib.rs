@@ -36,6 +36,7 @@ pub mod edit;
 pub mod error;
 pub mod formula_text;
 pub mod image;
+pub mod jpeg;
 pub mod legacy;
 pub mod model;
 pub mod ns;
