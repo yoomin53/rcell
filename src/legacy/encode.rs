@@ -1055,6 +1055,8 @@ struct Emitter<'r> {
     volatile: bool,
     /// 참조 연산 식(`:`·공백·`,` 와 그 사이의 괄호) 안이다 — 맨 바깥 연산에만 PtgMem* 을 붙인다
     in_chain: bool,
+    /// 인자가 30개를 넘는 함수 호출이 있다
+    too_long: bool,
     /// 토큰열 뒤에 붙는 자료 (PtgExtraMem 영역 목록, PtgExtraArray 배열 상수) — 토큰 차례대로
     extra: Vec<u8>,
 }
@@ -1130,6 +1132,13 @@ fn static_eval(n: &Node) -> Static {
 }
 
 impl Emitter<'_> {
+    /// 인자 수 바이트. 레거시는 함수 하나에 인자 30개까지 — 넘으면 한셀은 수식 전체를 #VALUE! 로 저장한다
+    fn argc(&mut self, n: usize) {
+        if n > 30 {
+            self.too_long = true;
+        }
+        self.out.push(n as u8);
+    }
     fn u8(&mut self, v: u8) {
         self.out.push(v);
     }
@@ -1595,7 +1604,7 @@ impl Emitter<'_> {
                 }
                 _ => {
                     self.u8(0x02 | tc.bits());
-                    self.u8(args.len() as u8);
+                    self.argc(args.len());
                 }
             }
             self.u16(idx);
@@ -1651,7 +1660,7 @@ impl Emitter<'_> {
             }
             let fpos = self.out.len();
             self.out.push(0x02 | token_class.bits());
-            self.out.push(args.len() as u8);
+            self.argc(args.len());
             self.out.extend_from_slice(&1u16.to_le_bytes());
             let end = self.out.len();
             // tAttrIf: 거짓 값(또는 함수 토큰)까지 건너뛸 바이트 수
@@ -1685,7 +1694,7 @@ impl Emitter<'_> {
             }
             let after = self.out.len() - base;
             self.out.push(0x02 | token_class.bits());
-            self.out.push(args.len() as u8);
+            self.argc(args.len());
             self.out.extend_from_slice(&100u16.to_le_bytes());
             let end = self.out.len();
             // 점프 표: 처음 값부터 (점프 표 시작 기준), 마지막은 범위 밖 번호용
@@ -1713,7 +1722,7 @@ impl Emitter<'_> {
             }
             _ => {
                 self.u8(0x02 | token_class.bits());
-                self.u8(args.len() as u8);
+                self.argc(args.len());
                 self.u16(info.index);
             }
         }
@@ -1741,7 +1750,7 @@ impl Emitter<'_> {
             }
             let tc = to_class(ctx.func_class(Ret::V));
             self.u8(0x02 | tc.bits());
-            self.u8((args.len() + 1) as u8);
+            self.argc(args.len() + 1);
             self.u16(0x00FF);
             return Ok(());
         }
@@ -1768,7 +1777,7 @@ impl Emitter<'_> {
         }
         let token_class = to_class(ctx.func_class(if future { Ret::V } else { Ret::R }));
         self.u8(0x02 | token_class.bits());
-        self.u8((args.len() + 1) as u8);
+        self.argc(args.len() + 1);
         self.u16(0x00FF);
         Ok(())
     }
@@ -1797,6 +1806,7 @@ pub fn encode_with_extra(
         opts,
         volatile: false,
         in_chain: false,
+        too_long: false,
         extra: Vec::new(),
     };
     let root = if opts.array || opts.root == Class::Arr {
@@ -1809,6 +1819,9 @@ pub fn encode_with_extra(
         Ctx::value()
     };
     e.emit(&node, root)?;
+    if e.too_long {
+        return Ok((vec![0x1C, 0x0F], Vec::new()));
+    }
     let mut out = e.out;
     if e.volatile {
         let mut v = vec![0x19, 0x01, 0x00, 0x00];
