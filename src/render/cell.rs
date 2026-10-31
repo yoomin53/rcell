@@ -569,6 +569,23 @@ fn cell_content_inner(
         if v.h == HAlign::Distributed {
             css.push_str("text-align-last:justify;");
         }
+        // 맑은 고딕 위 맞춤 줄 바꿈 글은 11pt 가 아니면 한셀이 1px 위 (줄 바꿈 실험 2: 10·12–20pt 첫·끝 줄 −1px, 11pt 0)
+        if v.v == VAlign::Top {
+            let (name, size) = v
+                .font
+                .map_or((metrics::DEFAULT_FONT, metrics::DEFAULT_SIZE), |f| {
+                    (
+                        f.name.as_deref().unwrap_or(metrics::DEFAULT_FONT),
+                        f.size.unwrap_or(metrics::DEFAULT_SIZE),
+                    )
+                });
+            if matches!(name, "맑은 고딕" | "Malgun Gothic")
+                && size >= 10.0
+                && (size - 11.0).abs() > 0.01
+            {
+                css.push_str("top:-1px;");
+            }
+        }
         match v.h {
             HAlign::Right if indent > 0.0 => {
                 let _ = write!(css, "padding-right:{:.1}px;", PAD_R + indent);
