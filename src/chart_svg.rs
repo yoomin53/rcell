@@ -5082,4 +5082,50 @@ mod tests {
         let s = make_scale(0.0, 1.0, None, 268.0, true, TickRule::Xml { room: false });
         assert_eq!((s.max, s.major), (1.0, 0.1));
     }
+
+    #[test]
+    fn grid_lines_round_up_to_quarter_pixels() {
+        // 한셀 화면: 가로 눈금선 가운데는 계산한 자리에서 다음 1/4 픽셀 (눈금 높이 실험)
+        let mut out = Svg::new(100.0, 100.0);
+        let plot = Rect {
+            x: 10.0,
+            y: 18.0,
+            w: 80.0,
+            h: 248.25,
+        };
+        let st = Stroke::new(AXIS_GRAY, 1.0);
+        for k in 1..=5 {
+            grid_line(
+                &mut out,
+                false,
+                18.0 + 248.25 * k as f64 / 6.0,
+                &plot,
+                &st,
+                false,
+            );
+        }
+        let svg = out.finish();
+        // SVG 글은 소수 첫째 자리까지 (101.25 → 101.2, 142.75 → 142.8)
+        for y in ["60.0", "101.2", "142.8", "184.0", "225.5"] {
+            assert!(svg.contains(&format!("y1=\"{y}\"")), "{y} in {svg}");
+        }
+    }
+
+    #[test]
+    fn percent_sign_is_wide_in_legacy_dotum() {
+        let dotum = Font {
+            size: 10.0,
+            bold: false,
+            italic: false,
+            color: "#000000".into(),
+            family: Some("'돋움','맑은 고딕'".to_string()),
+            rot: None,
+        };
+        // "100%" 가 10pt 돋움에서 32.5px (한셀 화면 — 축이 틀 + 60)
+        assert!(
+            (dotum.width("100%") - 32.5).abs() < 0.2,
+            "{}",
+            dotum.width("100%")
+        );
+    }
 }
