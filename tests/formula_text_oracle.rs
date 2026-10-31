@@ -105,10 +105,17 @@ fn typed_formula_text_matches_hancell() {
             ..Default::default()
         });
     }
-    for (n, f) in [("nm", "Data!$A$1:$A$3"), ("nm2", "S1!$B$2")] {
+    // 이름: 통합 문서 nm·nm2, 시트 범위 loc (Data), nm (S1) — tools/probe/formula-probe.ps1 과 같다
+    for (n, f, sheet) in [
+        ("nm", "Data!$A$1:$A$3", None),
+        ("nm2", "S1!$B$2", None),
+        ("loc", "Data!$B$1", Some(1)),
+        ("nm", "S1!$C$3", Some(2)),
+    ] {
         wb.defined_names.push(DefinedName {
             name: n.into(),
             formula: f.into(),
+            local_sheet_id: sheet,
             ..Default::default()
         });
     }

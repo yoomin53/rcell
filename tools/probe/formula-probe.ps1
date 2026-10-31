@@ -52,6 +52,8 @@ if ($Worker) {
         $ws = $wb.Worksheets.Item(1)
         try { [void]$wb.Names.Add("nm", '=Data!$A$1:$A$3') } catch {}
         try { [void]$wb.Names.Add("nm2", '=S1!$B$2') } catch {}
+        try { [void]$wb.Worksheets.Item("Data").Names.Add("loc", '=Data!$B$1') } catch {}
+        try { [void]$wb.Worksheets.Item("S1").Names.Add("nm", '=S1!$C$3') } catch {}
         $row = 0
         foreach ($l in $lines) {
             $row++

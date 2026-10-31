@@ -1780,12 +1780,106 @@ pub fn normalize_formula(wb: &Workbook, text: &str) -> crate::Result<String> {
         return Err(err(format!("수식 오류: ={text}")));
     }
     let canon = canon_name(wb);
-    let n = refs::normalize_checked(text, &canon);
+    let local = |sheet: &str, name: &str| {
+        wb.defined_names.iter().any(|d| {
+            refs::same_sheet(&d.name, name)
+                && d.local_sheet_id
+                    .and_then(|i| wb.sheets.get(i as usize))
+                    .is_some_and(|s| refs::same_sheet(&s.name, sheet))
+        })
+    };
+    let n = refs::normalize_scoped(text, &canon, &local);
     if n.invalid {
         return Err(err(format!("수식 오류: ={text}")));
     }
-    crate::calc::parse(&n.text).map_err(|e| err(format!("수식 오류: {e}")))?;
+    let expr = crate::calc::parse(&n.text).map_err(|e| err(format!("수식 오류: {e}")))?;
+    // 한셀은 입력한 수식의 인수 개수가 함수와 맞지 않으면 거부한다 (`LEN(,"")`, `COUNTIF("x")`; 한셀이 모르는 함수는 그대로)
+    let mut bad_arity = false;
+    // 존재하지 않는 표의 구조적 참조, 참조가 아닌 값의 합집합 (`1,5`, `(1,2)`) 도 거부한다
+    expr.visit_refs(&mut |r| {
+        if let crate::calc::ast::RefOrName::Table(t) = r
+            && !t.table.is_empty()
+            && !wb.sheets.iter().any(|s| {
+                s.tables
+                    .iter()
+                    .any(|x| refs::same_sheet(&x.display_name, &t.table))
+            })
+        {
+            bad_arity = true;
+        }
+    });
+    fn bad_union(e: &crate::calc::ast::Expr) -> bool {
+        use crate::calc::ast::{BinaryOp, Expr};
+        match e {
+            Expr::Binary(BinaryOp::Union, a, b) => {
+                !(crate::calc::eval::is_reference_expr(a) && crate::calc::eval::is_reference_expr(b))
+                    || bad_union(a)
+                    || bad_union(b)
+            }
+            Expr::Binary(_, a, b) => bad_union(a) || bad_union(b),
+            Expr::Unary(_, a) | Expr::Paren(a) => bad_union(a),
+            Expr::Call(c) => c.args.iter().any(bad_union),
+            _ => false,
+        }
+    }
+    if bad_union(&expr) {
+        bad_arity = true;
+    }
+    expr.visit_calls(&mut |c| {
+        if let Some(spec) = c.func
+            && !crate::calc::functions::HCELL_UNKNOWN.contains(&c.name.as_str())
+            && (c.args.len() < spec.min as usize || c.args.len() > spec.max as usize)
+        {
+            bad_arity = true;
+        }
+    });
+    if bad_arity {
+        return Err(err(format!("수식 오류: ={text}")));
+    }
     Ok(n.text)
+}
+
+/// 한셀 `FormulaLocal` 의 함수 이름 (한국어판): `Formula` 와 같되 세 함수만 다르다 — DBCS → JUNJA,
+/// DOLLAR → WON, USDOLLAR → DOLLAR (함수 목록 전체를 한셀에 넣어 대조한 결과). 글자 상수 안은 건드리지 않는다
+pub fn formula_local(text: &str) -> String {
+    let ch: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let (mut i, mut in_str) = (0, false);
+    while i < ch.len() {
+        let c = ch[i];
+        if c == '"' {
+            in_str = !in_str;
+            out.push(c);
+            i += 1;
+        } else if !in_str && (c.is_alphanumeric() || c == '_' || c == '.') {
+            let mut j = i;
+            while j < ch.len() && (ch[j].is_alphanumeric() || ch[j] == '_' || ch[j] == '.') {
+                j += 1;
+            }
+            let w: String = ch[i..j].iter().collect();
+            let mut k = j;
+            while k < ch.len() && ch[k].is_whitespace() {
+                k += 1;
+            }
+            let local = if ch.get(k) == Some(&'(') {
+                match w.to_ascii_uppercase().as_str() {
+                    "DBCS" => "JUNJA",
+                    "DOLLAR" => "WON",
+                    "USDOLLAR" => "DOLLAR",
+                    _ => &w,
+                }
+                .to_string()
+            } else {
+                w
+            };
+            out.push_str(&local);
+            i = j;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// [`normalize_formula`] 과 같고 닫지 않은 괄호도 오류 (한셀의 CSV 열기: `=SUM(` 은 글)

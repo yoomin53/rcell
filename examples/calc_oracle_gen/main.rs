@@ -458,6 +458,32 @@ fn main() {
     // --random N --seed S: 무작위 수식 N 개 (rand.rs), --emit 파일 이면 수식 목록을 글로도 남긴다
     let random: Option<usize> = opt("--random").and_then(|n| n.parse().ok());
     let seed: u64 = opt("--seed").and_then(|n| n.parse().ok()).unwrap_or(1);
+    // --names --emit 파일: 함수 이름 전부(구현한 것, 알려진 새 함수, 한셀 전용, 한셀이 모르는 것)를 `소문자이름(인수…)`
+    // 한 줄씩 쓴다 (tools/probe/formula-probe.ps1 로 한셀의 Formula·FormulaLocal 을 견주는 용도)
+    if args.iter().any(|a| a == "--names") {
+        use rcell::calc::functions as fns;
+        let mut names: Vec<String> = fns::implemented().iter().map(|s| s.to_string()).collect();
+        for n in fns::NEWER_FUNCTIONS
+            .iter()
+            .chain(fns::HANCOM_FUNCTIONS)
+            .chain(fns::HCELL_UNKNOWN)
+        {
+            names.push(n.to_string());
+        }
+        names.sort();
+        names.dedup();
+        let mut lines = Vec::new();
+        for n in names {
+            let k = fns::lookup(&n).map(|s| s.min as usize).unwrap_or(1).max(1);
+            let args = vec!["1"; k].join(",");
+            lines.push(format!("{}({args})", n.to_lowercase()));
+        }
+        let p = opt("--emit").expect("--names 는 --emit 파일이 필요합니다");
+        std::fs::write(p, lines.join("
+") + "
+").expect("--emit 쓰기");
+        return;
+    }
     // --syntax N --seed S --emit 파일: 수식 문법 시험용 목록만 쓰고 끝낸다 (문서 없음)
     if let Some(n) = opt("--syntax").and_then(|n| n.parse::<usize>().ok()) {
         let text = syntax::lines(n, seed).join("

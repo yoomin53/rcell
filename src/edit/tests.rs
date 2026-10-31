@@ -1797,3 +1797,9 @@ fn newline_input_turns_on_wrap_like_hcell() {
     assert!(!wrap(&wb, "A2"));
     assert!(!wrap(&wb, "A3"));
 }
+
+#[test]
+fn formula_local_names_like_hcell() {
+    assert_eq!(formula_local("DBCS(A1)&DOLLAR(1)&USDOLLAR(2)"), "JUNJA(A1)&WON(1)&DOLLAR(2)");
+    assert_eq!(formula_local("SUM(\"DOLLAR(\")+DOLLARDE(1,2)"), "SUM(\"DOLLAR(\")+DOLLARDE(1,2)");
+}
