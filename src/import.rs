@@ -24,6 +24,8 @@ pub enum Kind {
     Mht,
     Xml2003,
     Dbf,
+    /// Excel 2.x 워크시트 (OLE2 없이 BIFF2 레코드만, 한셀은 `.xls`·`.xlw` 이름으로 연다)
+    Biff2,
 }
 
 /// 내용과 확장자로 형식을 알아낸다 (모르면 None)
@@ -35,6 +37,9 @@ pub fn sniff(bytes: &[u8], path: Option<&Path>) -> Option<Kind> {
         .unwrap_or_default();
     if is_dbf(bytes) && (ext == "dbf" || ext.is_empty()) {
         return Some(Kind::Dbf);
+    }
+    if is_biff2(bytes) {
+        return Some(Kind::Biff2);
     }
     let head = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_ascii_lowercase();
     let head = head.trim_start_matches('\u{feff}').trim_start();
@@ -57,6 +62,7 @@ pub fn open(bytes: &[u8], kind: Kind, path: &Path) -> crate::Result<Workbook> {
     let stem = crate::csv::sheet_name_for(path);
     match kind {
         Kind::Dbf => dbf(bytes, &stem),
+        Kind::Biff2 => biff2(bytes),
         Kind::Xml2003 => xml_spreadsheet(bytes),
         Kind::Html => html_document(bytes, &stem, path.parent(), None),
         Kind::Mht => {
@@ -69,6 +75,67 @@ pub fn open(bytes: &[u8], kind: Kind, path: &Path) -> crate::Result<Workbook> {
             html_document(&main, &stem, None, Some(&parts))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// BIFF2
+// ---------------------------------------------------------------------------
+
+/// 첫 레코드가 BIFF2 의 BOF(0x0009, 워크시트 0x0010)인가
+fn is_biff2(b: &[u8]) -> bool {
+    b.len() >= 8
+        && u16::from_le_bytes([b[0], b[1]]) == 0x0009
+        && u16::from_le_bytes([b[2], b[3]]) >= 4
+        && u16::from_le_bytes([b[6], b[7]]) == 0x0010
+}
+
+/// Excel 2.x 워크시트 → 통합 문서. 한셀이 읽는 만큼: 수(NUMBER·INTEGER)와 글(LABEL, 949) 칸. 논리값·오류 칸(BOOLERR)은
+/// 빈 칸이고, 시트 이름은 파일 이름이 아니라 Sheet1 이다 (한셀 `.xls`·`.xlw` 대조)
+pub fn biff2(b: &[u8]) -> crate::Result<Workbook> {
+    let mut wb = crate::edit::new_workbook();
+    wb.application = Some("rcell".into());
+    let mut cells: BTreeMap<(u32, u32), Cell> = BTreeMap::new();
+    let mut at = 0;
+    while at + 4 <= b.len() {
+        let id = u16::from_le_bytes([b[at], b[at + 1]]);
+        let len = u16::from_le_bytes([b[at + 2], b[at + 3]]) as usize;
+        let Some(d) = b.get(at + 4..at + 4 + len) else {
+            break;
+        };
+        at += 4 + len;
+        if id == 0x000A {
+            break;
+        }
+        if d.len() < 8 || !matches!(id, 0x0002..=0x0004) {
+            continue;
+        }
+        let (row, col) = (
+            u16::from_le_bytes([d[0], d[1]]) as u32,
+            u16::from_le_bytes([d[2], d[3]]) as u32,
+        );
+        let value = match id {
+            0x0002 if d.len() >= 9 => CellValue::Number(u16::from_le_bytes([d[7], d[8]]) as f64),
+            0x0003 if d.len() >= 15 => {
+                CellValue::Number(f64::from_le_bytes(d[7..15].try_into().unwrap()))
+            }
+            0x0004 => {
+                let n = d[7] as usize;
+                CellValue::Text(crate::calc::cp949::decode(d.get(8..8 + n).unwrap_or(&[])))
+            }
+            _ => continue,
+        };
+        cells.insert(
+            (row, col),
+            Cell {
+                r: CellRef { row, col },
+                style: 0,
+                value,
+                formula: None,
+            },
+        );
+    }
+    finish(&mut wb, 0, cells, Vec::new());
+    Ok(wb)
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,6 +1154,35 @@ mod tests {
         assert!(s.contains(&(1, 1, "1.5".to_string())));
         assert!(s.contains(&(1, 2, "20230315".to_string())));
         assert!(!s.iter().any(|x| x.0 == 2 && x.1 == 1));
+    }
+
+    #[test]
+    fn biff2_reads_numbers_and_labels() {
+        let rec = |t: u16, d: &[u8]| {
+            let mut v = t.to_le_bytes().to_vec();
+            v.extend((d.len() as u16).to_le_bytes());
+            v.extend(d);
+            v
+        };
+        let hdr = |r: u16, c: u16| [r.to_le_bytes(), c.to_le_bytes()].concat();
+        let mut b = rec(0x0009, &[0, 0, 0x10, 0]);
+        b.extend(rec(
+            0x0003,
+            &[hdr(0, 0), vec![0; 3], 12.5f64.to_le_bytes().to_vec()].concat(),
+        ));
+        b.extend(rec(
+            0x0004,
+            &[hdr(0, 1), vec![0; 3], vec![3], b"abc".to_vec()].concat(),
+        ));
+        b.extend(rec(0x0005, &[hdr(1, 0), vec![0; 3], vec![1, 0]].concat()));
+        b.extend(rec(0x000A, &[]));
+        assert_eq!(sniff(&b, None), Some(Kind::Biff2));
+        let wb = biff2(&b).unwrap();
+        let s = sheet_text(&wb);
+        assert_eq!(
+            s,
+            vec![(0, 0, "12.5".to_string()), (0, 1, "abc".to_string())]
+        );
     }
 
     #[test]
