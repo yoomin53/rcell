@@ -222,6 +222,14 @@ function Invoke-Edit($wb, $e) {
             }
         }
         "addComment" { [void]$ws.Range([string]$e.cell).AddComment([string]$e.text) }
+        "commentBox" {
+            # 메모 상자 자리 (Comment.Shape.Left/Top/Width/Height — 포인트, 준 것만)
+            $sh = $ws.Range([string]$e.cell).Comment.Shape
+            if ($null -ne $e.left) { $sh.Left = [double]$e.left }
+            if ($null -ne $e.top) { $sh.Top = [double]$e.top }
+            if ($null -ne $e.width) { $sh.Width = [double]$e.width }
+            if ($null -ne $e.height) { $sh.Height = [double]$e.height }
+        }
         "editComment" { [void]$ws.Range([string]$e.cell).Comment.Text([string]$e.text) }
         "deleteComment" { [void]$ws.Range([string]$e.range).ClearComments() }
         "addHyperlink" {
@@ -326,6 +334,7 @@ function Invoke-Edit($wb, $e) {
             })
             [void]$ws.Range([string]$e.dest).Consolidate($srcs, $fn, [bool]$e.topRow, [bool]$e.leftColumn, $false)
         }
+        "sleep" { Start-Sleep -Milliseconds ([int]([double]$e.seconds * 1000)) }
         "autoFitRows" { [void]$ws.Range("A$($e.row):A$([int]$e.row + [int](Get-Count $e) - 1)").EntireRow.AutoFit() }
         "insertCells" {
             # 셀 삽입 (아래로 -4121, 오른쪽으로 -4161)

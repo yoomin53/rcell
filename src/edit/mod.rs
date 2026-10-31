@@ -2293,7 +2293,7 @@ pub(crate) fn one_cell_before(wb: &Workbook, si: usize) -> Before {
     }
 }
 
-/// 행·열을 숨기거나 보인 뒤: 크기를 지키는 그림의 끝 표지만 다시 정한다 (한셀 — 7·8행을 숨기면 그 행에 걸친 그림
+/// 행·열을 숨기거나 보인 뒤: 크기를 지키는 그림의 끝 표지와 메모 상자를 다시 정한다 (한셀 — 7·8행을 숨기면 그 행에 걸친 그림
 /// 끝이 8행에서 10행으로)
 pub(crate) fn one_cell_pictures_after(wb: &mut Workbook, si: usize, before: &Before) {
     if before.old.is_none() {
@@ -2302,6 +2302,10 @@ pub(crate) fn one_cell_pictures_after(wb: &mut Workbook, si: usize, before: &Bef
     let g = crate::render::sheet_geometry(wb, &wb.sheets[si], before.ext.0, before.ext.1);
     structure::keep_one_cell_sizes(&mut wb.sheets[si], &before.sizes, &g);
     structure::snap_from_hidden(&mut wb.sheets[si], &before.sizes, &g);
+    // 메모 상자는 화면 자리를 지킨다 (숨긴 행·열 때문에 칸 표지만 바뀐다 — 한셀 대조 실험 cb2)
+    if let Some(old) = &before.old {
+        structure::keep_comment_boxes(&mut wb.sheets[si], old, &g);
+    }
 }
 
 fn one_cell_after(wb: &mut Workbook, si: usize, before: &Before) {
