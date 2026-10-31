@@ -494,13 +494,17 @@ fn font_key(f: &Font) -> String {
         f.italic,
         f.underline,
         f.strike,
-        f.color.as_ref().map(|c| (
-            &c.rgb,
-            c.theme,
-            c.tint.map(|t| (t * 1e6) as i64),
-            c.indexed,
-            c.auto
-        )),
+        // 색을 정하지 않은 글꼴은 검정 (자동) 과 같다
+        f.color.as_ref().map_or_else(
+            || (Some("ff000000".to_string()), None, None, None, false),
+            |c| (
+                c.rgb.clone(),
+                c.theme,
+                c.tint.map(|t| (t * 1e6) as i64),
+                c.indexed,
+                c.auto
+            )
+        ),
         f.vert_align,
         h
     )
@@ -514,7 +518,18 @@ struct FontNumbers {
 
 impl FontNumbers {
     fn new(wb: &Workbook) -> FontNumbers {
-        let mut keys: Vec<String> = Vec::new();
+        // 한셀 글꼴 표는 기본 글꼴 (맑은 고딕 11pt, 검정) 하나로 시작하고 (번호 0), 문서의 글꼴이 차례로 더해진다 — 같은 글꼴은
+        // 합쳐진다. 한셀 프로세스 하나가 여러 문서를 열면 번호가 이어서 쌓이므로 문서마다 새 프로세스로 대조했다
+        let default_font = Font {
+            name: Some("맑은 고딕".into()),
+            size: Some(11.0),
+            color: Some(Color {
+                rgb: Some("ff000000".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut keys: Vec<String> = vec![font_key(&default_font)];
         let by_id = wb
             .styles
             .fonts
@@ -564,6 +579,10 @@ fn runs_html(runs: &[(String, String)]) -> String {
             t = t.trim_end().to_string();
         }
         if t.is_empty() {
+            // 공백뿐인 칸 글은 빈 <font> 하나 (한셀 웹 저장 대조)
+            if runs.len() == 1 && !text.is_empty() {
+                out.push_str(&format!("<font class=\"{class}\"></font>"));
+            }
             continue;
         }
         let lines: Vec<&str> = t.split('\n').collect();
@@ -874,11 +893,34 @@ fn sheet_page(
             k = j + 1;
         }
     }
+    // 행 서식이 있는 행은 <tr> 에 클래스를 단다 (열 서식처럼 칸이 없어도 클래스를 정의한다)
+    let row_style = |r: u32| {
+        sheet
+            .rows
+            .iter()
+            .find(|x| x.index == r + 1)
+            .and_then(|x| x.style)
+            .filter(|&x| x != 0)
+    };
+    let row_class = |r: u32| match row_style(r) {
+        Some(xf) => format!(" class=\"hcx{}\"", class_of(wb, xf)),
+        None => String::new(),
+    };
     for r in 0..nrows {
+        if let Some(xf) = row_style(r)
+            && !used.iter().any(|u| u.cls == class_of(wb, xf))
+        {
+            used.push(UsedClass {
+                cls: class_of(wb, xf),
+                xf,
+                edges: None,
+            });
+        }
         let hidden = hidden_row(r);
         let _ = writeln!(
             body,
-            "      <tr height=\"{}\"{}>",
+            "      <tr{} height=\"{}\"{}>",
+            row_class(r),
             if hidden { 0 } else { row_h[r as usize] },
             if hidden { " style='display:none'" } else { "" }
         );
@@ -1201,7 +1243,8 @@ fn shape_span(
     let z = png.zoom;
     let (sw, shh) = ((w * z).round() as i64, (h * z).round() as i64);
     let a = &sh.anchor;
-    let (ml, mt) = if a.kind == AnchorKind::Absolute {
+    let absolute = a.kind == AnchorKind::Absolute || a.edit_as.as_deref() == Some("absolute");
+    let (ml, mt) = if absolute {
         (1, 1)
     } else {
         (
@@ -1220,7 +1263,7 @@ fn shape_span(
           </span>
 "
     );
-    let (r, c) = if a.kind == AnchorKind::Absolute {
+    let (r, c) = if absolute {
         (0, 0)
     } else {
         (a.from.row, a.from.col)
